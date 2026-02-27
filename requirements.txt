@@ -1,0 +1,34 @@
+# Core async
+aiohttp>=3.9.0
+
+# Anthropic SDK for agent intelligence
+anthropic>=0.40.0
+
+# Sentiment analysis
+nltk>=3.8.1
+transformers>=4.40.0
+torch>=2.2.0
+
+# Data processing
+pandas>=2.2.0
+numpy>=1.26.0
+
+# Social data (optional — can use raw aiohttp)
+tweepy>=4.14.0
+praw>=7.7.1
+
+# Database
+asyncpg>=0.29.0
+
+# Configuration and utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# Development
+ipython>=8.0.0
+jupyter>=1.0.0

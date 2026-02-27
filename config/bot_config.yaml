@@ -1,0 +1,63 @@
+# Token watchlist — CoinGecko IDs and tickers
+watchlist:
+  - ticker: ETH
+    coingecko_id: ethereum
+    chain: Base
+    enabled: true
+  - ticker: SOL
+    coingecko_id: solana
+    chain: Solana
+    enabled: true
+  - ticker: BNKR
+    coingecko_id: bankr-bot
+    chain: Base
+    enabled: false  # Enable once familiar with the bot
+
+# Trading loop configuration
+loop:
+  interval_minutes: 15
+  sentiment_hours_back: 1
+  technical_candles: 50
+
+# Risk controls
+risk:
+  max_daily_loss_usd: 200.0
+  max_single_trade_usd: 150.0
+  cooldown_minutes: 15
+  stop_loss_pct: 8.0
+  min_confidence: 0.55
+
+# Position sizing
+position:
+  base_usd: 25.0
+  max_usd: 150.0
+
+# Sentiment weights by source
+sentiment_weights:
+  twitter: 0.40
+  reddit: 0.35
+  farcaster: 0.25
+
+# Agent model configuration
+agents:
+  research:
+    model: claude-haiku-4-5-20251001
+    description: "Fast market scanning, trending tokens, news gathering"
+  sentiment:
+    model: claude-haiku-4-5-20251001
+    description: "Social media NLP, sentiment scoring"
+  technical:
+    model: claude-haiku-4-5-20251001
+    description: "RSI, MACD, Bollinger, volume analysis"
+  signal:
+    model: claude-sonnet-4-6
+    description: "Signal aggregation, trade decision reasoning"
+  risk:
+    model: claude-sonnet-4-6
+    description: "Position sizing, loss limits, portfolio risk"
+  execution:
+    model: claude-haiku-4-5-20251001
+    description: "bankr.bot API interaction, order management"
+  portfolio:
+    model: claude-sonnet-4-6
+    description: "Position tracking, P&L analysis, rebalancing"
