@@ -48,3 +48,6 @@ htmlcov/
 # Logs
 logs/
 *.log
+
+# Local virtualenv for the systematic engine
+.venv/

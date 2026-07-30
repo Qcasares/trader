@@ -1,21 +1,27 @@
-# Core async
-aiohttp>=3.9.0
-
-# Anthropic SDK for agent intelligence
-anthropic>=0.40.0
-
-# Sentiment analysis
-nltk>=3.8.1
-transformers>=4.40.0
-torch>=2.2.0
+# =========================================================================
+# Systematic trading engine (src/core, src/engine, src/strategies,
+# src/execution, src/data). Deterministic, backtestable, no LLM.
+#
+# Licence note: every dependency here is permissive (Apache-2.0/BSD/MIT).
+# backtesting.py (AGPL-3.0), backtrader (GPL-3.0) and vectorbt (Commons
+# Clause, which forbids selling a hosted service) were all evaluated and
+# rejected — see docs/06-systematic-engine.md.
+# =========================================================================
 
 # Data processing
 pandas>=2.2.0
 numpy>=1.26.0
 
-# Social data (optional — can use raw aiohttp)
-tweepy>=4.14.0
-praw>=7.7.1
+# Trading calendars — NYSE sessions, holidays, early closes (Apache-2.0).
+# Never hand-roll a holiday calendar: it silently gets 9/11 and Sandy wrong.
+exchange_calendars>=4.13.0
+
+# Strategy parameter models -> JSON Schema -> the web form (MIT).
+pydantic>=2.7.0
+
+# Research-only price history back to inception (Apache-2.0 code; Yahoo's
+# own terms are a separate question). Never on the live path.
+yfinance>=0.2.60
 
 # Database
 asyncpg>=0.29.0
@@ -24,10 +30,31 @@ asyncpg>=0.29.0
 python-dotenv>=1.0.0
 pyyaml>=6.0.1
 
+# =========================================================================
+# Legacy crypto agent pipeline (src/agents, src/orchestrator.py,
+# src/main.py). Scheduled for demotion to commentary-only — see the plan.
+# torch + transformers alone are ~2.5GB; removing them is what makes the
+# image deployable.
+# =========================================================================
+aiohttp>=3.9.0
+anthropic>=0.40.0
+nltk>=3.8.1
+transformers>=4.40.0
+torch>=2.2.0
+tweepy>=4.14.0
+praw>=7.7.1
+
+# =========================================================================
 # Testing
+# =========================================================================
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
+
+# Dev-only metric oracles (both MIT). Used solely to cross-check our own
+# Sharpe/Sortino/CAGR/max-drawdown — not imported by src/.
+# ffn>=1.1.5
+# bt>=1.2.0
 
 # Development
 ipython>=8.0.0
