@@ -61,8 +61,20 @@ These exist because the research UI is a machine for fooling yourself.
 - **Never quote a metric without `effective_start`.** A 1999 backtest of the
   five asset-class ETFs is a single-asset SPY strategy until 2007, because GSG
   did not list until 2006.
+- **Never quote an annualised figure without its session count.** 252 is the
+  NYSE year; a venue that never closes has 365. Annualising continuous returns
+  on 252 understates volatility by `sqrt(365/252)` — about 20% — and flatters
+  the Sharpe by the same factor. `PerformanceMetrics.periods_per_year` carries
+  the assumption, and `metrics_from_records` takes it as an argument rather
+  than defaulting silently.
 - **Synthetic data is labelled everywhere it appears** and cannot back a
   deployment — the API rejects it.
+- **The backtest must say when it was kinder than the venue.** `SimulatedBroker`
+  trims an underfunded buy where a real venue rejects it; every trim lands in
+  `SimulatedBroker.underfunded_buys` and logs a warning. The parity test cannot
+  see this — the order *intents* match exactly and it is the fills that
+  diverge. Check the list before believing a result, and set
+  `RiskLimits.cash_buffer_pct` if it is non-empty.
 
 ## Commands
 
@@ -138,7 +150,9 @@ Each is enforced by a test, not by discipline:
 | Decision lag | `SimulatedBroker` queues rather than fills; decide on T's close, execute at T+1's open |
 | Availability windows | An unlisted asset is excluded from the weighting denominator, not treated as cash |
 | Idempotent orders | `client_order_id = "{run_ref}:{session}:{symbol}"`; the venue rejects duplicates |
-| Backtest/live parity | `tests/unit/test_parity.py` |
+| Backtest/live parity | `tests/unit/test_parity.py` (synthetic) and `tests/unit/test_real_data.py` (observed prices) |
+| Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
+| Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py` |
 
 ## Adding a strategy
@@ -201,11 +215,25 @@ do not use it.
 
 ## Known limitations
 
-- **No result in this repository is a real backtest.** Development ran without
-  network access to market data, so everything was verified against a synthetic
-  generator. Run against real data before drawing any conclusion.
+- **No result in this repository is a real backtest.** Equity data hosts
+  (Yahoo, Stooq, `data.alpaca.markets`) are blocked by this environment's
+  egress policy, so no strategy has ever been measured on real equity prices.
+  Run against real data before drawing any conclusion.
+- **The engine, separately, has been run on real prices.**
+  `tests/fixtures/cryptocom_candles.json` holds 24 daily candles for four spot
+  pairs, captured from the Crypto.com public API, and `tests/unit/test_real_data.py`
+  drives the whole ingest → panel → driver → gate → metrics path on them —
+  including parity. That validates the *machinery*, not any strategy: 24
+  sessions is seven weeks, the Sharpe standard error over it is about ±4, and
+  the 210-day SMA the one implemented strategy needs is impossible in a window
+  that short. Read it as "the plumbing survives contact with real numbers",
+  nothing more. Two bugs came out of it, both listed in the git log.
 - Alpaca has never been contacted. `AlpacaBroker` is tested against a fake
   server modelling the documented contract.
+- **Crypto is not supported**, and this fixture does not change that. It has no
+  24/7 scheduler, no crypto broker adapter and no venue-aware cost model;
+  `src/data/cryptocom_source.py` exists to feed the engine real prices. The
+  locked plan is equities first.
 - One strategy is implemented. The awesome-systematic-trading median Sharpe is
   ~0.35 and seven entries are negative; expect disappointment and let the
   walk-forward say so.

@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
-from src.core.clock import Clock
+from src.core.clock import Clock, SimClock
 from src.core.orders import RebalanceConstraints, weights_to_orders
 from src.core.panel import PricePanel
 from src.core.risk import RiskEvent, RiskLimits, RiskState, apply_risk
@@ -154,6 +154,8 @@ class Driver:
         curve stays continuous and the book is still marked. A kill switch that
         also stopped accounting would leave you blind at the worst moment.
         """
+        self._sync_clock(session)
+
         open_prices = self._prices(panel, session, "open")
         close_prices = self._prices(panel, session, "close")
 
@@ -238,6 +240,10 @@ class Driver:
         they mark the book and keep the equity curve continuous — but the
         strategy will naturally decline to allocate, because
         ``PricePanel.is_available`` reports insufficient history.
+
+        The clock follows the session being processed; see :meth:`_sync_clock`.
+        Callers do not have to advance it, and a caller that does anyway is
+        harmless.
         """
         records: list[SessionRecord] = []
         for session in sessions:
@@ -266,6 +272,38 @@ class Driver:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _sync_clock(self, session: date) -> None:
+        """
+        Point a simulated clock at the session being processed.
+
+        Without this, :meth:`run` leaves a ``SimClock`` parked on its first
+        session and *every* fill in the backtest carries that one date — the
+        audit trail becomes fiction, which is precisely what injecting a clock
+        was meant to prevent.
+
+        The three production callers each avoided it by advancing the clock
+        themselves inside a hand-rolled loop. Three independent copies of the
+        same four lines is the tell: the responsibility belongs to the driver,
+        which is the only object that knows which session it is processing.
+
+        A ``RealClock`` has no schedule to seek and is left alone.
+        """
+        if not isinstance(self.clock, SimClock):
+            return
+        if self.clock.today() == session:
+            return
+        try:
+            self.clock.seek(session)
+        except ValueError:
+            # Say so rather than silently stamping events with the wrong date.
+            # Not fatal: the clock supplies timestamps, never decisions.
+            self._logger.warning(
+                "%s is not in the clock's schedule; timestamps for this "
+                "session will read %s",
+                session,
+                self.clock.today(),
+            )
 
     async def _settle(
         self, open_prices: dict[str, float], session: date

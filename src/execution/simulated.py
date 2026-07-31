@@ -13,11 +13,32 @@ the next session's open via :meth:`execute_pending`. That mirrors reality — yo
 decide on tonight's close and find out your fill price tomorrow morning — and
 it makes the single most common backtest lie (filling at the price you used to
 decide) structurally impossible.
+
+The one place this venue is *kinder* than a real one
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A buy that cannot be funded is trimmed to fit available cash. A real venue
+rejects it. That difference is invisible to ``tests/unit/test_parity.py``,
+which compares ``OrderIntent`` lists — and the intents *are* identical; it is
+the fills that diverge.
+
+It is not hypothetical. Sizing happens against equity marked at session T's
+close, and the fill lands at T+1's open after slippage and commission, so a
+fully-invested target is under-funded by exactly the overnight gap every time
+the market opens up. On the observed-price run in ``tests/unit/test_real_data``
+this bound on **13 of 27 buys**.
+
+So :attr:`SimulatedBroker.underfunded_buys` records every trim and each one
+logs a warning. The cure is :attr:`~src.core.risk.RiskLimits.cash_buffer_pct`,
+which is deliberately still off by default — a default that silently
+constrained would make every backtest measure the gate rather than the
+strategy. The point here is that the backtest must *say* when it did something
+the live venue would not have done, not quietly paper over it.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
@@ -44,6 +65,31 @@ logger = logging.getLogger(__name__)
 
 class InsufficientCashError(OrderRejectedError):
     """A buy could not be funded. Mirrors Alpaca's buying-power rejection."""
+
+
+@dataclass(frozen=True, slots=True)
+class UnderfundedBuy:
+    """
+    A buy the simulated venue trimmed to fit cash.
+
+    Recorded because a real venue would have rejected the order outright, so
+    every entry here is a session on which the backtest and the live system
+    would have diverged in holdings while agreeing exactly on intent.
+    """
+
+    symbol: str
+    requested_qty: Decimal
+    filled_qty: Decimal
+    price: Decimal
+    cash_available: Decimal
+    at: datetime
+
+    @property
+    def shortfall_fraction(self) -> float:
+        """How much of the intended order went unfilled, as a fraction."""
+        if self.requested_qty <= 0:
+            return 0.0
+        return float((self.requested_qty - self.filled_qty) / self.requested_qty)
 
 
 class SimulatedBroker(BrokerBase):
@@ -84,6 +130,22 @@ class SimulatedBroker(BrokerBase):
         self._fills: list[Fill] = []
         self._halted = False
         self._seq = 0
+        self._underfunded: list[UnderfundedBuy] = []
+
+    # ------------------------------------------------------------------
+    # Divergence reporting
+    # ------------------------------------------------------------------
+
+    @property
+    def underfunded_buys(self) -> tuple[UnderfundedBuy, ...]:
+        """
+        Every buy this venue trimmed that a real one would have rejected.
+
+        A non-empty list means the backtest and the live system would have
+        ended the run holding different books, however identical their order
+        intents were. Read it before believing a result.
+        """
+        return tuple(self._underfunded)
 
     # ------------------------------------------------------------------
     # BrokerAdapter surface
@@ -198,10 +260,16 @@ class SimulatedBroker(BrokerBase):
                 continue
 
             if intent.side is Side.BUY:
+                requested = qty
+                available = self._cash
                 qty = self._cap_buy_to_cash(qty, fill_price)
                 if qty <= 0:
                     self._reject(order_id, intent, "insufficient cash")
                     continue
+                if qty < requested:
+                    self._record_underfunded(
+                        intent.symbol, requested, qty, fill_price, available, at
+                    )
             else:
                 held = self._position_qty(intent.symbol)
                 qty = min(qty, held)
@@ -285,6 +353,42 @@ class SimulatedBroker(BrokerBase):
         if intent.notional is not None and fill_price > 0:
             return quantize_qty(intent.notional / fill_price)
         return None
+
+    def _record_underfunded(
+        self,
+        symbol: str,
+        requested: Decimal,
+        filled: Decimal,
+        price: Decimal,
+        cash: Decimal,
+        at: datetime,
+    ) -> None:
+        """
+        Note a trim, loudly.
+
+        A warning rather than a debug line on purpose: this is the backtest
+        being more forgiving than the venue, and the only thing worse than the
+        divergence is not knowing about it.
+        """
+        event = UnderfundedBuy(
+            symbol=symbol,
+            requested_qty=requested,
+            filled_qty=filled,
+            price=price,
+            cash_available=cash,
+            at=at,
+        )
+        self._underfunded.append(event)
+        logger.warning(
+            "%s %s: buy trimmed from %s to %s (%.3f%% short) to fit $%s cash — "
+            "a live venue would have rejected this order",
+            at.date(),
+            symbol,
+            requested,
+            filled,
+            event.shortfall_fraction * 100,
+            cash,
+        )
 
     def _cap_buy_to_cash(self, qty: Decimal, price: Decimal) -> Decimal:
         """

@@ -75,6 +75,12 @@ class PerformanceMetrics:
     #: Cost assumption this run used, so a number is never quoted without it.
     cost_stress_multiplier: float = 1.0
 
+    #: Sessions per year used to annualise. Recorded for the same reason as the
+    #: cost assumption: an annualised figure is meaningless without it. 252 is
+    #: the NYSE year; a market that never closes has 365, and annualising 24/7
+    #: returns at 252 understates volatility by sqrt(365/252) — about 20%.
+    periods_per_year: int = PERIODS_PER_YEAR
+
     @property
     def sharpe_is_significant(self) -> bool:
         """Whether the Sharpe estimate clears two standard errors from zero."""
@@ -280,6 +286,7 @@ def compute_metrics(
             total_commission=0.0, turnover_annual=0.0,
             effective_start=effective_start,
             cost_stress_multiplier=cost_stress_multiplier,
+            periods_per_year=periods_per_year,
         )
 
     returns = to_returns(equity)
@@ -329,6 +336,7 @@ def compute_metrics(
         turnover_annual=turnover,
         effective_start=effective_start,
         cost_stress_multiplier=cost_stress_multiplier,
+        periods_per_year=periods_per_year,
     )
 
 
@@ -338,10 +346,19 @@ def metrics_from_records(
     effective_start: date | None = None,
     cost_stress_multiplier: float = 1.0,
     risk_free_rate: float = 0.0,
+    periods_per_year: int = PERIODS_PER_YEAR,
 ) -> PerformanceMetrics:
-    """Convenience wrapper turning ``SessionRecord``s into metrics."""
+    """
+    Convenience wrapper turning ``SessionRecord``s into metrics.
+
+    ``periods_per_year`` is forwarded rather than left at the NYSE default,
+    because the venue decides it: a 24/7 market has 365 sessions a year and
+    annualising its returns at 252 understates volatility by about 20%.
+    """
     if not records:
-        return compute_metrics(pd.Series(dtype=float))
+        return compute_metrics(
+            pd.Series(dtype=float), periods_per_year=periods_per_year
+        )
 
     index = pd.DatetimeIndex([pd.Timestamp(r.session) for r in records])
     equity = pd.Series([float(r.equity) for r in records], index=index)
@@ -364,4 +381,5 @@ def metrics_from_records(
         effective_start=effective_start,
         cost_stress_multiplier=cost_stress_multiplier,
         risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
     )

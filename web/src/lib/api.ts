@@ -84,6 +84,7 @@ export interface JsonSchemaProperty {
   exclusiveMinimum?: number;
   exclusiveMaximum?: number;
   items?: { type?: string };
+  enum?: unknown[];
 }
 
 export interface BacktestMetrics {
@@ -108,6 +109,8 @@ export interface BacktestMetrics {
   /** First session the whole universe existed. Metrics before it are not the strategy. */
   effective_start: string | null;
   cost_stress_multiplier: number;
+  /** Sessions per year used to annualise. 252 = NYSE; a 24/7 venue is 365. */
+  periods_per_year?: number;
 }
 
 export interface BacktestRun {

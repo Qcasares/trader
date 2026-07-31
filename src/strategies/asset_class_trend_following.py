@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from typing import Literal
 
 from pydantic import Field, field_validator
 
@@ -53,6 +54,11 @@ DEFAULT_UNIVERSE: tuple[str, ...] = ("SPY", "EFA", "IEF", "VNQ", "GSG")
 #: 10 months x 21 trading days, matching the reference implementation.
 DEFAULT_SMA_PERIOD = 210
 
+#: How often the book is re-weighted. ``monthly`` is the reference cadence;
+#: the others exist because a strategy's sensitivity to its own rebalance
+#: frequency is a robustness question worth being able to ask.
+Cadence = Literal["monthly", "weekly", "daily"]
+
 
 class AssetClassTrendFollowingParams(StrategyParams):
     """Tunable parameters, rendered as the web form via JSON Schema."""
@@ -68,6 +74,13 @@ class AssetClassTrendFollowingParams(StrategyParams):
         le=1000,
         description=(
             "Simple moving average lookback in trading sessions. 210 ~ 10 months."
+        ),
+    )
+    rebalance: Cadence = Field(
+        default="monthly",
+        description=(
+            "Rebalance cadence. Monthly matches the reference implementation; "
+            "shorter cadences trade more and pay more cost for it."
         ),
     )
     max_weight_per_asset: float = Field(
@@ -91,6 +104,22 @@ class AssetClassTrendFollowingParams(StrategyParams):
         return cleaned
 
 
+def _period_key(session: date, cadence: Cadence) -> tuple[int, ...]:
+    """
+    The bucket a session falls into, for the cadence in force.
+
+    ISO week rather than "day of year // 7": ISO weeks always start on Monday,
+    so a weekly cadence rebalances on the first session of the week rather than
+    drifting through the week as the year progresses.
+    """
+    if cadence == "monthly":
+        return (session.year, session.month)
+    if cadence == "weekly":
+        iso = session.isocalendar()
+        return (iso.year, iso.week)
+    return (session.year, session.month, session.day)
+
+
 @register
 class AssetClassTrendFollowing(Strategy):
     """Equal-weight the asset classes currently in an uptrend; hold cash otherwise."""
@@ -100,7 +129,8 @@ class AssetClassTrendFollowing(Strategy):
     description = (
         "Hold each of five asset-class ETFs only while it trades above its "
         "10-month simple moving average, equal-weighted, rebalanced on the "
-        "first trading day of each month. Anything not qualifying is cash."
+        "first trading day of each period (monthly by default). Anything not "
+        "qualifying is cash."
     )
     source = (
         "paperswithbacktest/awesome-systematic-trading — "
@@ -125,19 +155,20 @@ class AssetClassTrendFollowing(Strategy):
         self, session: date, last_rebalance: date | None
     ) -> bool:
         """
-        Rebalance on the first trading session of each calendar month.
+        Rebalance on the first session of each period.
 
-        The driver calls this for every session in order, so the first session
-        whose ``(year, month)`` differs from the last rebalance *is* the first
-        trading day of the month. That derives the schedule from the sessions
-        actually presented rather than from a separate calendar lookup, so a
-        holiday or an unscheduled closure cannot desynchronise the two.
+        The schedule is derived entirely from the sessions the driver actually
+        presents, never from a separate calendar lookup. The driver walks
+        sessions in order, so the first session whose period differs from the
+        last rebalance's period *is* the first session of that period — whether
+        the venue is NYSE with its holidays or a market that never closes. A
+        calendar lookup would desynchronise the moment the two disagreed about
+        what days exist.
         """
         if last_rebalance is None:
             return True
-        return (session.year, session.month) != (
-            last_rebalance.year,
-            last_rebalance.month,
+        return _period_key(session, self.params.rebalance) != _period_key(
+            last_rebalance, self.params.rebalance
         )
 
     def target_weights(

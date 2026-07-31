@@ -242,6 +242,27 @@ function ParamField({
 }) {
   const label = schema.title ?? name;
 
+  // A closed set of values is rendered as a closed control. Falling through to
+  // a free-text box would let the operator type something the API rejects with
+  // a 422 they cannot act on.
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return (
+      <label>
+        <span title={schema.description}>{label}</span>
+        <select
+          value={typeof value === "string" ? value : String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+        >
+          {schema.enum.map((option) => (
+            <option key={String(option)} value={String(option)}>
+              {String(option)}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+
   if (schema.type === "array") {
     const list = Array.isArray(value) ? (value as string[]) : [];
     return (

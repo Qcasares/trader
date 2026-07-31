@@ -104,6 +104,11 @@ export function MetricsPanel({ run, metrics }: Props) {
           hint="Re-run at 3× and check the sign does not flip before trusting this."
         />
         <Row
+          label="Annualised on"
+          value={`${metrics.periods_per_year ?? 252} sessions/year`}
+          hint="252 is the NYSE year. A venue that never closes has 365, and annualising it on 252 understates volatility by about 20%."
+        />
+        <Row
           label="Decision lag"
           value={`${run.decision_lag_sessions} session(s)`}
           hint="Decide on the close, execute at the next open — as live would."
