@@ -91,6 +91,47 @@ def test_decision_path_never_imports_the_legacy_agents(package: str) -> None:
     )
 
 
+@pytest.mark.parametrize("package", PROTECTED_PACKAGES)
+def test_decision_path_never_imports_the_commentary_layer(package: str) -> None:
+    """
+    ``src.llm`` imports its client lazily, so a module could route to a model
+    through it without ever naming ``anthropic``. Blocking the direct import
+    alone would leave that door open, so the package itself is off-limits to
+    anything that can produce an order.
+    """
+    offenders: list[str] = []
+    for path in _module_files(package):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = ",".join(a.name for a in node.names)
+            if "src.llm" in module:
+                offenders.append(f"{path.relative_to(SRC)} imports {module}")
+    assert not offenders, (
+        "the decision path imports the commentary layer, which reopens a route "
+        "from model output to an order:\n" + "\n".join(offenders)
+    )
+
+
+def test_commentary_layer_passes_no_tools_to_the_model() -> None:
+    """
+    The model must be able to emit text and nothing else. A ``tools=`` argument
+    would give it the ability to act, which is exactly what demoting it was
+    meant to remove.
+    """
+    source = (SRC / "llm" / "commentary.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                assert keyword.arg not in {"tools", "tool_choice"}, (
+                    "commentary must not pass tools to the model"
+                )
+
+
 def test_strategies_do_not_perform_io() -> None:
     """
     Strategies must be pure. An HTTP call or a DB read inside

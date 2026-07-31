@@ -34,6 +34,7 @@ from decimal import Decimal
 from src.core.clock import Clock
 from src.core.orders import RebalanceConstraints, weights_to_orders
 from src.core.panel import PricePanel
+from src.core.risk import RiskEvent, RiskLimits, RiskState, apply_risk
 from src.core.types import (
     Fill,
     OrderIntent,
@@ -74,6 +75,10 @@ class DriverConfig:
     #: Stamped into every client order ID.
     run_ref: str = "run"
 
+    #: The shared risk gate. Defaults are permissive, so an unconfigured run
+    #: measures the strategy rather than the gate.
+    risk_limits: RiskLimits = field(default_factory=RiskLimits)
+
 
 @dataclass(slots=True)
 class SessionRecord:
@@ -85,6 +90,10 @@ class SessionRecord:
     fills: list[Fill] = field(default_factory=list)
     intents: list[OrderIntent] = field(default_factory=list)
     targets: TargetWeights | None = None
+    #: What the strategy asked for, before the risk gate. Keeping both makes it
+    #: visible when a limit changed the answer rather than merely being checked.
+    raw_targets: TargetWeights | None = None
+    risk_events: tuple[RiskEvent, ...] = ()
     rebalanced: bool = False
     rationale: str = ""
     halted: bool = False
@@ -173,7 +182,17 @@ class Driver:
         if not self.strategy.should_rebalance(session, self._last_rebalance):
             return record
 
-        targets = self.strategy.target_weights(panel.at(session), state, session)
+        raw_targets = self.strategy.target_weights(panel.at(session), state, session)
+
+        # The shared gate. Identical on both paths — a backtest that measured
+        # an ungated strategy would not describe the live system.
+        gated = apply_risk(
+            raw_targets,
+            state,
+            self._risk_state(session, close_prices, halted=False),
+            self.config.risk_limits,
+        )
+        targets = gated.weights
         intents = weights_to_orders(
             state=state,
             targets=targets,
@@ -183,6 +202,8 @@ class Driver:
 
         record.rebalanced = True
         record.targets = targets
+        record.raw_targets = raw_targets
+        record.risk_events = gated.events
         record.intents = intents
         record.rationale = targets.rationale
         self._last_rebalance = session
@@ -269,6 +290,19 @@ class Driver:
             positions=positions,
             equity=account.equity,
             as_of=session,
+        )
+
+    def _risk_state(
+        self, session: date, prices: dict[str, float], halted: bool
+    ) -> RiskState:
+        """Assemble what the gate needs beyond the portfolio itself."""
+        return RiskState(
+            session=session,
+            current_prices={
+                symbol: Decimal(str(price)) for symbol, price in prices.items()
+            },
+            kill_switch_active=halted,
+            now=self.clock.now(),
         )
 
     def _prices(

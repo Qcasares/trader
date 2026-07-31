@@ -1,181 +1,211 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## Project Overview
 
-Automated cryptocurrency trading bot using the **bankr.bot Agent API**. Combines technical analysis (RSI, MACD, Bollinger Bands) with dual-layer social sentiment analysis (VADER + FinBERT) to generate trade signals. Trade execution, wallet management, and gas handling are fully delegated to bankr.bot.
+A **systematic trading platform**: deterministic, backtestable strategies with a
+research lab and a live control plane. Strategies are Python classes with typed
+parameter schemas; the same code path runs a backtest and a live session.
 
-Full spec: `BANKR_TRADING_BOT_POC.md`
+Informed by [paperswithbacktest/awesome-systematic-trading](https://github.com/paperswithbacktest/awesome-systematic-trading),
+though strategies are implemented from the **described rules** rather than
+copied — that repository publishes no licence.
 
-## Safety Rules
+There is also a **legacy** crypto agent pipeline (`src/agents/`,
+`src/orchestrator.py`, `src/main.py`) built against bankr.bot. It is not wired
+into the systematic engine, its context-promotion map is broken, and nothing in
+the new path may import it. Treat it as historical unless asked otherwise.
 
-1. **ALWAYS** verify `DRY_RUN=true` in `.env` before running trade-execution code.
-2. All trade amounts **must** pass through `RiskManager.assess()` before execution.
-3. The bankr.bot API key starts with `bk_`. If missing from env, raise clearly.
-4. Never hardcode API keys — use `os.environ.get()` or `python-dotenv`.
-5. Never commit `.env`.
+## The one idea to understand first
+
+**One `Driver`, two injected dependencies.**
+
+```python
+backtest = Driver(strategy, SimulatedBroker(), SimClock(sessions))
+live     = Driver(strategy, AlpacaBroker(),    RealClock())
+```
+
+The backtest *is* the live path with two objects swapped. This is not a
+convention — `tests/unit/test_parity.py` asserts both emit byte-identical
+`OrderIntent` lists from identical inputs, and it is mutation-tested.
+
+**Before changing anything in `src/core/`, `src/engine/` or `src/execution/`,
+run the parity test.** If it breaks, the change has made the backtest stop
+predicting the live system, which is worse than the bug being fixed.
+
+## Safety rules
+
+1. **Paper only.** Reaching a live Alpaca endpoint requires *three* independent
+   conditions: `mode=live`, `LIVE_TRADING_ENABLED` in the environment, and an
+   explicit `allow_live=True`. Do not weaken any of them.
+2. **The kill switch fails closed.** `flags.trading_enabled()` returns `False`
+   on a missing row, an unreadable value, or any database error. A control that
+   defaults to "go" when it cannot determine the answer is not a control.
+3. **Every trade path goes through `apply_risk`** (`src/core/risk.py`) — the
+   same call on both paths. Never add a clamp to one driver only.
+4. **Never let LLM output reach an order.** Enforced by
+   `tests/unit/test_import_boundaries.py`. `src/llm/` is commentary only.
+5. **Never commit credentials.** Not values, not placeholders, not defaults —
+   `docker-compose.yml` reads everything from gitignored `.env`.
+
+## Honesty rules
+
+These exist because the research UI is a machine for fooling yourself.
+
+- **Never render a Sharpe without its standard error.** Five years of daily
+  data gives roughly ±0.45, so a reported 0.50 is indistinguishable from zero.
+  `PerformanceMetrics.sharpe_is_significant` is the check.
+- **Never quote a performance figure without its cost assumption.** Every
+  result carries `cost_stress_multiplier`.
+- **Never quote a metric without `effective_start`.** A 1999 backtest of the
+  five asset-class ETFs is a single-asset SPY strategy until 2007, because GSG
+  did not list until 2006.
+- **Synthetic data is labelled everywhere it appears** and cannot back a
+  deployment — the API rejects it.
 
 ## Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-python -c "import nltk; nltk.download('vader_lexicon')"
+# Setup
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+export DATABASE_URL=postgresql://trader@localhost:5432/trader
+python -m src.db.migrate_cli                 # apply migrations
 
-# Run bot
-python src/main.py --dry-run     # Safe mode, no real trades
-python src/main.py --live        # Live trading — USE WITH CAUTION
+# Research CLI
+python -m src.cli strategies
+python -m src.cli backtest --strategy asset_class_trend_following \
+    --source yfinance --start 1999-01-01
+python -m src.cli walkforward --strategy asset_class_trend_following \
+    --grid '{"sma_period":[105,150,210]}'
 
-# Run all tests
-pytest tests/ -v
+# Services (API and worker are separate processes on purpose)
+uvicorn src.api.main:app --reload            # HTTP control plane
+python -m src.worker.main                    # runs backtests and live jobs
+cd web && npm run dev                        # Next.js frontend
 
-# Run a single test file
-pytest tests/test_sentiment.py -v
+# Everything at once
+docker compose up --build
 
-# Run a single test
-pytest tests/test_sentiment.py::test_function_name -v
+# Tests
+pytest tests/unit -q                                     # no DB needed
+TEST_DATABASE_URL=postgresql://localhost/trader_test \
+    pytest tests/ -q                                     # includes integration
+pytest tests/unit/test_parity.py -q                      # the important one
+ruff check src/ tests/
 ```
 
-## Architecture — Multi-Agent System
-
-Seven specialist AI agents coordinated by an `AgentOrchestrator`. Each agent extends `BaseAgent` (`src/agents/base.py`), wraps a Claude model with a focused system prompt, and communicates via shared database state.
+## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   ORCHESTRATOR                        │
-│                                                      │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
-│  │ Research  │  │Sentiment │  │Technical │          │
-│  │ Haiku/5m  │  │Haiku/data│  │ Haiku/3m │          │
-│  └─────┬─────┘  └────┬─────┘  └────┬─────┘          │
-│        └──────────────┼─────────────┘                │
-│                       ▼                              │
-│              ┌──────────────┐                        │
-│              │    Signal    │                        │
-│              │ Sonnet/15m   │                        │
-│              └──────┬───────┘                        │
-│                     ▼                                │
-│              ┌──────────────┐                        │
-│              │     Risk     │                        │
-│              │Sonnet/signal │                        │
-│              └──────┬───────┘                        │
-│                     ▼                                │
-│              ┌──────────────┐                        │
-│              │  Execution   │                        │
-│              │Haiku/approval│                        │
-│              └──────┬───────┘                        │
-│                     ▼                                │
-│              ┌──────────────┐                        │
-│              │  Portfolio   │                        │
-│              │ Sonnet/30m   │                        │
-│              └──────────────┘                        │
-│                                                      │
-│  ┌────────────────────────────────────────────────┐  │
-│  │         SHARED STATE (PostgreSQL)              │  │
-│  │  raw_social_posts | price_candles | sentiments │  │
-│  │  trade_signals | risk_decisions | trade_results│  │
-│  │  portfolio_snapshots | agent_heartbeats        │  │
-│  └────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────┘
+                    ┌──────────────────────────┐
+                    │  Strategy (pure, no I/O) │
+                    │  target_weights(...)     │
+                    └────────────┬─────────────┘
+                                 ▼
+                    ┌──────────────────────────┐
+                    │  core/risk.apply_risk    │  shared gate
+                    │  core/orders.weights_to_ │  shared sizing
+                    │            orders        │
+                    └────────────┬─────────────┘
+                                 ▼
+              ┌──────────────────┴──────────────────┐
+              ▼                                     ▼
+      SimulatedBroker                        AlpacaBroker
+      + SimClock                             + RealClock
 ```
 
-### Agent roster
-
-| Agent | Model | Cadence | Responsibility |
-|---|---|---|---|
-| Research | Haiku | 5 min | Market scanning, trending tokens, social data collection |
-| Sentiment | Haiku | On new data | VADER + FinBERT NLP, sarcasm detection, manipulation filtering |
-| Technical | Haiku | 3 min | RSI (14), MACD (12/26/9), Bollinger Bands (20/2σ), OBV |
-| Signal | Sonnet | 15 min | Multi-factor fusion (sentiment 40% + technical 40% + volume 20%) |
-| Risk | Sonnet | On signal | Position sizing, daily loss limit, cooldown, portfolio concentration |
-| Execution | Haiku | On approval | bankr.bot prompt construction, job polling, slippage tracking |
-| Portfolio | Sonnet | 30 min | P&L tracking, drawdown detection, performance vs benchmark |
-
-### Key modules (all under `src/`)
-
-| Module | Responsibility |
+| Package | Responsibility |
 |---|---|
-| `agents/` | Specialist agent classes — see [Agent Development](#agent-development) |
-| `agents/base.py` | `BaseAgent` ABC, `AgentRole` enum, `AgentResult`/`AgentMessage` dataclasses |
-| `bankr_client.py` | Async bankr.bot REST client — prompt submission + job polling |
-| `sentiment_engine.py` | VADER (social text) + FinBERT (financial text) dual-layer NLP |
-| `technical_analysis.py` | RSI, MACD, Bollinger Bands, OBV calculations |
-| `social_collector.py` | Twitter, Reddit, Farcaster, CoinGecko data fetchers |
-| `signal_engine.py` | Weighted fusion: sentiment 40% + technical 40% + volume 20% |
-| `risk_manager.py` | Daily loss limit, cooldown, position caps, stop-loss |
-| `docs/` | Design documents (`05-multi-agent-design.md`, etc.) |
+| `src/core/` | Value types, `PricePanel`, calendar, clock, order sizing, risk gate |
+| `src/engine/` | `Driver`, metrics, scheduler, walk-forward |
+| `src/strategies/` | Strategy ABC, registry, strategy implementations |
+| `src/execution/` | `BrokerAdapter` protocol, `SimulatedBroker`, `AlpacaBroker` |
+| `src/data/` | `PriceSource` protocol, yfinance, synthetic generator |
+| `src/db/` | asyncpg pool, migrations, repositories |
+| `src/api/` | FastAPI control plane |
+| `src/worker/` | The only process that runs backtests or places orders |
+| `src/llm/` | Commentary only. Never reachable from the decision path. |
+| `web/` | Next.js frontend |
 
-### Signal flow
+### Structural guarantees
 
-- Multi-factor confluence: at least 2 confirming signals from different domains required
-- Minimum confidence threshold: 0.55 before any trade is dispatched
-- Volume amplifies directional score — it does not independently trigger trades
-- Graceful degradation: if Research or Sentiment fail, Signal agent runs with reduced confidence; if Signal or Risk fail, no trades execute (safe default)
+Each is enforced by a test, not by discipline:
 
-### bankr.bot API pattern
+| Guarantee | Mechanism |
+|---|---|
+| No look-ahead | `PricePanel` is built with an `as_of` and refuses to re-slice forward |
+| Decision lag | `SimulatedBroker` queues rather than fills; decide on T's close, execute at T+1's open |
+| Availability windows | An unlisted asset is excluded from the weighting denominator, not treated as cash |
+| Idempotent orders | `client_order_id = "{run_ref}:{session}:{symbol}"`; the venue rejects duplicates |
+| Backtest/live parity | `tests/unit/test_parity.py` |
+| No LLM in the order path | `tests/unit/test_import_boundaries.py` |
 
+## Adding a strategy
+
+1. Create `src/strategies/<name>.py` with a `StrategyParams` subclass and a
+   `Strategy` subclass decorated with `@register`.
+2. Implement `universe()`, `should_rebalance()`, `target_weights()`.
+3. Import it in `src/strategies/__init__.py` so registration happens.
+4. Add tests. Walk-forward it before considering a deployment.
+
+```python
+@register
+class MyStrategy(Strategy):
+    name = "my_strategy"
+    params_model = MyParams
+
+    def universe(self) -> list[str]:
+        return list(self.params.symbols)
+
+    def should_rebalance(self, session, last_rebalance) -> bool:
+        return last_rebalance is None or session.month != last_rebalance.month
+
+    def target_weights(self, panel, state, session) -> TargetWeights:
+        # panel is already truncated to `session` — future data is unreachable
+        return TargetWeights({...})
 ```
-POST /agent/prompt  → returns jobId
-GET  /agent/job/{jobId}  → poll until status == "completed"
-```
 
-Prompts are plain English: `"Buy $50 of ETH on Base"`
+`target_weights` **must be pure**: no network, no clock, no database. Anything
+else makes the backtest unreproducible and the parity test meaningless.
+
+Signals use `adj_close` (split- and dividend-adjusted); money uses raw `close`.
+Mixing them makes the ledger disagree with the broker by the cumulative
+dividend adjustment.
 
 ## Database
 
-**Current:** SQLite at `data/bot_state.db` (auto-created by `RiskManager._init_db()`).
-**Target:** PostgreSQL (required for multi-agent shared state). Migration replaces SQLite with PostgreSQL; each agent reads/writes its own tables.
+PostgreSQL. Migrations are numbered SQL files in `migrations/` applied by
+`src/db/migrate.py`, which verifies a checksum — **never edit an applied
+migration**, write a new one.
 
-Legacy tables: `trades`, `signals`, `portfolio_snapshots`
+Key tables: `daily_bars` (raw prices, `source` in the PK so vendors can be
+reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
+`deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `system_flags`
+(the kill switch), `jobs`, `audit_log`, `commentary`.
 
-Multi-agent tables: `raw_social_posts`, `price_candles`, `sentiment_scores`, `technical_signals`, `trade_signals`, `risk_decisions`, `trade_results`, `portfolio_snapshots`, `agent_heartbeats`
+P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`. The legacy
+`get_daily_pnl` in `src/db/repositories.py` sums **cash flow** and is wrong —
+do not use it.
 
-Useful queries:
-- Why did the bot trade X? → `SELECT * FROM trade_signals WHERE ticker='X'`
-- Today's P&L → `SELECT SUM(pnl_usd) FROM trade_results WHERE executed_at >= CURRENT_DATE`
-- Agent health → `SELECT * FROM agent_heartbeats ORDER BY last_seen DESC`
+## Conventions
 
-## Configuration
+- Python 3.11+, type hints throughout, async/await, `logging` not `print`
+- `Decimal` for money and quantities; `float` for indicator maths. The single
+  conversion point is `src/core/orders.weights_to_orders`.
+- Frozen dataclasses for value types; pydantic for strategy params and API models
+- ruff, line length 88
+- Tests assert behaviour against real dependencies where possible — real
+  Postgres, the real NYSE calendar, a fake Alpaca over real HTTP. Mocking a
+  boundary only proves the mock matches your assumption about it.
 
-- `.env` — API keys (bankr, Twitter, CoinGecko, Neynar)
-- `config/bot_config.yaml` — watchlist, risk thresholds, loop interval, position sizing
+## Known limitations
 
-## Python Conventions
-
-- Python 3.11+, type hints on all functions
-- Async/await throughout (`aiohttp`, `asyncio`)
-- `logging` module (not `print`) for all output
-- Dataclasses for structured data (`TradeResult`, `TechnicalSignal`, `SentimentResult`, `TradeSignal`, `RiskDecision`)
-- Supported chains: Base, Ethereum, Polygon, Solana, Unichain (see `Chain` enum in `bankr_client.py`)
-
-## Agent Development
-
-### Creating a new agent
-
-1. Add a role to `AgentRole` enum in `src/agents/base.py`
-2. Create `src/agents/<role>.py` extending `BaseAgent`
-3. Implement `execute(context) -> AgentResult` and `system_prompt() -> str`
-4. Register the agent in the orchestrator with its model and cadence
-
-```python
-class MyAgent(BaseAgent):
-    def __init__(self, api_key: str) -> None:
-        super().__init__(AgentRole.MY_ROLE, "claude-haiku-4-5-20251001", api_key)
-
-    def system_prompt(self) -> str:
-        return "You are a specialist in ..."
-
-    async def execute(self, context: dict[str, Any]) -> AgentResult:
-        # Do work, call Claude if needed, return self._build_result(...)
-        return self._build_result(success=True, data={...})
-```
-
-### Model assignments
-
-- **Haiku** (`claude-haiku-4-5-20251001`): Fast/cheap agents — Research, Sentiment, Technical, Execution
-- **Sonnet** (`claude-sonnet-4-6`): Reasoning-heavy agents — Signal, Risk, Portfolio
-
-### Agent communication
-
-Agents do not call each other directly. They communicate through shared database tables. The orchestrator passes a `context` dict to each agent's `execute()` containing relevant upstream data. Use `AgentMessage` for structured inter-agent messages routed by the orchestrator.
+- **No result in this repository is a real backtest.** Development ran without
+  network access to market data, so everything was verified against a synthetic
+  generator. Run against real data before drawing any conclusion.
+- Alpaca has never been contacted. `AlpacaBroker` is tested against a fake
+  server modelling the documented contract.
+- One strategy is implemented. The awesome-systematic-trading median Sharpe is
+  ~0.35 and seven entries are negative; expect disappointment and let the
+  walk-forward say so.
