@@ -21,3 +21,6 @@ pyyaml>=6.0.1
 
 # Research-only price history. Never on the live path.
 yfinance>=0.2.60
+
+# Async HTTP for the Alpaca adapter.
+aiohttp>=3.9.0

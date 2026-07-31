@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import logging
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import pandas as pd
@@ -81,10 +82,28 @@ def session_close(day: date | str) -> datetime:
     return nyse().session_close(_ts(day)).to_pydatetime()
 
 
+#: The exchange's own timezone. "Is this early?" is only meaningful here.
+EXCHANGE_TZ = ZoneInfo("America/New_York")
+
+#: Ordinary NYSE close, exchange-local.
+NORMAL_CLOSE_HOUR_LOCAL = 16
+
+
 def is_early_close(day: date | str) -> bool:
-    """Whether ``day`` closes before the usual time."""
+    """
+    Whether ``day`` closes before the usual 16:00 exchange-local.
+
+    Compared in exchange-local time, never UTC. A UTC comparison against 21:00
+    is correct only under Eastern Standard Time — for the eight months of
+    daylight saving the ordinary close is 20:00 UTC, so every normal summer
+    session would be misreported as a half-day.
+    """
+    if not is_session(day):
+        return False
     close = nyse().session_close(_ts(day))
-    return bool(close.hour < 21 if close.tzinfo is None else close.hour < 21)
+    if close.tzinfo is None:
+        close = close.tz_localize("UTC")
+    return bool(close.tz_convert(EXCHANGE_TZ).hour < NORMAL_CLOSE_HOUR_LOCAL)
 
 
 def first_session_of_month(start: date | str, end: date | str) -> list[date]:

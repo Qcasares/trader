@@ -32,6 +32,7 @@ from src.config import get_settings
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
 from src.worker.backtest_job import run_backtest_job
+from src.worker.live_job import run_live_decision, run_submit_orders
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ JobHandler = Callable[[asyncpg.Connection, dict[str, Any]], Awaitable[dict]]
 
 HANDLERS: dict[str, JobHandler] = {
     "backtest": run_backtest_job,
+    "live_decision": run_live_decision,
+    "submit_orders": run_submit_orders,
 }
 
 
