@@ -51,3 +51,10 @@ logs/
 
 # Local virtualenv for the systematic engine
 .venv/
+
+# Next.js frontend
+web/node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
+web/*.tsbuildinfo
