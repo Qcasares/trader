@@ -6,12 +6,43 @@ Shared pytest fixtures for the trading bot test suite.
 All fixtures use unittest.mock — no external API calls or database connections.
 """
 
+import importlib.util
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Legacy collection guard
+# ---------------------------------------------------------------------------
+#
+# The legacy agent tests import ``src.agents``, whose package ``__init__``
+# imports ``anthropic`` at module scope. The systematic engine deliberately
+# does not depend on an LLM SDK — that independence is the point, and
+# ``tests/unit/test_import_boundaries.py`` fails the build if it is ever lost —
+# so ``requirements-engine.txt`` omits it and CI installs only that.
+#
+# Without this guard, ``pytest tests/unit -q`` (the command CLAUDE.md
+# documents as needing nothing but a checkout) dies during *collection* with a
+# ModuleNotFoundError, taking the whole suite with it. A missing optional
+# dependency should skip the tests that need it, not prevent the other 231
+# from running.
+#
+# These files are listed rather than globbed: a new legacy test should have to
+# be added here deliberately, and a rename should surface as a collection
+# error rather than silently skipping.
+_LEGACY_TESTS = (
+    "unit/test_execution_agent.py",
+    "unit/test_orchestrator.py",
+    "unit/test_risk_agent.py",
+    "unit/test_signal_agent.py",
+    "integration/test_dry_run_e2e.py",
+)
+
+if importlib.util.find_spec("anthropic") is None:
+    collect_ignore = list(_LEGACY_TESTS)
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +54,9 @@ import pytest
 def mock_anthropic_response():
     """Factory for creating mock Anthropic API responses."""
 
-    def _make_response(content_text: str, input_tokens: int = 100, output_tokens: int = 50):
+    def _make_response(
+        content_text: str, input_tokens: int = 100, output_tokens: int = 50
+    ):
         response = MagicMock()
         content_block = MagicMock()
         content_block.text = content_text
@@ -42,7 +75,10 @@ def mock_anthropic_client(mock_anthropic_response):
     client = AsyncMock()
     # Default: return a simple hold signal
     default_response = mock_anthropic_response(
-        json.dumps([{"ticker": "ETH", "action": "hold", "confidence": 0.4, "rationale": "test"}])
+        json.dumps(
+            [{"ticker": "ETH", "action": "hold", "confidence": 0.4,
+              "rationale": "test"}]
+        )
     )
     client.messages.create = AsyncMock(return_value=default_response)
     return client
@@ -289,12 +325,12 @@ def mock_db_pool():
 @pytest.fixture
 def recent_trades_within_cooldown() -> dict[str, str]:
     """Recent trades dict where ETH was traded 5 minutes ago (within cooldown)."""
-    five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+    five_min_ago = datetime.now(UTC) - timedelta(minutes=5)
     return {"ETH": five_min_ago.isoformat()}
 
 
 @pytest.fixture
 def recent_trades_expired_cooldown() -> dict[str, str]:
     """Recent trades dict where ETH was traded 20 minutes ago (expired cooldown)."""
-    twenty_min_ago = datetime.now(timezone.utc) - timedelta(minutes=20)
+    twenty_min_ago = datetime.now(UTC) - timedelta(minutes=20)
     return {"ETH": twenty_min_ago.isoformat()}

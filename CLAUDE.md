@@ -107,6 +107,18 @@ pytest tests/unit/test_parity.py -q                      # the important one
 ruff check src/ tests/
 ```
 
+`ruff` excludes the legacy pipeline via `pyproject.toml`, so the command above
+lints exactly the code this repository is responsible for. Likewise the legacy
+agent tests are skipped when `anthropic` is absent — `requirements-engine.txt`
+omits it deliberately, and a missing optional dependency must not take the
+whole suite down during collection.
+
+`.github/workflows/ci.yml` runs ruff, the unit suite and the integration suite
+against a real Postgres on every pull request, installing only
+`requirements-engine.txt`. Parity and the import boundaries get their own named
+steps: when they break, the failure should say so in the checks list rather
+than hide in a wall of dots.
+
 ## Architecture
 
 ```

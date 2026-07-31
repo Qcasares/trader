@@ -24,3 +24,9 @@ yfinance>=0.2.60
 
 # Async HTTP for the Alpaca adapter.
 aiohttp>=3.9.0
+
+# Synchronous HTTP for the Crypto.com candle adapter. Declared explicitly even
+# though yfinance pulls it in anyway: a shipped module imports it, and relying
+# on a transitive dependency means an unrelated yfinance release can break an
+# unrelated import.
+requests>=2.31.0
