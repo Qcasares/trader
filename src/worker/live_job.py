@@ -43,7 +43,7 @@ from src.core.orders import RebalanceConstraints
 from src.core.panel import PricePanel
 from src.core.risk import RiskEvent, RiskLimits, describe
 from src.core.types import OrderIntent, PortfolioState, Side, TradingMode
-from src.db.repos import flags
+from src.db.repos import flags, marks
 from src.engine import Driver, DriverConfig, client_order_id
 from src.execution.alpaca import AlpacaBroker
 from src.execution.base import BrokerAdapter, OrderRejectedError, TradingHaltedError
@@ -115,6 +115,14 @@ async def _decide_for(
         as_of=session,
     )
 
+    # Record where the account stands before deciding. This is both the P&L
+    # record and the memory the risk gate runs on: a live process is built
+    # fresh for each job, so without it peak equity is zero, drawdown is zero,
+    # and max_drawdown_pct never binds — while the backtest that authorised
+    # the deployment honours it.
+    mode = deployment.get("mode") or "paper"
+    await marks.record_mark(conn, session, state.equity, state.cash, mode=mode)
+
     limits = deployment.get("risk_limits") or {}
     driver = Driver(
         strategy,
@@ -128,6 +136,8 @@ async def _decide_for(
         # The rebalance schedule has to survive process restarts, so it comes
         # from the deployment row rather than from a fresh Driver's memory.
         last_rebalance=deployment.get("last_rebalance"),
+        peak_equity=await marks.peak_equity(conn, mode=mode),
+        prior_equity=await marks.prior_equity(conn, session, mode=mode),
     )
 
     # The shared path: strategy -> apply_risk -> weights_to_orders, exactly as
@@ -369,6 +379,12 @@ async def dry_run(
     # It goes through the same ``decide`` as the live job, gate included. A
     # preview that showed ungated orders would be worse than no preview: it is
     # the screen an operator reads before authorising a deployment.
+    #
+    # The equity history *is* seeded, unlike the schedule: a preview that
+    # ignored an already-breached drawdown limit would show orders the live
+    # job would refuse to produce. A dry run writes no mark — it is a
+    # question, not an event.
+    mode = deployment.get("mode") or "paper"
     driver = Driver(
         strategy,
         broker,
@@ -379,6 +395,8 @@ async def dry_run(
             risk_limits=risk_limits_from(limits),
         ),
         last_rebalance=None,
+        peak_equity=await marks.peak_equity(conn, mode=mode),
+        prior_equity=await marks.prior_equity(conn, session, mode=mode),
     )
     decision = driver.decide(panel, session, state)
 

@@ -144,6 +144,8 @@ class Driver:
         clock: Clock,
         config: DriverConfig | None = None,
         last_rebalance: date | None = None,
+        peak_equity: Decimal | None = None,
+        prior_equity: Decimal | None = None,
     ) -> None:
         self.strategy = strategy
         self.broker = broker
@@ -154,6 +156,22 @@ class Driver:
         # constantly and would otherwise believe it had never rebalanced, so
         # the schedule has to survive outside the object.
         self._last_rebalance = last_rebalance
+
+        # Equity history the risk gate needs. A backtest accumulates it by
+        # walking; a live process is restarted between sessions, so it is
+        # seeded from ``daily_marks``.
+        #
+        # These were absent entirely until they were found to be missing:
+        # ``_risk_state`` built a ``RiskState`` without them, they defaulted to
+        # zero, and ``RiskState.daily_pnl``/``drawdown`` both short-circuit to
+        # zero on a non-positive input. The effect was that
+        # ``max_daily_loss_usd`` and ``max_drawdown_pct`` could never fire, on
+        # either path, however they were configured.
+        self._peak_equity = Decimal(peak_equity) if peak_equity else Decimal("0")
+        self._prior_equity = Decimal(prior_equity) if prior_equity else Decimal("0")
+        self._current_equity = self._prior_equity
+        self._day_start_equity = self._prior_equity
+
         self._logger = logging.getLogger(f"driver.{strategy.name}")
 
     @property
@@ -267,6 +285,11 @@ class Driver:
         So: one implementation, called by both. A limit added here binds
         everywhere or the build fails.
         """
+        # Before the rebalance check: equity moves on every session, not only
+        # the ones that trade, and a drawdown that opens on a quiet day still
+        # has to be seen.
+        self._observe_equity(state.equity)
+
         if not self.strategy.should_rebalance(session, self._last_rebalance):
             return Decision(session, False, None, None, (), [])
 
@@ -401,12 +424,32 @@ class Driver:
             as_of=session,
         )
 
+    def _observe_equity(self, equity: Decimal) -> None:
+        """
+        Record where equity stood, so the loss and drawdown limits can bind.
+
+        A session opens where the previous one closed, so ``day_start_equity``
+        is the *prior* session's marked equity rather than this one's — using
+        today's own equity would make the daily loss identically zero, which is
+        precisely the bug this exists to fix.
+        """
+        self._day_start_equity = (
+            self._prior_equity if self._prior_equity > 0 else equity
+        )
+        self._prior_equity = equity
+        self._current_equity = equity
+        if equity > self._peak_equity:
+            self._peak_equity = equity
+
     def _risk_state(
         self, session: date, prices: dict[str, float], halted: bool
     ) -> RiskState:
         """Assemble what the gate needs beyond the portfolio itself."""
         return RiskState(
             session=session,
+            day_start_equity=self._day_start_equity,
+            current_equity=self._current_equity,
+            peak_equity=self._peak_equity,
             current_prices={
                 symbol: Decimal(str(price)) for symbol, price in prices.items()
             },

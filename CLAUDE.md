@@ -173,6 +173,7 @@ Each is enforced by a test, not by discipline:
 | Idempotent orders | `client_order_id = "{run_ref}:{session}:{symbol}"`; the venue rejects duplicates |
 | Backtest/live parity | `tests/unit/test_parity.py` (synthetic) and `tests/unit/test_real_data.py` (observed prices) |
 | The risk gate binds live, not just in backtests | `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` asserts against the shipped job, not the driver it ought to use |
+| The halting limits can actually halt | `Driver` populates `RiskState`'s equity fields and seeds them from `daily_marks` on the live path; `tests/unit/test_real_data.py` and `TestMarksFeedTheRiskGate` drive both directions |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py`, covering `src/worker` and `src/api` as well as the decision path |
@@ -220,9 +221,15 @@ reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
 `deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `system_flags`
 (the kill switch), `jobs`, `audit_log`, `commentary`.
 
-P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`. The legacy
-`get_daily_pnl` in `src/db/repositories.py` sums **cash flow** and is wrong —
-do not use it.
+P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`, written by
+`src/db/repos/marks.py`. The legacy `get_daily_pnl` in
+`src/db/repositories.py` sums **cash flow** and is wrong — do not use it.
+
+`daily_marks` is not only the P&L record: it is the memory the risk gate runs
+on. A live process is rebuilt for every session, so `max_drawdown_pct` and
+`max_daily_loss_usd` are measured against `peak_equity` and `prior_equity`
+read back from this table. Stop writing marks and both limits silently go
+inert while the backtest continues to honour them.
 
 ## Conventions
 

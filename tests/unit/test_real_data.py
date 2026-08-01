@@ -39,7 +39,7 @@ import pytest
 from src.core.calendar import sessions as nyse_sessions
 from src.core.clock import SimClock
 from src.core.panel import LookAheadError, PricePanel
-from src.core.risk import RiskLimits
+from src.core.risk import RiskCode, RiskLimits, Severity
 from src.core.types import CostModel, TradingMode
 from src.data import CryptoComSource, bars_to_rows, continuous_sessions
 from src.engine import Driver, DriverConfig
@@ -109,7 +109,11 @@ def _strategy():
     )
 
 
-def _run(broker, risk_limits: RiskLimits | None = None) -> list:
+def _run(
+    broker,
+    risk_limits: RiskLimits | None = None,
+    peak_equity: Decimal | None = None,
+) -> list:
     """Walk every session, returning the record list."""
 
     async def go():
@@ -118,7 +122,13 @@ def _run(broker, risk_limits: RiskLimits | None = None) -> list:
         config = DriverConfig(
             run_ref="realdata", risk_limits=risk_limits or RiskLimits()
         )
-        driver = Driver(strategy, broker, SimClock(sessions_list), config)
+        driver = Driver(
+            strategy,
+            broker,
+            SimClock(sessions_list),
+            config,
+            peak_equity=peak_equity,
+        )
         source = CryptoComSource.from_fixture(FIXTURE)
         panel = PricePanel.from_bars(
             bars_to_rows(source.fetch(UNIVERSE, FIRST_SESSION, LAST_SESSION))
@@ -560,3 +570,95 @@ def test_driver_run_stamps_the_right_session() -> None:
 def test_simulated_broker_stays_in_paper_or_backtest_mode() -> None:
     broker = SimulatedBroker(initial_cash=100_000, cost_model=CostModel())
     assert broker.mode is TradingMode.BACKTEST
+
+
+# ---------------------------------------------------------------------------
+# The halting limits, driven end to end
+# ---------------------------------------------------------------------------
+#
+# ``tests/unit/test_risk_gate.py`` exercises ``apply_risk`` with a hand-built
+# ``RiskState``. That proved the gate's arithmetic and nothing about whether
+# the ``RiskState`` the driver actually assembles carries the fields the
+# arithmetic reads. It did not: ``day_start_equity``, ``current_equity`` and
+# ``peak_equity`` were never populated, so ``daily_pnl`` and ``drawdown`` both
+# short-circuited to zero and neither limit could fire however it was set.
+#
+# These drive the real driver over real prices instead, and — because a limit
+# that always fires is as useless as one that never does — check both
+# directions.
+
+
+def test_a_daily_loss_limit_halts_trading() -> None:
+    broker = SimulatedBroker(initial_cash=100_000, cost_model=CostModel())
+    records = _run(broker, risk_limits=RiskLimits(max_daily_loss_usd=Decimal("500")))
+
+    breaches = [
+        e
+        for r in records
+        for e in r.risk_events
+        if e.code is RiskCode.DAILY_LOSS_BREACH
+    ]
+    assert breaches, "a $500 daily-loss limit never fired over a 10% drawdown"
+    assert all(e.severity is Severity.BLOCK for e in breaches)
+
+    # A blocking check means flat, not frozen: a halted book must not keep the
+    # exposure that caused the halt.
+    for record in records:
+        if any(e.code is RiskCode.DAILY_LOSS_BREACH for e in record.risk_events):
+            assert record.targets is not None
+            assert dict(record.targets.weights) == {}
+
+
+def test_a_drawdown_limit_halts_trading() -> None:
+    broker = SimulatedBroker(initial_cash=100_000, cost_model=CostModel())
+    records = _run(broker, risk_limits=RiskLimits(max_drawdown_pct=0.03))
+
+    breaches = [
+        e for r in records for e in r.risk_events if e.code is RiskCode.DRAWDOWN_BREACH
+    ]
+    assert breaches, "a 3% drawdown limit never fired over a 10% drawdown"
+
+
+def test_limits_that_should_not_bind_do_not() -> None:
+    """
+    The other direction. A gate that halts unconditionally would pass every
+    assertion above while making the system untradeable.
+    """
+    baseline = _run(SimulatedBroker(initial_cash=100_000, cost_model=CostModel()))
+    generous = _run(
+        SimulatedBroker(initial_cash=100_000, cost_model=CostModel()),
+        risk_limits=RiskLimits(
+            max_daily_loss_usd=Decimal("10000000"), max_drawdown_pct=0.99
+        ),
+    )
+
+    for records in (baseline, generous):
+        assert not [
+            e
+            for r in records
+            for e in r.risk_events
+            if e.code
+            in (RiskCode.DAILY_LOSS_BREACH, RiskCode.DRAWDOWN_BREACH)
+        ]
+    # And the generous run must be indistinguishable from no limits at all.
+    assert [r.equity for r in generous] == [r.equity for r in baseline]
+
+
+def test_peak_equity_is_seeded_not_rediscovered() -> None:
+    """
+    A live process is rebuilt for each session and must be told where the peak
+    was, or every restart resets the drawdown to zero and the limit is inert.
+    """
+    broker = SimulatedBroker(initial_cash=100_000, cost_model=CostModel())
+    seeded = _run(
+        broker,
+        risk_limits=RiskLimits(max_drawdown_pct=0.03),
+        peak_equity=Decimal("500000"),
+    )
+    breaches = [
+        e for r in seeded for e in r.risk_events if e.code is RiskCode.DRAWDOWN_BREACH
+    ]
+    # Against a $500k peak the very first session is already 80% down, so the
+    # seed must bind immediately rather than being recomputed from this run.
+    assert breaches
+    assert seeded[0].risk_events, "the seeded peak did not reach the gate"

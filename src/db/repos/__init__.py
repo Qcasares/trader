@@ -9,6 +9,6 @@ buy/sell cash flow, so a $100 purchase reads as a $100 loss. P&L here is a
 change in marked equity, computed from ``daily_marks``.
 """
 
-from src.db.repos import backtests, flags, jobs  # noqa: F401
+from src.db.repos import backtests, flags, jobs, marks  # noqa: F401
 
-__all__ = ["backtests", "flags", "jobs"]
+__all__ = ["backtests", "flags", "jobs", "marks"]

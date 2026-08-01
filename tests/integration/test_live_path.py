@@ -16,7 +16,8 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -29,7 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from src.api.security import hash_password  # noqa: E402
 from src.core.calendar import sessions as nyse_sessions  # noqa: E402
 from src.data import SyntheticSource  # noqa: E402
-from src.db.repos import flags  # noqa: E402
+from src.db.repos import flags, marks  # noqa: E402
 from src.execution.alpaca import AlpacaBroker  # noqa: E402
 from src.worker.live_job import (  # noqa: E402
     dry_run,
@@ -644,3 +645,164 @@ class TestRiskGateOnTheLivePath:
 def _as_json(value):
     """asyncpg returns JSONB as str or dict depending on codec registration."""
     return json.loads(value) if isinstance(value, str) else value
+
+
+class TestMarksFeedTheRiskGate:
+    """
+    A live process is rebuilt for every session; its risk memory must not be.
+
+    ``max_drawdown_pct`` is measured against peak equity, and a ``Driver``
+    constructed fresh each job knows of no peak but the one it was just told.
+    Without ``daily_marks`` behind it the peak is zero, the drawdown is zero,
+    and the limit is inert — while the backtest that authorised the deployment
+    honours it. That is the exact backtest/live divergence this repository
+    exists to prevent, so it gets a test against the shipped job.
+
+    ``daily_marks`` also carries the P&L record. It had a table, a schema, and
+    a paragraph in CLAUDE.md describing it as the source of truth — and no
+    writer at all.
+    """
+
+    def test_a_mark_is_recorded_for_the_decision_session(
+        self, dsn, seeded
+    ) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                await conn.execute("DELETE FROM daily_marks")
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                await run_live_decision(
+                    conn,
+                    {"session": session.isoformat()},
+                    broker_factory=factory,
+                )
+                return await conn.fetchrow(
+                    "SELECT session, equity, cash, daily_pnl, drawdown_pct "
+                    "FROM daily_marks ORDER BY session DESC LIMIT 1"
+                )
+            finally:
+                await conn.close()
+
+        row = asyncio.run(_with_venue(check))
+        assert row is not None, "the live decision recorded no mark"
+        assert row["equity"] > 0
+        # The first mark has nothing to difference against, so zero is the
+        # honest daily P&L rather than the whole opening balance booked as a
+        # gain. (The legacy get_daily_pnl would have reported cash flow here.)
+        assert float(row["daily_pnl"]) == 0.0
+
+    def test_pnl_is_a_change_in_equity_not_cash_flow(self, dsn) -> None:
+        """
+        ``equity_t - equity_{t-1} - net deposits``.
+
+        Written directly against the repository because the legacy
+        ``get_daily_pnl`` sums buy/sell cash flow, which makes a $100 purchase
+        read as a $100 loss. The distinction is the whole reason this table
+        exists, so it is asserted rather than assumed.
+        """
+
+        async def check():
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute("DELETE FROM daily_marks")
+                await marks.record_mark(
+                    conn, date(2021, 3, 1), Decimal("100000"), Decimal("100000")
+                )
+                # Equity up 5k, but 4k of it was deposited: P&L is 1k.
+                second = await marks.record_mark(
+                    conn,
+                    date(2021, 3, 2),
+                    Decimal("105000"),
+                    Decimal("5000"),
+                    deposits=Decimal("4000"),
+                )
+                third = await marks.record_mark(
+                    conn, date(2021, 3, 3), Decimal("94500"), Decimal("500")
+                )
+                peak = await marks.peak_equity(conn)
+                prior = await marks.prior_equity(conn, date(2021, 3, 3))
+                return second, third, peak, prior
+            finally:
+                await conn.close()
+
+        second, third, peak, prior = asyncio.run(check())
+
+        assert second["daily_pnl"] == Decimal("1000")
+        assert second["cumulative_pnl"] == Decimal("1000")
+        assert third["daily_pnl"] == Decimal("-10500")
+        assert third["cumulative_pnl"] == Decimal("-9500")
+
+        # Drawdown is measured against the peak, which is the 105k session.
+        assert peak == Decimal("105000")
+        assert third["drawdown_pct"] == pytest.approx(Decimal("-0.1"), abs=1e-9)
+        # And "prior" is the session before, not the latest.
+        assert prior == Decimal("105000")
+
+    def test_a_breached_drawdown_halts_a_freshly_built_live_process(
+        self, dsn, seeded
+    ) -> None:
+        """
+        The end-to-end claim: history in the table, halt in the decision.
+
+        A peak planted well above current equity must make the *next* live
+        decision refuse to allocate, even though the process computing it has
+        no memory of that peak beyond what it reads back.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                await conn.execute("DELETE FROM daily_marks")
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                # A prior session at 10x the current book: a ~90% drawdown.
+                await marks.record_mark(
+                    conn,
+                    session - timedelta(days=1),
+                    Decimal("1000000"),
+                    Decimal("1000000"),
+                )
+                await conn.execute(
+                    "UPDATE deployments SET risk_limits=$2::jsonb WHERE id=$1",
+                    seeded["deployment_id"],
+                    json.dumps({"max_drawdown_pct": 0.10}),
+                )
+                await run_live_decision(
+                    conn,
+                    {"session": session.isoformat()},
+                    broker_factory=factory,
+                )
+                return await conn.fetchrow(
+                    "SELECT target_weights, risk_events FROM decisions "
+                    "WHERE deployment_id=$1 AND session=$2",
+                    seeded["deployment_id"], session,
+                )
+            finally:
+                await conn.execute(
+                    "UPDATE deployments SET risk_limits='{}'::jsonb WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.close()
+
+        row = asyncio.run(_with_venue(check))
+        assert row is not None
+
+        events = _as_json(row["risk_events"])
+        codes = {e["code"] for e in events}
+        assert "drawdown_breach" in codes, (
+            "a 10% drawdown limit did not fire against a 90% drawdown — the "
+            "live process is not reading its equity history"
+        )
+        # Halted means flat, not frozen.
+        assert _as_json(row["target_weights"]) == {}
