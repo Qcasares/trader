@@ -122,8 +122,10 @@ uvicorn src.api.main:app --reload            # HTTP control plane
 python -m src.worker.main                    # runs backtests and live jobs
 cd web && npm run dev                        # Next.js frontend
 
-# Everything at once
+# Backend stack (db, api, worker) — the frontend deploys to Vercel
 docker compose up --build
+# ...plus the UI, for local testing only
+docker compose --profile web up --build
 
 # Tests
 pytest tests/unit -q                                     # no DB needed

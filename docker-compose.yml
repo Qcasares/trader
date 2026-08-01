@@ -8,8 +8,17 @@
 # loop and stall every other request, including the one a human is using to
 # stop trading.
 #
-# The frontend is not here. It deploys to Vercel and talks to the API over
-# HTTPS; a Next.js server cannot hold a trading loop and does not try.
+# The frontend deploys to Vercel and talks to the API over HTTPS; a Next.js
+# server cannot hold a trading loop and does not try. It is therefore *not* in
+# the default set — bringing it up here would suggest it is part of the
+# deployment, and it is not.
+#
+# It is available behind a profile, because the UI is the only part of this
+# system a human actually looks at and testing it should not require running
+# npm separately from everything else:
+#
+#   docker compose up --build                    # backend only, as deployed
+#   docker compose --profile web up --build      # everything, for local testing
 #
 # Secrets
 # ~~~~~~~
@@ -76,6 +85,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  # Local testing only. Not in the default set: production is Vercel.
+  web:
+    profiles: ["web"]
+    build: ./web
+    environment:
+      # Read by the browser, so it must be an address the *browser* can reach —
+      # not the compose-internal hostname `api`, which resolves only between
+      # containers.
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
 
 volumes:
   pgdata:

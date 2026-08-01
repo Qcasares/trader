@@ -1,0 +1,5 @@
+# node_modules is reinstalled inside the image by `npm ci` — copying the host's
+# would drag in platform-specific binaries built for a different architecture.
+node_modules
+.next
+.env.local
