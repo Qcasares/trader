@@ -309,3 +309,118 @@ class TestKillSwitchFailsClosed:
         for label in ("string-true", "integer-one", "null", "empty-object"):
             assert results[label] is False, f"{label} was treated as permission"
         assert results["real-true"] is True
+
+
+class TestPortfolio:
+    """
+    Account equity, P&L and positions, read from ``daily_marks``.
+
+    The plan listed these endpoints from the start and neither existed. They
+    could not have, usefully: nothing wrote ``daily_marks`` until the risk-gate
+    work, so there was no equity history to serve.
+
+    P&L here is a change in marked equity. The legacy ``get_daily_pnl`` sums
+    buy/sell cash flow and would report a $100 purchase as a $100 loss; nothing
+    in this router may reach it.
+    """
+
+    def test_requires_authentication(self, client) -> None:
+        client.cookies.clear()
+        assert client.get("/api/v1/portfolio").status_code == 401
+        assert client.get("/api/v1/portfolio/history").status_code == 401
+
+    def test_empty_history_reports_unknown_not_zero(self, authed) -> None:
+        """
+        Zero equity and *unknown* equity are different states.
+
+        Rendering the second as the first shows an operator a flat line at zero
+        where they should see "no data" — and a flat line is exactly what a
+        broken mark writer would also produce.
+        """
+        import asyncio as _asyncio
+
+        async def clear():
+            conn = await asyncpg.connect(TEST_DSN)
+            try:
+                await conn.execute("DELETE FROM daily_marks")
+            finally:
+                await conn.close()
+
+        _asyncio.run(clear())
+        body = authed.get("/api/v1/portfolio").json()
+        assert body["equity"] is None
+        assert body["cumulative_pnl"] is None
+        assert body["note"] == "no marks recorded yet"
+
+    def test_reports_the_latest_mark_and_the_peak(self, authed) -> None:
+        import asyncio as _asyncio
+        from datetime import date as _date
+        from decimal import Decimal as _Decimal
+
+        from src.db.repos import marks
+
+        async def seed():
+            conn = await asyncpg.connect(TEST_DSN)
+            try:
+                await conn.execute("DELETE FROM daily_marks")
+                await marks.record_mark(
+                    conn, _date(2021, 3, 1), _Decimal("100000"), _Decimal("100000")
+                )
+                await marks.record_mark(
+                    conn, _date(2021, 3, 2), _Decimal("110000"), _Decimal("10000")
+                )
+                await marks.record_mark(
+                    conn, _date(2021, 3, 3), _Decimal("99000"), _Decimal("9000")
+                )
+            finally:
+                await conn.close()
+
+        _asyncio.run(seed())
+        body = authed.get("/api/v1/portfolio").json()
+
+        assert body["as_of"] == "2021-03-03"
+        assert body["equity"] == 99000.0
+        assert body["daily_pnl"] == -11000.0
+        assert body["cumulative_pnl"] == -1000.0
+        # The peak is the 110k session, not the latest — drawdown is measured
+        # against the high-water mark or it is not a drawdown.
+        assert body["peak_equity"] == 110000.0
+        assert body["drawdown_pct"] == pytest.approx(-0.1, abs=1e-9)
+
+    def test_history_is_oldest_first_for_plotting(self, authed) -> None:
+        body = authed.get("/api/v1/portfolio/history").json()
+        sessions = [m["session"] for m in body["marks"]]
+        assert sessions == sorted(sessions)
+        assert body["count"] == len(sessions)
+
+    def test_an_unknown_mode_is_422_not_a_silent_empty_curve(self, authed) -> None:
+        """
+        A typo must not return an empty portfolio that looks like a real one.
+        """
+        assert authed.get("/api/v1/portfolio?mode=papper").status_code == 422
+        assert (
+            authed.get("/api/v1/portfolio/history?mode=nonsense").status_code == 422
+        )
+
+    def test_paper_and_live_are_never_mixed(self, authed) -> None:
+        """Two accounts, two curves. Summing them would be meaningless."""
+        import asyncio as _asyncio
+        from datetime import date as _date
+        from decimal import Decimal as _Decimal
+
+        from src.db.repos import marks
+
+        async def seed():
+            conn = await asyncpg.connect(TEST_DSN)
+            try:
+                await marks.record_mark(
+                    conn, _date(2021, 3, 3), _Decimal("5"), _Decimal("5"), mode="live"
+                )
+            finally:
+                await conn.close()
+
+        _asyncio.run(seed())
+        paper = authed.get("/api/v1/portfolio?mode=paper").json()
+        live = authed.get("/api/v1/portfolio?mode=live").json()
+        assert paper["equity"] == 99000.0
+        assert live["equity"] == 5.0

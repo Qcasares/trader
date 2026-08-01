@@ -22,7 +22,14 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routers import auth, backtests, deployments, strategies, system
+from src.api.routers import (
+    auth,
+    backtests,
+    deployments,
+    portfolio,
+    strategies,
+    system,
+)
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -79,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(strategies.router)
     app.include_router(backtests.router)
     app.include_router(deployments.router)
+    app.include_router(portfolio.router)
     app.include_router(system.router)
 
     @app.get("/api/v1/health", tags=["health"])
