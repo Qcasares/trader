@@ -154,7 +154,7 @@ async def _decide_for(
         logger.info("%s: risk gate — %s", session, describe(decision.risk_events))
 
     decision_id = uuid.uuid4()
-    await conn.execute(
+    inserted = await conn.fetchval(
         """
         INSERT INTO decisions (id, deployment_id, session, target_weights,
                                order_intents, rationale, status,
@@ -162,6 +162,7 @@ async def _decide_for(
         VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, 'planned',
                 $7::jsonb, $8::jsonb)
         ON CONFLICT (deployment_id, session) DO NOTHING
+        RETURNING id
         """,
         decision_id,
         deployment["id"],
@@ -174,6 +175,27 @@ async def _decide_for(
         json.dumps(decision.raw_targets.weights if decision.raw_targets else {}),
         json.dumps([_risk_event_to_dict(e) for e in decision.risk_events]),
     )
+
+    if inserted is None:
+        # A decision for this session already existed, so the conflict clause
+        # discarded the one just computed. That is the intended idempotency —
+        # a retried job must not be able to produce a second day's orders, and
+        # the persisted decision is the authority even if prices have moved
+        # since. Return the *existing* id rather than the unused one that was
+        # generated here, which was never written and would not resolve.
+        existing = await conn.fetchval(
+            "SELECT id FROM decisions WHERE deployment_id = $1 AND session = $2",
+            deployment["id"],
+            session,
+        )
+        logger.info(
+            "%s: a decision already exists for %s; keeping it and discarding "
+            "the recomputed one",
+            session,
+            strategy.name,
+        )
+        return existing
+
     logger.info(
         "%s: decided %d order(s) for %s — %s",
         session,

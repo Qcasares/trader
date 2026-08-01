@@ -33,6 +33,8 @@ from src.data import SyntheticSource  # noqa: E402
 from src.db.repos import flags, marks  # noqa: E402
 from src.execution.alpaca import AlpacaBroker  # noqa: E402
 from src.worker.live_job import (  # noqa: E402
+    _decide_for,
+    _enabled_deployments,
     dry_run,
     run_live_decision,
     run_submit_orders,
@@ -806,3 +808,59 @@ class TestMarksFeedTheRiskGate:
         )
         # Halted means flat, not frozen.
         assert _as_json(row["target_weights"]) == {}
+
+
+class TestDecisionIdempotency:
+    """
+    A re-run decision job keeps the first answer and returns its real id.
+
+    The insert carries ``ON CONFLICT (deployment_id, session) DO NOTHING``,
+    which is the intended idempotency: a retried job must not be able to
+    produce a second day's orders, and the persisted decision stays the
+    authority even if prices have moved. But the function generated a fresh
+    UUID and returned it unconditionally, so on a retry it handed back an id
+    that had never been written and could not be resolved — while the caller
+    counted the run as having made a decision.
+    """
+
+    def test_a_rerun_returns_the_existing_id_and_writes_no_second_row(
+        self, dsn, seeded
+    ) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                # Via the real loader: it decodes the JSONB columns, and a
+                # hand-built row would be testing a different shape than the
+                # worker actually receives.
+                (deployment,) = await _enabled_deployments(
+                    conn, [str(seeded["deployment_id"])]
+                )
+                first = await _decide_for(conn, deployment, session, factory)
+                second = await _decide_for(conn, deployment, session, factory)
+                rows = await conn.fetchval(
+                    "SELECT COUNT(*) FROM decisions WHERE deployment_id=$1 "
+                    "AND session=$2",
+                    seeded["deployment_id"], session,
+                )
+                stored = await conn.fetchval(
+                    "SELECT id FROM decisions WHERE deployment_id=$1 AND session=$2",
+                    seeded["deployment_id"], session,
+                )
+                return first, second, rows, stored
+            finally:
+                await conn.close()
+
+        first, second, rows, stored = asyncio.run(_with_venue(check))
+
+        assert rows == 1, "the retry wrote a second decision for one session"
+        assert first == stored
+        # The id handed back on the retry must resolve to the row that exists,
+        # not to the throwaway UUID the retry generated.
+        assert second == stored
