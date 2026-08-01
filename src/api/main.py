@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import asyncpg
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routers import (
@@ -95,10 +95,19 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": API_VERSION}
 
     @app.get("/api/v1/ready", tags=["health"])
-    async def ready() -> dict[str, object]:
-        """Readiness: can we actually reach the database?"""
+    async def ready(response: Response) -> dict[str, object]:
+        """
+        Readiness: can we actually reach the database?
+
+        Answers with **503** when it cannot. This used to return 200 with
+        ``{"ready": false}``, which every orchestrator that has ever existed
+        reads as healthy — they route on the status code, not the body. An
+        instance with a dead database would have stayed in the load balancer,
+        serving 500s, while its readiness probe cheerfully reported success.
+        """
         pool = getattr(app.state, "pool", None)
         if pool is None:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"ready": False, "database": False}
         try:
             async with pool.acquire() as conn:
@@ -106,6 +115,7 @@ def create_app() -> FastAPI:
             return {"ready": True, "database": True}
         except Exception as exc:  # noqa: BLE001 - probe must not raise
             logger.error("Readiness probe failed: %s", exc)
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"ready": False, "database": False}
 
     return app

@@ -25,7 +25,7 @@ import uuid
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.deps import AppSettings, AuthedSession, DbConn
 from src.db.repos import flags
@@ -36,6 +36,47 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/deployments", tags=["deployments"])
 
 
+class RiskLimitsRequest(BaseModel):
+    """
+    A deployment's risk configuration, validated rather than taken on trust.
+
+    This was a bare ``dict``, which meant an unrecognised key was accepted,
+    stored, and returned by the API — while the worker, which reads specific
+    keys, never saw it. Writing ``max_drawdown`` for ``max_drawdown_pct``
+    produced a deployment that displayed a configured drawdown limit and had
+    none. ``risk_limits_from`` already guards the read side ("a limit the API
+    accepts and stores but that this function forgets is worse than one that
+    does not exist"); this is the write side of the same argument.
+
+    ``extra="forbid"`` is the point of the model. Range checks are useful, but
+    the typo is the failure that actually happens, and it is silent.
+
+    Bounds are not decoration either. ``max_gross_exposure`` above 1.0 is
+    unreachable — ``TargetWeights`` refuses to construct a levered allocation —
+    so accepting it would let a cooldown hold inflate the weights past a clamp
+    that no longer catches them, and raise deep inside the worker instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: Also feeds order sizing via ``_constraints_from``.
+    max_weight_per_asset: float = Field(default=1.0, gt=0.0, le=1.0)
+    min_trade_usd: float = Field(default=25.0, ge=0.0)
+
+    max_gross_exposure: float = Field(default=1.0, gt=0.0, le=1.0)
+    #: ``None`` disables. Zero would mean "halt on any loss at all", which is
+    #: far more likely to be a mistake than an intention.
+    max_daily_loss_usd: float | None = Field(default=None, gt=0.0)
+    max_drawdown_pct: float | None = Field(default=None, gt=0.0, le=1.0)
+    cooldown_minutes: int = Field(default=0, ge=0)
+    #: Off by default. A stop on a monthly rebalancer is a different strategy,
+    #: and its backtest has to model it.
+    stop_loss_pct: float | None = Field(default=None, gt=0.0, le=1.0)
+    #: Held back so a gap between decision and fill does not produce an
+    #: insufficient-buying-power rejection. Must leave something to invest.
+    cash_buffer_pct: float = Field(default=0.0, ge=0.0, lt=1.0)
+
+
 class CreateDeploymentRequest(BaseModel):
     strategy: str
     params: dict = Field(default_factory=dict)
@@ -44,7 +85,7 @@ class CreateDeploymentRequest(BaseModel):
     #: has evidence for, and the API refuses to create one.
     approved_backtest_run_id: str
     mode: str = "paper"
-    risk_limits: dict = Field(default_factory=dict)
+    risk_limits: RiskLimitsRequest = Field(default_factory=RiskLimitsRequest)
 
     @field_validator("mode")
     @classmethod
@@ -185,7 +226,7 @@ async def create_deployment(
         json.dumps(body.params),
         body.mode,
         body.capital_usd,
-        json.dumps(body.risk_limits),
+        json.dumps(body.risk_limits.model_dump()),
         run_uuid,
     )
     await flags.record_audit(

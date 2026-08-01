@@ -15,6 +15,14 @@ import { ApiError, api, type JobSummary, type SystemStatus } from "@/lib/api";
 
 const CONFIRM_PHRASE = "ENABLE TRADING";
 
+/** Heartbeat age, in the largest unit that still reads as a number. */
+function fmtAge(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "—";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
 export default function SystemPage() {
   const router = useRouter();
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -161,19 +169,33 @@ export default function SystemPage() {
 
       <h2>Workers</h2>
       <div className="card">
-        {status.workers.length === 0 ? (
+        {/*
+          The warning keys off whether any worker is *live*, not whether the
+          table has rows. A heartbeat row persists after the process dies, so
+          "has ever checked in" is not the same question as "is running now",
+          and rendering the stored status made a worker that died an hour ago
+          show a green "alive" pill.
+        */}
+        {status.workers.every((w) => w.stale) && (
           <p className="banner banner-warn">
-            <strong>No worker has checked in.</strong> Backtests will queue and
-            never run. A dead worker produces no error anywhere — absence of
-            action looks exactly like nothing needing to be done.
+            <strong>No worker is alive.</strong>{" "}
+            {status.workers.length === 0
+              ? "None has ever checked in."
+              : "The last heartbeat is stale."}{" "}
+            Backtests will queue and never run, no end-of-day mark will be
+            written, and both halting limits go inert while that is true. A
+            dead worker produces no error anywhere — absence of action looks
+            exactly like nothing needing to be done.
           </p>
-        ) : (
+        )}
+        {status.workers.length > 0 && (
           <table>
             <thead>
               <tr>
                 <th>Worker</th>
                 <th>Status</th>
                 <th>Last seen</th>
+                <th className="num">Age</th>
               </tr>
             </thead>
             <tbody>
@@ -181,9 +203,14 @@ export default function SystemPage() {
                 <tr key={worker.worker_id}>
                   <td>{worker.worker_id}</td>
                   <td>
-                    <span className="pill pill-good">{worker.status}</span>
+                    <span
+                      className={`pill ${worker.stale ? "pill-bad" : "pill-good"}`}
+                    >
+                      {worker.stale ? "no heartbeat" : worker.status}
+                    </span>
                   </td>
                   <td>{worker.last_seen}</td>
+                  <td className="num">{fmtAge(worker.age_seconds)}</td>
                 </tr>
               ))}
             </tbody>

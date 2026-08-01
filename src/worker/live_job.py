@@ -351,17 +351,26 @@ async def run_submit_orders(
         if isinstance(intents, str):
             intents = json.loads(intents)
 
+        # Counted per decision, not globally. The status written below depends
+        # on how far *this* batch got, and a run covering several deployments
+        # would otherwise attribute one of them the others' progress.
+        sent_here = 0
+        halt: str | None = None
+
         broker = broker_factory() if broker_factory else _alpaca_from_row(row)
         async with _maybe_context(broker):
             for raw in intents:
                 # Re-read between orders: engaging the switch mid-batch must
                 # stop order 3 of 10, not merely the next cycle.
                 if not await flags.trading_enabled(conn):
+                    halt = "kill_switch"
                     logger.warning(
-                        "Kill switch engaged mid-batch; %d order(s) not sent",
-                        len(intents) - submitted,
+                        "Kill switch engaged mid-batch; %d of %d order(s) not "
+                        "sent for decision %s",
+                        len(intents) - sent_here,
+                        len(intents),
+                        row["id"],
                     )
-                    blocked += 1
                     break
 
                 intent = _dict_to_intent(raw)
@@ -377,14 +386,27 @@ async def run_submit_orders(
                     await _record_order(conn, row, intent, coid, None, str(exc))
                     continue
                 except TradingHaltedError:
-                    blocked += 1
+                    halt = "venue"
+                    logger.warning(
+                        "Venue reports trading halted; %d of %d order(s) not "
+                        "sent for decision %s",
+                        len(intents) - sent_here,
+                        len(intents),
+                        row["id"],
+                    )
                     break
 
                 await _record_order(conn, row, intent, coid, ack.broker_order_id, None)
+                sent_here += 1
                 submitted += 1
 
+        if halt is not None:
+            blocked += 1
+
         await conn.execute(
-            "UPDATE decisions SET status='submitted' WHERE id=$1", row["id"]
+            "UPDATE decisions SET status=$2 WHERE id=$1",
+            row["id"],
+            _batch_status(halt, sent_here),
         )
 
     return {
@@ -392,6 +414,36 @@ async def run_submit_orders(
         "submitted": submitted,
         "skipped": blocked,
     }
+
+
+def _batch_status(halt: str | None, sent: int) -> str:
+    """
+    What to record for a batch, given how it ended.
+
+    This used to be the literal ``'submitted'`` regardless, which was wrong in
+    two compounding ways. It is the system's account of what happened, and
+    "submitted" for a batch stopped after one of three orders is false. Worse,
+    it is also the retry filter — :func:`run_submit_orders` selects
+    ``status = 'planned'`` — so recording a halted batch as submitted retires
+    it, and the un-sent remainder can never go out even after the switch is
+    released. The orders were not deferred, they were silently dropped, while
+    the ledger claimed a rebalance that never fully happened.
+
+    A halted batch is deliberately *not* returned to ``'planned'``. Someone who
+    hits the kill switch partway through a rebalance does not want the
+    remainder to resume by itself the moment they release it, and the staleness
+    guard would refuse the batch anyway once its window closed. Surfacing the
+    true state and letting an operator decide is the conservative choice; the
+    orders that did go out are in ``orders`` either way.
+    """
+    if halt is None:
+        return "submitted"
+    if sent:
+        # Distinguished from a batch stopped before its first order: an
+        # operator reading "partially submitted" goes looking for fills, and
+        # they must actually exist.
+        return "partially_submitted"
+    return "blocked_by_kill_switch" if halt == "kill_switch" else "halted_by_venue"
 
 
 # ---------------------------------------------------------------------------

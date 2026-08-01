@@ -487,6 +487,206 @@ class TestKillSwitchStopsSubmission:
             )
 
 
+class TestKillSwitchEngagedMidBatch:
+    """
+    The switch thrown *between* orders, which is the case the pre-batch check
+    cannot cover.
+
+    ``live_job``'s docstring promises the flag is "re-read between orders too,
+    so engaging it partway through a batch stops the remainder". The check
+    exists, but the class above only ever engages the switch *before*
+    ``run_submit_orders`` is called, so it tests the pre-batch guard and returns
+    early. Everything after that guard was unexercised.
+
+    Two things must hold when a batch is cut short, and neither is about the
+    orders that did go out:
+
+    1. The decision must not be recorded as ``submitted``. It is the system's
+       account of what happened, and "submitted" for a batch that was halted
+       three orders in is simply false.
+    2. That record is also the retry filter — ``run_submit_orders`` selects
+       ``status = 'planned'``. Marking a halted batch ``submitted`` retires it,
+       so the un-sent remainder can never go out, even after the switch is
+       released. The orders are not deferred; they are lost silently, and the
+       ledger claims a rebalance that never fully happened.
+    """
+
+    @staticmethod
+    def _halting_factory(inner_factory, dsn, after=1):
+        """
+        A broker that engages the kill switch once ``after`` orders are away.
+
+        Stands in for an operator hitting the switch while a batch is in
+        flight. It wraps rather than replaces the real adapter, so the orders
+        preceding the halt take the genuine path to the fake venue.
+        """
+
+        class HaltsMidBatch:
+            def __init__(self) -> None:
+                self._inner = inner_factory()
+                self.sent = 0
+
+            async def __aenter__(self):
+                await self._inner.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc):
+                return await self._inner.__aexit__(*exc)
+
+            async def get_account(self):
+                return await self._inner.get_account()
+
+            async def get_positions(self):
+                return await self._inner.get_positions()
+
+            async def submit(self, intent, client_order_id=None):
+                ack = await self._inner.submit(
+                    intent, client_order_id=client_order_id
+                )
+                self.sent += 1
+                if self.sent == after:
+                    halt_conn = await asyncpg.connect(dsn)
+                    try:
+                        await flags.engage_kill_switch(
+                            halt_conn, "halted mid-batch", actor="test"
+                        )
+                    finally:
+                        await halt_conn.close()
+                return ack
+
+        return HaltsMidBatch
+
+    def test_a_halted_batch_is_not_recorded_as_submitted(self, dsn, seeded) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await flags.release_kill_switch(conn, actor="test")
+                # Reset the schedule as well as the decisions. `last_rebalance`
+                # persists across tests in this module, and a stale value in
+                # the same month makes `should_rebalance` return False, so the
+                # decision below is never created and the test measures
+                # nothing. Control the variable rather than depending on order.
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance=NULL WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                decision_session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 4, 1)
+                )
+                await run_live_decision(
+                    conn,
+                    {"session": decision_session.isoformat()},
+                    broker_factory=factory,
+                )
+                planned = await conn.fetchval(
+                    "SELECT order_intents FROM decisions "
+                    "WHERE deployment_id=$1 AND session=$2",
+                    seeded["deployment_id"], decision_session,
+                )
+                planned = (
+                    json.loads(planned) if isinstance(planned, str) else planned
+                )
+
+                nxt = next(s for s in seeded["sessions"] if s > decision_session)
+                result = await run_submit_orders(
+                    conn,
+                    {"session": nxt.isoformat()},
+                    broker_factory=self._halting_factory(factory, dsn, after=1),
+                    now=_in_window(nxt),
+                )
+                status = await conn.fetchval(
+                    "SELECT status FROM decisions "
+                    "WHERE deployment_id=$1 AND session=$2",
+                    seeded["deployment_id"], decision_session,
+                )
+                return result, server.submitted, status, planned
+            finally:
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+
+        result, submitted, status, planned = asyncio.run(_with_venue(check))
+
+        # The scenario is only meaningful if there was a remainder to stop.
+        assert len(planned) >= 2, "need a multi-order batch to cut short"
+        assert len(submitted) == 1, "the halt should stop the batch after one"
+
+        assert status != "submitted", (
+            "a batch halted after 1 of "
+            f"{len(planned)} orders was recorded as fully submitted; the "
+            "un-sent remainder can never be retried because run_submit_orders "
+            "only selects status='planned'"
+        )
+        assert status == "partially_submitted", status
+        assert result["submitted"] == 1
+        assert result["skipped"] == 1
+
+    def test_a_batch_halted_before_its_first_order_says_so(
+        self, dsn, seeded
+    ) -> None:
+        """
+        Halted with nothing sent is a different outcome from halted halfway,
+        and the status distinguishes them. "Partially submitted" when nothing
+        was submitted would send an operator looking for fills that do not
+        exist.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await flags.release_kill_switch(conn, actor="test")
+                # Reset the schedule as well as the decisions. `last_rebalance`
+                # persists across tests in this module, and a stale value in
+                # the same month makes `should_rebalance` return False, so the
+                # decision below is never created and the test measures
+                # nothing. Control the variable rather than depending on order.
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance=NULL WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                decision_session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 4, 1)
+                )
+                await run_live_decision(
+                    conn,
+                    {"session": decision_session.isoformat()},
+                    broker_factory=factory,
+                )
+                nxt = next(s for s in seeded["sessions"] if s > decision_session)
+
+                # after=0 never fires inside submit, so engage it here: the
+                # batch passes the pre-flight check and is stopped on the
+                # first per-order re-read.
+                await flags.engage_kill_switch(conn, "pre-flight", actor="test")
+                result = await run_submit_orders(
+                    conn,
+                    {"session": nxt.isoformat()},
+                    broker_factory=factory,
+                    now=_in_window(nxt),
+                )
+                status = await conn.fetchval(
+                    "SELECT status FROM decisions "
+                    "WHERE deployment_id=$1 AND session=$2",
+                    seeded["deployment_id"], decision_session,
+                )
+                return result, server.submitted, status
+            finally:
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+
+        result, submitted, status = asyncio.run(_with_venue(check))
+        assert submitted == []
+        assert status == "blocked_by_kill_switch"
+        assert result["submitted"] == 0
+
+
 class TestIdempotency:
     def test_resubmitting_the_same_session_does_not_double_trade(
         self, dsn, seeded

@@ -29,6 +29,19 @@ from src.db.repos import jobs as job_repo
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
 
+#: A worker is presumed dead once its heartbeat is this old.
+#:
+#: The worker writes one every ``src.worker.main.HEARTBEAT_INTERVAL_SECONDS``,
+#: so this is four missed beats — long enough to ride out a slow query or a
+#: brief database blip, short enough that an operator is not looking at a
+#: reassuring green pill for a process that died minutes ago.
+#:
+#: ``test_worker_liveness.py`` asserts this stays a multiple of that interval.
+#: The two numbers living in different modules is exactly how a threshold ends
+#: up shorter than the cadence it measures, which would report every healthy
+#: worker as dead.
+WORKER_STALE_AFTER_SECONDS = 60.0
+
 
 async def _build_status(conn, settings: AppSettings) -> SystemStatus:
     """
@@ -41,9 +54,14 @@ async def _build_status(conn, settings: AppSettings) -> SystemStatus:
     alarm is worst precisely when someone is already reacting to a problem.
     """
     state = await flags.system_state(conn)
+    # Age is computed by the database, not by comparing against the API's own
+    # clock: the two processes deploy separately and their clocks can differ by
+    # more than the staleness threshold, which would make liveness depend on
+    # NTP drift.
     workers = await conn.fetch(
-        "SELECT worker_id, last_seen, status FROM worker_heartbeats "
-        "ORDER BY last_seen DESC LIMIT 10"
+        "SELECT worker_id, last_seen, status, "
+        "       EXTRACT(EPOCH FROM (NOW() - last_seen)) AS age_seconds "
+        "FROM worker_heartbeats ORDER BY last_seen DESC LIMIT 10"
     )
     return SystemStatus(
         trading_enabled=state.trading_enabled,
@@ -54,11 +72,19 @@ async def _build_status(conn, settings: AppSettings) -> SystemStatus:
         alpaca_allow_live=settings.alpaca_allow_live,
         broker_configured=settings.has_broker_credentials,
         jobs=await job_repo.counts_by_status(conn),
+        # `stale` is reported rather than left for the caller to derive. The
+        # stored `status` column is only ever written as 'alive', so a UI
+        # rendering it directly showed a green "alive" pill for a worker that
+        # died an hour ago — the precise failure the heartbeat exists to catch.
+        # A dead worker produces no error anywhere: backtests queue, no mark is
+        # written, and both halting limits go inert, all silently.
         workers=[
             {
                 "worker_id": w["worker_id"],
                 "last_seen": w["last_seen"].isoformat(),
                 "status": w["status"],
+                "age_seconds": float(w["age_seconds"]),
+                "stale": float(w["age_seconds"]) > WORKER_STALE_AFTER_SECONDS,
             }
             for w in workers
         ],

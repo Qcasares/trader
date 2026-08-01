@@ -211,7 +211,19 @@ export interface SystemStatus {
   alpaca_allow_live: boolean;
   broker_configured: boolean;
   jobs: Record<string, number>;
-  workers: { worker_id: string; last_seen: string; status: string }[];
+  /**
+   * Heartbeat rows. `status` is the *stored* value and is only ever written as
+   * 'alive', so it says nothing about liveness on its own — a row outlives the
+   * process that wrote it. Use `stale`, which the API derives from the
+   * heartbeat's age against the database clock.
+   */
+  workers: {
+    worker_id: string;
+    last_seen: string;
+    status: string;
+    age_seconds: number;
+    stale: boolean;
+  }[];
   database_ok: boolean;
 }
 

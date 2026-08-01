@@ -51,6 +51,13 @@ SWEEP_INTERVAL = timedelta(seconds=30)
 #: lease itself or a long backtest gets picked up a second time.
 HEARTBEAT_INTERVAL = 60.0
 
+#: How often liveness is written to ``worker_heartbeats``.
+#:
+#: The API's ``WORKER_STALE_AFTER_SECONDS`` is a multiple of this, and
+#: ``test_worker_liveness.py`` asserts the relationship holds. A threshold
+#: shorter than the cadence would report every healthy worker as dead.
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+
 JobHandler = Callable[[asyncpg.Connection, dict[str, Any]], Awaitable[dict]]
 
 HANDLERS: dict[str, JobHandler] = {
@@ -99,11 +106,29 @@ class Worker:
     async def stop(self) -> None:
         self._stopping.set()
         self._wake.set()
+        # Say so before the pool closes. Staleness alone would eventually
+        # reveal a graceful shutdown, but only after the threshold elapses —
+        # this makes a deliberate stop immediately distinguishable from a
+        # crash, which is the difference between "expected" and "page someone".
+        await self._mark_stopped()
         if self._listener is not None:
             await self._listener.close()
         if self._pool is not None:
             await self._pool.close()
         logger.info("Worker %s stopped", self._worker_id)
+
+    async def _mark_stopped(self) -> None:
+        if self._pool is None:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE worker_heartbeats SET status='stopped', "
+                    "last_seen=NOW() WHERE worker_id=$1",
+                    self._worker_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - shutdown must not fail on this
+            logger.warning("Could not record shutdown: %s", exc)
 
     async def _start_listener(self) -> None:
         """Subscribe to job notifications so enqueue wakes us immediately."""
@@ -264,7 +289,7 @@ class Worker:
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Heartbeat failed: %s", exc)
-            await asyncio.sleep(15)
+            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
 
 
 async def async_main() -> int:
