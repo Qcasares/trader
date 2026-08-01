@@ -17,7 +17,6 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 bcrypt>=4.1.0
 python-dotenv>=1.0.0
-pyyaml>=6.0.1
 
 # Research-only price history. Never on the live path.
 yfinance>=0.2.60

@@ -14,7 +14,6 @@ RUN pip install --no-cache-dir -r requirements-engine.txt \
 
 COPY src/ ./src/
 COPY migrations/ ./migrations/
-COPY config/ ./config/
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000

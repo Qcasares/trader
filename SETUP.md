@@ -1,381 +1,236 @@
-# Setup Guide
+# Setup
 
-Complete setup instructions for the automated crypto trading bot.
+Running the systematic trading platform locally.
+
+For what the system *is* and why it is built this way, read `CLAUDE.md`. This
+file is only about getting it up.
 
 ## Prerequisites
 
-- Python 3.9+ (tested with 3.9.6 and 3.11+)
-- PostgreSQL 14+
-- API keys for: Anthropic, bankr.bot, CoinGecko, Twitter/X (optional), Neynar (optional)
+Two supported routes. Docker is fewer steps; the local route is better if you
+intend to change code, because you get a REPL and the test suite.
 
-## 1. Clone and Install
+| Route | Needs |
+|---|---|
+| Docker | Docker Engine 20.10+ **and the Compose V2 plugin** |
+| Local | Python 3.11+, Node 20+, PostgreSQL 14+ |
 
-```bash
-git clone <repo-url> trader
-cd trader
+### Compose V2 is required, and its absence reports badly
 
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+The compose file uses `profiles:` and `depends_on: condition:`, which are
+Compose V2 features. If the plugin is missing you get an error that names the
+flag rather than the cause:
 
-# Install dependencies
-pip install -r requirements.txt
+```
+$ docker compose --profile web up --build
+unknown flag: --profile
 
-# Download NLTK data for sentiment analysis
-python3 -c "import nltk; nltk.download('vader_lexicon')"
+Usage:  docker [OPTIONS] COMMAND [ARG...]
 ```
 
-### Dependency Notes
+That usage block is `docker`'s own, not Compose's — the CLI never found a
+`compose` subcommand to hand the flags to, so it parsed them against the root
+command and rejected the first one it did not recognise. The same failure on
+`docker compose run --rm …` reports `unknown flag: --rm`. Neither message
+mentions Compose, which is what makes it confusing.
 
-| Package | Purpose | Required |
-|---------|---------|----------|
-| anthropic | Claude API for agent intelligence | Yes |
-| aiohttp | Async HTTP for bankr.bot API | Yes |
-| asyncpg | Async PostgreSQL driver | Yes |
-| python-dotenv | .env file loading | Yes |
-| pyyaml | Config file parsing | Yes |
-| nltk | VADER sentiment analysis | Yes |
-| transformers + torch | FinBERT sentiment (downloads ~500MB model on first run) | Yes |
-| pandas, numpy | Data processing for technical analysis | Yes |
-| tweepy | Twitter data collection | Optional |
-| praw | Reddit data collection | Optional |
+Check with:
 
-## 2. Environment Variables
+```bash
+docker compose version     # V2 installed -> "Docker Compose version v2.x.x"
+                           # missing      -> "docker: 'compose' is not a docker command"
+```
 
-Copy the example file and fill in your keys:
+To install it:
+
+- **Docker Desktop (macOS/Windows)** — bundled since v3.4. If it is missing,
+  Docker Desktop is old; update it.
+- **Linux, Docker's apt/dnf repo** — `sudo apt-get install docker-compose-plugin`
+- **Anywhere else** — drop the binary in as a CLI plugin:
+
+  ```bash
+  mkdir -p ~/.docker/cli-plugins
+  curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+      -o ~/.docker/cli-plugins/docker-compose
+  chmod +x ~/.docker/cli-plugins/docker-compose
+  docker compose version
+  ```
+
+**Do not substitute the old hyphenated `docker-compose` (V1).** It is
+end-of-life, and it will not work here for a specific reason: this compose file
+has no `version:` key, which V2 reads as "current schema" and V1 reads as the
+legacy version-1 format — a format with no `profiles`, no conditional
+`depends_on`, and no top-level `volumes`. V1 does not fail cleanly on that; it
+misreads the file.
+
+## 1. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Three values are required and have no defaults. A signing key with a fallback
+value is a signing key an attacker already knows, so the API refuses to start
+without them rather than inventing one:
 
 ```bash
-# Required — bot will not start without these
-ANTHROPIC_API_KEY=sk-ant-your_key_here
-BANKR_API_KEY=bk_your_key_here          # Must start with "bk_"
-DATABASE_URL=postgresql://user:password@localhost:5432/trader
+# POSTGRES_PASSWORD — anything; it only has to match itself
+python -c "import secrets; print(secrets.token_urlsafe(24))"
 
-# Required for data collection
-COINGECKO_API_KEY=CG-your_key_here       # Free tier at coingecko.com/en/api
+# SESSION_SECRET
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 
-# Optional — enhances social sentiment coverage
-TWITTER_BEARER_TOKEN=your_bearer_token   # developer.twitter.com
-NEYNAR_API_KEY=your_neynar_key           # neynar.com (Farcaster data)
-
-# Safety flag — keep "true" until you're ready for live trading
-DRY_RUN=true
-
-# Logging
-LOG_LEVEL=INFO
+# ADMIN_PASSWORD_HASH — your operator login, bcrypt-hashed
+python -c "import bcrypt; print(bcrypt.hashpw(b'your-password', bcrypt.gensalt()).decode())"
 ```
 
-### Getting API Keys
+### Single-quote every value in `.env`
 
-| Key | Where | Notes |
-|-----|-------|-------|
-| ANTHROPIC_API_KEY | [console.anthropic.com](https://console.anthropic.com) | Requires billing. Uses Haiku (cheap) + Sonnet (reasoning). |
-| BANKR_API_KEY | [bankr.bot/api](https://bankr.bot/api) | Must start with `bk_`. Handles wallet + gas + execution. |
-| DATABASE_URL | Your PostgreSQL instance | Format: `postgresql://user:pass@host:port/dbname` |
-| COINGECKO_API_KEY | [coingecko.com/en/api](https://www.coingecko.com/en/api) | Free demo tier is sufficient. |
-| TWITTER_BEARER_TOKEN | [developer.twitter.com](https://developer.twitter.com) | Optional. Requires approved developer account. |
-| NEYNAR_API_KEY | [neynar.com](https://neynar.com) | Optional. For Farcaster social data. |
-
-## 3. Database Setup
-
-### Create the Database
+A bcrypt hash starts `$2b$12$…`, and `$2`, `$1` and `$b` are shell variable
+references. Any tooling that sources `.env` through a shell — a heredoc,
+`set -a; . ./.env`, some editor plugins — will expand them to empty strings and
+silently truncate the hash. The failure surfaces much later as "wrong password"
+with a correct password, which points nowhere near the real cause.
 
 ```bash
-# Connect to PostgreSQL
-psql -U postgres
-
-# Create database and user
-CREATE DATABASE trader;
-CREATE USER trader_user WITH PASSWORD 'your_password';
-GRANT ALL PRIVILEGES ON DATABASE trader TO trader_user;
-\q
+ADMIN_PASSWORD_HASH='$2b$12$abcdefg...'   # correct
+ADMIN_PASSWORD_HASH=$2b$12$abcdefg...     # becomes "b12abcdefg..." in a shell
 ```
 
-### Run the Schema
+Docker Compose's own `env_file` parser does not expand `$`, so quoting is
+belt-and-braces there — but quote anyway, because the same file gets sourced by
+hand sooner or later.
+
+## 2. Run
+
+### With Docker
 
 ```bash
-psql -U trader_user -d trader -f src/db/schema.sql
+docker compose --profile web up --build      # db + api + worker + UI
 ```
 
-This creates 9 tables:
-
-| Table | Purpose |
-|-------|---------|
-| `raw_social_posts` | Twitter, Reddit, Farcaster posts collected by ResearchAgent |
-| `price_candles` | OHLCV price data from CoinGecko |
-| `sentiment_scores` | VADER + FinBERT NLP scores per ticker |
-| `technical_signals` | RSI, MACD, Bollinger Bands, OBV indicators |
-| `trade_signals` | Multi-factor fusion decisions from SignalAgent |
-| `risk_decisions` | Approved/rejected trades from RiskAgent |
-| `trade_results` | Execution outcomes from bankr.bot |
-| `portfolio_snapshots` | P&L tracking, drawdown detection |
-| `agent_heartbeats` | Health monitoring (one row per agent) |
-
-### Verify Schema
+In a second terminal, once Postgres reports healthy:
 
 ```bash
-psql -U trader_user -d trader -c "\dt"
+docker compose run --rm api python -m src.db.migrate_cli
 ```
 
-You should see all 9 tables listed.
+Migrations are forward-only numbered SQL under `migrations/`, applied inside a
+transaction with a stored checksum. A fresh database needs this once; it is
+idempotent, so re-running it is safe.
 
-## 4. Configuration
+`docker compose up --build` **without** `--profile web` gives you db + api +
+worker only. That is the real deployment shape — the frontend goes to Vercel,
+because a Next.js server has no business holding a trading loop. The `web`
+service exists so the whole stack comes up with one command on a laptop, and it
+runs `next dev` rather than a production build.
 
-Edit `config/bot_config.yaml` to customize:
-
-### Watchlist
-
-```yaml
-watchlist:
-  - ticker: ETH
-    coingecko_id: ethereum
-    chain: Base
-    enabled: true
-  - ticker: SOL
-    coingecko_id: solana
-    chain: Solana
-    enabled: true
-  - ticker: BNKR
-    coingecko_id: bankr-bot
-    chain: Base
-    enabled: false       # Enable when comfortable
-```
-
-Supported chains: `Base`, `Ethereum`, `Polygon`, `Solana`, `Unichain`
-
-### Risk Controls
-
-```yaml
-risk:
-  max_daily_loss_usd: 200.0    # Stop all trading after $200 daily loss
-  max_single_trade_usd: 150.0  # Cap per trade
-  cooldown_minutes: 15          # Wait between trades on same ticker
-  stop_loss_pct: 8.0            # Sell if position drops 8%
-  min_confidence: 0.55          # Minimum signal confidence to trade
-
-position:
-  base_usd: 25.0               # Minimum trade size
-  max_usd: 150.0               # Maximum trade size (scales with confidence)
-```
-
-### Loop Timing
-
-```yaml
-loop:
-  interval_minutes: 15          # Main pipeline runs every 15 min
-  sentiment_hours_back: 1       # Look at last 1 hour of social data
-  technical_candles: 50         # Use 50 candles for indicator calculation
-```
-
-## 5. Running the Bot
-
-### Dry-Run Mode (Safe — Default)
+### Without Docker
 
 ```bash
-python3 src/main.py --dry-run
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+createdb trader
+export DATABASE_URL=postgresql://localhost:5432/trader
+.venv/bin/python -m src.db.migrate_cli
+
+.venv/bin/uvicorn src.api.main:app --reload    # terminal 1
+.venv/bin/python -m src.worker.main            # terminal 2
+cd web && npm install && npm run dev           # terminal 3
 ```
 
-All trade prompts are prefixed with `[SIMULATION — DO NOT EXECUTE]`. No real money moves.
+`requirements.txt` is the development set. `requirements-engine.txt` is what
+deploys — the same list minus test and research tooling.
 
-### Live Trading Mode
+The API and worker are separate processes on purpose. A backtest is CPU-bound
+pandas work; running it inside the API process would block the event loop and
+stall every other request, including the one an operator is using to stop
+trading.
 
-Requires **two** safety gates:
-
-1. Pass `--live` flag
-2. Set `DRY_RUN=false` in `.env`
+## 3. Verify
 
 ```bash
-# In .env, change:
-DRY_RUN=false
-
-# Then run:
-python3 src/main.py --live
+curl localhost:8000/api/v1/health      # {"status":"ok","version":"..."}
 ```
 
-If either gate is missing, the bot refuses to start.
+Then open `http://localhost:3000` and log in with the password you hashed.
 
-### CLI Options
+`CORS_ORIGINS` must match what the browser actually uses. `localhost` and
+`127.0.0.1` are different origins to a browser, and mixing them produces a CORS
+failure that looks like a broken login.
 
-```
-python3 src/main.py [OPTIONS]
+## 4. Your first backtest
 
-Options:
-  --dry-run              Safe mode, no real trades (default)
-  --live                 Live trading — REAL MONEY AT RISK
-  --log-level LEVEL      DEBUG, INFO, WARNING, ERROR
-  --config PATH          Config file path (default: config/bot_config.yaml)
-```
+A fresh database is empty; there is nothing to look at until you run something.
 
-### Stopping the Bot
+1. Log in, pick `asset_class_trend_following`
+2. Set the data source to **synthetic**
+3. Adjust `sma_period` if you like, and hit run
 
-Press `Ctrl+C` (sends SIGINT). The bot will:
+Use synthetic first even if you have working network. `SyntheticSource` labels
+itself as synthetic in every output it touches, so what you are checking is that
+the honesty controls fire: the tearsheet must show the synthetic-data banner,
+the Sharpe standard error, and the annualisation basis. A number rendered
+without those is a number that misleads, and seeing them appear is the point of
+the first run.
 
-1. Finish the current cycle
-2. Close database connections
-3. Exit cleanly
+The `yfinance` path is implemented but has never been exercised — the
+environment this was developed in blocks every equity data host. It may work
+first try on your machine or may need a version bump. Nothing in this repository
+has ever been measured against real equity prices; treat any figure you see as a
+test of the machinery, not of a strategy.
 
-## 6. Running Tests
+## 5. Tests
 
 ```bash
-# All tests (84 total)
-python3 -m pytest tests/ -v
+.venv/bin/pytest tests/unit -q                  # no database needed
 
-# Unit tests only (65 tests)
-python3 -m pytest tests/unit/ -v
+TEST_DATABASE_URL=postgresql://localhost/trader_test \
+    .venv/bin/pytest tests/ -q                  # adds the integration suite
 
-# Integration tests only (19 tests)
-python3 -m pytest tests/integration/ -v
-
-# Single test file
-python3 -m pytest tests/unit/test_risk_agent.py -v
-
-# Single test
-python3 -m pytest tests/unit/test_risk_agent.py::TestPositionSizing::test_base_at_zero_confidence -v
+.venv/bin/pytest tests/unit/test_parity.py -q   # the important one
+.venv/bin/ruff check src/ tests/
 ```
 
-Tests use mocks for all external services — no API keys or database needed.
+`test_parity.py` asserts the backtest and live paths emit byte-identical order
+intents from identical inputs. If it fails, the backtest has stopped predicting
+the live system, which is worse than whatever bug the change was fixing. Run it
+before and after touching `src/core/`, `src/engine/` or `src/execution/`.
 
-## 7. How It Works
-
-The bot runs a 7-agent pipeline every 15 minutes:
-
-```
-Research → Sentiment → Technical → Signal → Risk → Execution
-                                                        ↓
-                                                   Portfolio (every 30 min)
-```
-
-| Step | Agent | What It Does |
-|------|-------|-------------|
-| 1 | Research | Scans Twitter, Reddit, Farcaster, CoinGecko for market data |
-| 2 | Sentiment | Runs VADER + FinBERT NLP on collected posts |
-| 3 | Technical | Calculates RSI, MACD, Bollinger Bands, OBV from price data |
-| 4 | Signal | Fuses scores (40% sentiment + 40% technical + 20% volume) |
-| 5 | Risk | Enforces position sizing, loss limits, cooldowns |
-| 6 | Execution | Submits approved trades to bankr.bot API |
-| 7 | Portfolio | Tracks P&L, drawdown, positions (runs every 2nd cycle) |
-
-Each agent passes results via a shared context dict. If any agent fails, the pipeline continues with available data (graceful degradation).
-
-## 8. Monitoring
-
-### Agent Health
-
-```sql
-SELECT agent_role, status, last_seen, cycles_completed, last_error
-FROM agent_heartbeats
-ORDER BY last_seen DESC;
-```
-
-### Today's Trades
-
-```sql
-SELECT ticker, action, amount_usd, success, slippage_pct, executed_at
-FROM trade_results
-WHERE executed_at >= CURRENT_DATE
-ORDER BY executed_at DESC;
-```
-
-### Today's P&L
-
-```sql
-SELECT SUM(
-  CASE WHEN action = 'sell' THEN amount_usd ELSE -amount_usd END
-) AS daily_pnl
-FROM trade_results
-WHERE executed_at >= CURRENT_DATE AND success = true;
-```
-
-### Why Did It Trade X?
-
-```sql
-SELECT ts.ticker, ts.action, ts.confidence, ts.rationale,
-       rd.approved, rd.reason, rd.adjusted_amount_usd
-FROM trade_signals ts
-JOIN risk_decisions rd ON rd.trade_signal_id = ts.id
-WHERE ts.ticker = 'ETH'
-ORDER BY ts.created_at DESC
-LIMIT 5;
-```
-
-### Portfolio History
-
-```sql
-SELECT snapshot_time, total_value_usd, daily_pnl_usd,
-       cumulative_pnl_usd, max_drawdown_pct
-FROM portfolio_snapshots
-ORDER BY snapshot_time DESC
-LIMIT 10;
-```
-
-## 9. Project Structure
-
-```
-trader/
-├── config/
-│   └── bot_config.yaml          # Watchlist, risk limits, agent models
-├── docs/                         # Architecture and design documents
-├── src/
-│   ├── agents/
-│   │   ├── base.py              # BaseAgent ABC, AgentRole enum, AgentResult
-│   │   ├── research.py          # Market scanning, social data collection
-│   │   ├── sentiment.py         # VADER + FinBERT NLP analysis
-│   │   ├── technical.py         # RSI, MACD, Bollinger Bands, OBV
-│   │   ├── signal.py            # Multi-factor fusion, Claude reasoning
-│   │   ├── risk.py              # Position sizing, 5 risk controls
-│   │   ├── execution.py         # bankr.bot trade submission
-│   │   └── portfolio.py         # P&L tracking, drawdown detection
-│   ├── db/
-│   │   ├── schema.sql           # PostgreSQL 9-table schema
-│   │   ├── connection.py        # Async connection pool
-│   │   └── repositories.py      # 16 typed query functions
-│   ├── bankr_client.py          # Async bankr.bot API client
-│   ├── orchestrator.py          # Agent coordination, pipeline execution
-│   └── main.py                  # CLI entry point
-├── tests/
-│   ├── conftest.py              # Shared test fixtures
-│   ├── unit/                    # 65 unit tests
-│   └── integration/             # 19 integration tests
-├── .env.example                 # Environment variable template
-├── .gitignore
-├── requirements.txt
-└── pyproject.toml
-```
-
-## 10. Troubleshooting
-
-### Bot Won't Start
-
-| Error | Fix |
-|-------|-----|
-| `Missing required environment variables` | Check `.env` has ANTHROPIC_API_KEY, BANKR_API_KEY, DATABASE_URL |
-| `BANKR_API_KEY must start with 'bk_'` | Verify your bankr.bot key format |
-| `LIVE mode requested but DRY_RUN env is 'true'` | Set `DRY_RUN=false` in `.env` for live mode |
-| `Config file not found` | Ensure `config/bot_config.yaml` exists |
-| `connection refused` on database | Check PostgreSQL is running and DATABASE_URL is correct |
-
-### Import Errors
+The browser journey needs the whole stack running and so is not in CI:
 
 ```bash
-# If nltk data missing
-python3 -c "import nltk; nltk.download('vader_lexicon')"
-
-# If torch/transformers missing (FinBERT)
-pip install transformers torch
+.venv/bin/python tests/e2e/test_browser_journey.py
 ```
 
-### Test Failures
+## 6. Trading is off, and stays off
 
-```bash
-# Run with verbose output
-python3 -m pytest tests/ -v --tb=long
+Nothing here can reach a real venue, by construction rather than by
+configuration you might forget:
 
-# Tests don't need API keys or database — if they fail,
-# it's likely a dependency issue
-pip install -r requirements.txt
-```
+- The database kill switch defaults to halted and **fails closed** — a missing
+  row, an unreadable value or any database error all return "do not trade".
+- Reaching a live Alpaca endpoint takes **three independent** conditions: the
+  deployment row's `mode=live`, `LIVE_TRADING_ENABLED`, and `ALPACA_ALLOW_LIVE`.
+  Two environment variables rather than one is deliberate; the broker factory
+  once derived the third from the second, which quietly reduced three gates to
+  two while every test still passed.
+- Alpaca has never been contacted from this codebase. `AlpacaBroker` is tested
+  against a fake server modelling the documented contract.
+
+Leave `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` as `false`.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `unknown flag: --profile`, with `docker`'s root usage | Compose V2 plugin not installed — see above |
+| Correct password rejected at login | `ADMIN_PASSWORD_HASH` unquoted in `.env`; the shell ate `$2b$12` |
+| API exits at startup complaining about a missing value | `SESSION_SECRET` or `ADMIN_PASSWORD_HASH` empty. There is no default, on purpose |
+| `SESSION_SECRET must be at least 32 characters` | Exactly that. Use the generator above rather than typing one |
+| Login succeeds, every subsequent call fails in the browser | `CORS_ORIGINS` does not match the origin in the address bar (`localhost` ≠ `127.0.0.1`) |
+| `relation "…" does not exist` | Migrations not applied — `python -m src.db.migrate_cli` |
+| Backtest queues but never finishes | The worker is not running. It is a separate process from the API |
+| Backtest fails fetching prices | Expected on `yfinance`; use the synthetic source |
+| `MigrationError: checksum mismatch` | An applied migration was edited. Never edit one — write a new numbered file |
+| Port 5432 already in use | A local Postgres is running. Change the host-side port in `docker-compose.yml` |
