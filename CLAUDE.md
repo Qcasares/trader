@@ -200,6 +200,7 @@ Each is enforced by a test, not by discipline:
 | A late submission is refused, not filled | `run_submit_orders` expires a batch whose window closed over two hours ago rather than filling at a price the backtest never modelled |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
+| Brute force costs more than a shell loop | `src/api/throttle.py` backs off exponentially per source after 5 failed logins; keyed by source, not global, so an attacker cannot lock the operator out of the kill switch |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py`, covering `src/worker` and `src/api` as well as the decision path |
 
 ## Adding a strategy

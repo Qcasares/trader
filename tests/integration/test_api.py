@@ -424,3 +424,85 @@ class TestPortfolio:
         live = authed.get("/api/v1/portfolio?mode=live").json()
         assert paper["equity"] == 99000.0
         assert live["equity"] == 5.0
+
+
+class TestLoginBackoff:
+    """
+    The throttle, over real HTTP through the real route.
+
+    ``tests/unit/test_login_throttle.py`` proves the counter's arithmetic. This
+    proves the route consults it — the same distinction that hid four of the
+    bugs found in this codebase, where a correct component was never reached by
+    the code that ships.
+    """
+
+    def _reset(self):
+        from src.api.throttle import throttle
+
+        throttle.reset()
+
+    def test_repeated_failures_eventually_return_429(self, client) -> None:
+        from src.api.throttle import FREE_ATTEMPTS
+
+        self._reset()
+        client.cookies.clear()
+
+        # The free allowance must all come back as 401 — a throttle that
+        # engaged immediately would break the operator's first typo. The
+        # attempt *past* the allowance is also a 401: it is what arms the
+        # block, and a request already being processed cannot be refused
+        # retroactively. The one after it is the first to be turned away.
+        for _ in range(FREE_ATTEMPTS + 1):
+            assert (
+                client.post(
+                    "/api/v1/auth/login", json={"password": "wrong"}
+                ).status_code
+                == 401
+            )
+
+        blocked = client.post("/api/v1/auth/login", json={"password": "wrong"})
+        assert blocked.status_code == 429
+        assert "Retry-After" in blocked.headers
+        assert "retry in" in blocked.json()["detail"]
+        self._reset()
+
+    def test_a_blocked_source_is_refused_even_with_the_right_password(
+        self, client
+    ) -> None:
+        """
+        The credentials are never checked while blocked.
+
+        Otherwise the backoff would be advisory: an attacker who guessed
+        correctly on attempt 500 would still be let in.
+        """
+        from src.api.throttle import FREE_ATTEMPTS
+
+        self._reset()
+        client.cookies.clear()
+        for _ in range(FREE_ATTEMPTS + 1):
+            client.post("/api/v1/auth/login", json={"password": "wrong"})
+
+        refused = client.post("/api/v1/auth/login", json={"password": PASSWORD})
+        assert refused.status_code == 429
+        self._reset()
+
+    def test_a_correct_password_still_works_and_clears_the_count(
+        self, client
+    ) -> None:
+        """
+        The other direction. A control nobody can satisfy gets removed by the
+        next person in a hurry.
+        """
+        self._reset()
+        client.cookies.clear()
+        client.post("/api/v1/auth/login", json={"password": "wrong"})
+
+        ok = client.post("/api/v1/auth/login", json={"password": PASSWORD})
+        assert ok.status_code == 200
+        assert client.get("/api/v1/auth/me").status_code == 200
+
+        # And the failure count is gone, so the next typo starts fresh.
+        from src.api.throttle import throttle
+
+        assert throttle.retry_after("testclient") == 0.0
+        self._reset()
