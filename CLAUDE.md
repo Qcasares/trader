@@ -53,7 +53,13 @@ predicting the live system, which is worse than the bug being fixed.
 2. **The kill switch fails closed.** `flags.trading_enabled()` returns `False`
    on a missing row, an unreadable value, or any database error. A control that
    defaults to "go" when it cannot determine the answer is not a control.
-3. **Every trade path goes through `apply_risk`** (`src/core/risk.py`) — the
+3. **Anything a backtest holds in memory, the live path must read back.** A
+   `Driver` is constructed fresh for every live job. `last_rebalance`,
+   `peak_equity` and `prior_equity` all defaulted to "none/zero" there, so the
+   schedule fired every session and both halting limits were inert — while the
+   backtest, walking one process, honoured all three. When adding state to
+   `Driver`, ask where the live path gets it from.
+4. **Every trade path goes through `apply_risk`** (`src/core/risk.py`) — the
    same call on both paths. Never add a clamp to one driver only. Mechanically:
    `apply_risk` has exactly **one** call site, `Driver.decide`, and every path
    that produces orders — backtest, live decision, dry run — calls it. If you
@@ -61,12 +67,12 @@ predicting the live system, which is worse than the bug being fixed.
    `weights_to_orders` anywhere else, you are rebuilding the bypass that
    `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` exists to
    catch.
-4. **Never let LLM output reach an order.** Enforced by
+5. **Never let LLM output reach an order.** Enforced by
    `tests/unit/test_import_boundaries.py`. `src/llm/` is commentary only. The
    guard covers the order-placing *processes* (`src/worker`, `src/api`) as
    well as the pure decision path — `src/worker` is the only thing here that
    submits an order, so it is where an LLM import would matter most.
-5. **Never commit credentials.** Not values, not placeholders, not defaults —
+6. **Never commit credentials.** Not values, not placeholders, not defaults —
    `docker-compose.yml` reads everything from gitignored `.env`.
 
 ## Honesty rules
@@ -189,6 +195,9 @@ Each is enforced by a test, not by discipline:
 | The halting limits can actually halt | `Driver` populates `RiskState`'s equity fields and seeds them from `daily_marks` on the live path; `tests/unit/test_real_data.py` and `TestMarksFeedTheRiskGate` drive both directions |
 | Every scheduled job kind has a handler | `test_scheduling.py::test_every_scheduled_kind_has_a_handler` compares the planner's output against the worker's dispatch table as sets |
 | Re-planning a session is free | scheduled jobs carry `dedupe_key = "{kind}:{session}"` under a partial unique index, so a worker restart re-plans without duplicating |
+| The rebalance schedule survives a restart | `deployments.last_rebalance` is written after every live decision; `TestTheRebalanceScheduleSurvivesRestarts` requires four consecutive sessions to decline after the first |
+| Walk-forward before deployment | `walkforward_runs` persists each study's verdict; the deployment gate refuses without a completed, robust study **for the same parameters** |
+| A late submission is refused, not filled | `run_submit_orders` expires a batch whose window closed over two hours ago rather than filling at a price the backtest never modelled |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py`, covering `src/worker` and `src/api` as well as the decision path |
@@ -233,8 +242,8 @@ migration**, write a new one.
 
 Key tables: `daily_bars` (raw prices, `source` in the PK so vendors can be
 reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
-`deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `system_flags`
-(the kill switch), `jobs`, `audit_log`, `commentary`.
+`deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `walkforward_runs`,
+`system_flags` (the kill switch), `jobs`, `audit_log`, `commentary`.
 
 P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`, written by
 `src/db/repos/marks.py`. The legacy `get_daily_pnl` in

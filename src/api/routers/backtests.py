@@ -11,11 +11,13 @@ including the kill switch.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import BaseModel, Field, field_validator
 
 from src.api.deps import AuthedSession, DbConn
 from src.api.schemas import (
@@ -160,3 +162,146 @@ def _shape(row: dict) -> dict:
     out.pop("owner_id", None)
     out.pop("started_at", None)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward
+# ---------------------------------------------------------------------------
+
+
+class WalkForwardRequest(BaseModel):
+    """
+    A walk-forward study over a parameter grid.
+
+    The grid is the point. A study with one candidate per fold measures whether
+    a *fixed* configuration survives out of sample; a study with several
+    measures whether *choosing* between them survives, which is the question
+    that matters when a UI lets you tune parameters and rerun.
+    """
+
+    param_grid: dict[str, list] = Field(default_factory=dict)
+    train_months: int = Field(default=36, ge=6, le=240)
+    test_months: int = Field(default=12, ge=1, le=60)
+
+    @field_validator("param_grid")
+    @classmethod
+    def _non_empty_values(cls, value: dict[str, list]) -> dict[str, list]:
+        for name, options in value.items():
+            if not options:
+                raise ValueError(f"{name} has no candidate values")
+        return value
+
+
+@router.post("/{run_id}/walkforward", status_code=202)
+async def create_walkforward(
+    run_id: str,
+    body: WalkForwardRequest,
+    session: AuthedSession,
+    conn: DbConn,
+) -> dict:
+    """
+    Queue a walk-forward study over the same window as a backtest.
+
+    Returns 202: the study is many backtests and belongs in the worker, not in
+    a request handler holding a connection open.
+    """
+    run = await _require_run(conn, run_id)
+    if run["data_source"] == "synthetic":
+        raise HTTPException(
+            422,
+            "a walk-forward on synthetic data proves nothing about robustness — "
+            "the generator has no regime to fail to generalise across.",
+        )
+
+    params = run["params"]
+    if isinstance(params, str):
+        params = json.loads(params)
+
+    wf_id = uuid.uuid4()
+    await conn.execute(
+        """
+        INSERT INTO walkforward_runs (id, backtest_run_id, strategy_name,
+            params, param_grid, start_session, end_session, train_months,
+            test_months, data_source, status)
+        VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,$10,'queued')
+        """,
+        wf_id,
+        run["id"],
+        run["strategy_name"],
+        json.dumps(params, sort_keys=True),
+        json.dumps(body.param_grid),
+        run["start_session"],
+        run["end_session"],
+        body.train_months,
+        body.test_months,
+        run["data_source"],
+    )
+    job_id = await job_repo.enqueue(
+        conn, "walkforward", {"walkforward_run_id": str(wf_id)}
+    )
+    return {
+        "walkforward_run_id": str(wf_id),
+        "job_id": str(job_id),
+        "status": "queued",
+    }
+
+
+@router.get("/{run_id}/walkforward")
+async def list_walkforward(
+    run_id: str, session: AuthedSession, conn: DbConn
+) -> list[dict]:
+    """Studies for a backtest, newest first."""
+    run = await _require_run(conn, run_id)
+    rows = await conn.fetch(
+        """
+        SELECT id, status, is_robust, degradation, mean_is_sharpe,
+               mean_oos_sharpe, n_folds, folds, metrics, error,
+               train_months, test_months, param_grid, created_at, finished_at
+        FROM walkforward_runs WHERE backtest_run_id = $1
+        ORDER BY created_at DESC
+        """,
+        run["id"],
+    )
+    return [
+        {
+            "id": str(r["id"]),
+            "status": r["status"],
+            # Nullable until the study completes. A missing verdict is not a
+            # negative one, and the UI must be able to tell them apart.
+            "is_robust": r["is_robust"],
+            "degradation": _maybe_float(r["degradation"]),
+            "mean_in_sample_sharpe": _maybe_float(r["mean_is_sharpe"]),
+            "mean_out_of_sample_sharpe": _maybe_float(r["mean_oos_sharpe"]),
+            "n_folds": r["n_folds"],
+            "train_months": r["train_months"],
+            "test_months": r["test_months"],
+            "param_grid": _maybe_json(r["param_grid"]),
+            "folds": _maybe_json(r["folds"]),
+            "metrics": _maybe_json(r["metrics"]),
+            "error": r["error"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "finished_at": (
+                r["finished_at"].isoformat() if r["finished_at"] else None
+            ),
+        }
+        for r in rows
+    ]
+
+
+def _maybe_float(value) -> float | None:
+    return None if value is None else float(value)
+
+
+def _maybe_json(value):
+    """asyncpg hands JSONB back as str or as a decoded object, depending."""
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def _require_run(conn, run_id: str) -> dict:
+    """Fetch a backtest run or 404. Shared by the walk-forward endpoints."""
+    row = await conn.fetchrow(
+        "SELECT * FROM backtest_runs WHERE id = $1", _uuid(run_id)
+    )
+    if row is None:
+        raise HTTPException(404, f"unknown backtest run {run_id}")
+    return dict(row)

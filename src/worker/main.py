@@ -40,6 +40,7 @@ from src.worker.maintenance_jobs import (
     run_reconcile,
 )
 from src.worker.scheduling import plan_and_enqueue
+from src.worker.walkforward_job import run_walkforward_job
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ JobHandler = Callable[[asyncpg.Connection, dict[str, Any]], Awaitable[dict]]
 
 HANDLERS: dict[str, JobHandler] = {
     "backtest": run_backtest_job,
+    "walkforward": run_walkforward_job,
     "live_decision": run_live_decision,
     "submit_orders": run_submit_orders,
     # These three were planned by src/engine/scheduler.py and handled by

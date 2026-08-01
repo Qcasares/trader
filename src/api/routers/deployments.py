@@ -147,6 +147,32 @@ async def create_deployment(
             "performance. Deploy only against a run on real market data.",
         )
 
+    # The plan's own mitigation for its risk 7 — that a research UI is an
+    # overfitting machine, and edit-params/rerun/look-at-Sharpe is exactly how
+    # people fool themselves. A single backtest cannot distinguish a real edge
+    # from parameters fitted to noise; only walking the parameters forward can.
+    #
+    # This refuses rather than warns. A warning on the screen where somebody is
+    # already committed to deploying is not a control, and this gate is the
+    # last point at which the question gets asked.
+    verdict = await _walkforward_verdict(conn, body.strategy, body.params)
+    if verdict is None:
+        raise HTTPException(
+            422,
+            "no completed walk-forward study for this strategy and these "
+            "parameters. A single backtest cannot tell an edge from parameters "
+            "fitted to noise. Run POST /api/v1/backtests/{id}/walkforward "
+            "first.",
+        )
+    if not verdict["is_robust"]:
+        raise HTTPException(
+            422,
+            f"the walk-forward study for these parameters is NOT ROBUST "
+            f"(degradation {float(verdict['degradation']):+.3f}). "
+            "Out-of-sample performance did not survive fixing the parameters "
+            "in advance, which is strong evidence against this configuration.",
+        )
+
     deployment_id = uuid.uuid4()
     await conn.execute(
         """
@@ -308,3 +334,31 @@ def _shape(row) -> DeploymentResponse:
         created_at=row["created_at"].isoformat() if row["created_at"] else None,
         enabled_at=row["enabled_at"].isoformat() if row["enabled_at"] else None,
     )
+
+
+async def _walkforward_verdict(
+    conn, strategy: str, params: dict
+) -> dict | None:
+    """
+    The most recent completed walk-forward for this exact configuration.
+
+    Matched on the *parameters*, not merely the strategy name. A study of
+    `sma_period=210` says nothing about `sma_period=50`, and letting one vouch
+    for the other would turn the gate into a formality — which is precisely
+    the failure mode it exists to prevent.
+
+    Returns None when no completed study matches.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT is_robust, degradation, id
+        FROM walkforward_runs
+        WHERE strategy_name = $1
+          AND status = 'succeeded'
+          AND params = $2::jsonb
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        strategy,
+        json.dumps(params, sort_keys=True),
+    )
+    return dict(row) if row is not None else None

@@ -123,6 +123,13 @@ def seeded(dsn):
             """,
             deployment_id, run_id,
         )
+        # The deployment gate now also requires a completed, robust
+        # walk-forward for the strategy+params. Seeded here so the tests that
+        # exercise the gate's *other* conditions can reach them; the
+        # walk-forward condition has its own tests below.
+        await _seed_robust_walkforward(
+            conn, run_id, "asset_class_trend_following", {}
+        )
         await conn.close()
         return {
             "run_id": str(run_id),
@@ -161,6 +168,29 @@ async def _with_venue(fn, **server_kwargs):
         return await fn(factory, server)
     finally:
         await server.stop()
+
+
+async def _seed_robust_walkforward(conn, run_id, strategy, params=None):
+    """
+    Record a completed, robust walk-forward for a strategy+params.
+
+    The deployment gate refuses without one — a single backtest cannot tell an
+    edge from parameters fitted to noise. These tests are about the *other*
+    gate conditions, so they satisfy this one explicitly rather than having it
+    quietly disabled for them.
+    """
+    await conn.execute(
+        """
+        INSERT INTO walkforward_runs (id, backtest_run_id, strategy_name,
+            params, param_grid, start_session, end_session, train_months,
+            test_months, data_source, status, is_robust, degradation, n_folds)
+        VALUES ($1,$2,$3,$4::jsonb,'{}'::jsonb,$5,$6,36,12,'yfinance',
+                'succeeded', TRUE, 0.05, 4)
+        """,
+        uuid.uuid4(), run_id, strategy,
+        json.dumps(params or {}, sort_keys=True),
+        date(2015, 1, 1), date(2019, 12, 31),
+    )
 
 
 def _in_window(session):
@@ -1123,3 +1153,211 @@ class TestStaleSubmissionsExpire:
             _stale_by(session, now=on_time + MAX_SUBMISSION_LATENESS + _td(minutes=1))
             is not None
         )
+
+
+class TestWalkForwardIsRequiredToDeploy:
+    """
+    The plan's mitigation for its own risk 7, finally enforceable.
+
+    A research UI is an overfitting machine: edit parameters, rerun, look at
+    the Sharpe, repeat. A single backtest cannot distinguish a real edge from
+    parameters fitted to noise — only walking them forward can, because only
+    that fixes the parameters *before* seeing the data they are judged on.
+
+    The engine has implemented walk-forward since Phase 4 and the CLI could run
+    it. Nothing persisted the result, so the gate had nothing to consult and
+    "mandatory before deployment" was advice rather than a control.
+
+    It refuses rather than warns. A warning shown to somebody already committed
+    to deploying is not a control.
+    """
+
+    @staticmethod
+    def _fresh_backtest(conn, params):
+        async def make():
+            run_id = uuid.uuid4()
+            await conn.execute(
+                """
+                INSERT INTO backtest_runs (id, strategy_name, params, universe,
+                    start_session, end_session, initial_cash, data_source,
+                    cost_model, status, metrics)
+                VALUES ($1,'asset_class_trend_following',$2::jsonb,$3,
+                        $4,$5,100000,'yfinance','{}'::jsonb,'succeeded',
+                        '{}'::jsonb)
+                """,
+                run_id, json.dumps(params), UNIVERSE,
+                date(2015, 1, 1), date(2019, 12, 31),
+            )
+            return run_id
+
+        return make()
+
+    def test_deployment_is_refused_without_a_study(self, client, dsn) -> None:
+        params = {"sma_period": 111}
+
+        async def seed():
+            conn = await asyncpg.connect(dsn)
+            try:
+                return await self._fresh_backtest(conn, params)
+            finally:
+                await conn.close()
+
+        run_id = asyncio.run(seed())
+        response = client.post(
+            "/api/v1/deployments",
+            json={
+                "strategy": "asset_class_trend_following",
+                "params": params,
+                "capital_usd": 10000,
+                "approved_backtest_run_id": str(run_id),
+            },
+        )
+        assert response.status_code == 422
+        assert "walk-forward" in response.json()["detail"]
+
+    def test_a_not_robust_study_is_refused(self, client, dsn) -> None:
+        """
+        Failing a walk-forward is strong evidence against a configuration, and
+        must not be deployable merely because the study exists.
+        """
+        params = {"sma_period": 112}
+
+        async def seed():
+            conn = await asyncpg.connect(dsn)
+            try:
+                run_id = await self._fresh_backtest(conn, params)
+                await conn.execute(
+                    """
+                    INSERT INTO walkforward_runs (id, backtest_run_id,
+                        strategy_name, params, param_grid, start_session,
+                        end_session, train_months, test_months, data_source,
+                        status, is_robust, degradation, n_folds)
+                    VALUES ($1,$2,'asset_class_trend_following',$3::jsonb,
+                            '{}'::jsonb,$4,$5,36,12,'yfinance','succeeded',
+                            FALSE, 1.85, 4)
+                    """,
+                    uuid.uuid4(), run_id, json.dumps(params, sort_keys=True),
+                    date(2015, 1, 1), date(2019, 12, 31),
+                )
+                return run_id
+            finally:
+                await conn.close()
+
+        run_id = asyncio.run(seed())
+        response = client.post(
+            "/api/v1/deployments",
+            json={
+                "strategy": "asset_class_trend_following",
+                "params": params,
+                "capital_usd": 10000,
+                "approved_backtest_run_id": str(run_id),
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "NOT ROBUST" in detail
+        assert "+1.850" in detail, "the degradation figure must be quoted"
+
+    def test_a_study_of_different_parameters_does_not_vouch(
+        self, client, dsn
+    ) -> None:
+        """
+        Matched on parameters, not just the strategy name.
+
+        A study of sma_period=210 says nothing about sma_period=50. Letting one
+        vouch for the other would turn the gate into a formality — exactly the
+        failure mode it exists to prevent, since the whole risk is somebody
+        tuning parameters until the number looks good.
+        """
+        async def seed():
+            conn = await asyncpg.connect(dsn)
+            try:
+                run_id = await self._fresh_backtest(conn, {"sma_period": 210})
+                await _seed_robust_walkforward(
+                    conn, run_id, "asset_class_trend_following",
+                    {"sma_period": 210},
+                )
+                return run_id
+            finally:
+                await conn.close()
+
+        run_id = asyncio.run(seed())
+
+        # The robust study is for 210. Deploying 50 against it must fail.
+        refused = client.post(
+            "/api/v1/deployments",
+            json={
+                "strategy": "asset_class_trend_following",
+                "params": {"sma_period": 50},
+                "capital_usd": 10000,
+                "approved_backtest_run_id": str(run_id),
+            },
+        )
+        assert refused.status_code == 422
+        assert "walk-forward" in refused.json()["detail"]
+
+        # And the configuration it *was* run for goes through, so the gate is
+        # discriminating rather than simply refusing everything.
+        allowed = client.post(
+            "/api/v1/deployments",
+            json={
+                "strategy": "asset_class_trend_following",
+                "params": {"sma_period": 210},
+                "capital_usd": 10000,
+                "approved_backtest_run_id": str(run_id),
+            },
+        )
+        assert allowed.status_code == 201
+
+    def test_a_walkforward_can_be_queued_for_a_backtest(
+        self, client, seeded
+    ) -> None:
+        response = client.post(
+            f"/api/v1/backtests/{seeded['run_id']}/walkforward",
+            json={"param_grid": {"sma_period": [105, 150, 210]}},
+        )
+        assert response.status_code == 202
+        assert response.json()["status"] == "queued"
+
+        listed = client.get(
+            f"/api/v1/backtests/{seeded['run_id']}/walkforward"
+        ).json()
+        assert any(w["status"] == "queued" for w in listed)
+        # Queued means no verdict yet. Null and False must be distinguishable:
+        # "not yet judged" is not "judged and failed".
+        queued = next(w for w in listed if w["status"] == "queued")
+        assert queued["is_robust"] is None
+        assert queued["degradation"] is None
+
+    def test_a_walkforward_on_synthetic_data_is_refused(
+        self, client, dsn
+    ) -> None:
+        """
+        A generator has no regime to fail to generalise across, so a study of
+        it would return a robust verdict that means nothing.
+        """
+
+        async def seed():
+            conn = await asyncpg.connect(dsn)
+            try:
+                run_id = uuid.uuid4()
+                await conn.execute(
+                    """
+                    INSERT INTO backtest_runs (id, strategy_name, params,
+                        universe, start_session, end_session, initial_cash,
+                        data_source, cost_model, status)
+                    VALUES ($1,'asset_class_trend_following','{}'::jsonb,$2,
+                            $3,$4,100000,'synthetic','{}'::jsonb,'succeeded')
+                    """,
+                    run_id, UNIVERSE, date(2015, 1, 1), date(2019, 12, 31),
+                )
+                return run_id
+            finally:
+                await conn.close()
+
+        run_id = asyncio.run(seed())
+        response = client.post(
+            f"/api/v1/backtests/{run_id}/walkforward", json={"param_grid": {}}
+        )
+        assert response.status_code == 422
+        assert "synthetic" in response.json()["detail"]
