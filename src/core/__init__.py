@@ -3,7 +3,7 @@ core
 ----
 Value types and pure logic shared by the backtest and live paths.
 
-Nothing in this package may import from ``src.agents``, ``src.execution``, or
+Nothing in this package may import from ``src.execution`` or
 any LLM client. That boundary is enforced by ``tests/unit/test_import_boundaries.py``
 and is what closes the prompt-injection path recorded as C-1 in
 ``docs/02-security-audit.md``: if no model output can reach this code, no model

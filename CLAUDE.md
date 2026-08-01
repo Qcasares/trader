@@ -12,10 +12,15 @@ Informed by [paperswithbacktest/awesome-systematic-trading](https://github.com/p
 though strategies are implemented from the **described rules** rather than
 copied — that repository publishes no licence.
 
-There is also a **legacy** crypto agent pipeline (`src/agents/`,
-`src/orchestrator.py`, `src/main.py`) built against bankr.bot. It is not wired
-into the systematic engine, its context-promotion map is broken, and nothing in
-the new path may import it. Treat it as historical unless asked otherwise.
+A **legacy** seven-agent crypto pipeline (`src/agents/`, `src/orchestrator.py`,
+`src/main.py`, `src/db/repositories.py`) used to live alongside this. It has
+been deleted: it never ran end to end, nothing in the engine imported it, and
+its presence cost roughly 2.5GB of install (torch, transformers) plus a set of
+lint and test exclusions. It is in the git history if it is ever wanted.
+
+One file survives on purpose: `src/bankr_client.py`, a complete working client
+for the bankr.bot API, kept as the reference for a future crypto broker
+adapter. Nothing imports it.
 
 ## The one idea to understand first
 
@@ -122,11 +127,13 @@ pytest tests/unit/test_parity.py -q                      # the important one
 ruff check src/ tests/
 ```
 
-`ruff` excludes the legacy pipeline via `pyproject.toml`, so the command above
-lints exactly the code this repository is responsible for. Likewise the legacy
-agent tests are skipped when `anthropic` is absent — `requirements-engine.txt`
-omits it deliberately, and a missing optional dependency must not take the
-whole suite down during collection.
+Both commands above lint and run everything. The only `ruff` exclusion left is
+`src/bankr_client.py` and its test — a reference file no strategy imports,
+where reformatting buys nothing and risks breaking the reference.
+
+`anthropic` is deliberately absent from both requirements files. The engine
+must run, and be testable, without an LLM SDK anywhere near it;
+`src/llm/commentary.py` imports it lazily and returns `None` without it.
 
 `.github/workflows/ci.yml` runs ruff, the unit suite and the integration suite
 against a real Postgres on every pull request, installing only

@@ -1,11 +1,20 @@
 # =========================================================================
-# Systematic trading engine (src/core, src/engine, src/strategies,
-# src/execution, src/data). Deterministic, backtestable, no LLM.
+# Development requirements: the engine, plus test and research tooling.
+#
+# For deployment use requirements-engine.txt, which is this list minus the
+# development-only entries.
 #
 # Licence note: every dependency here is permissive (Apache-2.0/BSD/MIT).
 # backtesting.py (AGPL-3.0), backtrader (GPL-3.0) and vectorbt (Commons
 # Clause, which forbids selling a hosted service) were all evaluated and
 # rejected — see docs/06-systematic-engine.md.
+#
+# torch, transformers, nltk, tweepy, praw and anthropic used to appear here
+# for the crypto agent pipeline. That pipeline has been deleted, and with it
+# roughly 2.5GB of install. `anthropic` is deliberately *still* absent: the
+# engine must run, and be testable, without an LLM SDK anywhere near it, and
+# tests/unit/test_import_boundaries.py fails the build if that stops being
+# true. src/llm/commentary.py imports it lazily and returns None without it.
 # =========================================================================
 
 # Data processing
@@ -23,6 +32,16 @@ pydantic>=2.7.0
 # own terms are a separate question). Never on the live path.
 yfinance>=0.2.60
 
+# HTTP. aiohttp for the Alpaca adapter and the bankr.bot reference client;
+# requests for the Crypto.com candle adapter.
+aiohttp>=3.9.0
+requests>=2.31.0
+
+# Web control plane
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+bcrypt>=4.1.0
+
 # Database
 asyncpg>=0.29.0
 
@@ -31,25 +50,15 @@ python-dotenv>=1.0.0
 pyyaml>=6.0.1
 
 # =========================================================================
-# Legacy crypto agent pipeline (src/agents, src/orchestrator.py,
-# src/main.py). Scheduled for demotion to commentary-only — see the plan.
-# torch + transformers alone are ~2.5GB; removing them is what makes the
-# image deployable.
-# =========================================================================
-aiohttp>=3.9.0
-anthropic>=0.40.0
-nltk>=3.8.1
-transformers>=4.40.0
-torch>=2.2.0
-tweepy>=4.14.0
-praw>=7.7.1
-
-# =========================================================================
 # Testing
 # =========================================================================
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.1.0
+
+# starlette's TestClient imports httpx, and plain fastapi does not depend on
+# it. Test-only, so it stays out of requirements-engine.txt.
+httpx>=0.27.0
 
 # Dev-only metric oracles (both MIT). Used solely to cross-check our own
 # Sharpe/Sortino/CAGR/max-drawdown — not imported by src/.

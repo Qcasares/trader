@@ -17,31 +17,14 @@ markers = [
 target-version = "py311"
 line-length = 88
 
-# The legacy bankr.bot agent pipeline and its tests.
-#
-# Excluded rather than fixed, deliberately. Nothing in the systematic path may
-# import any of it — enforced by tests/unit/test_import_boundaries.py, not by
-# convention — and its tests cannot run without the optional `anthropic`
-# dependency the engine is built to live without. Reformatting code that no
-# test in this environment can exercise risks breaking it silently, and the
-# only honest options are "leave it alone" or "delete it". It is left alone
-# until that call is made.
-#
-# The effect is that `ruff check src/ tests/`, the command CLAUDE.md
-# documents, lints exactly the code this repository is responsible for.
+# The one legacy file kept on purpose: src/bankr_client.py is a complete,
+# working client for the bankr.bot API, retained as the reference for a future
+# BankrBroker adapter. It predates this repository's conventions and is not
+# reformatted, because reformatting a file no strategy imports buys nothing and
+# risks breaking the reference.
 extend-exclude = [
-    "src/agents",
-    "src/orchestrator.py",
-    "src/main.py",
     "src/bankr_client.py",
-    "src/db/connection.py",
-    "src/db/repositories.py",
     "tests/unit/test_bankr_client.py",
-    "tests/unit/test_execution_agent.py",
-    "tests/unit/test_orchestrator.py",
-    "tests/unit/test_risk_agent.py",
-    "tests/unit/test_signal_agent.py",
-    "tests/integration/test_dry_run_e2e.py",
 ]
 
 [tool.ruff.lint]

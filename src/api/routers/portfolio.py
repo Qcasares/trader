@@ -3,9 +3,9 @@ portfolio.py
 ------------
 What the account is actually worth, and how it got there.
 
-Reads ``daily_marks`` — the equity-change record — and never the legacy
-``get_daily_pnl``, which sums buy/sell cash flow and would report a $100
-purchase as a $100 loss.
+Reads ``daily_marks`` — the equity-change record. Its predecessor,
+``get_daily_pnl``, summed buy/sell cash flow and would have reported a $100
+purchase as a $100 loss; it was deleted with the pipeline it served.
 
 Why this is a separate router from ``deployments``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

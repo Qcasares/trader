@@ -7,11 +7,11 @@ risk gate runs on.
 Two jobs, and the second is the one that was missing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 1. It is the P&L record. ``daily_pnl = equity_t - equity_{t-1} - net deposits``
-   — a change in *marked equity*, never a sum of cash flow. The legacy
-   ``get_daily_pnl`` in ``src/db/repositories.py`` sums buy/sell cash flow, so
-   a $100 purchase reads as a $100 loss and a daily-loss breaker built on it
-   trips after two trades regardless of performance. That is why this exists
-   separately rather than being fixed in place.
+   — a change in *marked equity*, never a sum of cash flow. The predecessor,
+   ``get_daily_pnl``, summed buy/sell cash flow, so a $100 purchase read as a
+   $100 loss and any daily-loss breaker built on it tripped after two trades
+   regardless of performance. This was written alongside it rather than fixing
+   it in place, and outlived it.
 
 2. It is where a live :class:`~src.engine.driver.Driver` gets its equity
    history. A backtest walks every session in one process and accumulates

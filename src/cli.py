@@ -7,9 +7,9 @@ Command-line entry point for the systematic engine.
     python -m src.cli backtest --strategy asset_class_trend_following \
         --start 1999-01-01 --end 2026-07-01 --source synthetic
 
-Separate from ``src/main.py``, which runs the legacy crypto agent loop. The two
-do not share state and the new path never imports the old one — enforced by
-``tests/unit/test_import_boundaries.py``.
+This is now the only CLI. It used to be described as "separate from
+``src/main.py``, which runs the legacy crypto agent loop" — that loop, and the
+seven agents behind it, have been deleted.
 """
 
 from __future__ import annotations
