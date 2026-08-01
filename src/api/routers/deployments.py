@@ -246,12 +246,18 @@ async def decisions(
     conn: DbConn,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[dict]:
-    """Decision history — what was intended, and whether it was acted on."""
+    """
+    Decision history — what was intended, and whether it was acted on.
+
+    Returns the pre-gate weights alongside the approved ones. A live decision
+    that differs from its backtest is either a data difference or a risk limit
+    binding, and only these two fields together tell you which.
+    """
     row = await _require(conn, deployment_id)
     rows = await conn.fetch(
-        "SELECT session, target_weights, order_intents, rationale, status, "
-        "created_at FROM decisions WHERE deployment_id=$1 "
-        "ORDER BY session DESC LIMIT $2",
+        "SELECT session, target_weights, raw_target_weights, risk_events, "
+        "order_intents, rationale, status, created_at FROM decisions "
+        "WHERE deployment_id=$1 ORDER BY session DESC LIMIT $2",
         row["id"],
         limit,
     )
@@ -259,6 +265,8 @@ async def decisions(
         {
             "session": r["session"].isoformat(),
             "target_weights": _maybe_json(r["target_weights"]),
+            "raw_target_weights": _maybe_json(r["raw_target_weights"]),
+            "risk_events": _maybe_json(r["risk_events"]),
             "order_intents": _maybe_json(r["order_intents"]),
             "rationale": r["rationale"],
             "status": r["status"],

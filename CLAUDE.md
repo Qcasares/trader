@@ -43,7 +43,13 @@ predicting the live system, which is worse than the bug being fixed.
    on a missing row, an unreadable value, or any database error. A control that
    defaults to "go" when it cannot determine the answer is not a control.
 3. **Every trade path goes through `apply_risk`** (`src/core/risk.py`) — the
-   same call on both paths. Never add a clamp to one driver only.
+   same call on both paths. Never add a clamp to one driver only. Mechanically:
+   `apply_risk` has exactly **one** call site, `Driver.decide`, and every path
+   that produces orders — backtest, live decision, dry run — calls it. If you
+   find yourself calling `strategy.target_weights` followed by
+   `weights_to_orders` anywhere else, you are rebuilding the bypass that
+   `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` exists to
+   catch.
 4. **Never let LLM output reach an order.** Enforced by
    `tests/unit/test_import_boundaries.py`. `src/llm/` is commentary only.
 5. **Never commit credentials.** Not values, not placeholders, not defaults —
@@ -163,6 +169,7 @@ Each is enforced by a test, not by discipline:
 | Availability windows | An unlisted asset is excluded from the weighting denominator, not treated as cash |
 | Idempotent orders | `client_order_id = "{run_ref}:{session}:{symbol}"`; the venue rejects duplicates |
 | Backtest/live parity | `tests/unit/test_parity.py` (synthetic) and `tests/unit/test_real_data.py` (observed prices) |
+| The risk gate binds live, not just in backtests | `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` asserts against the shipped job, not the driver it ought to use |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py` |

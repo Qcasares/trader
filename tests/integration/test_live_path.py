@@ -484,3 +484,163 @@ class TestIdempotency:
         assert first["submitted"] > 0
         # The retry is refused, so the venue holds exactly one batch.
         assert orders_at_venue == first["submitted"]
+
+
+class TestRiskGateOnTheLivePath:
+    """
+    The live decision must go through ``apply_risk``, same as the backtest.
+
+    This is CLAUDE.md safety rule 3: *every trade path goes through
+    ``apply_risk`` — the same call on both paths*. It was violated. The live
+    job constructed a ``Driver``, never called it, and reimplemented the
+    sequence inline without the gate — so live ran an ungated strategy while
+    the backtest that authorised it ran a gated one. No cash buffer, no
+    daily-loss halt, no drawdown halt, no cooldown.
+
+    ``test_parity.py`` could not see it: both of its paths call
+    ``Driver.step``, and neither touches ``run_live_decision``. That is the
+    hole this class closes — it asserts against the *shipped live job*, not
+    against the driver the live job was supposed to be using.
+    """
+
+    #: The strategy equal-weights five ETFs at 0.20 each, so a 0.15 cap binds
+    #: on every one of them. Chosen so the assertion cannot pass by accident.
+    CAP = 0.15
+
+    @pytest.fixture(scope="class")
+    def gated_deployment(self, dsn, seeded):
+        """A second deployment whose risk limits actually bind."""
+
+        async def seed():
+            conn = await asyncpg.connect(dsn)
+            try:
+                deployment_id = uuid.uuid4()
+                await conn.execute(
+                    """
+                    INSERT INTO deployments (id, strategy_name, params, mode,
+                        capital_usd, risk_limits, approved_backtest_run_id,
+                        status)
+                    VALUES ($1,'asset_class_trend_following','{}'::jsonb,'paper',
+                            100000,$2::jsonb,$3,'disabled')
+                    """,
+                    deployment_id,
+                    json.dumps(
+                        {"max_weight_per_asset": self.CAP, "min_trade_usd": 25.0}
+                    ),
+                    uuid.UUID(seeded["run_id"]),
+                )
+                return deployment_id
+            finally:
+                await conn.close()
+
+        return asyncio.run(seed())
+
+    def test_a_binding_limit_actually_binds_on_the_live_path(
+        self, dsn, seeded, gated_deployment
+    ) -> None:
+        """
+        A configured cap changes the persisted decision.
+
+        Before the fix the stored weights were the strategy's raw 0.20 — the
+        limit was accepted by the API, shown in the UI as configured, and
+        silently never applied.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute(
+                    "UPDATE deployments SET status='enabled' WHERE id=$1",
+                    gated_deployment,
+                )
+                # Isolate: the other deployment would also decide this session.
+                await conn.execute(
+                    "UPDATE deployments SET status='disabled' WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1", gated_deployment
+                )
+                await run_live_decision(
+                    conn,
+                    {
+                        "session": session.isoformat(),
+                        "deployment_ids": [str(gated_deployment)],
+                    },
+                    broker_factory=factory,
+                )
+                return await conn.fetchrow(
+                    "SELECT target_weights, raw_target_weights, risk_events, "
+                    "order_intents FROM decisions WHERE deployment_id=$1",
+                    gated_deployment,
+                )
+            finally:
+                # Restore the shared fixture for whatever runs next.
+                await conn.execute(
+                    "UPDATE deployments SET status='enabled' WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.close()
+
+        row = asyncio.run(_with_venue(check))
+        assert row is not None, "the gated deployment produced no decision"
+
+        gated = _as_json(row["target_weights"])
+        raw = _as_json(row["raw_target_weights"])
+        events = _as_json(row["risk_events"])
+
+        assert gated, "expected a non-empty allocation to gate"
+        for symbol, weight in gated.items():
+            assert weight <= self.CAP + 1e-9, f"{symbol} escaped the cap"
+
+        # Both sides recorded. Without the raw weights there is no way to tell,
+        # after the fact, whether a limit changed the answer or merely ran.
+        assert raw, "pre-gate weights were not recorded"
+        assert max(raw.values()) > self.CAP, (
+            "the strategy did not exceed the cap, so this test proves nothing"
+        )
+
+        binding = [e for e in events if e["binding"]]
+        assert binding, "the gate bound but recorded no event"
+        assert any(e["code"] == "max_weight_clamp" for e in binding)
+
+    def test_dry_run_previews_gated_orders(
+        self, dsn, seeded, gated_deployment
+    ) -> None:
+        """
+        The preview shows what will actually happen, gate included.
+
+        An operator reads this screen before authorising a deployment. A
+        preview of ungated orders is worse than no preview.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                return await dry_run(
+                    conn,
+                    gated_deployment,
+                    session,
+                    broker_factory=factory,
+                )
+            finally:
+                await conn.close()
+
+        result = asyncio.run(_with_venue(check))
+
+        assert result["order_intents"], "expected orders from an all-cash start"
+        for symbol, weight in result["target_weights"].items():
+            assert weight <= self.CAP + 1e-9, f"{symbol} escaped the cap"
+        assert max(result["raw_target_weights"].values()) > self.CAP
+        assert any(e["binding"] for e in result["risk_events"])
+
+
+def _as_json(value):
+    """asyncpg returns JSONB as str or dict depending on codec registration."""
+    return json.loads(value) if isinstance(value, str) else value

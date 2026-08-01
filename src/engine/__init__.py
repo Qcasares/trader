@@ -9,6 +9,7 @@ implementation beyond the protocol, and neither imports an LLM client.
 """
 
 from src.engine.driver import (  # noqa: F401
+    Decision,
     Driver,
     DriverConfig,
     SessionRecord,
@@ -22,6 +23,7 @@ from src.engine.metrics import (  # noqa: F401
 )
 
 __all__ = [
+    "Decision",
     "Driver",
     "DriverConfig",
     "SessionRecord",

@@ -80,6 +80,32 @@ class DriverConfig:
     risk_limits: RiskLimits = field(default_factory=RiskLimits)
 
 
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """
+    What the strategy wanted, what the gate allowed, and the resulting orders.
+
+    Exists so that "strategy -> risk gate -> orders" has exactly one
+    implementation. It previously lived inline in :meth:`Driver.step`, which
+    meant the live decision job — which must *not* submit, because submission
+    is a separate job run after the next open — had no way to reuse it and
+    reimplemented a subset instead. The subset left out ``apply_risk``.
+    """
+
+    session: date
+    rebalanced: bool
+    #: What the strategy asked for, before the gate.
+    raw_targets: TargetWeights | None
+    #: What the gate approved. Identical to ``raw_targets`` when nothing bound.
+    targets: TargetWeights | None
+    risk_events: tuple[RiskEvent, ...]
+    intents: list[OrderIntent]
+
+    @property
+    def rationale(self) -> str:
+        return self.targets.rationale if self.targets is not None else ""
+
+
 @dataclass(slots=True)
 class SessionRecord:
     """Everything that happened on one session. One row of the audit trail."""
@@ -117,12 +143,17 @@ class Driver:
         broker: BrokerAdapter,
         clock: Clock,
         config: DriverConfig | None = None,
+        last_rebalance: date | None = None,
     ) -> None:
         self.strategy = strategy
         self.broker = broker
         self.clock = clock
         self.config = config or DriverConfig()
-        self._last_rebalance: date | None = None
+        # Seeded on the live path from the deployment row. A backtest starts
+        # at None and accumulates it while walking; a live process is restarted
+        # constantly and would otherwise believe it had never rebalanced, so
+        # the schedule has to survive outside the object.
+        self._last_rebalance = last_rebalance
         self._logger = logging.getLogger(f"driver.{strategy.name}")
 
     @property
@@ -181,34 +212,17 @@ class Driver:
             return record
 
         # 4. Decide.
-        if not self.strategy.should_rebalance(session, self._last_rebalance):
+        decision = self.decide(panel, session, state)
+        if not decision.rebalanced:
             return record
 
-        raw_targets = self.strategy.target_weights(panel.at(session), state, session)
-
-        # The shared gate. Identical on both paths — a backtest that measured
-        # an ungated strategy would not describe the live system.
-        gated = apply_risk(
-            raw_targets,
-            state,
-            self._risk_state(session, close_prices, halted=False),
-            self.config.risk_limits,
-        )
-        targets = gated.weights
-        intents = weights_to_orders(
-            state=state,
-            targets=targets,
-            prices=close_prices,
-            constraints=self.config.constraints,
-        )
-
+        intents = decision.intents
         record.rebalanced = True
-        record.targets = targets
-        record.raw_targets = raw_targets
-        record.risk_events = gated.events
+        record.targets = decision.targets
+        record.raw_targets = decision.raw_targets
+        record.risk_events = decision.risk_events
         record.intents = intents
-        record.rationale = targets.rationale
-        self._last_rebalance = session
+        record.rationale = decision.rationale
 
         for intent in intents:
             try:
@@ -223,6 +237,63 @@ class Driver:
                 break
 
         return record
+
+    # ------------------------------------------------------------------
+    # The decision, without the submission
+    # ------------------------------------------------------------------
+
+    def decide(
+        self,
+        panel: PricePanel,
+        session: date,
+        state: PortfolioState,
+    ) -> Decision:
+        """
+        Run the strategy and the risk gate, and size the resulting orders.
+
+        Submits nothing. That is the whole reason this is separate from
+        :meth:`step`: on the live path the decision is computed after one
+        session's close and submitted after the *next* session's open, by a
+        different job, so that a submission can be retried without recomputing
+        and getting a different answer.
+
+        Before this existed, the live job could not reuse ``step`` — ``step``
+        submits — so it reimplemented the sequence inline and **omitted
+        ``apply_risk`` entirely**. Live therefore ran an ungated strategy while
+        the backtest that authorised it ran a gated one: no cash buffer, no
+        daily-loss halt, no drawdown halt, no cooldown. ``test_parity.py`` was
+        blind to it, because both of its paths go through ``step``.
+
+        So: one implementation, called by both. A limit added here binds
+        everywhere or the build fails.
+        """
+        if not self.strategy.should_rebalance(session, self._last_rebalance):
+            return Decision(session, False, None, None, (), [])
+
+        raw_targets = self.strategy.target_weights(panel.at(session), state, session)
+        close_prices = self._prices(panel, session, "close")
+
+        gated = apply_risk(
+            raw_targets,
+            state,
+            self._risk_state(session, close_prices, halted=False),
+            self.config.risk_limits,
+        )
+        intents = weights_to_orders(
+            state=state,
+            targets=gated.weights,
+            prices=close_prices,
+            constraints=self.config.constraints,
+        )
+        self._last_rebalance = session
+        return Decision(
+            session=session,
+            rebalanced=True,
+            raw_targets=raw_targets,
+            targets=gated.weights,
+            risk_events=gated.events,
+            intents=intents,
+        )
 
     # ------------------------------------------------------------------
     # Full backtest

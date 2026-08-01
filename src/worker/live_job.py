@@ -41,6 +41,7 @@ from src.core.calendar import sessions as nyse_sessions
 from src.core.clock import RealClock
 from src.core.orders import RebalanceConstraints
 from src.core.panel import PricePanel
+from src.core.risk import RiskEvent, RiskLimits, describe
 from src.core.types import OrderIntent, PortfolioState, Side, TradingMode
 from src.db.repos import flags
 from src.engine import Driver, DriverConfig, client_order_id
@@ -120,48 +121,101 @@ async def _decide_for(
         broker,
         RealClock(),
         DriverConfig(
-            constraints=RebalanceConstraints(
-                min_trade_usd=Decimal(str(limits.get("min_trade_usd", 25.0))),
-                max_weight_per_asset=float(limits.get("max_weight_per_asset", 1.0)),
-            ),
+            constraints=_constraints_from(limits),
             run_ref=str(deployment["id"])[:8],
+            risk_limits=risk_limits_from(limits),
         ),
+        # The rebalance schedule has to survive process restarts, so it comes
+        # from the deployment row rather than from a fresh Driver's memory.
+        last_rebalance=deployment.get("last_rebalance"),
     )
 
-    if not strategy.should_rebalance(session, deployment.get("last_rebalance")):
+    # The shared path: strategy -> apply_risk -> weights_to_orders, exactly as
+    # the backtest runs it. This used to be reimplemented inline here, minus
+    # the risk gate, which meant live ran an ungated strategy while the
+    # backtest that authorised it ran a gated one.
+    decision = driver.decide(panel, session, state)
+    if not decision.rebalanced:
         logger.info("%s: not a rebalance session for %s", session, strategy.name)
         return None
 
-    targets = strategy.target_weights(panel.at(session), state, session)
-    prices = _close_prices(panel, strategy.universe(), session)
-
-    from src.core.orders import weights_to_orders
-
-    intents = weights_to_orders(state, targets, prices, driver.config.constraints)
+    intents = decision.intents
+    if decision.risk_events:
+        logger.info("%s: risk gate — %s", session, describe(decision.risk_events))
 
     decision_id = uuid.uuid4()
     await conn.execute(
         """
         INSERT INTO decisions (id, deployment_id, session, target_weights,
-                               order_intents, rationale, status)
-        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, 'planned')
+                               order_intents, rationale, status,
+                               raw_target_weights, risk_events)
+        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, 'planned',
+                $7::jsonb, $8::jsonb)
         ON CONFLICT (deployment_id, session) DO NOTHING
         """,
         decision_id,
         deployment["id"],
         session,
-        json.dumps(targets.weights),
+        json.dumps(decision.targets.weights),
         json.dumps([_intent_to_dict(i) for i in intents]),
-        targets.rationale,
+        decision.rationale,
+        # Both stored: without the pre-gate weights there is no way to tell,
+        # after the fact, whether a limit changed the answer or merely ran.
+        json.dumps(decision.raw_targets.weights if decision.raw_targets else {}),
+        json.dumps([_risk_event_to_dict(e) for e in decision.risk_events]),
     )
     logger.info(
         "%s: decided %d order(s) for %s — %s",
         session,
         len(intents),
         strategy.name,
-        targets.rationale,
+        decision.rationale,
     )
     return decision_id
+
+
+def _constraints_from(limits: dict[str, Any]) -> RebalanceConstraints:
+    """Order-sizing constraints from a deployment's stored limits."""
+    return RebalanceConstraints(
+        min_trade_usd=Decimal(str(limits.get("min_trade_usd", 25.0))),
+        max_weight_per_asset=float(limits.get("max_weight_per_asset", 1.0)),
+    )
+
+
+def risk_limits_from(limits: dict[str, Any]) -> RiskLimits:
+    """
+    Build the shared gate's limits from a deployment's stored configuration.
+
+    Every field is read here. A limit that the API accepts and stores but that
+    this function forgets is worse than one that does not exist, because the
+    UI will show it as configured and it will never bind.
+    """
+    max_daily_loss = limits.get("max_daily_loss_usd")
+    max_drawdown = limits.get("max_drawdown_pct")
+    stop_loss = limits.get("stop_loss_pct")
+    return RiskLimits(
+        max_weight_per_symbol=float(limits.get("max_weight_per_asset", 1.0)),
+        max_gross_exposure=float(limits.get("max_gross_exposure", 1.0)),
+        max_daily_loss_usd=(
+            Decimal(str(max_daily_loss)) if max_daily_loss is not None else None
+        ),
+        max_drawdown_pct=(
+            float(max_drawdown) if max_drawdown is not None else None
+        ),
+        cooldown_minutes=int(limits.get("cooldown_minutes", 0)),
+        stop_loss_pct=float(stop_loss) if stop_loss is not None else None,
+        cash_buffer_pct=float(limits.get("cash_buffer_pct", 0.0)),
+    )
+
+
+def _risk_event_to_dict(event: RiskEvent) -> dict[str, Any]:
+    return {
+        "code": event.code.value,
+        "severity": event.severity.value,
+        "message": event.message,
+        "symbol": event.symbol,
+        "binding": event.binding,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -305,18 +359,28 @@ async def dry_run(
         as_of=session,
     )
     limits = deployment.get("risk_limits") or {}
-    constraints = RebalanceConstraints(
-        min_trade_usd=Decimal(str(limits.get("min_trade_usd", 25.0))),
-        max_weight_per_asset=float(limits.get("max_weight_per_asset", 1.0)),
-    )
-
-    targets = strategy.target_weights(panel.at(session), state, session)
-    prices = _close_prices(panel, strategy.universe(), session)
-
-    from src.core.orders import weights_to_orders
-
-    intents = weights_to_orders(state, targets, prices, constraints)
     ref = str(deployment_id)[:8]
+
+    # ``last_rebalance=None`` on purpose: a preview answers "what would you do
+    # if you rebalanced now", so it decides unconditionally. Whether today is
+    # actually a rebalance session is reported separately as
+    # ``would_rebalance``, computed from the persisted schedule.
+    #
+    # It goes through the same ``decide`` as the live job, gate included. A
+    # preview that showed ungated orders would be worse than no preview: it is
+    # the screen an operator reads before authorising a deployment.
+    driver = Driver(
+        strategy,
+        broker,
+        RealClock(),
+        DriverConfig(
+            constraints=_constraints_from(limits),
+            run_ref=ref,
+            risk_limits=risk_limits_from(limits),
+        ),
+        last_rebalance=None,
+    )
+    decision = driver.decide(panel, session, state)
 
     return {
         "session": session.isoformat(),
@@ -324,15 +388,19 @@ async def dry_run(
         "would_rebalance": strategy.should_rebalance(
             session, deployment.get("last_rebalance")
         ),
-        "target_weights": targets.weights,
-        "rationale": targets.rationale,
+        "target_weights": decision.targets.weights if decision.targets else {},
+        "raw_target_weights": (
+            decision.raw_targets.weights if decision.raw_targets else {}
+        ),
+        "rationale": decision.rationale,
+        "risk_events": [_risk_event_to_dict(e) for e in decision.risk_events],
         "equity": float(state.equity),
         "order_intents": [
             {
                 **_intent_to_dict(intent),
                 "client_order_id": client_order_id(ref, session, intent.symbol),
             }
-            for intent in intents
+            for intent in decision.intents
         ],
         "submitted": False,
     }
