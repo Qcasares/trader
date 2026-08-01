@@ -163,6 +163,20 @@ async def _with_venue(fn, **server_kwargs):
         await server.stop()
 
 
+def _in_window(session):
+    """
+    A clock reading just after ``session``'s open.
+
+    These tests use 2021 dates, whose real submission window closed years ago.
+    Pinning the clock keeps them testing submission rather than the staleness
+    guard — which has its own tests, in both directions.
+    """
+    from src.core.calendar import session_open
+    from src.engine.scheduler import SUBMIT_AFTER_OPEN
+
+    return session_open(session) + SUBMIT_AFTER_OPEN
+
+
 class TestDeploymentGate:
     """A deployment must be backed by a real, completed backtest."""
 
@@ -364,7 +378,8 @@ class TestKillSwitchStopsSubmission:
                 )
                 nxt = next(s for s in seeded["sessions"] if s > decision_session)
                 result = await run_submit_orders(
-                    conn, {"session": nxt.isoformat()}, broker_factory=factory
+                    conn, {"session": nxt.isoformat()}, broker_factory=factory,
+                    now=_in_window(nxt),
                 )
                 return result, server.submitted
             finally:
@@ -396,7 +411,8 @@ class TestKillSwitchStopsSubmission:
                 await flags.engage_kill_switch(conn, "test halt", actor="test")
                 nxt = next(s for s in seeded["sessions"] if s > decision_session)
                 result = await run_submit_orders(
-                    conn, {"session": nxt.isoformat()}, broker_factory=factory
+                    conn, {"session": nxt.isoformat()}, broker_factory=factory,
+                    now=_in_window(nxt),
                 )
                 status = await conn.fetchval(
                     "SELECT status FROM decisions WHERE deployment_id=$1 "
@@ -468,7 +484,8 @@ class TestIdempotency:
                 )
                 nxt = next(s for s in seeded["sessions"] if s > decision_session)
                 first = await run_submit_orders(
-                    conn, {"session": nxt.isoformat()}, broker_factory=factory
+                    conn, {"session": nxt.isoformat()}, broker_factory=factory,
+                    now=_in_window(nxt),
                 )
                 # Re-arm the decision to simulate a retry of the same batch.
                 await conn.execute(
@@ -477,7 +494,8 @@ class TestIdempotency:
                     seeded["deployment_id"], decision_session,
                 )
                 await run_submit_orders(
-                    conn, {"session": nxt.isoformat()}, broker_factory=factory
+                    conn, {"session": nxt.isoformat()}, broker_factory=factory,
+                    now=_in_window(nxt),
                 )
                 return first, len(server.orders)
             finally:
@@ -1011,3 +1029,97 @@ class TestTheRebalanceScheduleSurvivesRestarts:
         same_month, next_month = asyncio.run(_with_venue(check))
         assert same_month is None, "rebalanced twice in one month"
         assert next_month is not None, "a new month was refused"
+
+
+class TestStaleSubmissionsExpire:
+    """
+    A late submit job must not fill at a price the backtest never modelled.
+
+    The scheduler aims to submit five minutes after the open, and the backtest
+    models exactly that. A worker restarted mid-afternoon, or a backed-up
+    queue, would otherwise send a morning decision near the close — silently,
+    at whatever the market had done in between.
+
+    The parity test cannot see this: the *intents* are identical either way and
+    it is the fill price that diverges. So the job refuses.
+
+    Refusing is the conservative side. A missed rebalance costs one period of
+    drift; an unexpected fill at an unmodelled price costs whatever the market
+    did that day.
+    """
+
+    def test_a_decision_submitted_hours_late_is_expired_not_sent(
+        self, dsn, seeded
+    ) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await flags.release_kill_switch(conn, actor="test")
+                decision_session = next(
+                    s for s in seeded["sessions"] if s >= date(2021, 6, 1)
+                )
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = NULL WHERE id = $1",
+                    seeded["deployment_id"],
+                )
+                await run_live_decision(
+                    conn,
+                    {"session": decision_session.isoformat()},
+                    broker_factory=factory,
+                )
+                # The submit job for the *next* session. 2021 is long past, so
+                # its window closed years ago — exactly the "ran far too late"
+                # case, without needing to fake a clock.
+                nxt = next(s for s in seeded["sessions"] if s > decision_session)
+                # Explicitly late: the window plus a working day. Stated as an
+                # offset from the window rather than "now" so the test says what
+                # it means and does not depend on the calendar year it runs in.
+                result = await run_submit_orders(
+                    conn, {"session": nxt.isoformat()}, broker_factory=factory,
+                    now=_in_window(nxt) + timedelta(hours=6),
+                )
+                status = await conn.fetchval(
+                    "SELECT status FROM decisions WHERE deployment_id=$1 "
+                    "AND session=$2",
+                    seeded["deployment_id"], decision_session,
+                )
+                return result, status, len(server.orders)
+            finally:
+                await conn.close()
+
+        result, status, orders_at_venue = asyncio.run(_with_venue(check))
+
+        assert result["submitted"] == 0
+        assert result["skipped"] >= 1
+        assert "window passed" in result["reason"]
+        assert status == "expired"
+        assert orders_at_venue == 0, "a stale batch reached the venue"
+
+    def test_the_guard_leaves_an_in_window_submission_alone(self) -> None:
+        """
+        The other direction, unit-style: a job running on time must not expire.
+
+        A guard that expired everything would satisfy the assertion above while
+        making the system untradeable — and would look identical in production
+        to a system that simply never trades.
+        """
+        from datetime import timedelta as _td
+
+        from src.core.calendar import session_open
+        from src.engine.scheduler import SUBMIT_AFTER_OPEN
+        from src.worker.live_job import MAX_SUBMISSION_LATENESS, _stale_by
+
+        session = date(2021, 6, 16)
+        on_time = session_open(session) + SUBMIT_AFTER_OPEN
+        assert _stale_by(session, now=on_time) is None
+        assert _stale_by(session, now=on_time + _td(minutes=30)) is None
+        # Right at the boundary is still allowed; past it is not.
+        assert _stale_by(session, now=on_time + MAX_SUBMISSION_LATENESS) is None
+        assert (
+            _stale_by(session, now=on_time + MAX_SUBMISSION_LATENESS + _td(minutes=1))
+            is not None
+        )

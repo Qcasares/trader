@@ -30,13 +30,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import asyncpg
 
-from src.core.calendar import previous_session
+from src.core.calendar import previous_session, session_open
 from src.core.calendar import sessions as nyse_sessions
 from src.core.clock import RealClock
 from src.core.orders import RebalanceConstraints
@@ -276,6 +276,7 @@ async def run_submit_orders(
     conn: asyncpg.Connection,
     payload: dict[str, Any],
     broker_factory: Any | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """
     Send the orders staged by the previous session's decision.
@@ -283,6 +284,11 @@ async def run_submit_orders(
     The kill switch is checked before the batch *and* before each individual
     order, so engaging it partway through stops the remainder rather than only
     affecting the next cycle.
+
+    ``now`` is injected rather than read from the wall clock, for the same
+    reason the driver takes a ``Clock``: the staleness guard below is a
+    time-dependent decision, and a time-dependent decision that reaches for
+    ``datetime.now()`` cannot be tested at the boundary that matters.
     """
     session = _as_date(payload["session"])
     previous = previous_session(session)
@@ -299,6 +305,30 @@ async def run_submit_orders(
     )
     if not rows:
         return {"session": session.isoformat(), "submitted": 0, "skipped": 0}
+
+    stale = _stale_by(session, now=now)
+    if stale is not None:
+        # The backtest models a fill shortly after this session's open. A job
+        # that runs hours late — a worker restarted mid-afternoon, a queue
+        # backed up — would fill at a price the backtest never modelled, and
+        # would do it silently. Refusing is the conservative choice: a missed
+        # rebalance costs one period of drift, whereas an unexpected fill at an
+        # unmodelled price costs whatever the market did in between.
+        logger.error(
+            "%s: submission window passed %s ago; expiring %d decision(s) "
+            "rather than filling at a price the backtest never modelled",
+            session, stale, len(rows),
+        )
+        for row in rows:
+            await conn.execute(
+                "UPDATE decisions SET status='expired' WHERE id=$1", row["id"]
+            )
+        return {
+            "session": session.isoformat(),
+            "submitted": 0,
+            "skipped": len(rows),
+            "reason": f"submission window passed ({stale} late)",
+        }
 
     if not await flags.trading_enabled(conn):
         logger.warning("Kill switch engaged; submitting nothing for %s", session)
@@ -650,3 +680,33 @@ def _as_date(value: Any) -> date:
 def sessions_between(start: date, end: date) -> list[date]:
     """Re-exported for the scheduler's convenience."""
     return nyse_sessions(start, end)
+
+
+#: How long after the intended submission time a batch may still go out.
+#:
+#: The scheduler aims for five minutes after the open. Two hours allows for a
+#: worker restart, a queue backlog or a slow venue while still refusing an
+#: afternoon fill on a decision computed for the morning. Beyond it the
+#: decision is expired rather than sent: the backtest models a fill near the
+#: open, and filling near the close instead is a divergence the parity test
+#: cannot see because the *intents* are identical.
+MAX_SUBMISSION_LATENESS = timedelta(hours=2)
+
+
+def _stale_by(session: date, now: datetime | None = None) -> timedelta | None:
+    """
+    How late submission is for ``session``, or ``None`` if still in window.
+
+    Returns ``None`` for a session with no calendar entry rather than treating
+    it as infinitely late — an unknown session is a scheduling bug to be
+    reported elsewhere, not a reason to silently expire real orders.
+    """
+    from src.engine.scheduler import SUBMIT_AFTER_OPEN
+
+    now = now or datetime.now(UTC)
+    try:
+        target = session_open(session) + SUBMIT_AFTER_OPEN
+    except Exception:  # noqa: BLE001 - not a session; leave the decision alone
+        return None
+    lateness = now - target
+    return lateness if lateness > MAX_SUBMISSION_LATENESS else None
