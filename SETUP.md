@@ -219,7 +219,68 @@ first try on your machine or may need a version bump. Nothing in this repository
 has ever been measured against real equity prices; treat any figure you see as a
 test of the machinery, not of a strategy.
 
-## 5. Tests
+## 5. Deploying
+
+The split is locked: **frontend on Vercel, backend on its own host.** A Next.js
+server cannot hold a trading loop — a backtest is CPU-bound pandas work, and a
+serverless function that sleeps between market sessions is not a worker.
+
+### Frontend (Vercel)
+
+Connect the GitHub repository rather than uploading a build. This repo is the
+source of truth, and a git-connected project redeploys on every push instead of
+needing a manual upload each time.
+
+- **New Project → import the repo**
+- **Root Directory: `web`** — the default is the repo root, where there is no
+  `package.json`, and the build fails with a framework-detection error that
+  does not mention the root directory
+- Framework preset: Next.js (detected)
+- Environment variable: `NEXT_PUBLIC_API_BASE` = the API's public HTTPS origin
+
+`NEXT_PUBLIC_*` is inlined at **build** time, not read at runtime. Changing it
+requires a redeploy; editing it in the dashboard and reloading the page does
+nothing.
+
+### Backend (Fly / Railway / Render)
+
+`Dockerfile` builds one image; run it twice with different commands — the API
+(`uvicorn src.api.main:app`) and the worker (`python -m src.worker.main`). The
+worker is not optional: without it, backtests queue forever and no mark is ever
+written, which silently disarms both halting limits.
+
+Set on the API:
+
+```bash
+DATABASE_URL=...                              # managed Postgres
+SESSION_SECRET=...                            # 32+ chars
+ADMIN_PASSWORD_HASH=...                       # bcrypt
+CORS_ORIGINS=https://your-app.vercel.app      # exact origin, no trailing slash
+SESSION_COOKIE_SAMESITE=none                  # required: see below
+LIVE_TRADING_ENABLED=false
+ALPACA_ALLOW_LIVE=false
+```
+
+Then apply migrations once against the deployed database:
+`python -m src.db.migrate_cli`.
+
+**`SESSION_COOKIE_SAMESITE=none` is required in this topology and easy to miss.**
+`vercel.app` and your API's host are different *sites*, so the session cookie is
+cross-site, and a browser will not attach a `Lax` cookie to a cross-site fetch.
+Leave it at `lax` and login returns 200 while every call after it returns 401 —
+which presents as a correct password being rejected, with nothing in the server
+log looking wrong. `none` implies `Secure`, which the API sets for you.
+
+### Pointing a deployed frontend at a local backend
+
+Workable for a look around, with caveats worth knowing before you spend time on
+it. Set `NEXT_PUBLIC_API_BASE=http://localhost:8000` and on the local API set
+`CORS_ORIGINS` to the Vercel origin plus `SESSION_COOKIE_SAMESITE=none`.
+Chromium and Firefox treat `http://localhost` as a trustworthy origin and allow
+it from an HTTPS page; Safari is stricter and may refuse. Running the frontend
+locally too is less trouble than debugging that.
+
+## 6. Tests
 
 ```bash
 .venv/bin/pytest tests/unit -q                  # no database needed
@@ -242,7 +303,7 @@ The browser journey needs the whole stack running and so is not in CI:
 .venv/bin/python tests/e2e/test_browser_journey.py
 ```
 
-## 6. Trading is off, and stays off
+## 7. Trading is off, and stays off
 
 Nothing here can reach a real venue, by construction rather than by
 configuration you might forget:
