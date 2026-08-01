@@ -87,6 +87,51 @@ export interface JsonSchemaProperty {
   enum?: unknown[];
 }
 
+export type PortfolioMode = "paper" | "live";
+
+/**
+ * A live account snapshot.
+ *
+ * Every money field is nullable, and that is load-bearing: the API returns
+ * null rather than 0 when no marks exist. Zero equity and unknown equity are
+ * different states, and a UI that renders the second as the first shows a flat
+ * line at zero where it should say "no data".
+ */
+export interface Portfolio {
+  mode: PortfolioMode;
+  as_of: string | null;
+  equity: number | null;
+  cash: number | null;
+  daily_pnl: number | null;
+  cumulative_pnl: number | null;
+  drawdown_pct: number | null;
+  peak_equity: number | null;
+  positions: PortfolioPosition[];
+  note?: string;
+}
+
+export interface PortfolioPosition {
+  symbol: string;
+  qty: number;
+  /** Average *purchase* price, not a mark — the API does not know a current price. */
+  avg_entry_price: number | null;
+}
+
+export interface PortfolioMark {
+  session: string;
+  equity: number;
+  cash: number;
+  daily_pnl: number;
+  cumulative_pnl: number;
+  drawdown_pct: number;
+}
+
+export interface PortfolioHistory {
+  mode: PortfolioMode;
+  count: number;
+  marks: PortfolioMark[];
+}
+
 export interface BacktestMetrics {
   start: string | null;
   end: string | null;
@@ -227,6 +272,12 @@ export const api = {
   equity: (id: string) => request<EquityPoint[]>(`/api/v1/backtests/${id}/equity`),
 
   orders: (id: string) => request<BacktestOrder[]>(`/api/v1/backtests/${id}/orders`),
+
+  portfolio: (mode: PortfolioMode = "paper") =>
+    request<Portfolio>(`/api/v1/portfolio?mode=${mode}`),
+
+  portfolioHistory: (mode: PortfolioMode = "paper") =>
+    request<PortfolioHistory>(`/api/v1/portfolio/history?mode=${mode}`),
 
   systemStatus: () => request<SystemStatus>("/api/v1/system/status"),
 

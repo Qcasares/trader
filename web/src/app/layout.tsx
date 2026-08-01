@@ -22,6 +22,7 @@ export default function RootLayout({
           <nav>
             <Link href="/">Strategies</Link>
             <Link href="/backtests">Backtests</Link>
+            <Link href="/portfolio">Portfolio</Link>
             <Link href="/system">System</Link>
           </nav>
         </header>
