@@ -46,14 +46,37 @@ To install it:
 - **Docker Desktop (macOS/Windows)** — bundled since v3.4. If it is missing,
   Docker Desktop is old; update it.
 - **Linux, Docker's apt/dnf repo** — `sudo apt-get install docker-compose-plugin`
-- **Anywhere else** — drop the binary in as a CLI plugin:
+- **macOS without Docker Desktop** — `brew install docker-compose`, which installs it
+  into `~/.docker/cli-plugins` for you.
+- **Anywhere else** — drop the binary in as a CLI plugin. Note the two
+  transformations: the release assets use a **lowercase** OS, and `aarch64`
+  where macOS's `uname -m` says `arm64`. Passing `uname` output through
+  unmodified requests an asset that does not exist.
 
   ```bash
   mkdir -p ~/.docker/cli-plugins
-  curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m); [ "$ARCH" = "arm64" ] && ARCH=aarch64
+
+  curl -fSL "https://github.com/docker/compose/releases/latest/download/docker-compose-${OS}-${ARCH}" \
       -o ~/.docker/cli-plugins/docker-compose
   chmod +x ~/.docker/cli-plugins/docker-compose
   docker compose version
+  ```
+
+  `-f` is load-bearing. Without it curl treats GitHub's 404 as an ordinary
+  response and writes the nine-byte body `Not Found` to the output path; the
+  `chmod +x` then succeeds, and you are left with an executable that is not a
+  binary. If the download ever looks wrong, `file ~/.docker/cli-plugins/docker-compose`
+  should report Mach-O or ELF and the size should be tens of megabytes.
+
+  If the asset name is ever wrong, ask GitHub what it publishes rather than
+  guessing:
+
+  ```bash
+  curl -fsSL https://api.github.com/repos/docker/compose/releases/latest \
+      | grep -o '"name": *"docker-compose-[^"]*"'
   ```
 
 **Do not substitute the old hyphenated `docker-compose` (V1).** It is
