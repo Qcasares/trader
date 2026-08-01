@@ -506,3 +506,19 @@ class TestLoginBackoff:
 
         assert throttle.retry_after("testclient") == 0.0
         self._reset()
+
+    def test_status_reports_all_three_live_gates_separately(self, authed) -> None:
+        """
+        Each gate reported on its own, never summarised into one flag.
+
+        The System page used to say "both gates". An operator reading that
+        would reasonably conclude LIVE_TRADING_ENABLED was sufficient — which
+        is precisely the misunderstanding the third gate exists to prevent, and
+        precisely the mistake `_alpaca_from_env` itself once made by deriving
+        one gate from another.
+        """
+        status = authed.get("/api/v1/system/status").json()
+        assert status["live_trading_enabled"] is False
+        assert status["alpaca_allow_live"] is False
+        # Reported independently: neither may be inferred from the other.
+        assert "live_trading_enabled" in status and "alpaca_allow_live" in status

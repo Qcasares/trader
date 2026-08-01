@@ -136,6 +136,7 @@ export interface BacktestMetrics {
   start: string | null;
   end: string | null;
   n_sessions: number;
+  initial_equity: number;
   total_return: number;
   cagr: number;
   volatility: number;
@@ -144,6 +145,10 @@ export interface BacktestMetrics {
   sharpe_is_significant: boolean;
   sortino: number;
   max_drawdown: number;
+  /** When the worst drawdown began and ended — depth without dates cannot
+   * answer "was that 2008, or was that us?". */
+  max_drawdown_start: string | null;
+  max_drawdown_end: string | null;
   calmar: number;
   exposure: number;
   n_rebalances: number;
@@ -155,7 +160,7 @@ export interface BacktestMetrics {
   effective_start: string | null;
   cost_stress_multiplier: number;
   /** Sessions per year used to annualise. 252 = NYSE; a 24/7 venue is 365. */
-  periods_per_year?: number;
+  periods_per_year: number;
 }
 
 export interface BacktestRun {
@@ -202,6 +207,8 @@ export interface SystemStatus {
   updated_by: string;
   updated_at: string | null;
   live_trading_enabled: boolean;
+  /** The third, independent gate. */
+  alpaca_allow_live: boolean;
   broker_configured: boolean;
   jobs: Record<string, number>;
   workers: { worker_id: string; last_seen: string; status: string }[];

@@ -107,12 +107,15 @@ export default function SystemPage() {
         </div>
 
         <p className="banner banner-info" style={{ marginTop: 14 }}>
-          Live orders require <em>both</em> gates open. Environment gate
-          (LIVE_TRADING_ENABLED):{" "}
+          Live orders require <em>three independent</em> conditions, plus this
+          kill switch. Deriving any one from another is a weakening, so each is
+          reported separately. Environment gate (LIVE_TRADING_ENABLED):{" "}
           <strong>{status.live_trading_enabled ? "open" : "closed"}</strong>.
-          Broker credentials:{" "}
+          Allow-live gate (ALPACA_ALLOW_LIVE):{" "}
+          <strong>{status.alpaca_allow_live ? "open" : "closed"}</strong>.
+          The third is the deployment&apos;s own mode. Broker credentials:{" "}
           <strong>{status.broker_configured ? "present" : "absent"}</strong>.
-          {!status.live_trading_enabled &&
+          {(!status.live_trading_enabled || !status.alpaca_allow_live) &&
             " No real order can be placed in this configuration."}
         </p>
 

@@ -28,9 +28,9 @@ export default function RootLayout({
         </header>
         <main>{children}</main>
         <footer className="footer">
-          Paper trading only. No live credentials are configured, and live
-          execution requires both an environment gate and the database kill
-          switch to permit it.
+          Paper trading only. Live execution requires three independent
+          conditions — the deployment&apos;s mode, LIVE_TRADING_ENABLED and
+          ALPACA_ALLOW_LIVE — and the database kill switch on top of them.
         </footer>
       </body>
     </html>

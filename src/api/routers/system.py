@@ -51,6 +51,7 @@ async def _build_status(conn, settings: AppSettings) -> SystemStatus:
         updated_by=state.updated_by,
         updated_at=state.updated_at.isoformat() if state.updated_at else None,
         live_trading_enabled=settings.live_trading_enabled,
+        alpaca_allow_live=settings.alpaca_allow_live,
         broker_configured=settings.has_broker_credentials,
         jobs=await job_repo.counts_by_status(conn),
         workers=[

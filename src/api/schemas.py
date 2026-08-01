@@ -73,6 +73,7 @@ class BacktestMetrics(BaseModel):
     start: str | None = None
     end: str | None = None
     n_sessions: int = 0
+    initial_equity: float = 0.0
     total_return: float = 0.0
     cagr: float = 0.0
     volatility: float = 0.0
@@ -81,6 +82,10 @@ class BacktestMetrics(BaseModel):
     sharpe_is_significant: bool = False
     sortino: float = 0.0
     max_drawdown: float = 0.0
+    #: When the worst drawdown began and ended. A research UI that shows the
+    #: depth but not the dates cannot answer "was that 2008 or was that us?".
+    max_drawdown_start: str | None = None
+    max_drawdown_end: str | None = None
     calmar: float = 0.0
     exposure: float = 0.0
     n_rebalances: int = 0
@@ -92,6 +97,12 @@ class BacktestMetrics(BaseModel):
     #: this is not the Sharpe of the strategy.
     effective_start: str | None = None
     cost_stress_multiplier: float = 1.0
+    #: Sessions per year used to annualise. 252 is the NYSE year; a venue that
+    #: never closes has 365. Quoting an annualised figure without it is one of
+    #: the honesty rules, so the field has to survive serialisation — pydantic
+    #: drops anything it does not declare, which is how it went missing between
+    #: the engine computing it and the API returning it.
+    periods_per_year: int = 252
 
 
 class BacktestRun(BaseModel):
@@ -144,6 +155,11 @@ class SystemStatus(BaseModel):
     #: The environment-level gate. Both this and ``trading_enabled`` must be
     #: true before a live order can be placed.
     live_trading_enabled: bool = False
+    #: The third, independent gate. Reported separately because an operator who
+    #: sees only LIVE_TRADING_ENABLED would reasonably conclude that flipping
+    #: it is sufficient — which is exactly the misunderstanding this gate
+    #: exists to prevent.
+    alpaca_allow_live: bool = False
     broker_configured: bool = False
     jobs: dict[str, int] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)

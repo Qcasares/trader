@@ -157,3 +157,32 @@ def _metrics_with(sharpe: float, n: int):
         100 * np.cumprod(1 + returns), index=pd.bdate_range("2000-01-03", periods=n)
     )
     return compute_metrics(curve)
+
+
+def test_the_api_schema_declares_every_engine_metric() -> None:
+    """
+    Pydantic drops undeclared fields, so a metric the engine computes can be
+    silently absent from the API response.
+
+    That happened: ``periods_per_year`` was added to ``PerformanceMetrics``,
+    stored in the database, rendered by the UI — and stripped in between,
+    because ``BacktestMetrics`` never declared it. The UI's ``?? 252`` fallback
+    hid it, and every existing test checked specific keys rather than the whole
+    surface.
+
+    Comparing the two as sets means the next added metric fails here rather
+    than disappearing quietly.
+    """
+    pytest.importorskip("fastapi")
+    from src.api.schemas import BacktestMetrics
+
+    computed = set(compute_metrics(pd.Series(dtype=float)).to_dict())
+    declared = set(BacktestMetrics.model_fields)
+
+    # sharpe_is_significant is derived in to_dict() rather than being a field;
+    # it is declared on the schema, so it appears in both.
+    missing = computed - declared
+    assert not missing, (
+        f"the engine computes {sorted(missing)} and the API schema would drop "
+        "them from every response"
+    )
