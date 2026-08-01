@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
@@ -10,9 +11,33 @@ from src.api.deps import AppSettings, AuthedSession
 from src.api.schemas import LoginRequest, LoginResponse
 from src.api.security import SESSION_COOKIE, issue_session, verify_password
 from src.api.throttle import throttle
+from src.config import Settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+
+def _cookie_attrs(settings: Settings) -> dict[str, Any]:
+    """
+    The cookie attributes, resolved once and used by both set and delete.
+
+    A browser matches a deletion against name, path, domain, ``Secure`` and
+    ``SameSite``. Clearing a ``SameSite=None; Secure`` cookie with a bare
+    ``delete_cookie()`` therefore leaves it in place, and logout appears to
+    work while the session survives. Deriving both calls from one function is
+    what stops those drifting apart.
+
+    ``Secure`` is forced on whenever ``SameSite=None``, because browsers reject
+    that combination outright — a cookie that is never stored is a harder
+    failure than the cross-site one this is here to fix.
+    """
+    samesite = settings.session_cookie_samesite
+    return {
+        "httponly": True,
+        "samesite": samesite,
+        "secure": samesite == "none" or bool(settings.cors_origins),
+        "path": "/",
+    }
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -66,18 +91,14 @@ async def login(
         SESSION_COOKIE,
         token,
         max_age=settings.session_ttl_seconds,
-        httponly=True,
-        samesite="lax",
-        # Secure requires HTTPS; disabled only when no origins are configured,
-        # which is the local-development case.
-        secure=bool(settings.cors_origins),
+        **_cookie_attrs(settings),
     )
     return LoginResponse(token=token, expires_in=settings.session_ttl_seconds)
 
 
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, str]:
-    response.delete_cookie(SESSION_COOKIE)
+async def logout(response: Response, settings: AppSettings) -> dict[str, str]:
+    response.delete_cookie(SESSION_COOKIE, **_cookie_attrs(settings))
     return {"status": "logged out"}
 
 

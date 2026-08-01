@@ -73,6 +73,24 @@ class Settings:
     # Where the browser app is served from, for CORS.
     cors_origins: list[str] = field(default_factory=list)
 
+    #: ``SameSite`` on the session cookie.
+    #:
+    #: ``lax`` is right when the browser app and the API are the same *site* —
+    #: which includes different ports, so it covers local development
+    #: (``localhost:3000`` calling ``localhost:8000``) and a shared parent
+    #: domain such as ``app.example.com`` calling ``api.example.com``.
+    #:
+    #: It is wrong for the deployment this project actually targets. The
+    #: frontend goes to Vercel and the API to a separate host, so the request
+    #: is cross-*site*, and a browser will not attach a ``Lax`` cookie to a
+    #: cross-site fetch. The failure is quiet and misleading: ``/auth/login``
+    #: returns 200 and sets the cookie, and every authenticated call after it
+    #: gets 401, which reads as "the password did not work" when in fact it
+    #: did. ``none`` is the setting that permits it, and browsers reject
+    #: ``SameSite=None`` unless ``Secure`` is also set — so ``none`` implies
+    #: ``secure`` below rather than trusting an operator to set both.
+    session_cookie_samesite: str = "lax"
+
     session_ttl_seconds: int = 60 * 60 * 12
     worker_poll_seconds: int = 2
     worker_id: str = "worker-1"
@@ -116,6 +134,16 @@ def get_settings() -> Settings:
     origins_raw = os.environ.get("CORS_ORIGINS", "").strip()
     cors_origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
 
+    samesite = os.environ.get("SESSION_COOKIE_SAMESITE", "lax").strip().lower()
+    if samesite not in {"lax", "strict", "none"}:
+        # Rejected rather than defaulted. A typo silently falling back to `lax`
+        # would produce exactly the cross-site 401 this setting exists to fix,
+        # with the configuration appearing to say otherwise.
+        raise ConfigError(
+            f"SESSION_COOKIE_SAMESITE must be one of lax, strict, none "
+            f"(got {samesite!r})"
+        )
+
     live = _bool_env("LIVE_TRADING_ENABLED", False)
     allow_live = _bool_env("ALPACA_ALLOW_LIVE", False)
     if live:
@@ -142,6 +170,7 @@ def get_settings() -> Settings:
         admin_password_hash=admin_password_hash,
         live_trading_enabled=live,
         cors_origins=cors_origins,
+        session_cookie_samesite=samesite,
         session_ttl_seconds=_int_env("SESSION_TTL_SECONDS", 60 * 60 * 12),
         worker_poll_seconds=_int_env("WORKER_POLL_SECONDS", 2),
         worker_id=os.environ.get("WORKER_ID", "worker-1"),

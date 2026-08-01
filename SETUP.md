@@ -150,6 +150,9 @@ runs `next dev` rather than a production build.
 
 ### Without Docker
 
+Fewer moving parts if you already have Postgres, and it is the better choice if
+you intend to change code — you get the test suite and a REPL.
+
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
@@ -161,6 +164,19 @@ export DATABASE_URL=postgresql://localhost:5432/trader
 .venv/bin/python -m src.worker.main            # terminal 2
 cd web && npm install && npm run dev           # terminal 3
 ```
+
+On macOS with Homebrew Postgres, start it first and note that the superuser is
+your own account rather than `postgres`, so the DSN above needs no credentials:
+
+```bash
+brew services start postgresql@16     # match your installed version
+createdb trader                       # uses $(whoami) as owner
+```
+
+The API still needs `SESSION_SECRET` and `ADMIN_PASSWORD_HASH` in the
+environment. `.env` is read by docker-compose, not by a bare `uvicorn`, so
+either export them or source the file — and if you source it, see the quoting
+warning above.
 
 `requirements.txt` is the development set. `requirements-engine.txt` is what
 deploys — the same list minus test and research tooling.
