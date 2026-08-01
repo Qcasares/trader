@@ -8,8 +8,14 @@ model reads a decision that has **already been made and recorded**, and writes
 prose about it. It has no tools, no function calling, no broker access, and no
 route to an order — that last one enforced by
 ``tests/unit/test_import_boundaries.py``, which fails the build if anything
-under ``src/core``, ``src/strategies``, ``src/engine``, ``src/execution`` or
-``src/data`` imports an LLM client.
+under ``src/core``, ``src/strategies``, ``src/engine``, ``src/execution``,
+``src/data``, ``src/worker`` or ``src/api`` imports an LLM client, this
+package included.
+
+``src/worker`` matters most of that list and was the last to be covered: it is
+the only process that places an order. If commentary is ever wanted after a
+backtest completes, it belongs in a separate job rather than in the process
+holding the broker credentials.
 
 The consequence is worth stating plainly: a completely successful prompt
 injection against this module produces misleading prose in the ``commentary``

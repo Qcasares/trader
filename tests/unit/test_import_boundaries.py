@@ -12,6 +12,10 @@ So: no module that computes or executes an order may import an LLM client. Not
 "should not" — cannot, with a test that fails the build. A successful prompt
 injection can then produce, at most, misleading prose in the commentary table.
 
+"Computes or executes" includes the *processes*, not only the pure decision
+code. ``src/worker`` is the only thing in this system that places an order, so
+it is the package where an LLM import would matter most.
+
 This is an AST scan rather than a runtime import check so it catches the import
 even in a module that is never executed by the rest of the suite.
 """
@@ -28,8 +32,24 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 #: Packages that must never appear anywhere in the decision or execution path.
 FORBIDDEN_PREFIXES = ("anthropic", "openai", "transformers", "nltk", "torch")
 
-#: The decision and execution path.
-PROTECTED_PACKAGES = ("core", "strategies", "engine", "execution", "data")
+#: Pure computation that turns market data into orders.
+DECISION_PATH = ("core", "strategies", "engine", "execution", "data")
+
+#: The processes that can actually move money.
+#:
+#: These were missing, and their absence was the most important gap in this
+#: file: ``src/worker`` is, in CLAUDE.md's own words, "the only process that
+#: runs backtests or places orders", and it was the one package not guarded
+#: against importing an LLM client. ``src/api`` is what commands it.
+#:
+#: They are held to the same prohibition as the decision path even though,
+#: unlike it, they legitimately perform I/O. If commentary generation is ever
+#: wanted after a backtest it belongs in its own job or process, not inside
+#: the module that submits orders — and this test is where that decision gets
+#: made deliberately rather than by accident.
+ORDER_PROCESSES = ("worker", "api")
+
+PROTECTED_PACKAGES = DECISION_PATH + ORDER_PROCESSES
 
 
 def _module_files(package: str) -> list[Path]:
