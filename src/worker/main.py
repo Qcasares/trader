@@ -29,10 +29,17 @@ from typing import Any
 import asyncpg
 
 from src.config import get_settings
+from src.core.clock import RealClock
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
 from src.worker.backtest_job import run_backtest_job
 from src.worker.live_job import run_live_decision, run_submit_orders
+from src.worker.maintenance_jobs import (
+    run_eod_marks,
+    run_ingest_bars,
+    run_reconcile,
+)
+from src.worker.scheduling import plan_and_enqueue
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +56,21 @@ HANDLERS: dict[str, JobHandler] = {
     "backtest": run_backtest_job,
     "live_decision": run_live_decision,
     "submit_orders": run_submit_orders,
+    # These three were planned by src/engine/scheduler.py and handled by
+    # nothing, so they failed with "no handler". ingest_bars was the one that
+    # mattered: the live decision reads daily_bars, and without an ingest the
+    # table stayed empty and the live loop could never run.
+    "ingest_bars": run_ingest_bars,
+    "eod_marks": run_eod_marks,
+    "reconcile": run_reconcile,
 }
+
+#: The scheduler is only useful if something runs it. Planning happens on
+#: startup and once per sweep; the dedupe key makes repetition free, which is
+#: what lets a restart re-plan without a misfire storm.
+SCHEDULED_KINDS = frozenset(
+    {"reconcile", "submit_orders", "live_decision", "ingest_bars", "eod_marks"}
+)
 
 
 class Worker:
@@ -103,6 +124,7 @@ class Worker:
 
     async def run(self) -> None:
         assert self._pool is not None, "call start() first"
+        await self._plan_today()
         sweeper = asyncio.create_task(self._sweep_loop())
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         try:
@@ -177,8 +199,35 @@ class Worker:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Could not extend lease for %s: %s", job_id, exc)
 
+    async def _plan_today(self) -> None:
+        """
+        Enqueue the current session's jobs.
+
+        Called on startup and once per sweep rather than by a wall-clock timer.
+        Re-planning is free — every scheduled job carries a
+        ``{kind}:{session}`` dedupe key and the unique index refuses the second
+        insert — so the plan survives a restart without a durable scheduler and
+        without the misfire storm one would produce.
+
+        A missed rebalance is otherwise a silent failure: monthly cadence means
+        a worker outage on the first trading day costs a whole month, and
+        nothing anywhere would report it. Re-planning on every sweep means the
+        job reappears as soon as the worker does, and the strategy's own
+        ``should_rebalance`` — which derives its schedule from the sessions it
+        is actually shown — rebalances late rather than skipping.
+        """
+        assert self._pool is not None
+        session = RealClock().today()
+        try:
+            async with self._pool.acquire() as conn:
+                result = await plan_and_enqueue(conn, session)
+            if result.get("enqueued"):
+                self._wake.set()
+        except Exception as exc:  # noqa: BLE001 - never fatal to the worker
+            logger.warning("Could not plan %s: %s", session, exc)
+
     async def _sweep_loop(self) -> None:
-        """Periodically return jobs abandoned by dead workers."""
+        """Periodically return abandoned jobs, and keep the day's plan current."""
         assert self._pool is not None
         while not self._stopping.is_set():
             await asyncio.sleep(SWEEP_INTERVAL.total_seconds())
@@ -188,6 +237,7 @@ class Worker:
                         self._wake.set()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Sweep failed: %s", exc)
+            await self._plan_today()
 
     async def _heartbeat_loop(self) -> None:
         """

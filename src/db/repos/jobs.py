@@ -71,13 +71,23 @@ async def enqueue(
     priority: int = 0,
     max_attempts: int = 3,
     scheduled_for: datetime | None = None,
-) -> uuid.UUID:
-    """Add a job. Returns its id."""
+    dedupe_key: str | None = None,
+) -> uuid.UUID | None:
+    """
+    Add a job. Returns its id, or ``None`` when ``dedupe_key`` already exists.
+
+    A ``dedupe_key`` makes the insert idempotent, which is what lets the
+    session planner run on every worker startup without enqueuing the day's
+    work twice. Ad-hoc jobs pass no key and may repeat freely.
+    """
     job_id = uuid.uuid4()
-    await conn.execute(
+    inserted = await conn.fetchval(
         """
-        INSERT INTO jobs (id, kind, payload, priority, max_attempts, scheduled_for)
-        VALUES ($1, $2, $3::jsonb, $4, $5, COALESCE($6, NOW()))
+        INSERT INTO jobs (id, kind, payload, priority, max_attempts,
+                          scheduled_for, dedupe_key)
+        VALUES ($1, $2, $3::jsonb, $4, $5, COALESCE($6, NOW()), $7)
+        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
+        RETURNING id
         """,
         job_id,
         kind,
@@ -85,7 +95,10 @@ async def enqueue(
         priority,
         max_attempts,
         scheduled_for,
+        dedupe_key,
     )
+    if inserted is None:
+        return None
     # Wake an idle worker immediately rather than waiting for its poll tick.
     await conn.execute("SELECT pg_notify('jobs_new', $1)", kind)
     return job_id

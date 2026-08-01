@@ -163,7 +163,7 @@ than hide in a wall of dots.
 | `src/data/` | `PriceSource` protocol, yfinance, synthetic generator |
 | `src/db/` | asyncpg pool, migrations, repositories |
 | `src/api/` | FastAPI control plane |
-| `src/worker/` | The only process that runs backtests or places orders |
+| `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
 | `web/` | Next.js frontend |
 
@@ -180,6 +180,8 @@ Each is enforced by a test, not by discipline:
 | Backtest/live parity | `tests/unit/test_parity.py` (synthetic) and `tests/unit/test_real_data.py` (observed prices) |
 | The risk gate binds live, not just in backtests | `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` asserts against the shipped job, not the driver it ought to use |
 | The halting limits can actually halt | `Driver` populates `RiskState`'s equity fields and seeds them from `daily_marks` on the live path; `tests/unit/test_real_data.py` and `TestMarksFeedTheRiskGate` drive both directions |
+| Every scheduled job kind has a handler | `test_scheduling.py::test_every_scheduled_kind_has_a_handler` compares the planner's output against the worker's dispatch table as sets |
+| Re-planning a session is free | scheduled jobs carry `dedupe_key = "{kind}:{session}"` under a partial unique index, so a worker restart re-plans without duplicating |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py`, covering `src/worker` and `src/api` as well as the decision path |
