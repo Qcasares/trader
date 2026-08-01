@@ -131,6 +131,9 @@ TEST_DATABASE_URL=postgresql://localhost/trader_test \
     pytest tests/ -q                                     # includes integration
 pytest tests/unit/test_parity.py -q                      # the important one
 ruff check src/ tests/
+
+# Browser journey — needs the whole stack running, so it is not in CI
+.venv/bin/python tests/e2e/test_browser_journey.py
 ```
 
 Both commands above lint and run everything. The only `ruff` exclusion left is
