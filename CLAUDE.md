@@ -207,6 +207,11 @@ Each is enforced by a test, not by discipline:
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
 | Brute force costs more than a shell loop | `src/api/throttle.py` backs off exponentially per source after 5 failed logins; keyed by source, not global, so an attacker cannot lock the operator out of the kill switch |
 | No LLM in the order path | `tests/unit/test_import_boundaries.py`, covering `src/worker` and `src/api` as well as the decision path |
+| A halted batch is not recorded as sent | `run_submit_orders` writes `partially_submitted` / `blocked_by_kill_switch` / `halted_by_venue`. It is also the retry filter (`status='planned'`), so recording a halted batch as submitted retired the un-sent remainder permanently |
+| A dead worker looks dead | The API derives `stale` from the heartbeat's age against the *database* clock; `worker_heartbeats.status` is only ever written `'alive'` and cannot carry liveness. `test_worker_liveness.py` keeps the threshold a multiple of the write interval |
+| An unready instance is taken out of rotation | `/api/v1/ready` answers **503**, not 200-with-a-false-body. `/health` stays 200 without a database, so a dependency outage cannot cause a restart loop |
+| A mistyped risk limit is refused, not stored | `RiskLimitsRequest` forbids unknown keys, and `test_risk_limits_contract.py` parses the worker's own source to prove the settable set equals the enforced set |
+| An impossible backtest window is a 422 | `calendar.bounds()` is read from the calendar, so it tracks the `exchange_calendars` release rather than a literal that goes stale |
 
 ## Adding a strategy
 
