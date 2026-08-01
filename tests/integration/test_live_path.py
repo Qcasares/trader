@@ -768,6 +768,13 @@ class TestMarksFeedTheRiskGate:
                     "DELETE FROM decisions WHERE deployment_id=$1",
                     seeded["deployment_id"],
                 )
+                # Clear the schedule: this test is about the drawdown limit,
+                # and a last_rebalance left by an earlier test would make the
+                # session decline before the gate is ever consulted.
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = NULL WHERE id = $1",
+                    seeded["deployment_id"],
+                )
                 # A prior session at 10x the current book: a ~90% drawdown.
                 await marks.record_mark(
                     conn,
@@ -839,10 +846,27 @@ class TestDecisionIdempotency:
                 # Via the real loader: it decodes the JSONB columns, and a
                 # hand-built row would be testing a different shape than the
                 # worker actually receives.
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = NULL WHERE id = $1",
+                    seeded["deployment_id"],
+                )
                 (deployment,) = await _enabled_deployments(
                     conn, [str(seeded["deployment_id"])]
                 )
                 first = await _decide_for(conn, deployment, session, factory)
+
+                # Simulate the recovery case this clause exists for: the
+                # decision landed but the schedule update did not, so a retry
+                # gets past should_rebalance and reaches the insert. Without
+                # resetting it the retry would decline at the schedule instead,
+                # which is correct behaviour but tests a different thing.
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = NULL WHERE id = $1",
+                    seeded["deployment_id"],
+                )
+                (deployment,) = await _enabled_deployments(
+                    conn, [str(seeded["deployment_id"])]
+                )
                 second = await _decide_for(conn, deployment, session, factory)
                 rows = await conn.fetchval(
                     "SELECT COUNT(*) FROM decisions WHERE deployment_id=$1 "
@@ -864,3 +888,126 @@ class TestDecisionIdempotency:
         # The id handed back on the retry must resolve to the row that exists,
         # not to the throwaway UUID the retry generated.
         assert second == stored
+
+
+class TestTheRebalanceScheduleSurvivesRestarts:
+    """
+    A monthly strategy must rebalance monthly *live*, not daily.
+
+    ``Strategy.should_rebalance(session, last_rebalance)`` returns True when
+    ``last_rebalance`` is None — that is how a backtest's first session gets to
+    trade. A backtest then keeps the value in memory while it walks.
+
+    The live path read it from ``deployment["last_rebalance"]``, and that column
+    did not exist. Every job therefore saw None, ``should_rebalance`` returned
+    True on every session, and a monthly strategy rebalanced daily: roughly 21x
+    the intended turnover and 21x the cost, against a backtest that rebalanced
+    twelve times a year.
+
+    Nothing caught it. The parity test walks one process and accumulates the
+    schedule in memory, exactly as the backtest does, so both of its paths
+    agreed with each other and neither matched production.
+    """
+
+    def test_a_second_session_in_the_same_month_does_not_rebalance(
+        self, dsn, seeded
+    ) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = NULL WHERE id = $1",
+                    seeded["deployment_id"],
+                )
+                june = [
+                    s for s in seeded["sessions"]
+                    if s.year == 2021 and s.month == 6
+                ][:5]
+
+                made = []
+                for day in june:
+                    (deployment,) = await _enabled_deployments(
+                        conn, [str(seeded["deployment_id"])]
+                    )
+                    result = await _decide_for(conn, deployment, day, factory)
+                    made.append((day, result is not None))
+
+                stored = await conn.fetchval(
+                    "SELECT last_rebalance FROM deployments WHERE id=$1",
+                    seeded["deployment_id"],
+                )
+                rows = await conn.fetchval(
+                    "SELECT COUNT(*) FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                return june, made, stored, rows
+            finally:
+                await conn.close()
+
+        june, made, stored, rows = asyncio.run(_with_venue(check))
+
+        # The first session of the month decides; the next four must not.
+        assert made[0][1] is True, "the first session of the month did not decide"
+        assert [m[1] for m in made[1:]] == [False, False, False, False], (
+            f"a monthly strategy decided on {sum(1 for m in made if m[1])} of "
+            f"{len(made)} consecutive sessions"
+        )
+        assert rows == 1, "more than one decision was written for one month"
+        # And the schedule is persisted, not merely held in the process that
+        # happened to run first.
+        assert stored == june[0]
+
+    def test_a_fresh_process_reads_the_schedule_back(self, dsn, seeded) -> None:
+        """
+        The property that matters: no shared memory between jobs.
+
+        Each ``_decide_for`` call above built its own ``Driver``. This asserts
+        the persisted value is what stops the second one, by planting a
+        last_rebalance directly and requiring the next session to decline.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute(
+                    "DELETE FROM decisions WHERE deployment_id=$1",
+                    seeded["deployment_id"],
+                )
+                june = [
+                    s for s in seeded["sessions"]
+                    if s.year == 2021 and s.month == 6
+                ]
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = $2 WHERE id = $1",
+                    seeded["deployment_id"], june[0],
+                )
+                (deployment,) = await _enabled_deployments(
+                    conn, [str(seeded["deployment_id"])]
+                )
+                same_month = await _decide_for(conn, deployment, june[3], factory)
+
+                # A new month must be allowed through, or the schedule would
+                # halt the strategy permanently rather than pace it.
+                may = [
+                    s for s in seeded["sessions"]
+                    if s.year == 2021 and s.month == 5
+                ]
+                await conn.execute(
+                    "UPDATE deployments SET last_rebalance = $2 WHERE id = $1",
+                    seeded["deployment_id"], may[0],
+                )
+                (deployment,) = await _enabled_deployments(
+                    conn, [str(seeded["deployment_id"])]
+                )
+                next_month = await _decide_for(conn, deployment, june[0], factory)
+                return same_month, next_month
+            finally:
+                await conn.close()
+
+        same_month, next_month = asyncio.run(_with_venue(check))
+        assert same_month is None, "rebalanced twice in one month"
+        assert next_month is not None, "a new month was refused"

@@ -196,6 +196,23 @@ async def _decide_for(
         )
         return existing
 
+    # Advance the schedule. Without this the column stays NULL,
+    # ``should_rebalance`` sees "never rebalanced" on every job and returns
+    # True every time — so a monthly strategy rebalances *daily* live while its
+    # backtest rebalances twelve times a year. Not a disabled limit: a
+    # different strategy from the one that was validated.
+    #
+    # Written after the decision row, in the same transaction as nothing else:
+    # if this update fails the decision still stands, and the next job recomputes
+    # an identical one and is refused by the decision table's own conflict
+    # clause. Losing the schedule update is recoverable; losing the decision is
+    # not.
+    await conn.execute(
+        "UPDATE deployments SET last_rebalance = $2 WHERE id = $1",
+        deployment["id"],
+        session,
+    )
+
     logger.info(
         "%s: decided %d order(s) for %s — %s",
         session,
