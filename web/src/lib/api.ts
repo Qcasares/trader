@@ -24,17 +24,44 @@ export class ApiError extends Error {
   get isUnauthorized(): boolean {
     return this.status === 401;
   }
+
+  /**
+   * The request never reached the API. Status 0, because there was no
+   * response to take one from.
+   */
+  get isUnreachable(): boolean {
+    return this.status === 0;
+  }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}${path}`, {
+      ...init,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch {
+    // `fetch` rejects with a bare `TypeError: Failed to fetch` for every
+    // transport-level failure, and the browser deliberately withholds the
+    // reason — a page must not be able to probe what it cannot reach.
+    //
+    // That message is the single most likely thing an operator sees after a
+    // deploy, and on its own it is useless. The API host being down and CORS
+    // rejecting the origin are indistinguishable from here, so name both,
+    // along with the URL actually being called: "Failed to fetch" sends people
+    // looking at their password, and the address bar is where the answer is.
+    throw new ApiError(
+      0,
+      `Cannot reach the API at ${BASE}. Either it is not running, or its ` +
+        `CORS_ORIGINS does not include this page's origin ` +
+        `(${typeof window === "undefined" ? "unknown" : window.location.origin}).`,
+    );
+  }
 
   if (!response.ok) {
     let detail = response.statusText;

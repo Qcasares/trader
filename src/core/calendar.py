@@ -38,6 +38,26 @@ def nyse(start: str = CALENDAR_START) -> xcals.ExchangeCalendar:
     return xcals.get_calendar(EXCHANGE, start=start)
 
 
+def bounds(start: str = CALENDAR_START) -> tuple[date, date]:
+    """
+    The first and last session the calendar can answer for.
+
+    Exists so callers can refuse an out-of-range request *before* queueing work
+    on it. The API used to accept any pair of dates pydantic would parse, and
+    the failure surfaced in the worker as an ``OverflowError`` from pandas (a
+    year-1000 start cannot be a nanosecond timestamp) or a ``DateOutOfBounds``
+    from the calendar — three retries later, under an error message that never
+    mentions dates.
+
+    The upper bound is not ours: ``exchange_calendars`` publishes holidays a
+    couple of years ahead and stops. It therefore moves when the library is
+    upgraded, which is exactly why it is read from the calendar here rather
+    than written down as a literal somewhere it would quietly go stale.
+    """
+    calendar = nyse(start)
+    return calendar.first_session.date(), calendar.last_session.date()
+
+
 def _ts(value: date | datetime | str | pd.Timestamp) -> pd.Timestamp:
     ts = pd.Timestamp(value)
     if ts.tzinfo is not None:

@@ -27,6 +27,7 @@ from src.api.schemas import (
     CreateBacktestResponse,
     EquityPoint,
 )
+from src.core.calendar import bounds as calendar_bounds
 from src.db.repos import backtests as repo
 from src.db.repos import jobs as job_repo
 from src.strategies import build_strategy, get_strategy_class, list_strategies
@@ -68,6 +69,24 @@ async def create(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"end ({end}) must be after start ({body.start})",
+        )
+
+    # Refuse a window the calendar cannot answer for, here rather than in the
+    # worker. Pydantic will happily parse `0001-01-01`, and the engine then
+    # dies on it three retries deep with an OverflowError about nanosecond
+    # timestamps — an error that says nothing about the thing the operator got
+    # wrong. The bounds are read from the calendar, so they track the
+    # `exchange_calendars` release rather than a literal that goes stale.
+    first, last = calendar_bounds()
+    if body.start < first or end > last:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"requested window {body.start}..{end} is outside the trading "
+                f"calendar, which covers {first}..{last}. The upper bound is "
+                "how far ahead exchange_calendars publishes sessions, not a "
+                "limit of this system."
+            ),
         )
 
     request = repo.BacktestRequest(

@@ -266,6 +266,17 @@ tbody tr:hover { background: var(--panel-2); }
 .pill-bad  { background: color-mix(in srgb, var(--bad) 20%, transparent);  color: var(--bad); }
 .pill-mute { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
 
+/* Sits among the nav links, so it reads as one rather than as a control. */
+.linklike {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-family: var(--sans);
+}
+.linklike:hover:not(:disabled) { color: var(--text); border: none; }
+
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); }
 .error { color: var(--bad); }
