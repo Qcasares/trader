@@ -52,9 +52,11 @@ services:
       # Interpolated from .env — this file holds no literal value.
       DATABASE_URL: postgresql://trader:${POSTGRES_PASSWORD}@db:5432/trader
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      # Outer gate for real money. Leave false. The database kill switch is the
-      # inner gate; both must permit trading before a live order can be placed.
+      # Two of the three independent gates on real money; the third is the
+      # deployment's own mode. The database kill switch is a fourth and fails
+      # closed. Leave both false.
       LIVE_TRADING_ENABLED: "false"
+      ALPACA_ALLOW_LIVE: "false"
     ports:
       - "8000:8000"
     depends_on:
@@ -69,6 +71,7 @@ services:
     environment:
       DATABASE_URL: postgresql://trader:${POSTGRES_PASSWORD}@db:5432/trader
       LIVE_TRADING_ENABLED: "false"
+      ALPACA_ALLOW_LIVE: "false"
       WORKER_ID: worker-1
     depends_on:
       db:

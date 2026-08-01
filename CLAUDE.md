@@ -37,8 +37,14 @@ predicting the live system, which is worse than the bug being fixed.
 ## Safety rules
 
 1. **Paper only.** Reaching a live Alpaca endpoint requires *three* independent
-   conditions: `mode=live`, `LIVE_TRADING_ENABLED` in the environment, and an
-   explicit `allow_live=True`. Do not weaken any of them.
+   conditions: the deployment's `mode=live`, `LIVE_TRADING_ENABLED` in the
+   environment, and `ALPACA_ALLOW_LIVE` in the environment. Do not weaken any
+   of them — and note that **deriving one from another is a weakening**.
+   `_alpaca_from_env` once passed
+   `allow_live=(mode is LIVE and live_trading_enabled)`, which reduced three
+   conditions to two while every test still passed, because the tests drove the
+   `AlpacaBroker` constructor rather than the factory that builds it.
+   `TestTheShippedFactoryHonoursAllThreeGates` now drives the factory.
 2. **The kill switch fails closed.** `flags.trading_enabled()` returns `False`
    on a missing row, an unreadable value, or any database error. A control that
    defaults to "go" when it cannot determine the answer is not a control.

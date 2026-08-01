@@ -323,3 +323,88 @@ class TestClockCrossCheck:
             return await broker.get_clock()
 
         assert run(check, market_open=False)["is_open"] is False
+
+
+class TestTheShippedFactoryHonoursAllThreeGates:
+    """
+    The gates must be independent *where the broker is actually built*.
+
+    ``TestLiveGuard`` above proves the constructor rejects a missing gate. It
+    could not see that ``_alpaca_from_env`` — the only thing in the system that
+    constructs a real ``AlpacaBroker`` — passed
+    ``allow_live=(mode is LIVE and live_trading_enabled)``. Derived from the
+    second gate, the third one added nothing, and a stray
+    LIVE_TRADING_ENABLED=true was sufficient on its own: exactly the scenario
+    ``test_env_gate_alone_is_insufficient`` claims to rule out.
+
+    So these drive the factory, with the environment set the way an operator
+    would set it.
+    """
+
+    @staticmethod
+    def _env(monkeypatch, *, live: str | None, allow: str | None) -> None:
+        from src.config import get_settings
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/x")
+        monkeypatch.setenv("SESSION_SECRET", "s" * 48)
+        monkeypatch.setenv("ADMIN_PASSWORD_HASH", "$2b$12$" + "x" * 53)
+        monkeypatch.setenv("ALPACA_KEY_ID", KEY_ID)
+        monkeypatch.setenv("ALPACA_SECRET_KEY", SECRET_KEY)
+        for name, value in (
+            ("LIVE_TRADING_ENABLED", live),
+            ("ALPACA_ALLOW_LIVE", allow),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        get_settings.cache_clear()
+
+    def _build(self, mode: str):
+        from src.worker.live_job import _alpaca_from_env
+
+        return _alpaca_from_env({"mode": mode})
+
+    def test_env_gate_alone_does_not_arm_live(self, monkeypatch) -> None:
+        """The regression. This passed the constructor test and shipped anyway."""
+        self._env(monkeypatch, live="true", allow=None)
+        with pytest.raises(TradingHaltedError, match="allow_live"):
+            self._build("live")
+
+    def test_allow_flag_alone_does_not_arm_live(self, monkeypatch) -> None:
+        self._env(monkeypatch, live=None, allow="true")
+        with pytest.raises(TradingHaltedError, match="LIVE_TRADING_ENABLED"):
+            self._build("live")
+
+    def test_neither_flag_does_not_arm_live(self, monkeypatch) -> None:
+        self._env(monkeypatch, live=None, allow=None)
+        with pytest.raises(TradingHaltedError):
+            self._build("live")
+
+    def test_both_flags_together_arm_live(self, monkeypatch) -> None:
+        """
+        Two deliberate acts, and only then. Asserted so the gates cannot be
+        quietly tightened into unusability either — a safety control nobody can
+        satisfy gets removed by the next person in a hurry.
+        """
+        self._env(monkeypatch, live="true", allow="true")
+        broker = self._build("live")
+        assert broker.mode is TradingMode.LIVE
+
+    def test_paper_is_unaffected_by_either_flag(self, monkeypatch) -> None:
+        """Paper must never require the live gates."""
+        for live, allow in (("true", "true"), (None, None), ("true", None)):
+            self._env(monkeypatch, live=live, allow=allow)
+            broker = self._build("paper")
+            assert broker.mode is TradingMode.PAPER
+
+    def test_paper_deployment_never_reaches_the_live_endpoint(
+        self, monkeypatch
+    ) -> None:
+        """
+        Even with both gates armed, a paper deployment stays on the paper host.
+        The mode comes from the deployment row, not from the environment.
+        """
+        self._env(monkeypatch, live="true", allow="true")
+        broker = self._build("paper")
+        assert "paper-api" in broker._base

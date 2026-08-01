@@ -9,6 +9,10 @@ Two safety properties are enforced here rather than left to discipline:
   gates. The inner gate is the database kill switch. Flipping the DB flag needs
   only API access; flipping this one needs a redeploy. Both must permit trading
   before a live order can leave the building.
+- ``alpaca_allow_live`` is a third, independent flag. It exists because a
+  derived gate is not a gate: deriving it from ``live_trading_enabled`` — as
+  the broker factory once did — reduced three documented conditions to two.
+  Each must now be set by a separate deliberate act.
 - ``session_secret`` has no default. A signing key with a fallback value is a
   signing key an attacker already knows, so the app refuses to start without
   one rather than quietly using a placeholder.
@@ -55,6 +59,16 @@ class Settings:
 
     # Outer gate for real money. See module docstring.
     live_trading_enabled: bool = False
+
+    #: The third, independent gate. ``LIVE_TRADING_ENABLED`` says the
+    #: *deployment* may reach a live venue at all; this says a given process is
+    #: authorised to place the order. They are separate variables on purpose:
+    #: ``_alpaca_from_env`` used to derive ``allow_live`` from
+    #: ``live_trading_enabled``, which collapsed the documented three
+    #: independent conditions into two and made a stray LIVE_TRADING_ENABLED=true
+    #: sufficient on its own — the exact scenario
+    #: ``test_alpaca_broker.py`` claims to protect against.
+    alpaca_allow_live: bool = False
 
     # Where the browser app is served from, for CORS.
     cors_origins: list[str] = field(default_factory=list)
@@ -103,10 +117,23 @@ def get_settings() -> Settings:
     cors_origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
 
     live = _bool_env("LIVE_TRADING_ENABLED", False)
+    allow_live = _bool_env("ALPACA_ALLOW_LIVE", False)
     if live:
         logger.warning(
             "LIVE_TRADING_ENABLED is set. Real orders become possible once the "
             "database kill switch also permits trading."
+        )
+    if live and allow_live:
+        logger.warning(
+            "LIVE_TRADING_ENABLED *and* ALPACA_ALLOW_LIVE are both set. A "
+            "deployment in live mode will place REAL orders."
+        )
+    if allow_live and not live:
+        # Harmless on its own, and worth saying so: an operator who set only
+        # this one may believe live trading is armed when it is not.
+        logger.info(
+            "ALPACA_ALLOW_LIVE is set but LIVE_TRADING_ENABLED is not; live "
+            "trading remains disabled."
         )
 
     return Settings(
@@ -121,4 +148,5 @@ def get_settings() -> Settings:
         alpaca_key_id=os.environ.get("ALPACA_KEY_ID", ""),
         alpaca_secret_key=os.environ.get("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_bool_env("ALPACA_PAPER", True),
+        alpaca_allow_live=allow_live,
     )

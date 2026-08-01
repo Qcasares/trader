@@ -229,7 +229,17 @@ class TestSystemControl:
 
 
 class TestKillSwitchFailsClosed:
-    def test_unreadable_flag_means_disabled(self) -> None:
+    """
+    Three failure modes are claimed, so three are tested.
+
+    CLAUDE.md says ``trading_enabled`` returns ``False`` on "a missing row, an
+    unreadable value, or any database error". Only the third had a test. A
+    fail-closed control that has never been observed failing closed is a claim
+    rather than a control, and the missing-row case is the one that actually
+    happens — a fresh database before migrations, or a row deleted by hand.
+    """
+
+    def test_database_error_means_disabled(self) -> None:
         """
         A control that defaults to "go" when it cannot determine the answer is
         not a safety control.
@@ -241,3 +251,61 @@ class TestKillSwitchFailsClosed:
                 raise asyncpg.PostgresError("connection lost")
 
         assert asyncio.run(trading_enabled(BrokenConn())) is False
+
+    def test_missing_row_means_disabled(self, client) -> None:
+        """The state a fresh or hand-edited database is actually in."""
+        from src.db.repos.flags import TRADING_ENABLED, set_flag, trading_enabled
+
+        async def check():
+            conn = await asyncpg.connect(TEST_DSN)
+            try:
+                await conn.execute(
+                    "DELETE FROM system_flags WHERE key=$1", TRADING_ENABLED
+                )
+                absent = await trading_enabled(conn)
+                # Restore, and confirm the fixture can still say yes — a
+                # function that always returns False would pass the assertion
+                # above while disabling the system permanently.
+                await set_flag(conn, TRADING_ENABLED, True, "test")
+                restored = await trading_enabled(conn)
+                return absent, restored
+            finally:
+                await conn.close()
+
+        absent, restored = asyncio.run(check())
+        assert absent is False
+        assert restored is True
+
+    def test_a_non_boolean_value_means_disabled(self, client) -> None:
+        """
+        ``value is True``, not ``bool(value)``.
+
+        The column is JSONB, so Postgres will not hold malformed JSON — but it
+        will happily hold ``"true"``, ``1`` or ``null``. Each is a value
+        somebody could set by hand believing it enables trading, and each must
+        read as disabled rather than being coerced into permission.
+        """
+        from src.db.repos.flags import TRADING_ENABLED, set_flag, trading_enabled
+
+        async def check():
+            conn = await asyncpg.connect(TEST_DSN)
+            results = {}
+            try:
+                for label, value in (
+                    ("string-true", "true"),
+                    ("integer-one", 1),
+                    ("null", None),
+                    ("empty-object", {}),
+                ):
+                    await set_flag(conn, TRADING_ENABLED, value, "test")
+                    results[label] = await trading_enabled(conn)
+                await set_flag(conn, TRADING_ENABLED, True, "test")
+                results["real-true"] = await trading_enabled(conn)
+                return results
+            finally:
+                await conn.close()
+
+        results = asyncio.run(check())
+        for label in ("string-true", "integer-one", "null", "empty-object"):
+            assert results[label] is False, f"{label} was treated as permission"
+        assert results["real-true"] is True

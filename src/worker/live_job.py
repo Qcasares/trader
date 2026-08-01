@@ -575,7 +575,11 @@ def _alpaca_from_env(deployment: dict[str, Any]) -> BrokerAdapter:
         settings.alpaca_secret_key,
         mode=mode,
         live_enabled=settings.live_trading_enabled,
-        allow_live=mode is TradingMode.LIVE and settings.live_trading_enabled,
+        # Read from its own environment variable, never derived from
+        # ``live_trading_enabled``. Deriving it made the third gate ceremonial:
+        # a stray LIVE_TRADING_ENABLED=true was then sufficient on its own,
+        # which is precisely what the three-gate design exists to prevent.
+        allow_live=settings.alpaca_allow_live,
     )
 
 
