@@ -126,6 +126,40 @@ def require_api_secrets(settings: Settings) -> None:
         )
 
 
+def require_database_url(settings: Settings) -> None:
+    """
+    Refuse to run without a database. For processes that cannot work without one.
+
+    The **worker** calls this and exits: it exists solely to claim jobs and
+    write results, so starting without a database means running a loop that can
+    never do anything, quietly, forever. Failing at boot is the honest outcome.
+
+    The **API** deliberately does not. It used to — ``DATABASE_URL`` was
+    required inside :func:`get_settings`, which runs at import — and on a
+    serverless host that is the wrong trade. Environment variables are
+    configured *after* the first deploy there, so the first deploy of any
+    correctly-built application crashed at import, and every route returned an
+    opaque ``FUNCTION_INVOCATION_FAILED`` with the real reason visible only in
+    a runtime log. Including ``/health``, whose entire purpose is to answer
+    when the database cannot.
+
+    Now the app builds, ``/health`` answers 200, and ``/ready`` answers 503 —
+    which is exactly the split those two endpoints already document, and it
+    makes a half-configured deployment say what it is missing instead of
+    looking broken.
+
+    No security property moves. ``require_api_secrets`` still refuses to build
+    an application without a signing key, because an empty secret is a working
+    key that everybody knows. A missing ``DATABASE_URL`` cannot make anything
+    insecure; it can only make it useless, and being loudly useless is fine.
+    """
+    if not settings.database_url:
+        raise ConfigError(
+            "DATABASE_URL is required. Example: "
+            "postgresql://user:pass@localhost:5432/trader"
+        )
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -237,12 +271,9 @@ class Settings:
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load and validate settings once per process."""
+    # Read, not required. See `require_database_url` for why the API tolerates
+    # its absence and the worker does not.
     database_url = normalise_dsn(os.environ.get("DATABASE_URL", "").strip())
-    if not database_url:
-        raise ConfigError(
-            "DATABASE_URL is required. Example: "
-            "postgresql://user:pass@localhost:5432/trader"
-        )
 
     # Read, not validated. Validation happens in `require_api_secrets`, called
     # by `create_app`. See that function for why.

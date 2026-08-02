@@ -28,7 +28,7 @@ from typing import Any
 
 import asyncpg
 
-from src.config import get_settings
+from src.config import get_settings, require_database_url
 from src.core.clock import RealClock
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
@@ -294,6 +294,11 @@ class Worker:
 
 async def async_main() -> int:
     settings = get_settings()
+    # The worker exists solely to claim jobs and write results. Starting it
+    # without a database means running a loop that can never do anything, and
+    # doing so silently — which is the failure mode this codebase treats as
+    # worse than crashing.
+    require_database_url(settings)
     worker_id = settings.worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
     worker = Worker(settings.database_url, worker_id, settings.worker_poll_seconds)
     await worker.start()
