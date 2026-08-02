@@ -129,6 +129,26 @@ class Settings:
     worker_poll_seconds: int = 2
     worker_id: str = "worker-1"
 
+    #: Allow the API process to run queued **research** jobs itself.
+    #:
+    #: Off by default, and it must stay that way for any long-lived
+    #: deployment. The API refusing to run a backtest inline is not fastidious:
+    #: a backtest is CPU-bound pandas work, and running one in the request
+    #: handler stalls every other request on that event loop — including the
+    #: one an operator is using to hit the kill switch.
+    #:
+    #: On a serverless host there is no shared event loop to stall. Each
+    #: invocation is its own process, and there is nowhere to put a long-lived
+    #: worker, so without this a queued backtest is never executed by anything.
+    #: That is the only situation in which this should be true.
+    #:
+    #: It never covers trading jobs. See ``DRAINABLE_KINDS``.
+    serverless_drain_enabled: bool = False
+
+    #: Shared secret allowing a scheduler (Vercel Cron) to call the drain
+    #: endpoint without an operator session. Empty disables that route in.
+    cron_secret: str = ""
+
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
@@ -196,6 +216,8 @@ def get_settings() -> Settings:
         session_ttl_seconds=_int_env("SESSION_TTL_SECONDS", 60 * 60 * 12),
         worker_poll_seconds=_int_env("WORKER_POLL_SECONDS", 2),
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
+        serverless_drain_enabled=_bool_env("SERVERLESS_DRAIN_ENABLED", False),
+        cron_secret=os.environ.get("CRON_SECRET", "").strip(),
         alpaca_key_id=os.environ.get("ALPACA_KEY_ID", ""),
         alpaca_secret_key=os.environ.get("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_bool_env("ALPACA_PAPER", True),

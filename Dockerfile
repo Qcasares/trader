@@ -8,8 +8,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libpq-dev \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-engine.txt .
-RUN pip install --no-cache-dir -r requirements-engine.txt \
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
  && apt-get purge -y gcc && apt-get autoremove -y
 
 COPY src/ ./src/
