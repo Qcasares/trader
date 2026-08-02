@@ -1,21 +1,29 @@
 [project]
-name = "crypto-trading-bot"
+name = "trader"
 version = "0.1.0"
-description = "Multi-agent crypto trading bot powered by bankr.bot and Claude"
+description = "Systematic trading platform: backtestable strategies with a research lab and a live control plane"
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
-    "unit: Unit tests (no external API calls)",
-    "integration: Integration tests (may call external APIs)",
-    "slow: Tests that take >10s (FinBERT loading, etc.)",
+    "unit: Unit tests (no database, no network)",
 ]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+
+# The one legacy file kept on purpose: src/bankr_client.py is a complete,
+# working client for the bankr.bot API, retained as the reference for a future
+# BankrBroker adapter. It predates this repository's conventions and is not
+# reformatted, because reformatting a file no strategy imports buys nothing and
+# risks breaking the reference.
+extend-exclude = [
+    "src/bankr_client.py",
+    "tests/unit/test_bankr_client.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

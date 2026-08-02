@@ -1,0 +1,129 @@
+# render.yaml
+# -----------
+# The backend, as a Render Blueprint: Postgres, the API, and the worker.
+#
+# The frontend is not here. It goes to Vercel — locked decision 6 — because a
+# Next.js server has no business holding a trading loop, and this file would
+# quietly suggest otherwise.
+#
+# Render is not the only option; Fly and Railway both work and SETUP.md gives
+# the Fly commands. It is the one described declaratively because it is the
+# only one that can state the database and both processes in a single file, so
+# the deployment is reviewable in the diff rather than reconstructed from a
+# dashboard someone configured months ago.
+#
+#   Render dashboard -> New -> Blueprint -> point at this repository
+#
+# Two values are deliberately left blank and must be set by hand; see below.
+
+databases:
+  - name: trader-db
+    databaseName: trader
+    user: trader
+    # Smallest paid tier. The free tier expires after 90 days and takes the
+    # equity curve with it — and `daily_marks` is not merely a record, it is
+    # the memory both halting limits are measured against. Losing it silently
+    # disarms them.
+    plan: basic-256mb
+
+services:
+  # ---------------------------------------------------------------------
+  # The control plane. Read-mostly, plus the kill switch.
+  # ---------------------------------------------------------------------
+  - type: web
+    name: trader-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    dockerCommand: sh -c "uvicorn src.api.main:app --host 0.0.0.0 --port $PORT"
+
+    # `/health`, deliberately, not `/ready`.
+    #
+    # Render restarts a service whose health check fails. `/health` answers 200
+    # whenever the process is alive, so a database outage does not turn into a
+    # restart loop — which would convert a recoverable incident into an
+    # unrecoverable one, since the instance never stays up long enough to see
+    # the database come back.
+    #
+    # `/ready` answers 503 when the database is unreachable and is the right
+    # probe for a load balancer deciding where to send traffic. It is the wrong
+    # one for a supervisor deciding whether to kill the process.
+    healthCheckPath: /api/v1/health
+
+    # Applies migrations before the new version takes traffic. Requires a paid
+    # instance type; on the free tier, run it once by hand instead:
+    #   render exec trader-api -- python -m src.db.migrate_cli
+    # Migrations are forward-only with a stored checksum, so re-running is safe.
+    preDeployCommand: python -m src.db.migrate_cli
+
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: trader-db
+          property: connectionString
+
+      # Generated once by Render and never printed. Rotating it invalidates
+      # every session at once, which for a single operator is the right blunt
+      # instrument — sessions are signed rather than stored, so there is no
+      # per-session revocation.
+      - key: SESSION_SECRET
+        generateValue: true
+
+      # `sync: false` means "set this in the dashboard". A bcrypt hash in a
+      # committed file is a committed credential, even when it is only a hash.
+      #   python -c "import bcrypt;print(bcrypt.hashpw(b'yours', bcrypt.gensalt()).decode())"
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+
+      # The Vercel origin, exactly: scheme, host, no trailing slash. A browser
+      # treats localhost and 127.0.0.1 as different origins and will treat a
+      # mismatch here the same way — as a CORS failure that looks like a broken
+      # login.
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Required in this topology. onrender.com and vercel.app are different
+      # *sites*, so the session cookie is cross-site, and a browser will not
+      # attach a `Lax` one. Leave it at the default and login returns 200 while
+      # every call after it returns 401 — which reads as a correct password
+      # being rejected. `none` implies Secure, which the API sets itself.
+      - key: SESSION_COOKIE_SAMESITE
+        value: none
+
+      # Two of the three independent gates on real money. The third is the
+      # deployment row's own mode, and the database kill switch sits on top of
+      # all three and fails closed. Leave both false.
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: ALPACA_ALLOW_LIVE
+        value: "false"
+
+  # ---------------------------------------------------------------------
+  # The only process that runs a backtest or places an order.
+  # ---------------------------------------------------------------------
+  - type: worker
+    name: trader-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    dockerCommand: python -m src.worker.main
+
+    # Not optional, and its absence is silent. Without it backtests queue
+    # forever, no end-of-day mark is written, and because both halting limits
+    # are measured against marks, they go inert. Nothing raises. The System
+    # page reports a stale heartbeat, which is the only place it shows up.
+    #
+    # It carries neither SESSION_SECRET nor ADMIN_PASSWORD_HASH: it serves no
+    # HTTP and verifies no session, so it has no business holding the
+    # operator's credential.
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: trader-db
+          property: connectionString
+      - key: WORKER_ID
+        value: worker-1
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: ALPACA_ALLOW_LIVE
+        value: "false"

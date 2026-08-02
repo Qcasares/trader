@@ -1,0 +1,136 @@
+# CI for the systematic trading engine.
+#
+# Why this file exists
+# --------------------
+# CLAUDE.md claims each structural guarantee is "enforced by a test, not by
+# discipline". Until this workflow, that was aspirational: the repository had
+# no GitHub Actions at all, so the parity test — the one that justifies the
+# whole "backtest is the live path with two objects swapped" architecture —
+# ran only when someone remembered to run it. A guarantee nothing checks is a
+# comment.
+#
+# Parity gets its own step rather than being folded into the suite. When it
+# breaks, the failure should name itself in the checks list, because it means
+# the backtest has stopped predicting the live system — which is worse than
+# whatever bug the change was fixing.
+#
+# Only requirements-engine.txt is installed. The legacy agent stack pulls
+# torch and transformers (~2.5GB) for code the engine may not import, and a CI
+# run that spends four minutes downloading CUDA wheels to test a moving
+# average is a CI run people learn to ignore.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install ruff
+      # Exactly the command CLAUDE.md documents. The legacy pipeline is
+      # excluded via pyproject.toml rather than by a path list here, so a
+      # developer running this locally gets the same answer CI does.
+      - name: ruff check
+        run: ruff check src/ tests/
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # No password, deliberately. This container is created and destroyed
+          # inside a single job and is reachable only from it, so the right
+          # posture is "no credential exists" rather than "a weak credential is
+          # acceptable" — the latter is how a throwaway password ends up
+          # committed, scanned, and then copied into something that matters.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: trader_test
+        ports:
+          - 5432:5432
+        # Without this the first connection races the server's startup and the
+        # whole job fails on a flake rather than on anything real.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/trader_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # httpx is test-only and therefore not in requirements-engine.txt, which
+      # is the deployment set. It is required here because starlette's
+      # TestClient imports it — and plain `fastapi` does not depend on it, so
+      # without this line the integration job fails at collection on a machine
+      # that has never had the fuller dev install.
+      - name: Install engine dependencies
+        run: |
+          pip install -r requirements-engine.txt
+          pip install pytest pytest-asyncio httpx
+
+      # The test that justifies the architecture. Run first and named, so a
+      # break is unmistakable rather than one line in a wall of dots.
+      - name: Backtest/live parity (synthetic prices)
+        run: pytest tests/unit/test_parity.py -q
+
+      - name: Backtest/live parity (observed prices)
+        run: pytest tests/unit/test_real_data.py -q
+
+      # Nothing under src/core, src/engine, src/execution, src/strategies or
+      # src/data may import an LLM client. This is the control that makes a
+      # successful prompt injection produce prose instead of an order.
+      - name: Import boundaries
+        run: pytest tests/unit/test_import_boundaries.py -q
+
+      - name: Unit tests
+        run: pytest tests/unit -q
+
+      # Real Postgres, real migrations, real HTTP against the app. Mocking a
+      # boundary only proves the mock matches an assumption about it.
+      - name: Integration tests
+        run: pytest tests/integration -q
+
+  web:
+    name: next build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build

@@ -1,0 +1,290 @@
+/*
+ * globals.css
+ * -----------
+ * A dense, quiet interface. This is an instrument panel, not a marketing page:
+ * numbers are monospaced and aligned, warnings are impossible to miss, and
+ * nothing animates.
+ */
+
+:root {
+  --bg: #0e1116;
+  --panel: #161b22;
+  --panel-2: #1c2230;
+  --border: #2a313c;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #4493f8;
+  --good: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa;
+    --panel: #ffffff;
+    --panel-2: #f0f3f6;
+    --border: #d6dbe1;
+    --text: #1f2328;
+    --muted: #59636e;
+    --accent: #0969da;
+    --good: #1a7f37;
+    --warn: #9a6700;
+    --bad: #cf222e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 64px;
+}
+
+/* --- top bar --------------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.brand-mark {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.topbar nav { display: flex; gap: 18px; margin-left: auto; }
+.topbar nav a { color: var(--muted); text-decoration: none; }
+.topbar nav a:hover { color: var(--text); }
+
+.footer {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* --- structure ------------------------------------------------------- */
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 28px 0 10px; }
+h3 { font-size: 13px; margin: 20px 0 8px; color: var(--muted);
+     text-transform: uppercase; letter-spacing: .04em; }
+
+.subtitle { color: var(--muted); margin: 0 0 20px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+
+/* --- banners --------------------------------------------------------- */
+
+.banner {
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border-left: 3px solid;
+  font-size: 13px;
+}
+.banner-warn { background: color-mix(in srgb, var(--warn) 12%, transparent);
+               border-color: var(--warn); }
+.banner-info { background: color-mix(in srgb, var(--accent) 12%, transparent);
+               border-color: var(--accent); }
+.banner-bad  { background: color-mix(in srgb, var(--bad) 14%, transparent);
+               border-color: var(--bad); }
+
+/* --- metrics --------------------------------------------------------- */
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 0 0 18px;
+}
+
+.metric { background: var(--panel); padding: 10px 12px; }
+.metric dt { color: var(--muted); font-size: 11px; text-transform: uppercase;
+             letter-spacing: .04em; }
+.metric dd { margin: 2px 0 0; font-family: var(--mono); font-size: 15px; }
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-family: var(--sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  background: color-mix(in srgb, var(--warn) 22%, transparent);
+  color: var(--warn);
+  vertical-align: middle;
+}
+
+.assumptions { margin: 0; }
+.assumption-row {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.assumption-row dt { color: var(--muted); }
+.assumption-row dd { margin: 0; font-family: var(--mono); font-size: 13px; }
+.hint { display: block; color: var(--muted); font-family: var(--sans);
+        font-size: 12px; margin-top: 2px; }
+
+/* --- chart ----------------------------------------------------------- */
+
+.chart { margin: 0 0 18px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart figcaption { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.chart-empty { color: var(--muted); padding: 40px; text-align: center; }
+
+.grid { stroke: var(--border); stroke-width: 1; }
+.axis { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+.axis-line { stroke: var(--border); stroke-width: 1; }
+.equity-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.drawdown-area { fill: color-mix(in srgb, var(--bad) 30%, transparent);
+                 stroke: var(--bad); stroke-width: 1; }
+.warmup { fill: color-mix(in srgb, var(--muted) 12%, transparent); }
+.effective-line { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; }
+.effective-label { fill: var(--warn); font-size: 10px; font-family: var(--mono); }
+
+/* --- forms ----------------------------------------------------------- */
+
+label { display: block; margin-bottom: 10px; }
+label > span { display: block; color: var(--muted); font-size: 12px;
+               margin-bottom: 3px; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0 14px;
+}
+
+button {
+  padding: 8px 14px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+
+/* --- tables ---------------------------------------------------------- */
+
+table { width: 100%; border-collapse: collapse; font-family: var(--mono);
+        font-size: 12px; }
+th { text-align: left; color: var(--muted); font-family: var(--sans);
+     font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+     padding: 6px 8px; border-bottom: 1px solid var(--border); }
+td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+tbody tr:hover { background: var(--panel-2); }
+.num { text-align: right; }
+
+.table-scroll { overflow-x: auto; }
+
+/* --- status ---------------------------------------------------------- */
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-family: var(--sans);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.pill-good { background: color-mix(in srgb, var(--good) 20%, transparent); color: var(--good); }
+.pill-warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.pill-bad  { background: color-mix(in srgb, var(--bad) 20%, transparent);  color: var(--bad); }
+.pill-mute { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+
+/* Sits among the nav links, so it reads as one rather than as a control. */
+.linklike {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-family: var(--sans);
+}
+.linklike:hover:not(:disabled) { color: var(--text); border: none; }
+
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+.error { color: var(--bad); }
+
+a { color: var(--accent); }
+
+@media (max-width: 640px) {
+  .assumption-row { grid-template-columns: 1fr; gap: 0; }
+  .topbar { flex-wrap: wrap; gap: 10px; }
+  .topbar nav { margin-left: 0; }
+}

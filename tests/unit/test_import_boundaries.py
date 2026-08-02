@@ -1,0 +1,183 @@
+"""
+test_import_boundaries.py
+-------------------------
+Structural closure of the prompt-injection path recorded as C-1 in
+``docs/02-security-audit.md``.
+
+The original design let unsanitised social-media text flow into trade
+reasoning, which is a path from "anyone can post" to "money moves". Sanitising
+the text would be a mitigation; removing the path is a fix.
+
+So: no module that computes or executes an order may import an LLM client. Not
+"should not" — cannot, with a test that fails the build. A successful prompt
+injection can then produce, at most, misleading prose in the commentary table.
+
+"Computes or executes" includes the *processes*, not only the pure decision
+code. ``src/worker`` is the only thing in this system that places an order, so
+it is the package where an LLM import would matter most.
+
+This is an AST scan rather than a runtime import check so it catches the import
+even in a module that is never executed by the rest of the suite.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+SRC = Path(__file__).resolve().parents[2] / "src"
+
+#: Packages that must never appear anywhere in the decision or execution path.
+FORBIDDEN_PREFIXES = ("anthropic", "openai", "transformers", "nltk", "torch")
+
+#: Pure computation that turns market data into orders.
+DECISION_PATH = ("core", "strategies", "engine", "execution", "data")
+
+#: The processes that can actually move money.
+#:
+#: These were missing, and their absence was the most important gap in this
+#: file: ``src/worker`` is, in CLAUDE.md's own words, "the only process that
+#: runs backtests or places orders", and it was the one package not guarded
+#: against importing an LLM client. ``src/api`` is what commands it.
+#:
+#: They are held to the same prohibition as the decision path even though,
+#: unlike it, they legitimately perform I/O. If commentary generation is ever
+#: wanted after a backtest it belongs in its own job or process, not inside
+#: the module that submits orders — and this test is where that decision gets
+#: made deliberately rather than by accident.
+ORDER_PROCESSES = ("worker", "api")
+
+PROTECTED_PACKAGES = DECISION_PATH + ORDER_PROCESSES
+
+
+def _module_files(package: str) -> list[Path]:
+    root = SRC / package
+    return sorted(root.rglob("*.py")) if root.is_dir() else []
+
+
+def _imported_roots(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
+    return roots
+
+
+@pytest.mark.parametrize("package", PROTECTED_PACKAGES)
+def test_decision_path_never_imports_an_llm(package: str) -> None:
+    """No LLM client may be reachable from code that can move money."""
+    offenders: list[str] = []
+    for path in _module_files(package):
+        for root in _imported_roots(path):
+            if root in FORBIDDEN_PREFIXES:
+                offenders.append(f"{path.relative_to(SRC)} imports {root}")
+    assert not offenders, (
+        "LLM/NLP imports found in the decision path — this reopens the "
+        "prompt-injection route from untrusted text to an order:\n"
+        + "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("package", PROTECTED_PACKAGES)
+def test_decision_path_never_imports_the_legacy_agents(package: str) -> None:
+    """
+    The legacy ``src.agents`` package is non-deterministic by construction.
+    Anything importing it becomes unbacktestable, which defeats the point.
+    """
+    offenders: list[str] = []
+    for path in _module_files(package):
+        # Parse imports rather than grepping the text: a docstring that
+        # *mentions* src.agents (as core/__init__.py does, to explain the
+        # boundary) is documentation, not a dependency.
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = ",".join(a.name for a in node.names)
+            if "src.agents" in module or module.startswith("agents"):
+                offenders.append(f"{path.relative_to(SRC)} imports {module}")
+    assert not offenders, (
+        "decision-path modules import the legacy agent package:\n"
+        + "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("package", PROTECTED_PACKAGES)
+def test_decision_path_never_imports_the_commentary_layer(package: str) -> None:
+    """
+    ``src.llm`` imports its client lazily, so a module could route to a model
+    through it without ever naming ``anthropic``. Blocking the direct import
+    alone would leave that door open, so the package itself is off-limits to
+    anything that can produce an order.
+    """
+    offenders: list[str] = []
+    for path in _module_files(package):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = ",".join(a.name for a in node.names)
+            if "src.llm" in module:
+                offenders.append(f"{path.relative_to(SRC)} imports {module}")
+    assert not offenders, (
+        "the decision path imports the commentary layer, which reopens a route "
+        "from model output to an order:\n" + "\n".join(offenders)
+    )
+
+
+def test_commentary_layer_passes_no_tools_to_the_model() -> None:
+    """
+    The model must be able to emit text and nothing else. A ``tools=`` argument
+    would give it the ability to act, which is exactly what demoting it was
+    meant to remove.
+    """
+    source = (SRC / "llm" / "commentary.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                assert keyword.arg not in {"tools", "tool_choice"}, (
+                    "commentary must not pass tools to the model"
+                )
+
+
+def test_strategies_do_not_perform_io() -> None:
+    """
+    Strategies must be pure. An HTTP call or a DB read inside
+    ``target_weights`` would make the backtest unreproducible and the parity
+    test meaningless.
+    """
+    io_roots = {"aiohttp", "requests", "httpx", "asyncpg", "socket", "urllib"}
+    offenders: list[str] = []
+    for path in _module_files("strategies"):
+        for root in _imported_roots(path):
+            if root in io_roots:
+                offenders.append(f"{path.relative_to(SRC)} imports {root}")
+    assert not offenders, "strategies must not perform I/O:\n" + "\n".join(offenders)
+
+
+def test_core_does_not_depend_on_execution_or_engine() -> None:
+    """
+    Dependency direction: engine -> core, never core -> engine. Keeps the
+    value types importable by anything without dragging in a broker.
+    """
+    offenders: list[str] = []
+    for path in _module_files("core"):
+        text = path.read_text(encoding="utf-8")
+        for forbidden in ("from src.engine", "from src.execution", "import src.engine"):
+            if forbidden in text:
+                offenders.append(f"{path.relative_to(SRC)}: {forbidden}")
+    assert not offenders, "core must not depend on engine/execution:\n" + "\n".join(
+        offenders
+    )

@@ -1,0 +1,112 @@
+# docker-compose.yml
+# ------------------
+# Local stack: Postgres, the API, and the worker.
+#
+# The API and worker are the same image with different entrypoints. They are
+# separate *processes* rather than threads in one, because a backtest is
+# CPU-bound pandas work — running it in the API process would block the event
+# loop and stall every other request, including the one a human is using to
+# stop trading.
+#
+# The frontend deploys to Vercel and talks to the API over HTTPS; a Next.js
+# server cannot hold a trading loop and does not try. It is therefore *not* in
+# the default set — bringing it up here would suggest it is part of the
+# deployment, and it is not.
+#
+# It is available behind a profile, because the UI is the only part of this
+# system a human actually looks at and testing it should not require running
+# npm separately from everything else:
+#
+#   docker compose up --build                    # backend only, as deployed
+#   docker compose --profile web up --build      # everything, for local testing
+#
+# Requires Compose V2. `profiles:` and `depends_on: condition:` below are V2
+# features, and this file carries no `version:` key — which V2 reads as "current
+# schema" and the end-of-life V1 reads as the legacy version-1 format, which has
+# none of them. V1 misreads it rather than failing cleanly, so do not substitute
+# the hyphenated `docker-compose`. A missing V2 plugin reports as
+# `unknown flag: --profile` against docker's own usage, which names the flag
+# rather than the cause; SETUP.md covers the fix.
+#
+# Secrets
+# ~~~~~~~
+# No credential is written in this file — not even a placeholder or a default.
+# Every service reads them from `.env`, which is gitignored. That keeps
+# password-shaped literals out of version control entirely, and it removes the
+# weak-default failure where `docker compose up` without configuration would
+# quietly start a database with a guessable password.
+#
+#   cp .env.example .env
+#   # fill in POSTGRES_PASSWORD, SESSION_SECRET, ADMIN_PASSWORD_HASH
+#   docker compose up --build
+#   docker compose run --rm api python -m src.db.migrate_cli
+
+services:
+  db:
+    image: postgres:16-alpine
+    # POSTGRES_PASSWORD is supplied by .env, never written here.
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_DB: trader
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    command: uvicorn src.api.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    environment:
+      # Interpolated from .env — this file holds no literal value.
+      DATABASE_URL: postgresql://trader:${POSTGRES_PASSWORD}@db:5432/trader
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # Two of the three independent gates on real money; the third is the
+      # deployment's own mode. The database kill switch is a fourth and fails
+      # closed. Leave both false.
+      LIVE_TRADING_ENABLED: "false"
+      ALPACA_ALLOW_LIVE: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: python -m src.worker.main
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://trader:${POSTGRES_PASSWORD}@db:5432/trader
+      LIVE_TRADING_ENABLED: "false"
+      ALPACA_ALLOW_LIVE: "false"
+      WORKER_ID: worker-1
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Local testing only. Not in the default set: production is Vercel.
+  web:
+    profiles: ["web"]
+    build: ./web
+    environment:
+      # Read by the browser, so it must be an address the *browser* can reach —
+      # not the compose-internal hostname `api`, which resolves only between
+      # containers.
+      NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
