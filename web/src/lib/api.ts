@@ -343,6 +343,19 @@ export const api = {
 
   jobs: (status?: string) =>
     request<JobSummary[]>(`/api/v1/system/jobs${status ? `?status=${status}` : ""}`),
+
+  /**
+   * Ask the API to run queued research jobs itself.
+   *
+   * Only does anything on a deployment with no worker process — a serverless
+   * host, where nothing long-lived can exist and a submitted backtest would
+   * otherwise stay queued indefinitely. Anywhere a worker runs, the endpoint
+   * answers 404 and the worker has already picked the job up.
+   *
+   * Callers should treat every failure as uninteresting: this is a nudge, not
+   * a dependency, and the page it is called from works without it.
+   */
+  drain: () => request<{ ran: number }>("/api/v1/system/drain", { method: "POST" }),
 };
 
 // ---------------------------------------------------------------------------

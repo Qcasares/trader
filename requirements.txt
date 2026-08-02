@@ -1,69 +1,37 @@
-# =========================================================================
-# Development requirements: the engine, plus test and research tooling.
+# Runtime dependencies — the deployable set.
 #
-# For deployment use requirements-engine.txt, which is this list minus the
-# development-only entries.
+# This is the root `requirements.txt` on purpose: Vercel's Python runtime
+# installs it by that name from the project root. Docker and CI use it too, so
+# there is exactly one answer to "what does this application need to run".
+# Development tooling lives in requirements-dev.txt.
 #
-# Licence note: every dependency here is permissive (Apache-2.0/BSD/MIT).
-# backtesting.py (AGPL-3.0), backtrader (GPL-3.0) and vectorbt (Commons
-# Clause, which forbids selling a hosted service) were all evaluated and
-# rejected — see docs/06-systematic-engine.md.
+# Deliberately excludes the legacy crypto agents' torch/transformers/nltk
+# stack (~2.5GB), which is what makes this deployable at all. Installed, this
+# comes to roughly 190MB — inside Vercel's 250MB unzipped function limit, with
+# pandas and numpy accounting for over half of it.
 #
-# torch, transformers, nltk, tweepy, praw and anthropic used to appear here
-# for the crypto agent pipeline. That pipeline has been deleted, and with it
-# roughly 2.5GB of install. `anthropic` is deliberately *still* absent: the
-# engine must run, and be testable, without an LLM SDK anywhere near it, and
-# tests/unit/test_import_boundaries.py fails the build if that stops being
-# true. src/llm/commentary.py imports it lazily and returns None without it.
-# =========================================================================
+# Every entry is permissively licensed (Apache-2.0/BSD/MIT). backtesting.py
+# (AGPL-3.0), backtrader (GPL-3.0) and vectorbt (Commons Clause, which forbids
+# selling a hosted service) were evaluated and rejected.
 
-# Data processing
 pandas>=2.2.0
 numpy>=1.26.0
-
-# Trading calendars — NYSE sessions, holidays, early closes (Apache-2.0).
-# Never hand-roll a holiday calendar: it silently gets 9/11 and Sandy wrong.
 exchange_calendars>=4.13.0
-
-# Strategy parameter models -> JSON Schema -> the web form (MIT).
 pydantic>=2.7.0
-
-# Research-only price history back to inception (Apache-2.0 code; Yahoo's
-# own terms are a separate question). Never on the live path.
-yfinance>=0.2.60
-
-# HTTP. aiohttp for the Alpaca adapter and the bankr.bot reference client;
-# requests for the Crypto.com candle adapter.
-aiohttp>=3.9.0
-requests>=2.31.0
-
-# Web control plane
+asyncpg>=0.29.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 bcrypt>=4.1.0
-
-# Database
-asyncpg>=0.29.0
-
-# Configuration and utilities
 python-dotenv>=1.0.0
 
-# =========================================================================
-# Testing
-# =========================================================================
-pytest>=8.0.0
-pytest-asyncio>=0.23.0
-pytest-cov>=4.1.0
+# Research-only price history. Never on the live path.
+yfinance>=0.2.60
 
-# starlette's TestClient imports httpx, and plain fastapi does not depend on
-# it. Test-only, so it stays out of requirements-engine.txt.
-httpx>=0.27.0
+# Async HTTP for the Alpaca adapter.
+aiohttp>=3.9.0
 
-# Dev-only metric oracles (both MIT). Used solely to cross-check our own
-# Sharpe/Sortino/CAGR/max-drawdown — not imported by src/.
-# ffn>=1.1.5
-# bt>=1.2.0
-
-# Development
-ipython>=8.0.0
-jupyter>=1.0.0
+# Synchronous HTTP for the Crypto.com candle adapter. Declared explicitly even
+# though yfinance pulls it in anyway: a shipped module imports it, and relying
+# on a transitive dependency means an unrelated yfinance release can break an
+# unrelated import.
+requests>=2.31.0

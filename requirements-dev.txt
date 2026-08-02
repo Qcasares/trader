@@ -1,0 +1,45 @@
+# =========================================================================
+# Development requirements: everything that deploys, plus test tooling.
+#
+#   pip install -r requirements-dev.txt
+#
+# `requirements.txt` is the deployable set — what Docker, CI and Vercel
+# install. It is the *root* file by name because Vercel's Python runtime
+# reads `requirements.txt` from the project root and offers no way to point
+# it elsewhere; installing pytest and Jupyter into a serverless bundle would
+# spend most of the 250MB budget on things no request ever imports.
+#
+# Licence note: every dependency here is permissive (Apache-2.0/BSD/MIT).
+# backtesting.py (AGPL-3.0), backtrader (GPL-3.0) and vectorbt (Commons
+# Clause, which forbids selling a hosted service) were all evaluated and
+# rejected — see docs/06-systematic-engine.md.
+#
+# torch, transformers, nltk, tweepy, praw and anthropic used to appear here
+# for the crypto agent pipeline. That pipeline has been deleted, and with it
+# roughly 2.5GB of install. `anthropic` is deliberately *still* absent: the
+# engine must run, and be testable, without an LLM SDK anywhere near it, and
+# tests/unit/test_import_boundaries.py fails the build if that stops being
+# true. src/llm/commentary.py imports it lazily and returns None without it.
+# =========================================================================
+
+-r requirements.txt
+
+# =========================================================================
+# Testing
+# =========================================================================
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# starlette's TestClient imports httpx, and plain fastapi does not depend on
+# it. Test-only, so it stays out of the deployable set.
+httpx>=0.27.0
+
+# Dev-only metric oracles (both MIT). Used solely to cross-check our own
+# Sharpe/Sortino/CAGR/max-drawdown — not imported by src/.
+# ffn>=1.1.5
+# bt>=1.2.0
+
+# Development
+ipython>=8.0.0
+jupyter>=1.0.0

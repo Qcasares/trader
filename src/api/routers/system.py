@@ -14,14 +14,21 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from src.api.deps import AppSettings, AuthedSession, DbConn
+from src.api.drain import drain_once
 from src.api.schemas import (
     JobSummary,
     KillSwitchRequest,
     ReleaseKillSwitchRequest,
     SystemStatus,
+)
+from src.api.security import (
+    SESSION_COOKIE,
+    AuthError,
+    constant_time_equals,
+    verify_session,
 )
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
@@ -136,6 +143,72 @@ async def resume(
     """
     await flags.release_kill_switch(conn, actor=session.subject, note=body.note)
     return await _build_status(conn, settings)
+
+
+@router.api_route("/drain", methods=["GET", "POST"])
+async def drain(
+    request: Request,
+    conn: DbConn,
+    settings: AppSettings,
+) -> dict:
+    """
+    Run queued research jobs in this process. For hosts with no worker.
+
+    Answers to GET as well as POST, which is not an endorsement of mutating
+    GETs — Vercel Cron issues a GET and gives no way to change that, and an
+    endpoint a scheduler cannot call is not a scheduler.
+
+    Disabled unless ``SERVERLESS_DRAIN_ENABLED`` is set, and it should stay
+    disabled anywhere a worker exists: running a backtest inside a request
+    handler on a long-lived server stalls every other request on that event
+    loop, the kill switch included. See ``src/api/drain.py``.
+
+    Authenticated by an operator session **or** ``CRON_SECRET`` as a bearer
+    token, so a platform scheduler can call it unattended. It is never
+    anonymous: it is the one endpoint that consumes real CPU on demand, which
+    makes it the one worth rate-limiting by having a credential at all.
+    """
+    if not settings.serverless_drain_enabled:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "job draining is not enabled on this deployment; a worker process "
+            "runs jobs here",
+        )
+
+    actor = _drain_caller(request, settings)
+    result = await drain_once(conn, worker_id=f"drain:{actor}")
+    if result["ran"]:
+        logger.info("Drain by %s ran %d job(s)", actor, result["ran"])
+    return result
+
+
+def _drain_caller(request: Request, settings: AppSettings) -> str:
+    """
+    Identify the caller, or refuse.
+
+    Tries the cron secret first because that is the unattended path; falls back
+    to a normal session so an operator can force a drain from the UI without
+    knowing the secret.
+    """
+    header = request.headers.get("authorization", "")
+    if settings.cron_secret and header.lower().startswith("bearer "):
+        presented = header[7:].strip()
+        # Constant-time: this is a fixed secret compared on every scheduled
+        # call, which is exactly the shape a timing oracle likes.
+        if constant_time_equals(presented, settings.cron_secret):
+            return "cron"
+
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie:
+        try:
+            return verify_session(settings.session_secret, cookie).subject
+        except AuthError:
+            pass
+
+    raise HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        "drain requires an operator session or the CRON_SECRET bearer token",
+    )
 
 
 @router.get("/jobs", response_model=list[JobSummary])

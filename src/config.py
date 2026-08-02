@@ -32,6 +32,66 @@ class ConfigError(RuntimeError):
     """A required setting is missing or invalid."""
 
 
+#: libpq connection parameters that asyncpg does not implement.
+#:
+#: asyncpg forwards any query parameter it does not recognise to the server as
+#: a runtime setting, and Postgres refuses the connection outright:
+#: ``UndefinedObjectError: unrecognized configuration parameter``. So a DSN
+#: that works with psql fails here, with an error naming a parameter the
+#: operator did not choose and cannot act on.
+#:
+#: This is not hypothetical. Neon — the Postgres offered by Vercel's own
+#: marketplace, and therefore the likeliest choice for a deployment of this —
+#: puts ``channel_binding=require`` in the connection string it hands out by
+#: default. Pasted straight into the environment, every request fails.
+_UNSUPPORTED_DSN_PARAMS = frozenset(
+    {"channel_binding", "gssencmode", "sslcompression", "krbsrvname"}
+)
+
+
+def normalise_dsn(dsn: str) -> str:
+    """
+    Strip connection parameters asyncpg cannot honour.
+
+    Removing a parameter is not free and is not done silently. ``sslmode`` and
+    ``sslrootcert`` *are* supported and are left alone; only the entries above
+    are dropped, and each one logs a warning.
+
+    ``channel_binding=require`` deserves its own note, because dropping it is a
+    real if narrow loss. Under ``sslmode=require`` libpq does not verify the
+    server certificate, and channel binding is what still frustrates a
+    man-in-the-middle in that case. asyncpg cannot negotiate it, so the choice
+    is between a connection that refuses to open and one that opens without
+    it. The stronger answer is not channel binding anyway — it is
+    ``sslmode=verify-full`` with the provider's CA, which authenticates the
+    server properly, and the warning says so.
+    """
+    if "?" not in dsn:
+        return dsn
+
+    base, _, query = dsn.partition("?")
+    kept: list[str] = []
+    dropped: list[str] = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        key = pair.split("=", 1)[0].strip().lower()
+        (dropped if key in _UNSUPPORTED_DSN_PARAMS else kept).append(pair)
+
+    if not dropped:
+        return dsn
+
+    for pair in dropped:
+        logger.warning(
+            "Dropping unsupported connection parameter %r from DATABASE_URL: "
+            "asyncpg would forward it to the server and the connection would "
+            "be refused. For transport security prefer sslmode=verify-full "
+            "with your provider's CA certificate.",
+            pair,
+        )
+    return f"{base}?{'&'.join(kept)}" if kept else base
+
+
 def require_api_secrets(settings: Settings) -> None:
     """
     Refuse to serve HTTP without a signing key and an operator password.
@@ -129,6 +189,42 @@ class Settings:
     worker_poll_seconds: int = 2
     worker_id: str = "worker-1"
 
+    #: Allow the API process to run queued **research** jobs itself.
+    #:
+    #: Off by default, and it must stay that way for any long-lived
+    #: deployment. The API refusing to run a backtest inline is not fastidious:
+    #: a backtest is CPU-bound pandas work, and running one in the request
+    #: handler stalls every other request on that event loop — including the
+    #: one an operator is using to hit the kill switch.
+    #:
+    #: On a serverless host there is no shared event loop to stall. Each
+    #: invocation is its own process, and there is nowhere to put a long-lived
+    #: worker, so without this a queued backtest is never executed by anything.
+    #: That is the only situation in which this should be true.
+    #:
+    #: It never covers trading jobs. See ``DRAINABLE_KINDS``.
+    serverless_drain_enabled: bool = False
+
+    #: Shared secret allowing a scheduler (Vercel Cron) to call the drain
+    #: endpoint without an operator session. Empty disables that route in.
+    cron_secret: str = ""
+
+    #: Connection pool bounds.
+    #:
+    #: The default suits a long-lived process: one pool, reused for the life of
+    #: the deployment. It is actively wrong on a serverless host, where every
+    #: cold start builds its own pool and none of them share. Ten instances
+    #: awake at once means up to a hundred connections, and a managed free tier
+    #: typically allows a small fraction of that — so the failure is not a slow
+    #: API but ``too many clients already``, arriving exactly when traffic
+    #: picks up.
+    #:
+    #: Set the maximum to 2-3 there, and prefer a provider's pooled endpoint
+    #: (Neon and Supabase both publish one) which multiplexes properly instead
+    #: of leaving each instance to guess.
+    db_pool_min_size: int = 1
+    db_pool_max_size: int = 10
+
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
@@ -141,7 +237,7 @@ class Settings:
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load and validate settings once per process."""
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = normalise_dsn(os.environ.get("DATABASE_URL", "").strip())
     if not database_url:
         raise ConfigError(
             "DATABASE_URL is required. Example: "
@@ -196,6 +292,10 @@ def get_settings() -> Settings:
         session_ttl_seconds=_int_env("SESSION_TTL_SECONDS", 60 * 60 * 12),
         worker_poll_seconds=_int_env("WORKER_POLL_SECONDS", 2),
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
+        serverless_drain_enabled=_bool_env("SERVERLESS_DRAIN_ENABLED", False),
+        cron_secret=os.environ.get("CRON_SECRET", "").strip(),
+        db_pool_min_size=_int_env("DB_POOL_MIN_SIZE", 1),
+        db_pool_max_size=_int_env("DB_POOL_MAX_SIZE", 10),
         alpaca_key_id=os.environ.get("ALPACA_KEY_ID", ""),
         alpaca_secret_key=os.environ.get("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_bool_env("ALPACA_PAPER", True),

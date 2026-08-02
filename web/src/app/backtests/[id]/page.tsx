@@ -63,6 +63,19 @@ export default function BacktestDetailPage({
       if (cancelled) return;
       // Keep polling only while there is something left to happen.
       if (status === "queued" || status === "running") {
+        // On a serverless deployment there is no worker process, so nothing
+        // would ever pick this job up. Nudge the API into running it.
+        // Deliberately unawaited-on-failure: where a worker *does* exist the
+        // endpoint is disabled and answers 404, which is the normal case and
+        // not worth a line on screen. The page polls correctly either way.
+        if (status === "queued") {
+          try {
+            await api.drain();
+          } catch {
+            /* no drain here; a worker has it */
+          }
+          if (cancelled) return;
+        }
         timer = setTimeout(tick, 2000);
       }
     };

@@ -106,7 +106,7 @@ These exist because the research UI is a machine for fooling yourself.
 
 ```bash
 # Setup
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 export DATABASE_URL=postgresql://trader@localhost:5432/trader
 python -m src.db.migrate_cli                 # apply migrations
 
@@ -148,7 +148,7 @@ must run, and be testable, without an LLM SDK anywhere near it;
 
 `.github/workflows/ci.yml` runs ruff, the unit suite and the integration suite
 against a real Postgres on every pull request, installing only
-`requirements-engine.txt`. Parity and the import boundaries get their own named
+`requirements.txt`. Parity and the import boundaries get their own named
 steps: when they break, the failure should say so in the checks list rather
 than hide in a wall of dots.
 

@@ -14,7 +14,7 @@
 # the backtest has stopped predicting the live system — which is worse than
 # whatever bug the change was fixing.
 #
-# Only requirements-engine.txt is installed. The legacy agent stack pulls
+# Only requirements.txt is installed. The legacy agent stack pulls
 # torch and transformers (~2.5GB) for code the engine may not import, and a CI
 # run that spends four minutes downloading CUDA wheels to test a moving
 # average is a CI run people learn to ignore.
@@ -84,14 +84,14 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # httpx is test-only and therefore not in requirements-engine.txt, which
+      # httpx is test-only and therefore not in requirements.txt, which
       # is the deployment set. It is required here because starlette's
       # TestClient imports it — and plain `fastapi` does not depend on it, so
       # without this line the integration job fails at collection on a machine
       # that has never had the fuller dev install.
       - name: Install engine dependencies
         run: |
-          pip install -r requirements-engine.txt
+          pip install -r requirements.txt
           pip install pytest pytest-asyncio httpx
 
       # The test that justifies the architecture. Run first and named, so a

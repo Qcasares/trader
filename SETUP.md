@@ -154,7 +154,7 @@ Fewer moving parts if you already have Postgres, and it is the better choice if
 you intend to change code — you get the test suite and a REPL.
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 
 createdb trader
 export DATABASE_URL=postgresql://localhost:5432/trader
@@ -178,7 +178,7 @@ environment. `.env` is read by docker-compose, not by a bare `uvicorn`, so
 either export them or source the file — and if you source it, see the quoting
 warning above.
 
-`requirements.txt` is the development set. `requirements-engine.txt` is what
+`requirements-dev.txt` is the development set. `requirements.txt` is what
 deploys — the same list minus test and research tooling.
 
 The API and worker are separate processes on purpose. A backtest is CPU-bound
@@ -225,22 +225,83 @@ The split is locked: **frontend on Vercel, backend on its own host.** A Next.js
 server cannot hold a trading loop — a backtest is CPU-bound pandas work, and a
 serverless function that sleeps between market sessions is not a worker.
 
-### Frontend (Vercel)
+### Everything on Vercel — two projects from one repository
 
-Connect the GitHub repository rather than uploading a build. This repo is the
-source of truth, and a git-connected project redeploys on every push instead of
-needing a manual upload each time.
+The whole research lab runs on Vercel: the Next.js UI and the FastAPI control
+plane, as two projects pointed at the same repository with different root
+directories. Both use Vercel's own detection rather than a hand-written build,
+because a zero-config project is one that still works after an upgrade.
 
-- **New Project → import the repo**
-- **Root Directory: `web`** — the default is the repo root, where there is no
-  `package.json`, and the build fails with a framework-detection error that
-  does not mention the root directory
-- Framework preset: Next.js (detected)
-- Environment variable: `NEXT_PUBLIC_API_BASE` = the API's public HTTPS origin
+The **live trading path does not run here.** It needs a process that outlives a
+request — a scheduler that wakes at the close, and a worker holding the only
+route to a broker. Serverless has nowhere to put one. Use `render.yaml` below
+when you get there. What deploys here is the part that is actually useful
+today: run backtests, read tearsheets, work the kill switch.
 
-`NEXT_PUBLIC_*` is inlined at **build** time, not read at runtime. Changing it
-requires a redeploy; editing it in the dashboard and reloading the page does
-nothing.
+**Project 1 — the API.** Import the repo; leave **Root Directory** at the
+repository root. `vercel.json` and `api/index.py` do the rest: the Python
+runtime installs `requirements.txt` (the deployable set, ~190MB against a
+250MB limit) and serves the same FastAPI app uvicorn does.
+
+For the database, Vercel's marketplace offers Neon, which sets `DATABASE_URL`
+on the project for you. Paste one in from anywhere else and it works too:
+connection strings from managed providers often carry `channel_binding=require`,
+which asyncpg cannot honour and Postgres rejects outright, so it is stripped
+with a warning rather than left to fail at the first request.
+
+```bash
+DATABASE_URL=...                          # any managed Postgres
+SESSION_SECRET=...                        # 32+ chars
+ADMIN_PASSWORD_HASH=...                   # bcrypt
+CORS_ORIGINS=https://<ui>.vercel.app      # exact origin, no trailing slash
+SESSION_COOKIE_SAMESITE=none              # required; see below
+SERVERLESS_DRAIN_ENABLED=true             # required; see below
+CRON_SECRET=...                           # any long random string
+DB_POOL_MAX_SIZE=3                        # required; see below
+LIVE_TRADING_ENABLED=false
+ALPACA_ALLOW_LIVE=false
+```
+
+**Project 2 — the UI.** Import the same repo, set **Root Directory to `web`**,
+and set `NEXT_PUBLIC_API_BASE` to project 1's URL. The default root is the
+repository root, where there is no `package.json`, and the build then fails
+with a framework-detection error that never mentions the root directory.
+
+The two need each other's URLs, so deploy the API first, then the UI, then go
+back and set `CORS_ORIGINS`. `NEXT_PUBLIC_*` is inlined at **build** time —
+changing it in the dashboard without redeploying does nothing.
+
+Apply migrations once against the database:
+`DATABASE_URL=... python -m src.db.migrate_cli` from a checkout.
+
+#### The two settings that are not optional
+
+`SESSION_COOKIE_SAMESITE=none`. The two projects are on different hosts, so the
+session cookie is cross-site, and a browser will not attach a `Lax` one. Leave
+it at the default and login returns 200 while every call after it returns 401 —
+which reads on screen as a correct password being rejected.
+
+`SERVERLESS_DRAIN_ENABLED=true`. There is no worker, so nothing would ever run
+a queued backtest; it would sit at "waiting for a worker" indefinitely. With
+this set, `POST /api/v1/system/drain` runs queued **research** jobs in the
+request — the UI calls it while polling a queued run, and `vercel.json`
+schedules a daily sweep. It is off by default and must stay off wherever a
+worker exists: a backtest is CPU-bound pandas work, and running one inside a
+request handler on a long-lived server stalls every other request on that event
+loop, including the one an operator is using to hit the kill switch.
+
+Trading jobs are never drainable. "The worker is the only process that places
+an order" is what makes the kill-switch check and the three live gates
+meaningful, and `test_drain_boundary.py` fails the build if a trading kind is
+ever added to that set.
+
+`DB_POOL_MAX_SIZE=3`. The default of 10 assumes one long-lived process holding
+one pool. On a serverless host every cold start builds its own and none of them
+share, so ten warm instances mean up to a hundred connections against a free
+tier that allows a small fraction of that. The failure is not a slow API, it is
+`too many clients already`, and it arrives exactly when traffic picks up.
+Prefer the provider's pooled endpoint as well — Neon and Supabase both publish
+one, and it multiplexes properly rather than leaving each instance to guess.
 
 ### Backend (Fly / Railway / Render)
 
@@ -326,6 +387,7 @@ Leave `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` as `false`.
 |---|---|
 | `unknown flag: --profile`, with `docker`'s root usage | Compose V2 plugin not installed — see above |
 | Correct password rejected at login | `ADMIN_PASSWORD_HASH` unquoted in `.env`; the shell ate `$2b$12` |
+| Same, but only when reaching the API over a LAN IP | The session cookie is `Secure` whenever `CORS_ORIGINS` is set. Browsers treat `localhost` as a secure context and accept it over plain HTTP; `http://192.168.x.x` is not, so the cookie is discarded and every call after login is anonymous. Use localhost, or terminate TLS |
 | API exits at startup complaining about a missing value | `SESSION_SECRET` or `ADMIN_PASSWORD_HASH` empty. There is no default, on purpose |
 | `SESSION_SECRET must be at least 32 characters` | Exactly that. Use the generator above rather than typing one |
 | Login succeeds, every subsequent call fails in the browser | `CORS_ORIGINS` does not match the origin in the address bar (`localhost` ≠ `127.0.0.1`) |

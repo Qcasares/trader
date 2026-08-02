@@ -43,7 +43,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the connection pool for the app's lifetime."""
     settings = get_settings()
     app.state.pool = await asyncpg.create_pool(
-        settings.database_url, min_size=1, max_size=10
+        settings.database_url,
+        min_size=settings.db_pool_min_size,
+        max_size=settings.db_pool_max_size,
     )
     logger.info("Database pool ready")
     try:
@@ -92,6 +94,24 @@ def create_app() -> FastAPI:
     app.include_router(deployments.router)
     app.include_router(portfolio.router)
     app.include_router(system.router)
+
+    @app.get("/", tags=["health"], include_in_schema=False)
+    async def root() -> dict[str, str]:
+        """
+        Something legible at the bare URL.
+
+        The deployed API answers every path through one function, so without
+        this the first thing anyone sees after a deploy is a 404 — which is
+        indistinguishable from a broken deployment at the moment you most want
+        to tell the difference. Says what this is and where to go; reveals no
+        more than ``/health`` does.
+        """
+        return {
+            "service": API_TITLE,
+            "version": API_VERSION,
+            "health": "/api/v1/health",
+            "docs": "/docs",
+        }
 
     @app.get("/api/v1/health", tags=["health"])
     async def health() -> dict[str, str]:
