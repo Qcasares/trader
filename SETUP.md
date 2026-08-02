@@ -93,8 +93,9 @@ cp .env.example .env
 ```
 
 Three values are required and have no defaults. A signing key with a fallback
-value is a signing key an attacker already knows, so the API refuses to start
-without them rather than inventing one:
+value is a signing key an attacker already knows, so the API will not mint or
+accept a session without a real one — `/api/v1/ready` answers 503 and names
+what is missing, and every authenticated route refuses until you set them:
 
 ```bash
 # POSTGRES_PASSWORD — anything; it only has to match itself
@@ -388,7 +389,7 @@ Leave `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` as `false`.
 | `unknown flag: --profile`, with `docker`'s root usage | Compose V2 plugin not installed — see above |
 | Correct password rejected at login | `ADMIN_PASSWORD_HASH` unquoted in `.env`; the shell ate `$2b$12` |
 | Same, but only when reaching the API over a LAN IP | The session cookie is `Secure` whenever `CORS_ORIGINS` is set. Browsers treat `localhost` as a secure context and accept it over plain HTTP; `http://192.168.x.x` is not, so the cookie is discarded and every call after login is anonymous. Use localhost, or terminate TLS |
-| API exits at startup complaining about a missing value | `SESSION_SECRET` or `ADMIN_PASSWORD_HASH` empty. There is no default, on purpose |
+| Login returns 503, or every authenticated route does | `SESSION_SECRET` or `ADMIN_PASSWORD_HASH` empty. There is no default, on purpose. `curl .../api/v1/ready` names exactly which |
 | `SESSION_SECRET must be at least 32 characters` | Exactly that. Use the generator above rather than typing one |
 | Login succeeds, every subsequent call fails in the browser | `CORS_ORIGINS` does not match the origin in the address bar (`localhost` ≠ `127.0.0.1`) |
 | `relation "…" does not exist` | Migrations not applied — `python -m src.db.migrate_cli` |

@@ -27,6 +27,7 @@ from src.api.schemas import (
 from src.api.security import (
     SESSION_COOKIE,
     AuthError,
+    InsecureSecretError,
     constant_time_equals,
     verify_session,
 )
@@ -204,6 +205,14 @@ def _drain_caller(request: Request, settings: AppSettings) -> str:
             return verify_session(settings.session_secret, cookie).subject
         except AuthError:
             pass
+        except InsecureSecretError as exc:
+            # Reached only when the cron secret did not already authorise this
+            # call, so there is no other way in. 503 rather than the 401 below:
+            # the cookie was never checked, and saying "unauthorised" would
+            # blame a caller who may well be entitled.
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)
+            ) from exc
 
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED,

@@ -9,12 +9,23 @@ boot without an operator password it has no use for — it serves no HTTP and
 verifies no session — which pushed a credential onto a process that never needs
 it and failed deployments on a value that could not have affected them.
 
-The validation moved to ``require_api_secrets``, called by ``create_app``. That
-is a relocation, not a relaxation, and this file is what makes the difference
-checkable. The property that must survive is the one in config.py's own
-docstring: *a signing key with a fallback value is a signing key an attacker
-already knows*. An **empty** secret would be worse than a missing one — HMAC
-over ``b""`` verifies perfectly well, so anyone could mint a session.
+The validation moved to ``require_api_secrets``, called by ``create_app``, and
+then out of ``create_app`` altogether — because raising there took ``/health``,
+``/ready`` and ``/`` down with it, and a deployment missing one variable became
+indistinguishable from one that failed to build.
+
+Both moves are relocations, not relaxations, and this file is what makes the
+difference checkable. The property that must survive is the one in config.py's
+own docstring: *a signing key with a fallback value is a signing key an
+attacker already knows*. An **empty** secret would be worse than a missing one
+— HMAC over ``b""`` verifies perfectly well, so anyone could mint a session.
+
+The property is now stated more precisely, and enforced somewhere better.
+"Refuses to start" was only ever a proxy for what actually matters — **nobody
+can obtain or present a valid session** — and it was a proxy that constrained
+exactly one call site. That guarantee now lives in ``issue_session`` and
+``verify_session`` themselves, which raise rather than touch an unusable key,
+so it holds against a caller that never validated anything.
 """
 
 from __future__ import annotations
@@ -25,8 +36,21 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from src.api.security import hash_password  # noqa: E402
-from src.config import ConfigError, get_settings  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from src.api.security import (  # noqa: E402
+    AuthError,
+    InsecureSecretError,
+    hash_password,
+    issue_session,
+    verify_session,
+)
+from src.config import (  # noqa: E402
+    MIN_SESSION_SECRET_LENGTH,
+    ConfigError,
+    get_settings,
+    require_api_secrets,
+)
 
 # `src/api/main.py` ends with `app = create_app()`, because that is what
 # `uvicorn src.api.main:app` needs. So *importing* the module builds an
@@ -61,38 +85,216 @@ def _clear_cache():
     get_settings.cache_clear()
 
 
+class TestTheSigningPrimitivesRefuseAnUnusableKey:
+    """
+    Where the guarantee actually lives.
+
+    Every test here would pass just as well if ``create_app`` had never checked
+    anything, which is the point: these constrain the *operation*, so no
+    arrangement of callers — present, future, or in a test — can produce a
+    session under a key that fails the policy.
+
+    ``issue_session`` is the mint and ``verify_session`` is the gate. Closing
+    only one is not enough. Leaving the mint open lets this deployment hand out
+    tokens under a guessable key; leaving the gate open lets it *accept* them,
+    which is worse, because the attacker mints those.
+    """
+
+    @pytest.mark.parametrize("secret", ["", "   ", "tooshort", "x" * 31])
+    def test_an_unusable_key_cannot_mint(self, secret) -> None:
+        with pytest.raises(InsecureSecretError):
+            issue_session(secret)
+
+    @pytest.mark.parametrize("secret", ["", "   ", "tooshort", "x" * 31])
+    def test_an_unusable_key_cannot_verify(self, secret) -> None:
+        # The token argument is deliberately a *valid-looking* one. The check
+        # must happen before the token is examined at all, or a caller could
+        # conclude from a rejection that the signature was wrong.
+        with pytest.raises(InsecureSecretError):
+            verify_session(secret, "abc.def")
+
+    def test_the_boundary_is_exactly_32(self) -> None:
+        # Pinned so a later "tidy up" cannot lower it silently.
+        assert MIN_SESSION_SECRET_LENGTH == 32
+        with pytest.raises(InsecureSecretError):
+            issue_session("x" * 31)
+        assert issue_session("x" * 32)
+
+    def test_an_empty_key_cannot_verify_a_token_it_just_signed(self) -> None:
+        """
+        The exact attack an empty key permits, stated as a test.
+
+        With the guard removed, ``issue_session("")`` returns a token and
+        ``verify_session("", token)`` accepts it — so anyone who knows the key
+        is the empty string, which is everyone, is the operator. Both halves
+        must refuse; neither is allowed to be the only one that does.
+        """
+        with pytest.raises(InsecureSecretError):
+            token = issue_session("")
+            verify_session("", token)
+
+    def test_a_usable_key_still_round_trips(self) -> None:
+        # The negative tests above are worthless if the positive path broke.
+        token = issue_session("k" * 48, subject="operator")
+        assert verify_session("k" * 48, token).subject == "operator"
+
+    def test_insecure_is_not_an_auth_error(self) -> None:
+        # Load-bearing for the 503-not-401 split: `current_session` catches
+        # AuthError and answers 401. If InsecureSecretError were a subclass,
+        # a server with no key would tell the operator their *password* was
+        # the problem, and send them to a login that also cannot work.
+        assert not issubclass(InsecureSecretError, AuthError)
+
+
 class TestTheApiStillFailsClosed:
     """
-    The whole point of the relocation being safe. `create_app` is the only way
-    to obtain an application object, so every path that can serve a request
-    passes through the check.
+    The app now builds without secrets — so this is where the replacement
+    guarantee is checked at the HTTP boundary. Building is not serving.
     """
 
-    def test_no_session_secret_means_no_app(self, monkeypatch) -> None:
+    def _client(self, monkeypatch, **overrides):
+        _env(monkeypatch, **overrides)
+        return TestClient(create_app(), raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"SESSION_SECRET": None},
+            {"SESSION_SECRET": "   "},
+            {"SESSION_SECRET": "tooshort"},
+            {"ADMIN_PASSWORD_HASH": None},
+        ],
+    )
+    def test_login_is_refused_without_complete_config(
+        self, monkeypatch, overrides
+    ) -> None:
+        client = self._client(monkeypatch, **overrides)
+        response = client.post("/api/v1/auth/login", json={"password": "unused"})
+        assert response.status_code == 503, (
+            "an unconfigured deployment must refuse to mint a session, and "
+            "must not answer 401 — the password was never the problem"
+        )
+
+    def test_login_is_refused_before_the_password_is_checked(
+        self, monkeypatch
+    ) -> None:
+        # Even the *correct* password gets 503. If this ever returned 200 the
+        # deployment would be minting sessions under a key it does not have.
         _env(monkeypatch, SESSION_SECRET=None)
-        with pytest.raises(ConfigError, match="SESSION_SECRET"):
-            create_app()
+        monkeypatch.setenv("ADMIN_PASSWORD_HASH", hash_password("correct-horse"))
+        get_settings.cache_clear()
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/auth/login", json={"password": "correct-horse"}
+        )
+        assert response.status_code == 503
+        assert "trader_session" not in response.cookies
 
-    def test_an_empty_session_secret_means_no_app(self, monkeypatch) -> None:
-        # Distinct from missing, and more dangerous: HMAC over b"" verifies,
-        # so an empty key is a working key that everyone knows.
-        _env(monkeypatch, SESSION_SECRET="   ")
-        with pytest.raises(ConfigError, match="SESSION_SECRET"):
-            create_app()
+    def test_an_authenticated_route_answers_503_not_401(self, monkeypatch) -> None:
+        client = self._client(monkeypatch, SESSION_SECRET=None)
+        response = client.get(
+            "/api/v1/auth/me", headers={"Authorization": "Bearer anything"}
+        )
+        assert response.status_code == 503
 
-    def test_a_short_session_secret_means_no_app(self, monkeypatch) -> None:
-        _env(monkeypatch, SESSION_SECRET="tooshort")
-        with pytest.raises(ConfigError, match="at least 32"):
-            create_app()
+    def test_a_forged_session_is_still_refused(self, monkeypatch) -> None:
+        # The one that would matter if the guard were wrong. A token signed
+        # with the empty key must not be accepted by a server whose key is
+        # empty — that is the whole attack.
+        client = self._client(monkeypatch, SESSION_SECRET=None)
+        import base64
+        import hashlib
+        import hmac
+        import json
+        import time
 
-    def test_no_admin_password_means_no_app(self, monkeypatch) -> None:
-        _env(monkeypatch, ADMIN_PASSWORD_HASH=None)
-        with pytest.raises(ConfigError, match="ADMIN_PASSWORD_HASH"):
-            create_app()
+        payload = json.dumps(
+            {"sub": "operator", "iat": int(time.time()), "exp": 2**31}
+        ).encode()
+        body = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        sig = hmac.new(b"", body.encode(), hashlib.sha256).digest()
+        forged = f"{body}.{base64.urlsafe_b64encode(sig).decode().rstrip('=')}"
+
+        response = client.get(
+            "/api/v1/auth/me", headers={"Authorization": f"Bearer {forged}"}
+        )
+        assert response.status_code == 503, (
+            "a token forged under the empty key must never authenticate"
+        )
+        assert response.status_code != 200
+
+    def test_ready_names_what_is_missing(self, monkeypatch) -> None:
+        client = self._client(monkeypatch, SESSION_SECRET=None)
+        response = client.get("/api/v1/ready")
+        assert response.status_code == 503
+        assert any("SESSION_SECRET" in gap for gap in response.json()["config"])
+
+    def test_ready_names_every_gap_at_once(self, monkeypatch) -> None:
+        # Three redeploys to discover three missing variables is the failure
+        # this replaces.
+        client = self._client(
+            monkeypatch, SESSION_SECRET=None, ADMIN_PASSWORD_HASH=None
+        )
+        gaps = " ".join(client.get("/api/v1/ready").json()["config"])
+        assert "SESSION_SECRET" in gaps
+        assert "ADMIN_PASSWORD_HASH" in gaps
+
+    def test_health_survives_missing_secrets(self, monkeypatch) -> None:
+        # The entire reason for the change: the endpoint that reports trouble
+        # must not be taken down by the trouble.
+        client = self._client(monkeypatch, SESSION_SECRET=None)
+        assert client.get("/api/v1/health").status_code == 200
+        assert client.get("/").status_code == 200
 
     def test_a_complete_environment_builds_an_app(self, monkeypatch) -> None:
         _env(monkeypatch)
         assert create_app() is not None
+
+    def test_a_complete_environment_can_log_in(self, monkeypatch) -> None:
+        _env(monkeypatch, ADMIN_PASSWORD_HASH=hash_password("s3kret"))
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        assert (
+            client.post(
+                "/api/v1/auth/login", json={"password": "s3kret"}
+            ).status_code
+            == 200
+        )
+
+
+class TestRequireApiSecretsStillRaises:
+    """
+    Kept for any process that does want to fail closed at boot, and because a
+    policy stated in one raising form keeps ConfigError meaningful.
+    """
+
+    def test_no_session_secret_raises(self, monkeypatch) -> None:
+        _env(monkeypatch, SESSION_SECRET=None)
+        with pytest.raises(ConfigError, match="SESSION_SECRET"):
+            require_api_secrets(get_settings())
+
+    def test_a_short_session_secret_raises(self, monkeypatch) -> None:
+        _env(monkeypatch, SESSION_SECRET="tooshort")
+        with pytest.raises(ConfigError, match="at least 32"):
+            require_api_secrets(get_settings())
+
+    def test_no_admin_password_raises(self, monkeypatch) -> None:
+        _env(monkeypatch, ADMIN_PASSWORD_HASH=None)
+        with pytest.raises(ConfigError, match="ADMIN_PASSWORD_HASH"):
+            require_api_secrets(get_settings())
+
+    def test_a_complete_environment_does_not_raise(self, monkeypatch) -> None:
+        _env(monkeypatch)
+        require_api_secrets(get_settings())
+
+    def test_create_app_no_longer_calls_it(self) -> None:
+        # Deliberate asymmetry, pinned for the same reason as the
+        # DATABASE_URL one below: restoring the call would restore the
+        # crash-at-import and take /health down with it.
+        import inspect
+
+        from src.api import main as api_main
+
+        assert "require_api_secrets" not in inspect.getsource(api_main.create_app)
 
 
 class TestTheWorkerNeedsNeither:
