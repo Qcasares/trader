@@ -6,9 +6,6 @@
       "includeFiles": "src/**"
     }
   },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index" }
-  ],
   "crons": [
     { "path": "/api/v1/system/drain", "schedule": "0 6 * * *" }
   ]

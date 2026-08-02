@@ -20,6 +20,22 @@ explicitly costs nothing and removes the question.
 ``includeFiles`` in ``vercel.json`` is the other half. Python dependency
 tracing cannot see through ``from src.api.main import app`` reliably, so the
 package has to be named as an asset or it is simply absent from the bundle.
+
+There is deliberately **no catch-all rewrite** in ``vercel.json``. There was
+one — ``{"source": "/(.*)", "destination": "/api/index"}`` — and it made every
+route in this application unreachable. A Vercel rewrite rewrites the *path*:
+the function is invoked with ``/api/index``, not with the path the client
+asked for, so FastAPI received ``/api/index`` for every request and answered
+its own 404 to all of them. The runtime routes a detected ASGI ``app`` on the
+full path already, which is why Vercel's own FastAPI example declares real
+paths like ``/api/items/{item_id}`` inside the application and configures no
+rewrite at all.
+
+The bug was invisible for as long as it existed, because the module raised at
+import and every request returned ``FUNCTION_INVOCATION_FAILED`` before
+routing happened. It became visible in the same deploy that stopped the app
+crashing — a 404 in the runtime log naming ``/api/index`` on a request for
+``/api/v1/health``.
 """
 
 from __future__ import annotations
