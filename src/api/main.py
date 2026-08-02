@@ -30,7 +30,7 @@ from src.api.routers import (
     strategies,
     system,
 )
-from src.config import get_settings
+from src.config import get_settings, require_api_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    # The single chokepoint for "this process will serve HTTP". Validated here
+    # rather than in get_settings() so the worker — which serves nothing and
+    # verifies no session — does not need an operator password to boot.
+    require_api_secrets(settings)
     app = FastAPI(
         title=API_TITLE,
         version=API_VERSION,

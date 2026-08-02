@@ -32,6 +32,40 @@ class ConfigError(RuntimeError):
     """A required setting is missing or invalid."""
 
 
+def require_api_secrets(settings: Settings) -> None:
+    """
+    Refuse to serve HTTP without a signing key and an operator password.
+
+    These used to be validated inside :func:`get_settings`, which every process
+    calls — so the **worker** refused to start without an admin password hash it
+    has no use for. It serves no HTTP and verifies no session. Requiring it
+    there pushed the operator's credential onto a process that never needs it,
+    and made a perfectly good worker deployment fail on a missing value that
+    could not have affected it.
+
+    Moving the check does not weaken it. ``create_app`` is the only way to
+    obtain an application object, so every path that can serve a request passes
+    through here first — the same single-chokepoint argument that makes
+    ``apply_risk`` trustworthy. The guarantee is unchanged: an API with no
+    signing key does not start. An empty secret would be far worse than a
+    missing one, because HMAC over ``b""`` verifies perfectly well and anyone
+    could mint a session.
+    """
+    if not settings.session_secret:
+        raise ConfigError(
+            "SESSION_SECRET is required and has no default. Generate one with: "
+            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+        )
+    if len(settings.session_secret) < 32:
+        raise ConfigError("SESSION_SECRET must be at least 32 characters")
+    if not settings.admin_password_hash:
+        raise ConfigError(
+            "ADMIN_PASSWORD_HASH is required. Generate one with: python -c "
+            "\"import bcrypt;print(bcrypt.hashpw(b'yourpassword', "
+            'bcrypt.gensalt()).decode())"'
+        )
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -114,22 +148,10 @@ def get_settings() -> Settings:
             "postgresql://user:pass@localhost:5432/trader"
         )
 
+    # Read, not validated. Validation happens in `require_api_secrets`, called
+    # by `create_app`. See that function for why.
     session_secret = os.environ.get("SESSION_SECRET", "").strip()
-    if not session_secret:
-        raise ConfigError(
-            "SESSION_SECRET is required and has no default. Generate one with: "
-            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
-        )
-    if len(session_secret) < 32:
-        raise ConfigError("SESSION_SECRET must be at least 32 characters")
-
     admin_password_hash = os.environ.get("ADMIN_PASSWORD_HASH", "").strip()
-    if not admin_password_hash:
-        raise ConfigError(
-            "ADMIN_PASSWORD_HASH is required. Generate one with: python -c "
-            "\"import bcrypt;print(bcrypt.hashpw(b'yourpassword', "
-            'bcrypt.gensalt()).decode())"'
-        )
 
     origins_raw = os.environ.get("CORS_ORIGINS", "").strip()
     cors_origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
