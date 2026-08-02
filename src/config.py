@@ -209,6 +209,22 @@ class Settings:
     #: endpoint without an operator session. Empty disables that route in.
     cron_secret: str = ""
 
+    #: Connection pool bounds.
+    #:
+    #: The default suits a long-lived process: one pool, reused for the life of
+    #: the deployment. It is actively wrong on a serverless host, where every
+    #: cold start builds its own pool and none of them share. Ten instances
+    #: awake at once means up to a hundred connections, and a managed free tier
+    #: typically allows a small fraction of that — so the failure is not a slow
+    #: API but ``too many clients already``, arriving exactly when traffic
+    #: picks up.
+    #:
+    #: Set the maximum to 2-3 there, and prefer a provider's pooled endpoint
+    #: (Neon and Supabase both publish one) which multiplexes properly instead
+    #: of leaving each instance to guess.
+    db_pool_min_size: int = 1
+    db_pool_max_size: int = 10
+
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
     alpaca_paper: bool = True
@@ -278,6 +294,8 @@ def get_settings() -> Settings:
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
         serverless_drain_enabled=_bool_env("SERVERLESS_DRAIN_ENABLED", False),
         cron_secret=os.environ.get("CRON_SECRET", "").strip(),
+        db_pool_min_size=_int_env("DB_POOL_MIN_SIZE", 1),
+        db_pool_max_size=_int_env("DB_POOL_MAX_SIZE", 10),
         alpaca_key_id=os.environ.get("ALPACA_KEY_ID", ""),
         alpaca_secret_key=os.environ.get("ALPACA_SECRET_KEY", ""),
         alpaca_paper=_bool_env("ALPACA_PAPER", True),

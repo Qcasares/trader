@@ -43,7 +43,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the connection pool for the app's lifetime."""
     settings = get_settings()
     app.state.pool = await asyncpg.create_pool(
-        settings.database_url, min_size=1, max_size=10
+        settings.database_url,
+        min_size=settings.db_pool_min_size,
+        max_size=settings.db_pool_max_size,
     )
     logger.info("Database pool ready")
     try:

@@ -257,6 +257,7 @@ CORS_ORIGINS=https://<ui>.vercel.app      # exact origin, no trailing slash
 SESSION_COOKIE_SAMESITE=none              # required; see below
 SERVERLESS_DRAIN_ENABLED=true             # required; see below
 CRON_SECRET=...                           # any long random string
+DB_POOL_MAX_SIZE=3                        # required; see below
 LIVE_TRADING_ENABLED=false
 ALPACA_ALLOW_LIVE=false
 ```
@@ -293,6 +294,14 @@ Trading jobs are never drainable. "The worker is the only process that places
 an order" is what makes the kill-switch check and the three live gates
 meaningful, and `test_drain_boundary.py` fails the build if a trading kind is
 ever added to that set.
+
+`DB_POOL_MAX_SIZE=3`. The default of 10 assumes one long-lived process holding
+one pool. On a serverless host every cold start builds its own and none of them
+share, so ten warm instances mean up to a hundred connections against a free
+tier that allows a small fraction of that. The failure is not a slow API, it is
+`too many clients already`, and it arrives exactly when traffic picks up.
+Prefer the provider's pooled endpoint as well — Neon and Supabase both publish
+one, and it multiplexes properly rather than leaving each instance to guess.
 
 ### Backend (Fly / Railway / Render)
 
