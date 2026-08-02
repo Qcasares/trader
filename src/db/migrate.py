@@ -25,6 +25,8 @@ from pathlib import Path
 
 import asyncpg
 
+from src.config import normalise_dsn
+
 logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
@@ -109,7 +111,11 @@ async def migrate(
     Idempotent: running twice applies nothing the second time.
     """
     owns_connection = isinstance(dsn_or_conn, str)
-    conn = await asyncpg.connect(dsn_or_conn) if owns_connection else dsn_or_conn
+    conn = (
+        await asyncpg.connect(normalise_dsn(dsn_or_conn))
+        if owns_connection
+        else dsn_or_conn
+    )
     try:
         await conn.execute(_BOOTSTRAP)
         on_disk = discover(directory)
@@ -157,7 +163,11 @@ async def migrate(
 async def current_version(dsn_or_conn: str | asyncpg.Connection) -> int:
     """Highest applied version, or 0 on a fresh database."""
     owns_connection = isinstance(dsn_or_conn, str)
-    conn = await asyncpg.connect(dsn_or_conn) if owns_connection else dsn_or_conn
+    conn = (
+        await asyncpg.connect(normalise_dsn(dsn_or_conn))
+        if owns_connection
+        else dsn_or_conn
+    )
     try:
         await conn.execute(_BOOTSTRAP)
         value = await conn.fetchval("SELECT MAX(version) FROM schema_migrations")

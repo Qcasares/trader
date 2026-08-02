@@ -32,6 +32,66 @@ class ConfigError(RuntimeError):
     """A required setting is missing or invalid."""
 
 
+#: libpq connection parameters that asyncpg does not implement.
+#:
+#: asyncpg forwards any query parameter it does not recognise to the server as
+#: a runtime setting, and Postgres refuses the connection outright:
+#: ``UndefinedObjectError: unrecognized configuration parameter``. So a DSN
+#: that works with psql fails here, with an error naming a parameter the
+#: operator did not choose and cannot act on.
+#:
+#: This is not hypothetical. Neon — the Postgres offered by Vercel's own
+#: marketplace, and therefore the likeliest choice for a deployment of this —
+#: puts ``channel_binding=require`` in the connection string it hands out by
+#: default. Pasted straight into the environment, every request fails.
+_UNSUPPORTED_DSN_PARAMS = frozenset(
+    {"channel_binding", "gssencmode", "sslcompression", "krbsrvname"}
+)
+
+
+def normalise_dsn(dsn: str) -> str:
+    """
+    Strip connection parameters asyncpg cannot honour.
+
+    Removing a parameter is not free and is not done silently. ``sslmode`` and
+    ``sslrootcert`` *are* supported and are left alone; only the entries above
+    are dropped, and each one logs a warning.
+
+    ``channel_binding=require`` deserves its own note, because dropping it is a
+    real if narrow loss. Under ``sslmode=require`` libpq does not verify the
+    server certificate, and channel binding is what still frustrates a
+    man-in-the-middle in that case. asyncpg cannot negotiate it, so the choice
+    is between a connection that refuses to open and one that opens without
+    it. The stronger answer is not channel binding anyway — it is
+    ``sslmode=verify-full`` with the provider's CA, which authenticates the
+    server properly, and the warning says so.
+    """
+    if "?" not in dsn:
+        return dsn
+
+    base, _, query = dsn.partition("?")
+    kept: list[str] = []
+    dropped: list[str] = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        key = pair.split("=", 1)[0].strip().lower()
+        (dropped if key in _UNSUPPORTED_DSN_PARAMS else kept).append(pair)
+
+    if not dropped:
+        return dsn
+
+    for pair in dropped:
+        logger.warning(
+            "Dropping unsupported connection parameter %r from DATABASE_URL: "
+            "asyncpg would forward it to the server and the connection would "
+            "be refused. For transport security prefer sslmode=verify-full "
+            "with your provider's CA certificate.",
+            pair,
+        )
+    return f"{base}?{'&'.join(kept)}" if kept else base
+
+
 def require_api_secrets(settings: Settings) -> None:
     """
     Refuse to serve HTTP without a signing key and an operator password.
@@ -161,7 +221,7 @@ class Settings:
 @functools.lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Load and validate settings once per process."""
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = normalise_dsn(os.environ.get("DATABASE_URL", "").strip())
     if not database_url:
         raise ConfigError(
             "DATABASE_URL is required. Example: "

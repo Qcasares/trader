@@ -243,6 +243,12 @@ repository root. `vercel.json` and `api/index.py` do the rest: the Python
 runtime installs `requirements.txt` (the deployable set, ~190MB against a
 250MB limit) and serves the same FastAPI app uvicorn does.
 
+For the database, Vercel's marketplace offers Neon, which sets `DATABASE_URL`
+on the project for you. Paste one in from anywhere else and it works too:
+connection strings from managed providers often carry `channel_binding=require`,
+which asyncpg cannot honour and Postgres rejects outright, so it is stripped
+with a warning rather than left to fail at the first request.
+
 ```bash
 DATABASE_URL=...                          # any managed Postgres
 SESSION_SECRET=...                        # 32+ chars
