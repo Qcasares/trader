@@ -80,6 +80,24 @@ Then apply migrations once, from a checkout:
 The three variables marked **required** each fail in a way that points somewhere
 other than the cause. They are the whole reason this table exists.
 
+### Check it actually works
+
+```bash
+API_PASSWORD=yourpassword python scripts/smoke.py https://your-api.vercel.app
+```
+
+Six checks against the real URL: reachable, database, login *and a second call
+with the returned cookie*, the strategy registry, a backtest that reaches
+`succeeded`, and whether the result carries its standard error. Standard library
+only — a smoke test needing its own install is one you cannot run from wherever
+you happen to be.
+
+It tests the deployment, not the code; CI covers the code and says nothing about
+any of this. Each failure prints the remedy rather than a stack trace, because
+every one of these has a symptom that points at the wrong thing — a correct
+password appearing rejected, a backtest queued forever, a connection string the
+database itself refuses.
+
 ### Live path, on a host with real processes
 
 Not Vercel. The live path needs something that outlives a request — a scheduler
