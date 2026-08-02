@@ -11,7 +11,7 @@ from src.api.deps import AppSettings, AuthedSession
 from src.api.schemas import LoginRequest, LoginResponse
 from src.api.security import SESSION_COOKIE, issue_session, verify_password
 from src.api.throttle import throttle
-from src.config import Settings
+from src.config import Settings, missing_api_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -59,6 +59,20 @@ async def login(
     far more in parallel, and there is exactly one password standing between
     the internet and a system that places orders.
     """
+    # Before the throttle and before the password check, because a deployment
+    # missing its configuration would otherwise answer 401 "invalid password"
+    # — blaming the operator for a password that was never wrong, and spending
+    # their throttle budget doing it. There is also nothing to check against:
+    # an absent ADMIN_PASSWORD_HASH makes `verify_password` return False for
+    # every input, so every attempt is a "failure" that can never succeed.
+    gaps = missing_api_config(settings)
+    if gaps:
+        logger.error("Login attempted against an unconfigured deployment: %s", gaps)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="; ".join(gaps),
+        )
+
     source = _source(request)
 
     wait = throttle.retry_after(source)

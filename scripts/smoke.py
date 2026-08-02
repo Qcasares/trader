@@ -14,6 +14,7 @@ message points somewhere other than its cause, which is why each check prints
 the actual remedy rather than a stack trace.
 
     reachable            the URL resolves and answers
+    configured           every required environment variable is set
     database             migrations applied, connection string accepted
     login                session cookie issued *and accepted on the next call*
     strategies           the registry loaded
@@ -129,13 +130,38 @@ def main() -> None:
             )
         return f"v{body.get('version', '?')}"
 
+    def configured() -> str:
+        """
+        What the deployment says it is missing, in its own words.
+
+        Split from ``database`` because ``/ready`` answers 503 for either, and
+        the two have nothing to do with each other. Reporting "cannot reach the
+        database" at a deployment whose real problem is an unset SESSION_SECRET
+        sends the operator to the wrong provider dashboard.
+        """
+        status, body = client.call("/api/v1/ready")
+        gaps = body.get("config") or [] if isinstance(body, dict) else []
+        # Connectivity is the next check's business; drop its line from here.
+        gaps = [g for g in gaps if "unreachable" not in g]
+        if gaps:
+            raise CheckError(
+                "the deployment is missing configuration:\n    - "
+                + "\n    - ".join(gaps)
+                + "\n\n  Set these in the host's environment and redeploy. "
+                "Until then\n  the API serves /health and refuses every "
+                "authenticated route."
+            )
+        if status not in (200, 503):
+            raise CheckError(f"/api/v1/ready returned {status}: {body}")
+        return "complete"
+
     def database() -> str:
         status, body = client.call("/api/v1/ready")
         if status == 503:
             raise CheckError(
-                "the API cannot reach its database. Either DATABASE_URL is wrong, "
-                "or the connection string carries a parameter asyncpg refuses "
-                "(a provider default). Check the logs for 'unrecognized "
+                "the API cannot reach its database. Either DATABASE_URL is unset "
+                "or wrong, or the connection string carries a parameter asyncpg "
+                "refuses (a provider default). Check the logs for 'unrecognized "
                 "configuration parameter'."
             )
         if status != 200:
@@ -261,6 +287,7 @@ def main() -> None:
         )
 
     check("reachable", reachable)
+    check("configured", configured)
     check("database", database)
     check("login", login)
     check("strategies", strategies)

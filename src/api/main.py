@@ -30,7 +30,7 @@ from src.api.routers import (
     strategies,
     system,
 )
-from src.config import get_settings, require_api_secrets
+from src.config import get_settings, missing_api_config
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +78,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    # The single chokepoint for "this process will serve HTTP". Validated here
-    # rather than in get_settings() so the worker — which serves nothing and
-    # verifies no session — does not need an operator password to boot.
-    require_api_secrets(settings)
+    # Reported, not raised — the same trade already made for DATABASE_URL, for
+    # the same reason. Raising here took `/health`, `/ready` and `/` down with
+    # it, so a deployment missing one variable was indistinguishable from a
+    # deployment that failed to build, and the reason lived only in a runtime
+    # log. `/ready` now answers 503 and names what is missing.
+    #
+    # Nothing is trusted as a result. A session cannot be minted or verified
+    # without a usable key: `issue_session` and `verify_session` raise
+    # `InsecureSecretError` rather than touch one, so every authenticated route
+    # and the login route itself answer 503 until the key is set. The
+    # guarantee — nobody can obtain or present a valid session — is enforced at
+    # the operation rather than at startup, which is where it survives a caller
+    # that forgets to check.
+    config_gaps = missing_api_config(settings)
+    for gap in config_gaps:
+        logger.error("Configuration incomplete: %s", gap)
+    if config_gaps:
+        logger.error(
+            "The API will serve /health and answer 503 on /ready and on every "
+            "authenticated route until the above are set."
+        )
     app = FastAPI(
         title=API_TITLE,
         version=API_VERSION,
@@ -147,19 +164,31 @@ def create_app() -> FastAPI:
         reads as healthy — they route on the status code, not the body. An
         instance with a dead database would have stayed in the load balancer,
         serving 500s, while its readiness probe cheerfully reported success.
+
+        Also names any missing configuration. This is the one endpoint an
+        operator has after a deploy, and "not ready" without a reason sends
+        them to the runtime logs to find out which variable they forgot. The
+        names of absent settings are not a disclosure — nothing here reveals a
+        *value*, and an unconfigured deployment announces itself on the first
+        request either way.
         """
+        gaps = missing_api_config(get_settings())
         pool = getattr(app.state, "pool", None)
-        if pool is None:
-            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return {"ready": False, "database": False}
-        try:
-            async with pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
-            return {"ready": True, "database": True}
-        except Exception as exc:  # noqa: BLE001 - probe must not raise
-            logger.error("Readiness probe failed: %s", exc)
-            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-            return {"ready": False, "database": False}
+        database = False
+        if pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                database = True
+            except Exception as exc:  # noqa: BLE001 - probe must not raise
+                logger.error("Readiness probe failed: %s", exc)
+
+        if database and not gaps:
+            return {"ready": True, "database": True, "config": []}
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        if not database:
+            gaps = [*gaps, "DATABASE_URL is not set or the database is unreachable"]
+        return {"ready": False, "database": database, "config": gaps}
 
     return app
 

@@ -16,7 +16,13 @@ from typing import Annotated
 import asyncpg
 from fastapi import Cookie, Depends, HTTPException, Request, status
 
-from src.api.security import SESSION_COOKIE, AuthError, Session, verify_session
+from src.api.security import (
+    SESSION_COOKIE,
+    AuthError,
+    InsecureSecretError,
+    Session,
+    verify_session,
+)
 from src.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -70,6 +76,15 @@ async def current_session(
 
     try:
         return verify_session(get_settings().session_secret, token)
+    except InsecureSecretError as exc:
+        # 503, not 401. The token may be perfectly good; this deployment has no
+        # key to check it with, and that is a fault on this side of the wire.
+        # Answering 401 would tell an operator their session had expired and
+        # send them to log in again, which cannot succeed either.
+        logger.error("Cannot verify sessions: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
     except AuthError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

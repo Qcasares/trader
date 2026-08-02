@@ -14,8 +14,10 @@ Two safety properties are enforced here rather than left to discipline:
   the broker factory once did — reduced three documented conditions to two.
   Each must now be set by a separate deliberate act.
 - ``session_secret`` has no default. A signing key with a fallback value is a
-  signing key an attacker already knows, so the app refuses to start without
-  one rather than quietly using a placeholder.
+  signing key an attacker already knows, so no session can be minted or
+  verified without a real one — enforced at ``issue_session`` and
+  ``verify_session`` rather than at startup, because a startup check binds one
+  call site while this binds the operation. See :func:`session_secret_problem`.
 """
 
 from __future__ import annotations
@@ -92,9 +94,71 @@ def normalise_dsn(dsn: str) -> str:
     return f"{base}?{'&'.join(kept)}" if kept else base
 
 
+#: Shortest key that may sign a session.
+#:
+#: Not a round number chosen for looks: the signature is HMAC-SHA256, whose
+#: security is bounded by the key's entropy once the key is shorter than the
+#: 32-byte block. Below this an attacker can search the keyspace rather than
+#: the signature space.
+MIN_SESSION_SECRET_LENGTH = 32
+
+
+def session_secret_problem(secret: str) -> str | None:
+    """
+    Why ``secret`` may not sign a session, or ``None`` if it may.
+
+    The single definition of the policy. ``src/api/security.py`` enforces it at
+    the two primitives that touch the key, and :func:`missing_api_config`
+    reports it — both from here, so the reported state and the enforced state
+    cannot drift apart.
+
+    Lives in ``config.py`` rather than beside its enforcement because the
+    worker and the CLI import this module, and neither has any business
+    pulling in ``bcrypt`` to find out whether a string is long enough.
+    """
+    if not secret or not secret.strip():
+        return (
+            "SESSION_SECRET is not set. Generate one with: "
+            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+        )
+    if len(secret) < MIN_SESSION_SECRET_LENGTH:
+        return (
+            f"SESSION_SECRET must be at least {MIN_SESSION_SECRET_LENGTH} "
+            f"characters (got {len(secret)})"
+        )
+    return None
+
+
+def missing_api_config(settings: Settings) -> list[str]:
+    """
+    Every prerequisite the HTTP API needs and does not have.
+
+    A list rather than an exception, and *all* the gaps rather than the first.
+    An operator configuring a deployment one variable at a time, redeploying
+    between each, is the slowest possible way to discover three missing values;
+    naming them together turns three round trips into one.
+
+    Reported by ``/ready``. Not the enforcement — the signing primitives in
+    ``src/api/security.py`` call :func:`session_secret_problem` themselves.
+    Both read the policy from here, so a deployment cannot report a gap it does
+    not have, or run with one it has not reported.
+    """
+    gaps: list[str] = []
+    problem = session_secret_problem(settings.session_secret)
+    if problem is not None:
+        gaps.append(problem)
+    if not settings.admin_password_hash:
+        gaps.append(
+            "ADMIN_PASSWORD_HASH is not set. Generate one with: python -c "
+            "\"import bcrypt;print(bcrypt.hashpw(b'yourpassword', "
+            'bcrypt.gensalt()).decode())"'
+        )
+    return gaps
+
+
 def require_api_secrets(settings: Settings) -> None:
     """
-    Refuse to serve HTTP without a signing key and an operator password.
+    Raise unless the API has a signing key and an operator password.
 
     These used to be validated inside :func:`get_settings`, which every process
     calls — so the **worker** refused to start without an admin password hash it
@@ -103,27 +167,31 @@ def require_api_secrets(settings: Settings) -> None:
     and made a perfectly good worker deployment fail on a missing value that
     could not have affected it.
 
-    Moving the check does not weaken it. ``create_app`` is the only way to
-    obtain an application object, so every path that can serve a request passes
-    through here first — the same single-chokepoint argument that makes
-    ``apply_risk`` trustworthy. The guarantee is unchanged: an API with no
-    signing key does not start. An empty secret would be far worse than a
-    missing one, because HMAC over ``b""`` verifies perfectly well and anyone
-    could mint a session.
+    It then moved to ``create_app``, and that was still one step too early. On
+    a serverless host, environment variables are set *after* the first deploy,
+    so raising here took down ``/health``, ``/ready`` and ``/`` — every
+    endpoint whose purpose is to say what is wrong — and left
+    ``FUNCTION_INVOCATION_FAILED`` as the only symptom. Exactly the failure
+    already fixed for ``DATABASE_URL``; the same argument applies, and the same
+    fix does.
+
+    So ``create_app`` no longer calls this. What replaces it is stronger, not
+    weaker, and the distinction is worth stating precisely. The property that
+    matters has never been "the process refuses to start" — it is **nobody can
+    obtain or present a valid session**. That now holds at
+    :func:`src.api.security.issue_session` and
+    :func:`src.api.security.verify_session` themselves, which raise rather than
+    touch an unusable key. A startup check only ever constrained one call site;
+    this constrains the operation, so a future caller that forgets to validate
+    still cannot mint a session.
+
+    The function stays because a process that genuinely wants to fail closed at
+    boot should have one call to make, and because stating the policy in one
+    raising form keeps ``ConfigError`` meaningful.
     """
-    if not settings.session_secret:
-        raise ConfigError(
-            "SESSION_SECRET is required and has no default. Generate one with: "
-            "python -c 'import secrets; print(secrets.token_urlsafe(48))'"
-        )
-    if len(settings.session_secret) < 32:
-        raise ConfigError("SESSION_SECRET must be at least 32 characters")
-    if not settings.admin_password_hash:
-        raise ConfigError(
-            "ADMIN_PASSWORD_HASH is required. Generate one with: python -c "
-            "\"import bcrypt;print(bcrypt.hashpw(b'yourpassword', "
-            'bcrypt.gensalt()).decode())"'
-        )
+    gaps = missing_api_config(settings)
+    if gaps:
+        raise ConfigError("; ".join(gaps))
 
 
 def require_database_url(settings: Settings) -> None:

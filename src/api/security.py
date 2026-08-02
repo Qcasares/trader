@@ -28,13 +28,50 @@ from dataclasses import dataclass
 
 import bcrypt
 
+from src.config import session_secret_problem
+
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "trader_session"
 
 
 class AuthError(Exception):
-    """Authentication failed."""
+    """
+    Authentication failed — the *credential* is bad.
+
+    Callers turn this into 401. It means the token was absent, malformed,
+    expired, or signed with the wrong key.
+    """
+
+
+class InsecureSecretError(RuntimeError):
+    """
+    The *server* cannot sign or check a session, because its key is unusable.
+
+    Deliberately not an :class:`AuthError`. Answering 401 here would blame the
+    caller for the deployment's missing configuration, and would tell an
+    operator staring at a login failure that their password was wrong when the
+    password was never the problem. Callers turn this into 503.
+    """
+
+
+def _require_signing_key(secret: str) -> None:
+    """
+    Refuse to use a key that fails the policy.
+
+    Enforced *here*, at the two functions that touch the key, rather than only
+    at startup. A startup check is a promise about one call site; this is a
+    property of the primitive, and it survives someone later adding a caller
+    that forgot to validate — including a test.
+
+    The case this exists for is the empty string. ``hmac.new(b"", ...)`` does
+    not fail; it returns a perfectly good signature under a key every attacker
+    already has, so ``verify_session`` would accept tokens anyone could mint.
+    An unusable key must raise, never sign.
+    """
+    problem = session_secret_problem(secret)
+    if problem is not None:
+        raise InsecureSecretError(problem)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +116,13 @@ def _b64decode(value: str) -> bytes:
 
 
 def issue_session(secret: str, subject: str = "operator", ttl: int = 43200) -> str:
-    """Create a signed session token."""
+    """
+    Create a signed session token.
+
+    Raises :class:`InsecureSecretError` rather than signing under a key that
+    fails the policy.
+    """
+    _require_signing_key(secret)
     now = int(time.time())
     payload = {"sub": subject, "iat": now, "exp": now + ttl}
     body = _b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
@@ -96,7 +139,16 @@ def verify_session(secret: str, token: str) -> Session:
     Raises :class:`AuthError` on a bad signature, malformed token, or expiry.
     The signature is checked before the payload is parsed, so untrusted JSON is
     never deserialised on an unauthenticated path.
+
+    Raises :class:`InsecureSecretError` — checked *first*, before the token is
+    even looked at — when this deployment has no usable key. Rejecting with
+    ``AuthError`` instead would be the dangerous shape: it reads as "that
+    session is invalid", which is indistinguishable from the case where the key
+    is fine, and it invites someone to conclude the empty-key path is safely
+    handled when in fact nothing verified anything.
     """
+    _require_signing_key(secret)
+
     if not token or "." not in token:
         raise AuthError("malformed session token")
 
