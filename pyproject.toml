@@ -4,6 +4,35 @@ version = "0.1.0"
 description = "Systematic trading platform: backtestable strategies with a research lab and a live control plane"
 requires-python = ">=3.11"
 
+# Deliberately duplicated from requirements.txt, and kept in step by
+# tests/unit/test_dependency_sources_agree.py.
+#
+# Not an oversight. Vercel's Python builder prefers pyproject.toml when one
+# exists and ignores requirements.txt entirely — the build log says
+# "Installing required dependencies from pyproject.toml..." — so a project
+# with a pyproject that declares no dependencies installs nothing at all. The
+# build succeeds, and every request then dies on `ModuleNotFoundError: No
+# module named 'asyncpg'` at import time. That is exactly how this list came
+# to exist: the deployment built cleanly and returned 500 to everything.
+#
+# Docker and CI install requirements.txt; Vercel installs this. Both must
+# describe the same application, so the test compares them rather than trusting
+# anyone to remember.
+dependencies = [
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "exchange_calendars>=4.13.0",
+    "pydantic>=2.7.0",
+    "asyncpg>=0.29.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "bcrypt>=4.1.0",
+    "python-dotenv>=1.0.0",
+    "yfinance>=0.2.60",
+    "aiohttp>=3.9.0",
+    "requests>=2.31.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
