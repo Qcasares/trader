@@ -108,12 +108,65 @@ class TestTheWorkerNeedsNeither:
         assert settings.session_secret == ""
         assert settings.admin_password_hash == ""
 
-    def test_database_url_is_still_required_of_everyone(self, monkeypatch) -> None:
-        # The relocation applies only to the two API secrets. Every process
-        # talks to Postgres, so that one stays a hard requirement everywhere.
+    def test_settings_load_without_a_database_url_too(self, monkeypatch) -> None:
+        """
+        DATABASE_URL used to be required inside get_settings, which runs at
+        import. On a serverless host that is the wrong trade: environment
+        variables are configured *after* the first deploy, so the first deploy
+        of a correctly-built application crashed at import and every route —
+        `/health` included — returned an opaque FUNCTION_INVOCATION_FAILED,
+        with the real reason visible only in a runtime log.
+
+        It is now enforced where it matters instead. See the class below.
+        """
+        _env(monkeypatch, DATABASE_URL=None)
+        assert get_settings().database_url == ""
+
+
+class TestTheDatabaseIsRequiredWhereItMatters:
+    """
+    Relocated, not relaxed — the same argument as the API secrets above.
+
+    A missing DATABASE_URL cannot make anything *insecure*; it can only make it
+    useless. So the API degrades legibly (200 on /health, 503 on /ready) while
+    the worker, which exists solely to claim jobs and write results, refuses to
+    start at all: a loop that can never do anything, running quietly forever,
+    is the failure mode this codebase treats as worse than crashing.
+    """
+
+    def test_require_database_url_rejects_an_empty_one(self, monkeypatch) -> None:
+        from src.config import require_database_url
+
         _env(monkeypatch, DATABASE_URL=None)
         with pytest.raises(ConfigError, match="DATABASE_URL"):
-            get_settings()
+            require_database_url(get_settings())
+
+    def test_require_database_url_accepts_a_real_one(self, monkeypatch) -> None:
+        from src.config import require_database_url
+
+        _env(monkeypatch)
+        require_database_url(get_settings())  # must not raise
+
+    def test_the_worker_calls_it(self) -> None:
+        # The function existing is not the guarantee; the worker calling it is.
+        import inspect
+
+        from src.worker import main
+
+        assert "require_database_url" in inspect.getsource(main.async_main), (
+            "the worker must refuse to start without a database, or it runs a "
+            "loop that can never claim a job and says nothing about it"
+        )
+
+    def test_the_api_does_not_call_it(self) -> None:
+        # Deliberate asymmetry, and worth pinning: adding it to create_app
+        # would restore the crash-at-import behaviour and take /health down
+        # with it on any half-configured deployment.
+        import inspect
+
+        from src.api import main as api_main
+
+        assert "require_database_url" not in inspect.getsource(api_main.create_app)
 
     def test_the_live_gates_still_default_closed(self, monkeypatch) -> None:
         # Adjacent, and worth asserting in the same breath: nothing about

@@ -68,6 +68,52 @@ class TestReadiness:
         assert body["database"] is False
 
 
+class TestAHalfConfiguredDeploymentSaysSo:
+    """
+    The state every serverless deployment passes through: the code is deployed
+    and correct, and DATABASE_URL has not been set yet, because on that host
+    environment variables are configured *after* the first deploy.
+
+    It used to crash at import. Every route returned FUNCTION_INVOCATION_FAILED
+    — including `/health`, whose entire purpose is to answer when the database
+    cannot — and the real reason appeared only in a runtime log. A deployment
+    that cannot say what it is missing looks identical to one that is broken.
+    """
+
+    @pytest.fixture
+    def no_database(self, monkeypatch):
+        from src.api.security import hash_password
+        from src.config import get_settings
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("SESSION_SECRET", "q" * 48)
+        monkeypatch.setenv("ADMIN_PASSWORD_HASH", hash_password("unused"))
+        get_settings.cache_clear()
+
+        from src.api.main import create_app
+
+        try:
+            yield TestClient(create_app())
+        finally:
+            get_settings.cache_clear()
+
+    def test_the_app_still_builds(self, no_database) -> None:
+        assert no_database is not None
+
+    def test_health_answers_200(self, no_database) -> None:
+        assert no_database.get("/api/v1/health").status_code == 200
+
+    def test_ready_answers_503(self, no_database) -> None:
+        assert no_database.get("/api/v1/ready").status_code == 503
+
+    def test_the_root_route_still_answers(self, no_database) -> None:
+        # The first thing anyone opens after a deploy. It must distinguish
+        # "deployed but unconfigured" from "deployment failed".
+        response = no_database.get("/")
+        assert response.status_code == 200
+        assert "health" in response.json()
+
+
 class TestLiveness:
     """
     Liveness answers "is this process running", not "is it useful". It must

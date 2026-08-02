@@ -40,14 +40,33 @@ API_VERSION = "0.1.0"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open the connection pool for the app's lifetime."""
+    """
+    Open the connection pool for the app's lifetime.
+
+    A missing or unreachable database is reported rather than raised. Raising
+    here takes the whole application down — including ``/health``, whose job is
+    to answer when the database cannot — and on a serverless host, where
+    environment variables are set after the first deploy, that turns an
+    ordinary configuration gap into an opaque ``FUNCTION_INVOCATION_FAILED``
+    on every route. ``/ready`` answers 503 instead, and says which it is.
+    """
     settings = get_settings()
-    app.state.pool = await asyncpg.create_pool(
-        settings.database_url,
-        min_size=settings.db_pool_min_size,
-        max_size=settings.db_pool_max_size,
-    )
-    logger.info("Database pool ready")
+    app.state.pool = None
+    if not settings.database_url:
+        logger.error(
+            "DATABASE_URL is not set. The API will serve /health and answer "
+            "503 on /ready; every data endpoint will fail until it is."
+        )
+    else:
+        try:
+            app.state.pool = await asyncpg.create_pool(
+                settings.database_url,
+                min_size=settings.db_pool_min_size,
+                max_size=settings.db_pool_max_size,
+            )
+            logger.info("Database pool ready")
+        except Exception as exc:  # noqa: BLE001 - reported by /ready, not fatal
+            logger.error("Could not open a database pool: %s", exc)
     try:
         yield
     finally:
