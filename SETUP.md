@@ -236,27 +236,44 @@ is a system nobody can check.
 | UI | https://trader-ui-black.vercel.app | Vercel, free |
 | API | https://trader-api-515t.onrender.com | Render web service, free |
 | Database | Render Postgres `trader-db`, Oregon | free, **expires 2026-09-02** |
-| Job scheduler | `.github/workflows/drain.yml`, every 10 minutes | GitHub Actions |
+| Worker | `.github/workflows/worker.yml` | GitHub Actions, unmetered on a public repo |
+| Keepalive | `.github/workflows/keepalive.yml` | GitHub Actions |
 
-Three consequences of the free tiers, each of which changes what the system can
-be trusted to do:
+The worker is the interesting one. Render has no free background-worker tier,
+so `trader-worker` from `render.yaml` does not exist here; the workflow runs
+`python -m src.worker.main` unchanged on a runner instead, chained so coverage
+is continuous rather than sampled. `worker.yml` explains the chaining. The
+System page reports it alive under `gha-<run id>`, and it claims a queued
+backtest in seconds.
 
-- **There is no worker.** Render has no free background-worker tier, so
-  `trader-worker` from `render.yaml` does not exist. `SERVERLESS_DRAIN_ENABLED`
-  lets the API run `backtest` and `walkforward` jobs itself and the workflow
-  above asks it to, so research works. **Live trading does not**, and the System
-  page says so: it reports no worker alive, which is true and is the right thing
-  for it to report. A live deployment needs the paid worker.
+Two consequences of the free tiers, and one deliberate trade:
+
 - **The database expires after 30 days**, and it takes `daily_marks` with it —
   the table both halting limits are measured against. Upgrade it before then or
   the equity history goes, silently.
 - **The API sleeps after 15 minutes idle** and takes about a minute to answer
-  the request that wakes it. The ten-minute drain keeps it awake in practice.
+  the request that wakes it. `keepalive.yml` mitigates it. Nothing
+  correctness-bearing depends on it; the worker holds its own database
+  connection and does not care whether the API is awake.
+- **The database accepts connections from anywhere** (`0.0.0.0/0` on Render's
+  IP allow list), protected by TLS and Render's generated password. This is not
+  a default worth keeping. It is here because the worker runs on GitHub's
+  runners, whose egress addresses are neither stable nor enumerable into an
+  allow list, and a worker with no route to the database is not a worker. A
+  worker inside Render would let the list be closed again and the internal
+  hostname used instead.
+
+**Live trading is not armed, and none of this arms it.** `LIVE_TRADING_ENABLED`
+and `ALPACA_ALLOW_LIVE` are false, no broker credentials are set, the
+deployment's own mode is the third gate, and the kill switch is engaged above
+all three. A `submit_orders` job on this deployment fails with "kill switch
+engaged", which is the control working rather than a fault. Arming real money
+should be done on a host you pay for.
 
 Upgrading is one action: add a card to the Render account and deploy
 `render.yaml` as a Blueprint, which brings the paid database, the paid API and
-the worker in one step. The workflow above becomes redundant then; the worker
-claims jobs faster than a ten-minute schedule can.
+a worker beside them in one step. Both workflows become redundant then, and the
+allow list can be closed.
 
 ### Everything on Vercel — two projects from one repository
 

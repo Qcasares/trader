@@ -1,0 +1,50 @@
+# keepalive.yml
+# -------------
+# Keeps the free API instance awake. Nothing else.
+#
+# This replaces `drain.yml`, which asked the API to run queued research jobs
+# itself because there was no worker to run them. `worker.yml` is that worker
+# now, so the API is back to being what the architecture says it is: a control
+# plane that writes job rows and never executes one. `SERVERLESS_DRAIN_ENABLED`
+# is off on the deployment for the same reason — a backtest is CPU-bound pandas
+# work, and running one inside the API stalls every other request on that event
+# loop, including the one an operator is using to hit the kill switch.
+#
+# A free Render instance sleeps after 15 minutes idle and takes about a minute
+# to answer the request that wakes it. That is a bad first impression for the
+# UI and nothing more, which is why this hits `/api/v1/health` — the endpoint
+# that answers without a database — rather than anything that does work.
+#
+# GitHub delivers scheduled runs on a best-effort basis and, in practice on
+# this repository, closer to hourly than to the ten minutes asked for below.
+# That is fine for what this is: a warm instance is a nicety, and nothing
+# correctness-bearing depends on it. The worker holds its own database
+# connection and does not care whether the API is awake.
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the API
+        env:
+          API_BASE: ${{ vars.API_BASE }}
+        run: |
+          set -euo pipefail
+          # --max-time covers a cold start, which is the slowest this call ever
+          # legitimately is.
+          code=$(curl --silent --show-error --max-time 180 \
+            --output /dev/null --write-out '%{http_code}' \
+            "${API_BASE}/api/v1/health")
+          echo "health: $code"
+          test "$code" = "200"
