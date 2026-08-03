@@ -1,0 +1,92 @@
+# programme.yml
+# -------------
+# The AI programme, on the same host as the worker and for the same reason.
+#
+# `src/programme` is a third long-lived process. Render has no free tier for a
+# background worker and Vercel has no long-lived process at all, so the runner
+# that already keeps `src/worker` alive keeps this one alive too. It runs
+# `python -m src.programme.main` unchanged — the same module, the same
+# fail-closed switches, the same heartbeat row.
+#
+# Why it is a separate workflow from the worker
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Not tidiness. This is the only job in the repository that installs
+# `requirements-programme.txt`, and therefore the only place `anthropic` is
+# ever present. `src/api` and `src/worker` are forbidden from importing an LLM
+# client by `tests/unit/test_import_boundaries.py`, and `src/programme` is
+# forbidden from importing anything that can submit an order. Running both in
+# one job would put the SDK in the same process tree as the broker
+# credentials, which is exactly the separation the tests exist to keep.
+#
+# It also means the programme can fail, be disabled, or run out of API credit
+# without touching the worker that writes `daily_marks` — and both halting
+# limits are measured against that table.
+#
+# What this does NOT make safe
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Nothing about trading. This process cannot place an order: it may not import
+# `src.execution` or `src.worker`, it holds no broker credentials, and
+# `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` are absent from the
+# environment below and therefore false.
+#
+# Nor does deploying it turn it on. `programme_enabled` is seeded false by
+# migration 0007 and read fail-closed, and `programme_max_auto_stage` is seeded
+# zero, so a freshly deployed runner evaluates gates, records judgements and
+# promotes nothing until an operator says otherwise from the Programme page.
+# Arriving deployed-but-inert is the intended state.
+
+name: programme
+
+on:
+  schedule:
+    - cron: "30 */5 * * *"
+  workflow_dispatch:
+
+# Queue, never overlap. Two runners would both claim requested ticks — the
+# claim uses FOR UPDATE SKIP LOCKED so it is safe — but a second one buys
+# nothing and doubles the model spend.
+concurrency:
+  group: programme
+  cancel-in-progress: false
+
+jobs:
+  programme:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # The one file in this repository that installs an LLM SDK, in the one
+      # job that is allowed to.
+      - run: pip install -r requirements-programme.txt
+
+      - name: Run the programme until just short of the job limit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Absent is fine and is the expected state on a first deploy. Without
+          # it the runner still reconciles experiments, evaluates gates,
+          # promotes candidates and queues shadow sessions; it simply proposes
+          # no new hypotheses and convenes no panel.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Recorded on every experiment row, so a result can be reproduced
+          # from the commit that produced it.
+          GIT_COMMIT: ${{ github.sha }}
+          PROGRAMME_TICK_SECONDS: "3600"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -uo pipefail
+          # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
+          # the tick in flight, records it on its `programme_runs` row and
+          # closes the pool. A killed tick would leave a row stuck 'running'.
+          timeout --signal=TERM --kill-after=60 20700 python -m src.programme.main
+          code=$?
+          # 124 is `timeout` stopping a healthy process, which is how every
+          # run is meant to end.
+          if [ "$code" -eq 124 ]; then exit 0; fi
+          exit "$code"
