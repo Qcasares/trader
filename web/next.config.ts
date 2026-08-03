@@ -46,10 +46,50 @@ const explicit = raw && !raw.includes("://") ? `https://${raw}` : raw;
 const apiBase =
   explicit || (process.env.VERCEL ? DEPLOYED_API_BASE : LOCAL_API_BASE);
 
+/**
+ * Whether the browser talks to the API directly or through this server.
+ *
+ * Direct is the simpler arrangement and it is what the code did first. It also
+ * does not work in Safari or Firefox, for a reason that has nothing to do with
+ * this application: `vercel.app` and `onrender.com` are on the Public Suffix
+ * List, so `trader-ui-x.vercel.app` and `trader-y.vercel.app` are different
+ * *sites*, the session cookie is third-party, and those browsers block
+ * third-party cookies by default. The failure is the worst kind — `/auth/login`
+ * returns 200 and sets the cookie, the browser drops it, and every call after
+ * it gets 401, so a correct password looks like a rejected one and the app
+ * bounces straight back to the login screen.
+ *
+ * `SESSION_COOKIE_SAMESITE=none` does not save it. SameSite governs whether a
+ * cookie *may* be sent cross-site; third-party cookie blocking governs whether
+ * it is stored at all, and blocking wins.
+ *
+ * So when `API_PROXY` is set, the browser calls this origin at `/api/...` and
+ * the rewrite below forwards to the API. The cookie is then first-party and
+ * every browser keeps it. The cost is that API traffic takes one extra hop
+ * through a Next.js function; for a single operator that is nothing, and it
+ * buys a UI that works in the browser people actually use.
+ *
+ * The alternative fix is a custom domain with the UI and API on sibling
+ * subdomains, which makes them the same site properly. That is better, and it
+ * needs a domain; this needs nothing.
+ */
+const proxyApi = (process.env.API_PROXY ?? "").trim() === "1";
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   env: {
-    NEXT_PUBLIC_API_BASE: apiBase,
+    // Empty means "same origin": `api.ts` builds `${BASE}${path}`, so an empty
+    // base yields a relative URL, which is exactly what the proxy needs.
+    NEXT_PUBLIC_API_BASE: proxyApi ? "" : apiBase,
+  },
+  async rewrites() {
+    if (!proxyApi) return [];
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${apiBase}/api/:path*`,
+      },
+    ];
   },
 };
 
