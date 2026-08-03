@@ -158,7 +158,19 @@ def _execute(study: dict[str, Any]) -> dict[str, Any]:
         ],
         # The stitched out-of-sample curve is the only performance figure here
         # that anybody should quote, and it carries its own standard error.
-        "metrics": result.stitched_oos.to_dict(),
+        #
+        # The two research-integrity statistics ride alongside it rather than
+        # inside it, because they are properties of the *study* — of how hard
+        # it looked — and not of the curve. Both are None when the study could
+        # not support them, and None is stored as null rather than as zero: an
+        # unmeasured probability of overfitting rendered as 0.0 would be the
+        # most flattering possible lie about a research process.
+        "metrics": {
+            **result.stitched_oos.to_dict(),
+            "probability_of_backtest_overfitting": result.pbo,
+            "deflated_sharpe": result.deflated_sharpe,
+            "n_trials": result.param_grid_size,
+        },
     }
 
 

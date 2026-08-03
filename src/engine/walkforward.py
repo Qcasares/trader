@@ -34,11 +34,14 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any
+
+import numpy as np
 
 from src.core.calendar import sessions as nyse_sessions
 from src.core.clock import SimClock
@@ -50,6 +53,10 @@ from src.engine.metrics import (
     PerformanceMetrics,
     compute_metrics,
     metrics_from_records,
+)
+from src.engine.statistics import (
+    deflated_sharpe_ratio,
+    probability_of_backtest_overfitting,
 )
 from src.execution.simulated import SimulatedBroker
 from src.strategies import build_strategy
@@ -103,6 +110,18 @@ class WalkForwardResult:
     folds: list[FoldResult]
     stitched_oos: PerformanceMetrics
     param_grid_size: int
+
+    #: Probability that the configuration which looked best in sample would
+    #: land in the bottom half out of sample. ``None`` when the study could not
+    #: support the estimate — one candidate, or too short a sample — which is
+    #: emphatically not the same as zero. See
+    #: :func:`src.engine.statistics.probability_of_backtest_overfitting`.
+    pbo: float | None = None
+
+    #: Probability the true Sharpe of the stitched out-of-sample curve is above
+    #: zero, discounted for how many configurations were tried. ``None`` when
+    #: undefined.
+    deflated_sharpe: float | None = None
 
     @property
     def mean_in_sample_sharpe(self) -> float:
@@ -310,12 +329,111 @@ def run_walk_forward(
         )
 
     stitched = _stitch_out_of_sample(results, oos_segments)
+    pbo, deflated = _overfitting_statistics(
+        strategy_name,
+        candidates,
+        panel,
+        sessions,
+        initial_cash,
+        cost_model,
+        constraints,
+        stitched,
+    )
     return WalkForwardResult(
         strategy_name=strategy_name,
         folds=results,
         stitched_oos=stitched,
         param_grid_size=len(candidates),
+        pbo=pbo,
+        deflated_sharpe=deflated,
     )
+
+
+def _overfitting_statistics(
+    strategy_name: str,
+    candidates: Sequence[dict[str, Any]],
+    panel: PricePanel,
+    sessions: Sequence[date],
+    initial_cash: float,
+    cost_model: CostModel | None,
+    constraints: RebalanceConstraints | None,
+    stitched: PerformanceMetrics,
+) -> tuple[float | None, float | None]:
+    """
+    How much of this study's winner is selection, and how much is signal.
+
+    Two questions the fold results cannot answer between them. Walk-forward
+    already tells you whether performance survives fixing the parameters in
+    advance; it does not tell you whether the parameter that won did so by
+    chance, and it does not discount the headline for the number of attempts.
+
+    The extra cost is one backtest per candidate over the whole window, against
+    the ``folds x candidates`` the study has already run — so a few percent for
+    the two figures the research-integrity section of the operating prompt puts
+    at the top of its list.
+
+    Both are returned as ``None`` when the study cannot support them. A single
+    candidate has no selection to overfit, and reporting 0.0 for that would be
+    the most flattering possible lie.
+    """
+    if len(candidates) < 2:
+        return None, _deflate(stitched, n_trials=max(1, len(candidates)),
+                              sharpe_variance=0.0)
+
+    start, end = sessions[0], sessions[-1]
+    returns_by_trial: list[list[float]] = []
+    per_trial_sharpe: list[float] = []
+    for params in candidates:
+        metrics, records = _run_segment(
+            strategy_name, params, panel, sessions, start, end,
+            initial_cash, cost_model, constraints,
+        )
+        returns_by_trial.append(_returns_of(records))
+        per_trial_sharpe.append(metrics.sharpe)
+
+    pbo = probability_of_backtest_overfitting(returns_by_trial)
+    variance = float(np.var(per_trial_sharpe, ddof=1)) if per_trial_sharpe else 0.0
+    return pbo, _deflate(stitched, len(candidates), variance)
+
+
+def _deflate(
+    metrics: PerformanceMetrics, n_trials: int, sharpe_variance: float
+) -> float | None:
+    """
+    Deflate the stitched out-of-sample Sharpe for the size of the search.
+
+    The annualised Sharpe is converted back to per-observation units first.
+    Feeding an annualised figure into the statistic inflates it by the square
+    root of the annualisation factor and produces a confident-looking number
+    that means nothing.
+
+    ``sharpe_variance`` is the dispersion of the *annualised* candidate
+    Sharpes, so it is rescaled by the same factor rather than passed through.
+    """
+    periods = max(1, metrics.periods_per_year)
+    scale = math.sqrt(periods)
+    return deflated_sharpe_ratio(
+        sharpe=metrics.sharpe / scale,
+        n_observations=metrics.n_sessions,
+        # The stitched curve's own higher moments are not carried on
+        # PerformanceMetrics, so the normal case is assumed and stated. This
+        # makes the figure *optimistic* for a fat-tailed strategy, which is the
+        # direction worth knowing about.
+        skew=0.0,
+        kurtosis=3.0,
+        n_trials=max(1, n_trials),
+        sharpe_variance=sharpe_variance / periods,
+    )
+
+
+def _returns_of(records: Sequence[Any]) -> list[float]:
+    """Per-session returns from a segment's equity path."""
+    equities = [float(r.equity) for r in records if getattr(r, "equity", None)]
+    return [
+        (equities[i] - equities[i - 1]) / equities[i - 1]
+        for i in range(1, len(equities))
+        if equities[i - 1] > 0
+    ]
 
 
 def _stitch_out_of_sample(

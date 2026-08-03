@@ -27,6 +27,7 @@ from src.api.routers import (
     backtests,
     deployments,
     portfolio,
+    programme,
     strategies,
     system,
 )
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(backtests.router)
     app.include_router(deployments.router)
     app.include_router(portfolio.router)
+    app.include_router(programme.router)
     app.include_router(system.router)
 
     @app.get("/", tags=["health"], include_in_schema=False)

@@ -292,6 +292,319 @@ export interface CreateBacktestBody {
 }
 
 // ---------------------------------------------------------------------------
+// The AI programme
+// ---------------------------------------------------------------------------
+
+/**
+ * One configuration item from the operating prompt's section 2.
+ *
+ * `value` is nullable and the null is load-bearing: it means TBD, and the UI
+ * renders it as TBD rather than blank or zero. A value nobody supplied is
+ * never invented, at any layer.
+ */
+export interface ProgrammeConfigItem {
+  key: string;
+  value: string | null;
+  is_critical: boolean;
+  notes: string;
+  updated_by: string;
+  updated_at: string | null;
+}
+
+export interface ProgrammeConfig {
+  items: ProgrammeConfigItem[];
+  critical_unknowns: string[];
+  unknowns: string[];
+}
+
+/** Where a criterion's answer came from. Absent means the criterion is unmet. */
+export interface GateEvidence {
+  table: string;
+  row_id: string;
+  value: unknown;
+}
+
+export interface GateCriterion {
+  id: string;
+  description: string;
+  met: boolean;
+  detail: string;
+  evidence: GateEvidence | null;
+}
+
+/**
+ * A gate's verdict.
+ *
+ * `requires_human` is not a UI preference. Stage 5 is canary production, the
+ * first stage at which the programme's own decision exposes capital, and the
+ * operating prompt forbids a model from changing capital allocation.
+ */
+export interface GateResult {
+  from_stage: number;
+  to_stage: number;
+  from_stage_name: string;
+  to_stage_name: string;
+  passed: boolean;
+  requires_human: boolean;
+  criteria: GateCriterion[];
+}
+
+export interface Hypothesis {
+  id: string;
+  ref: string;
+  title: string;
+  owner: string;
+  card: Record<string, string>;
+  status: "open" | "accepted" | "rejected" | "superseded";
+  parent_ref: string | null;
+  /** Multiple-testing counter: how many configurations this idea has spawned. */
+  variants_tried: number;
+  origin: "model" | "operator";
+  model: string;
+  decision: string | null;
+  decision_rationale: string;
+  created_at: string;
+  decided_at: string | null;
+  candidates?: Candidate[];
+}
+
+export interface Candidate {
+  id: string;
+  hypothesis_id: string;
+  hypothesis_ref: string;
+  hypothesis_title: string;
+  hypothesis_origin: "model" | "operator";
+  strategy_name: string;
+  params: Record<string, unknown>;
+  universe: string[];
+  start_session: string;
+  end_session: string;
+  data_source: string;
+  stage: number;
+  stage_name?: string;
+  stage_entered_at: string;
+  status: "active" | "held" | "rejected" | "retired";
+  /** Set by any synthetic-sourced evidence, never cleared. Gate 2→3 refuses it. */
+  evidence_is_synthetic: boolean;
+  deployment_id: string | null;
+  notes: string;
+  created_at: string;
+  experiments?: Experiment[];
+  gate?: GateResult | null;
+}
+
+export interface Experiment {
+  id: string;
+  ref: string;
+  hypothesis_id: string;
+  candidate_id: string;
+  kind: string;
+  code_commit: string;
+  dataset_manifest: Record<string, unknown>;
+  seed: number | null;
+  universe: string[];
+  cost_assumptions: Record<string, unknown>;
+  /** Fixed before the run and immutable after. Rendered above the outcome. */
+  preregistered_criteria: { metric: string; op: string; value: number }[];
+  backtest_run_id: string | null;
+  walkforward_run_id: string | null;
+  status: string;
+  outcome: Record<string, unknown>;
+  conclusion: "pass" | "fail" | "inconclusive" | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface ProgrammeRun {
+  id: string;
+  trigger: "scheduled" | "manual";
+  status: string;
+  actions: Record<string, unknown>[];
+  model: string;
+  error: string | null;
+  requested_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/**
+ * A defect on the record.
+ *
+ * Whether it *blocks* is not a field: it is `status === "open"` and a blocking
+ * severity and a role holding a veto, and the API returns those two vocabularies
+ * alongside the list so the page applies the same rule the gate does rather
+ * than a copy of it that can drift.
+ */
+export interface Finding {
+  id: string;
+  ref: string;
+  candidate_id: string | null;
+  raised_by: string;
+  severity: "low" | "medium" | "high" | "critical";
+  title: string;
+  detail_md: string;
+  remediation: string;
+  status: "open" | "remediated" | "accepted" | "withdrawn";
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+  close_note: string;
+}
+
+export interface RoleDescriptor {
+  key: string;
+  title: string;
+  holds_veto: boolean;
+}
+
+export interface FindingsPage {
+  findings: Finding[];
+  veto_roles: string[];
+  blocking_severities: string[];
+  roles: RoleDescriptor[];
+}
+
+/** One specialist's view. Commentary: nothing here is read by a gate. */
+export interface RoleAssessment {
+  id: number;
+  role: string;
+  verdict: "support" | "concern" | "object" | "abstain";
+  summary: string;
+  evidence: Record<string, unknown>;
+  stage: number;
+  model: string;
+  created_at: string;
+}
+
+/**
+ * One shadow session.
+ *
+ * `equity` is the derived book's value, not a P&L. The opening balance is a
+ * fixed notional and the window is weeks, so a return computed from it would
+ * carry a standard error several times its own size.
+ */
+export interface ShadowSession {
+  session: string;
+  rebalanced: boolean;
+  target_weights: Record<string, number>;
+  order_intents: Record<string, unknown>[];
+  risk_events: Record<string, unknown>[];
+  rationale: string;
+  equity: number | null;
+  /** Buys the simulated venue trimmed. A real venue rejects these outright. */
+  underfunded: Record<string, unknown>[];
+  error: string | null;
+  created_at: string;
+}
+
+export interface ShadowHistory {
+  sessions: ShadowSession[];
+  required: number;
+}
+
+/**
+ * One dimension of the §11 scorecard.
+ *
+ * `observed` is null when the figure does not exist, and `observed_display`
+ * carries the words "not measured" for that case. Render the display field:
+ * a card showing 0.00 for an unmeasured probability of backtest overfitting
+ * asserts the most flattering possible value for the metric whose whole
+ * purpose is to be unflattering.
+ */
+export interface ScoreRow {
+  dimension: string;
+  metric: string;
+  observed: number | string | null;
+  observed_display: number | string;
+  target: string;
+  /** pass | fail | unknown. `unknown` is an absent measurement, not a soft fail. */
+  status: "pass" | "fail" | "unknown";
+  commentary: string;
+  evidence: string;
+}
+
+export interface Scorecard {
+  candidate_id: string;
+  hypothesis_ref: string;
+  stage: number;
+  rows: ScoreRow[];
+  recommendation: string;
+  recommendation_reason: string;
+  approvers: string[];
+  unresolved: string[];
+  measured: number;
+  not_measured: number;
+  failing: number;
+  decisions: string[];
+}
+
+/** The §8.11 daily report. Every figure nullable; null means no data, not zero. */
+export interface DailyReport {
+  session: string;
+  portfolio: {
+    as_of: string | null;
+    equity: number | null;
+    cash: number | null;
+    daily_pnl: number | null;
+    cumulative_pnl: number | null;
+    drawdown_pct: number | null;
+    positions: { symbol: string; qty: number | null; avg_entry_price: number | null }[];
+    note: string | null;
+  };
+  risk: { trading_enabled: boolean; risk_events: Record<string, number>; note: string };
+  programme: {
+    by_stage: Record<string, number>;
+    open_findings: number;
+    severe_findings: number;
+    promotions_today: { candidate_id: string; to_stage: number; approved_by: string }[];
+  };
+  operations: {
+    decisions: number;
+    orders_submitted: number;
+    shadow_sessions: number;
+    shadow_failures: number;
+    jobs: Record<string, number>;
+    workers: { worker_id: string; age_seconds: number; stale: boolean }[];
+  };
+  data_health: {
+    symbols: number;
+    rows: number;
+    latest_session: string | null;
+    sessions_behind: number | null;
+    note: string | null;
+  };
+  required_actions: string[];
+  /** Sections §8.11 asks for that this system cannot produce, and why. */
+  unavailable_sections: Record<string, string>;
+}
+
+export interface ProgrammeStatus {
+  enabled: boolean;
+  /** Already clamped and fail-closed by the API; render it as authoritative. */
+  max_auto_stage: number;
+  autonomy_hard_cap: number;
+  open_findings: number;
+  blocking_findings: number;
+  runner: {
+    last_seen: string;
+    status: string;
+    age_seconds: number;
+    stale: boolean;
+  } | null;
+  last_run: ProgrammeRun | null;
+  critical_unknowns: string[];
+  unknown_count: number;
+}
+
+export interface PipelineBoard {
+  stages: { stage: number; name: string }[];
+  first_human_gated_stage: number;
+  candidates: Candidate[];
+}
+
+// ---------------------------------------------------------------------------
 // Calls
 // ---------------------------------------------------------------------------
 
@@ -369,6 +682,144 @@ export const api = {
    * a dependency, and the page it is called from works without it.
    */
   drain: () => request<{ ran: number }>("/api/v1/system/drain", { method: "POST" }),
+
+  // -------------------------------------------------------------------------
+  // The AI programme
+  //
+  // POST rather than PUT for the two mutations that would read better as PUT.
+  // The API's CORS policy allows GET, POST, DELETE and OPTIONS, and this app
+  // is deployed to a different origin from the API, so a PUT would be refused
+  // at the browser's preflight and would fail only in production.
+  // -------------------------------------------------------------------------
+
+  programmeStatus: () =>
+    request<ProgrammeStatus>("/api/v1/programme/status"),
+
+  setProgrammeEnabled: (enabled: boolean, reason: string, confirm = "") =>
+    request<ProgrammeStatus>("/api/v1/programme/enabled", {
+      method: "POST",
+      body: JSON.stringify({ enabled, reason, confirm }),
+    }),
+
+  requestTick: () =>
+    request<{ run_id: string; status: string }>("/api/v1/programme/tick", {
+      method: "POST",
+    }),
+
+  programmeRuns: (limit = 20) =>
+    request<ProgrammeRun[]>(`/api/v1/programme/runs?limit=${limit}`),
+
+  programmeConfig: () => request<ProgrammeConfig>("/api/v1/programme/config"),
+
+  setProgrammeConfig: (values: Record<string, string>) =>
+    request<ProgrammeConfig>("/api/v1/programme/config", {
+      method: "POST",
+      body: JSON.stringify({ values }),
+    }),
+
+  hypotheses: (status?: string) =>
+    request<Hypothesis[]>(
+      `/api/v1/programme/hypotheses${status ? `?status=${status}` : ""}`,
+    ),
+
+  hypothesis: (ref: string) =>
+    request<Hypothesis>(`/api/v1/programme/hypotheses/${ref}`),
+
+  pipeline: () => request<PipelineBoard>("/api/v1/programme/candidates"),
+
+  candidate: (id: string) =>
+    request<Candidate>(`/api/v1/programme/candidates/${id}`),
+
+  gate: (id: string) =>
+    request<GateResult>(`/api/v1/programme/candidates/${id}/gate`),
+
+  /**
+   * Confirm a promotion the gate has already passed.
+   *
+   * Answers 409 with the unmet criteria when it has not. The operator cannot
+   * override a failed gate from here, and the API would refuse if this tried.
+   */
+  promote: (id: string, rationale: string) =>
+    request<{ candidate_id: string; stage: number; stage_name: string }>(
+      `/api/v1/programme/candidates/${id}/promote`,
+      { method: "POST", body: JSON.stringify({ confirm: "PROMOTE", rationale }) },
+    ),
+
+  rejectCandidate: (id: string, rationale: string) =>
+    request<{ status: string }>(`/api/v1/programme/candidates/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ rationale }),
+    }),
+
+  holdCandidate: (id: string, rationale: string) =>
+    request<{ status: string }>(`/api/v1/programme/candidates/${id}/hold`, {
+      method: "POST",
+      body: JSON.stringify({ rationale }),
+    }),
+
+  experiment: (ref: string) =>
+    request<Experiment>(`/api/v1/programme/experiments/${ref}`),
+
+  findings: (params?: { candidateId?: string; onlyOpen?: boolean }) => {
+    const query = new URLSearchParams();
+    if (params?.candidateId) query.set("candidate_id", params.candidateId);
+    if (params?.onlyOpen) query.set("only_open", "true");
+    const suffix = query.toString() ? `?${query}` : "";
+    return request<FindingsPage>(`/api/v1/programme/findings${suffix}`);
+  },
+
+  raiseFinding: (body: {
+    candidate_id?: string | null;
+    raised_by: string;
+    severity: string;
+    title: string;
+    detail?: string;
+    remediation?: string;
+  }) =>
+    request<{ id: string; ref: string }>("/api/v1/programme/findings", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * Close a finding. The only route by which one is ever closed — the schema
+   * refuses any `closed_by` that does not name an operator, and this endpoint
+   * is the only code that produces one.
+   */
+  closeFinding: (ref: string, status: string, note: string) =>
+    request<{ ref: string; status: string; closed_by: string }>(
+      `/api/v1/programme/findings/${ref}/close`,
+      { method: "POST", body: JSON.stringify({ status, note }) },
+    ),
+
+  scorecard: (candidateId: string) =>
+    request<Scorecard>(`/api/v1/programme/candidates/${candidateId}/scorecard`),
+
+  dailyReport: (on?: string) =>
+    request<DailyReport>(
+      `/api/v1/programme/report${on ? `?on=${on}` : ""}`,
+    ),
+
+  shadow: (candidateId: string) =>
+    request<ShadowHistory>(`/api/v1/programme/candidates/${candidateId}/shadow`),
+
+  assessments: (candidateId: string) =>
+    request<RoleAssessment[]>(
+      `/api/v1/programme/candidates/${candidateId}/assessments`,
+    ),
+
+  setAutonomy: (maxAutoStage: number, reason: string, confirm = "") =>
+    request<{ requested: number; effective: number; hard_cap: number }>(
+      "/api/v1/programme/autonomy",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          max_auto_stage: maxAutoStage,
+          reason,
+          confirm,
+        }),
+      },
+    ),
 };
 
 // ---------------------------------------------------------------------------

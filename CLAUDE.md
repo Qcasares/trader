@@ -72,8 +72,20 @@ predicting the live system, which is worse than the bug being fixed.
    guard covers the order-placing *processes* (`src/worker`, `src/api`) as
    well as the pure decision path — `src/worker` is the only thing here that
    submits an order, so it is where an LLM import would matter most.
+   The same test carries the **reverse** boundary: `src/programme` is the one
+   package permitted a model client, and is therefore the one package that may
+   not import `src.execution` or `src.worker`. That prohibition is the price of
+   the permission; without it the separation is a convention that one import
+   would end. `src/api` may read the programme's rows (`repo`, `flags`,
+   `gates`) and may not import its runner (`tick`, `author`, `client`, `main`),
+   which would drag the SDK into the process that commands the worker.
 6. **Never commit credentials.** Not values, not placeholders, not defaults —
    `docker-compose.yml` reads everything from gitignored `.env`.
+7. **The programme's switch fails closed too.** `programme_enabled` is read
+   through `src/programme/flags.py` with the same broad `except` as the kill
+   switch. The stakes look lower because the process writes rows rather than
+   placing orders; they are not. A runaway programme fills the `jobs` queue the
+   live decision path shares, and spends money at a model API on every pass.
 
 ## Honesty rules
 
@@ -82,6 +94,16 @@ These exist because the research UI is a machine for fooling yourself.
 - **Never render a Sharpe without its standard error.** Five years of daily
   data gives roughly ±0.45, so a reported 0.50 is indistinguishable from zero.
   `PerformanceMetrics.sharpe_is_significant` is the check.
+- **Never quote a Sharpe from a search without deflating it.** The best of
+  fifty parameter sets has a flattering Sharpe by construction.
+  `src/engine/statistics.deflated_sharpe_ratio` discounts it for the number of
+  attempts; the walk-forward computes it and stores it beside the curve. It
+  takes a **per-observation** Sharpe — feeding it an annualised one inflates
+  the statistic by `sqrt(periods_per_year)`.
+- **An unmeasured metric is never zero.** Everywhere: the scorecard renders
+  "not measured", the daily report renders "no data", and both keep a genuine
+  zero as a zero. Reporting an unmeasured probability of backtest overfitting
+  as 0.00 is the single most flattering lie this system could tell.
 - **Never quote a performance figure without its cost assumption.** Every
   result carries `cost_stress_multiplier`.
 - **Never quote a metric without `effective_start`.** A 1999 backtest of the
@@ -117,13 +139,21 @@ python -m src.cli backtest --strategy asset_class_trend_following \
 python -m src.cli walkforward --strategy asset_class_trend_following \
     --grid '{"sma_period":[105,150,210]}'
 
-# Services (API and worker are separate processes on purpose)
+# Services (three processes on purpose, see the boundaries below)
 uvicorn src.api.main:app --reload            # HTTP control plane
 python -m src.worker.main                    # runs backtests and live jobs
+python -m src.programme.main                 # the AI programme; needs the extra
+                                             # requirements file below
 cd web && npm run dev                        # Next.js frontend
+
+# The programme's dependencies. Deliberately a third file: `anthropic` must not
+# be installed alongside the broker credentials.
+pip install -r requirements-programme.txt
 
 # Backend stack (db, api, worker) — the frontend deploys to Vercel
 docker compose up --build
+# ...plus the AI programme, which is the only service needing an API key
+docker compose --profile programme up --build
 # ...plus the UI, for local testing only
 docker compose --profile web up --build
 
@@ -142,9 +172,17 @@ Both commands above lint and run everything. The only `ruff` exclusion left is
 `src/bankr_client.py` and its test — a reference file no strategy imports,
 where reformatting buys nothing and risks breaking the reference.
 
-`anthropic` is deliberately absent from both requirements files. The engine
-must run, and be testable, without an LLM SDK anywhere near it;
-`src/llm/commentary.py` imports it lazily and returns `None` without it.
+`anthropic` is deliberately absent from `requirements.txt` and
+`requirements-dev.txt`. The engine must run, and be testable, without an LLM
+SDK anywhere near it; `src/llm/commentary.py` and `src/programme/client.py`
+both import it lazily and degrade rather than fail without it.
+
+It lives in `requirements-programme.txt`, installed only by the programme
+process and by `Dockerfile.programme`. Two images rather than one, so the
+boundary holds at runtime as well as in review: the worker container, which
+holds the broker credentials, could not import an LLM client if its code tried.
+The whole unit suite therefore runs on `requirements-dev.txt` alone — every
+gate, validator and parser in `src/programme` is testable with no SDK present.
 
 `.github/workflows/ci.yml` runs ruff, the unit suite and the integration suite
 against a real Postgres on every pull request, installing only
@@ -175,7 +213,7 @@ than hide in a wall of dots.
 | Package | Responsibility |
 |---|---|
 | `src/core/` | Value types, `PricePanel`, calendar, clock, order sizing, risk gate |
-| `src/engine/` | `Driver`, metrics, scheduler, walk-forward |
+| `src/engine/` | `Driver`, metrics, scheduler, walk-forward, and `statistics.py`: deflated Sharpe, probability of backtest overfitting, capacity, days to exit — all pure |
 | `src/strategies/` | Strategy ABC, registry, strategy implementations |
 | `src/execution/` | `BrokerAdapter` protocol, `SimulatedBroker`, `AlpacaBroker` |
 | `src/data/` | `PriceSource` protocol, yfinance, synthetic generator |
@@ -183,6 +221,7 @@ than hide in a wall of dots.
 | `src/api/` | FastAPI control plane |
 | `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
+| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` and `roles.py` are everything the model may write and what happens to it first; `flags.py` holds the two fail-closed switches; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either |
 | `web/` | Next.js frontend |
 
 ### Structural guarantees
@@ -214,6 +253,22 @@ Each is enforced by a test, not by discipline:
 | No session exists without a real signing key | `issue_session` and `verify_session` raise `InsecureSecretError` rather than touch a key that fails `session_secret_problem`. The guarantee is on the *operation*, not on startup — `test_secret_requirements.py` proves a token forged under the empty key is refused, and that removing the guard makes it authenticate as `operator` with a 200 |
 | A mistyped risk limit is refused, not stored | `RiskLimitsRequest` forbids unknown keys, and `test_risk_limits_contract.py` parses the worker's own source to prove the settable set equals the enforced set |
 | An impossible backtest window is a 422 | `calendar.bounds()` is read from the calendar, so it tracks the `exchange_calendars` release rather than a literal that goes stale |
+| The model that holds an SDK cannot reach an order | `test_import_boundaries.py::test_the_programme_cannot_reach_an_order` and `::test_the_api_does_not_import_the_programme_runner`. The reverse of the rule above, and the reason `src/programme` is allowed the client at all |
+| A failed hypothesis stays in the ledger | A rule on `hypotheses` turns DELETE into a no-op. `test_programme.py::TestTheLedgerCannotBeTidied` proves a blanket `DELETE FROM hypotheses` removes nothing |
+| An acceptance test cannot be written after the answer | `experiments.preregistered_criteria` is NOT NULL, refused empty by `record_experiment`, and frozen after insert by a trigger. The conclusion is then `evaluate_preregistered` applied to the engine's own metrics — never typed by hand, never read from prose |
+| A human approval confirms a pass, it does not override a failure | `POST /candidates/{id}/promote` re-evaluates the gate at the moment of the click and answers **409 with the unmet criteria** when it has not passed. An operator's route forward is the runner's route forward: produce the evidence |
+| Synthetic prices cannot reach operation | `candidates.evidence_is_synthetic` is set by any synthetic-sourced experiment and never cleared; gate 2 → 3 refuses it. Permitted through the research stages on purpose — no equity data host is reachable from this environment, and a pipeline nothing can traverse is untested rather than safe |
+| A gate with no criteria never passes | `GateResult.passed` requires a non-empty list. Stages this slice cannot evidence return one unmet criterion naming the missing capability, so an unbuilt stage reads as blocked rather than as unanimous agreement |
+| A model cannot close its own finding | `findings_closed_by_an_operator` requires `closed_by LIKE 'operator:%'` on any transition out of `open`, and the API endpoint is the only code that produces that prefix. A role free to retract its own blocking finding has not vetoed anything |
+| A veto is a row, not an opinion | `gates._no_blocking_findings` blocks on open, high-or-critical findings from a role in `VETO_ROLES`, and reads none of their text. Prepended to every gate, including the unbuilt ones |
+| The runner cannot promote past its ceiling | `programme_max_auto_stage` is read fail-closed to zero and clamped below `FIRST_HUMAN_GATED_STAGE` **on the way out**, not on the way in — so the stored value never masquerades as the effective one, and a boolean stored there does not read as stage 1 |
+| The panel reviews before the promotion, not after | `tick._convene` runs, then facts are re-loaded and the gate re-evaluated. A review of something already promoted is an audit, and an audit is not a control |
+| An unmeasured metric is never rendered as zero | `ScoreRow.observed` is nullable with no third state, and `test_programme_scorecard.py` asserts it over every row. A card showing 0.00 for an unmeasured probability of backtest overfitting asserts the most flattering possible value for the metric whose purpose is to be unflattering |
+| A missing measurement is `unknown`, not `fail` | Same file. An operator who cannot tell them apart will either dismiss real failures or chase phantom ones |
+| A search that selected noise cannot reach validation | Gate 1 → 2 refuses a *measured* PBO above `MAX_PBO`. It passes on an unmeasured one, because a single-candidate study has no selection to overfit and refusing on undefined would bar the honest case |
+| A shadow book cannot drift from its own decisions | Nothing stores it. `shadow_job._replay` rebuilds it from `shadow_decisions` on every run, filling session S's intents at S+1's open with the same `execute_pending` a backtest uses. `test_shadow.py` asserts two runs over the same log agree |
+| Shadow mode reaches no venue | The deployment is created **disabled** and stays so; `_enabled_deployments` filters on status. `test_shadow.py` asserts the `orders` table stays empty |
+| Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |
 
 ## Adding a strategy
 
@@ -257,6 +312,18 @@ Key tables: `daily_bars` (raw prices, `source` in the PK so vendors can be
 reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
 `deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `walkforward_runs`,
 `system_flags` (the kill switch), `jobs`, `audit_log`, `commentary`.
+
+The AI programme adds `programme_config` (the operating prompt's section 2,
+NULL meaning TBD), `hypotheses` (append-only), `candidates` (a hypothesis as one
+testable configuration, carrying its lifecycle stage), `experiments` (the
+reproducibility record, with immutable preregistered criteria),
+`gate_evaluations`, `programme_decisions`, `programme_runs`, `shadow_decisions`,
+plus `role_assessments` and `findings` for the specialist panel and its veto.
+Three
+of those carry rules rather than only columns — the no-delete rule on
+`hypotheses`, the immutable-preregistration trigger on `experiments`, and the
+operator-only closure constraint on `findings`. See the structural guarantees
+above before changing any of them.
 
 P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`, written by
 `src/db/repos/marks.py`. The legacy `get_daily_pnl` in
@@ -314,6 +381,28 @@ inert while the backtest continues to honour them.
   24/7 scheduler, no crypto broker adapter and no venue-aware cost model;
   `src/data/cryptocom_source.py` exists to feed the engine real prices. The
   locked plan is equities first.
-- One strategy is implemented. The awesome-systematic-trading median Sharpe is
-  ~0.35 and seven entries are negative; expect disappointment and let the
-  walk-forward say so.
+- Two strategies are implemented, and one of them is `buy_and_hold`, which
+  exists because gate 1 → 2 will not pass a candidate without a benchmark
+  comparison and a benchmark the same engine cannot run over the same window
+  under the same cost model is not a comparison. The
+  awesome-systematic-trading median Sharpe is ~0.35 and seven entries are
+  negative; expect disappointment and let the walk-forward say so.
+- **The AI programme stops at the gate into broker paper trading.** It carries
+  a candidate automatically from concept through rapid research, independent
+  validation and shadow operation, with the twelve specialist roles, the
+  findings register and the veto mapping in place. It cannot cross into stage
+  4: that needs a venue, and Alpaca has never been contacted. Stages 4 to 8
+  return *not met — capability absent* and name what is missing. The
+  scorecards and the statistics they need (deflated Sharpe, probability of
+  backtest overfitting, capacity) are a later slice. See
+  `docs/07-ai-programme-spine.md`.
+- **Shadow mode proves operation, not performance.** Twenty sessions carries a
+  Sharpe standard error near ±4, so the shadow book's equity is not a result
+  and the UI says so. It also does not exercise the halting limits: `dry_run`
+  seeds the risk gate's equity history from the *paper* book's marks, and a
+  shadow candidate has none of its own. Both are what stage 4 is for.
+- The programme has never called a model. `ANTHROPIC_API_KEY` is unset in this
+  environment, so `author.py`'s prompts and its three validation layers are
+  exercised by unit tests against fabricated replies and by nothing else. The
+  gates, the reconciliation and the promotions do not need the model and are
+  tested end to end against real Postgres.

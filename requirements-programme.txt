@@ -1,0 +1,32 @@
+# =========================================================================
+# The AI programme's dependencies.
+#
+#   pip install -r requirements-programme.txt
+#
+# A third requirements file, and the reason is a safety property rather than
+# tidiness.
+#
+# `requirements.txt` is the deployable set that Docker, CI and Vercel install
+# for the API and the worker. `requirements-dev.txt` adds the test tooling.
+# Neither contains an LLM SDK, and that is deliberate and long-standing: the
+# engine must run, and be testable, without one anywhere near it, and
+# tests/unit/test_import_boundaries.py fails the build if `src/api`,
+# `src/worker` or the decision path ever import one.
+#
+# `src/programme` is the single package permitted to hold a model client, and
+# it runs as its own process for exactly that reason. Putting `anthropic` here
+# rather than in either file above keeps the permission and the process
+# boundary aligned: the API image and the worker image cannot import it because
+# it is not installed in them.
+#
+# The programme's own tests do not need it either. `src/programme/client.py`
+# imports it lazily, so the package is importable and every gate, validator and
+# parser is testable without an SDK — which is why the unit suite runs on
+# requirements-dev.txt alone.
+# =========================================================================
+
+-r requirements.txt
+
+# The only LLM SDK in this repository, installed only in the process that is
+# forbidden from reaching an order.
+anthropic>=0.40.0

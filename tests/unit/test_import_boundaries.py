@@ -51,6 +51,26 @@ ORDER_PROCESSES = ("worker", "api")
 
 PROTECTED_PACKAGES = DECISION_PATH + ORDER_PROCESSES
 
+#: The one package allowed to hold a model client, and therefore the one
+#: package that must not be able to reach an order.
+#:
+#: This is the mirror image of everything above, and it is the guarantee the AI
+#: programme rests on. ``src/programme`` runs as its own process precisely so
+#: it can import ``anthropic`` without that import landing in the API or the
+#: worker. The price of that permission is this prohibition: it may enqueue a
+#: job row and read results, and it may not import the code that fills an order
+#: or the process that submits one.
+#:
+#: ``src.strategies`` is deliberately *not* forbidden. The programme validates
+#: every proposed configuration through the strategy's own ``params_model``,
+#: which is what stops a hallucinated parameter reaching the engine — and doing
+#: that requires importing the registry. Strategies are pure by their own test
+#: two functions down, so importing them grants no ability to act.
+MODEL_HOLDING_PACKAGE = "programme"
+
+#: Packages that can place or simulate an order.
+ORDER_CAPABLE_MODULES = ("src.execution", "src.worker")
+
 
 def _module_files(package: str) -> list[Path]:
     root = SRC / package
@@ -150,6 +170,87 @@ def test_commentary_layer_passes_no_tools_to_the_model() -> None:
                 assert keyword.arg not in {"tools", "tool_choice"}, (
                     "commentary must not pass tools to the model"
                 )
+
+
+def test_the_programme_cannot_reach_an_order() -> None:
+    """
+    The reverse boundary.
+
+    ``src/programme`` is the only package permitted a model client, so it is
+    the only one that must be unable to place an order. Without this the
+    arrangement is merely a convention: nothing would stop a future tick from
+    importing ``AlpacaBroker`` to "check something", and the separation that
+    justifies the model client's existence would be gone with one import.
+    """
+    offenders: list[str] = []
+    for path in _module_files(MODEL_HOLDING_PACKAGE):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = ",".join(a.name for a in node.names)
+            for forbidden in ORDER_CAPABLE_MODULES:
+                if module == forbidden or module.startswith(f"{forbidden}."):
+                    offenders.append(f"{path.relative_to(SRC)} imports {module}")
+    assert not offenders, (
+        "the programme package can reach order-placing code, which removes the "
+        "separation that lets it hold a model client at all:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_shadow_mode_lives_in_the_worker_because_of_that_boundary() -> None:
+    """
+    The boundary above is why ``shadow_job`` is where it is.
+
+    Shadow mode runs the shipped live decision path, so it must import
+    ``src.worker.live_job``. The programme cannot, so it enqueues a
+    ``shadow_decision`` job and the worker runs it. If someone later moves that
+    module into ``src/programme`` to keep the programme's code together, the
+    test above fails — and this one says why, so the fix is to move it back
+    rather than to relax the rule.
+    """
+    assert (SRC / "worker" / "shadow_job.py").is_file(), (
+        "src/worker/shadow_job.py is missing; shadow mode cannot live in "
+        "src/programme because that package may not import the worker"
+    )
+    assert not (SRC / "programme" / "shadow_job.py").exists()
+
+
+def test_the_api_does_not_import_the_programme_runner() -> None:
+    """
+    The API may read the programme's rows; it may not become the runner.
+
+    ``src/api/routers/programme.py`` imports ``src.programme.repo``,
+    ``.flags`` and ``.gates`` — queries, a switch and pure logic. Importing
+    ``.tick``, ``.author``, ``.client`` or ``.main`` would pull the model
+    client into the API process transitively, defeating the check above without
+    ever naming ``anthropic``. This is why the switch lives in its own module
+    rather than beside the loop that reads it.
+    """
+    runner_only = {
+        "src.programme.tick",
+        "src.programme.author",
+        "src.programme.client",
+        "src.programme.main",
+    }
+    offenders: list[str] = []
+    for path in _module_files("api"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module
+            elif isinstance(node, ast.Import):
+                module = ",".join(a.name for a in node.names)
+            if module in runner_only:
+                offenders.append(f"{path.relative_to(SRC)} imports {module}")
+    assert not offenders, (
+        "the API imports the programme runner, which drags a model client into "
+        "the process that commands the worker:\n" + "\n".join(offenders)
+    )
 
 
 def test_strategies_do_not_perform_io() -> None:
