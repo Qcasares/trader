@@ -234,9 +234,16 @@ is a system nobody can check.
 | Piece | Where | Plan |
 |---|---|---|
 | UI | https://trader-ui-black.vercel.app | Vercel project `trader-ui`, free |
-| API | https://trader-vert-xi.vercel.app | Vercel project `trader`, free |
+| API | https://trader-vert-xi.vercel.app, and proxied at the UI's `/api/*` | Vercel project `trader`, free |
 | Database | Neon, via the Vercel marketplace (`neon-celeste-paddle`) | free, no expiry |
 | Worker | `.github/workflows/worker.yml` | GitHub Actions, unmetered on a public repo |
+
+**Use the UI's own origin, not the API's.** `API_PROXY=1` on the UI project
+makes the browser call `/api/*` on `trader-ui-black.vercel.app`, which a
+Next.js rewrite forwards to the API. The API's own hostname still answers and
+is useful for `curl`, but a browser pointed at it directly gets a session
+cookie that Safari and Firefox discard — see the `API_PROXY` comment in
+`web/next.config.ts` for why, and why `SameSite=none` cannot fix it.
 
 The worker is the one piece that cannot live on Vercel, and the reason is
 structural rather than a tier limit: every Vercel function is request-scoped
