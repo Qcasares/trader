@@ -34,6 +34,7 @@ from src.programme.gates import (
     ExperimentFact,
     FindingFact,
     GateResult,
+    ShadowFact,
     WalkforwardFact,
     evaluate_preregistered,
 )
@@ -778,6 +779,24 @@ async def load_facts(
         for r in finding_rows
     )
 
+    shadow_rows = await conn.fetch(
+        """
+        SELECT session, rebalanced, order_intents, underfunded, error
+        FROM shadow_decisions WHERE candidate_id = $1 ORDER BY session
+        """,
+        uuid.UUID(candidate_id),
+    )
+    shadow = tuple(
+        ShadowFact(
+            session=r["session"],
+            rebalanced=r["rebalanced"],
+            order_intents=len(loads_json(r["order_intents"], [])),
+            underfunded=len(loads_json(r["underfunded"], [])),
+            error=r["error"],
+        )
+        for r in shadow_rows
+    )
+
     coverage_rows = await conn.fetch(
         """
         SELECT symbol, COUNT(*) AS bars FROM daily_bars
@@ -805,6 +824,8 @@ async def load_facts(
         experiments=experiments,
         walkforwards=walkforwards,
         findings=findings,
+        shadow=shadow,
+        has_deployment=cand["deployment_id"] is not None,
     )
 
 
@@ -888,6 +909,132 @@ async def promote(
         uuid.UUID(candidate_id),
         to_stage,
     )
+
+
+#: Risk limits a shadow deployment is created with.
+#:
+#: The cash buffer is not a nicety. A target that invests every last dollar
+#: leaves nothing to absorb the slippage between the decision price and the
+#: fill, so the simulated venue trims the buy — and a real venue rejects it
+#: outright. Every such trim lands in ``SimulatedBroker.underfunded_buys``, and
+#: gate 3 -> 4 refuses a candidate with any, because the shadow book and a live
+#: one have already diverged in holdings however identical their intents were.
+#:
+#: One percent, discovered rather than chosen: without it every shadow
+#: candidate trips that criterion on its first session, which is the gate
+#: correctly reporting a real divergence and not a threshold set too tight.
+SHADOW_RISK_LIMITS: dict[str, Any] = {"cash_buffer_pct": 0.01}
+
+
+async def ensure_shadow_deployment(
+    conn: asyncpg.Connection, candidate_id: str
+) -> str | None:
+    """
+    Give a candidate entering stage 3 something to operate against.
+
+    The row is created **disabled** and stays that way for the whole of shadow
+    mode. ``_enabled_deployments`` in the worker filters on ``status``, so a
+    disabled deployment cannot be picked up by the live loop however long it
+    sits there — the shadow job reaches it by id, deliberately, and submits
+    nothing.
+
+    ``approved_backtest_run_id`` is required by the schema, and by the time a
+    candidate is at stage 3 the 2 -> 3 gate has already established that a
+    succeeded backtest and a robust walk-forward of these exact parameters
+    exist. This does not re-check that; it reads the row the gate read.
+
+    Returns ``None`` when there is no approved backtest to point at, which
+    should be impossible at this stage and is reported rather than assumed
+    away.
+    """
+    cand = await get_candidate(conn, candidate_id)
+    if cand is None:
+        return None
+    if cand["deployment_id"]:
+        return cand["deployment_id"]
+
+    approved = await conn.fetchval(
+        """
+        SELECT b.id FROM experiments e
+        JOIN backtest_runs b ON b.id = e.backtest_run_id
+        WHERE e.candidate_id = $1 AND e.kind = 'backtest' AND b.status = 'succeeded'
+        ORDER BY e.created_at DESC LIMIT 1
+        """,
+        uuid.UUID(candidate_id),
+    )
+    if approved is None:
+        logger.error(
+            "Candidate %s reached shadow with no succeeded backtest to approve "
+            "a deployment against",
+            candidate_id,
+        )
+        return None
+
+    deployment_id = uuid.uuid4()
+    await conn.execute(
+        """
+        INSERT INTO deployments (id, owner_id, strategy_name, params, mode,
+            capital_usd, risk_limits, approved_backtest_run_id, status)
+        VALUES ($1,'programme',$2,$3::jsonb,'paper',$4,$5::jsonb,$6,'disabled')
+        """,
+        deployment_id,
+        cand["strategy_name"],
+        json.dumps(cand["params"], sort_keys=True, default=str),
+        0,
+        json.dumps(SHADOW_RISK_LIMITS),
+        approved,
+    )
+    await conn.execute(
+        "UPDATE candidates SET deployment_id = $2 WHERE id = $1",
+        uuid.UUID(candidate_id),
+        deployment_id,
+    )
+    logger.info(
+        "Created disabled shadow deployment %s for candidate %s",
+        deployment_id,
+        candidate_id,
+    )
+    return str(deployment_id)
+
+
+async def shadow_sessions_recorded(
+    conn: asyncpg.Connection, candidate_id: str
+) -> set[date]:
+    rows = await conn.fetch(
+        "SELECT session FROM shadow_decisions WHERE candidate_id = $1",
+        uuid.UUID(candidate_id),
+    )
+    return {r["session"] for r in rows}
+
+
+async def list_shadow_decisions(
+    conn: asyncpg.Connection, candidate_id: str, limit: int = 200
+) -> list[dict[str, Any]]:
+    rows = await conn.fetch(
+        """
+        SELECT session, rebalanced, target_weights, order_intents, risk_events,
+               rationale, equity, underfunded, error, created_at
+        FROM shadow_decisions WHERE candidate_id = $1
+        ORDER BY session DESC LIMIT $2
+        """,
+        uuid.UUID(candidate_id),
+        limit,
+    )
+    return [
+        {
+            "session": r["session"].isoformat(),
+            "rebalanced": r["rebalanced"],
+            "target_weights": loads_json(r["target_weights"], {}),
+            "order_intents": loads_json(r["order_intents"], []),
+            "risk_events": loads_json(r["risk_events"], []),
+            "rationale": r["rationale"],
+            "equity": float(r["equity"]) if r["equity"] is not None else None,
+            "underfunded": loads_json(r["underfunded"], []),
+            "error": r["error"],
+            "created_at": r["created_at"].isoformat(),
+        }
+        for r in rows
+    ]
 
 
 async def record_decision(

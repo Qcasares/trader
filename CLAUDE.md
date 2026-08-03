@@ -253,6 +253,9 @@ Each is enforced by a test, not by discipline:
 | A veto is a row, not an opinion | `gates._no_blocking_findings` blocks on open, high-or-critical findings from a role in `VETO_ROLES`, and reads none of their text. Prepended to every gate, including the unbuilt ones |
 | The runner cannot promote past its ceiling | `programme_max_auto_stage` is read fail-closed to zero and clamped below `FIRST_HUMAN_GATED_STAGE` **on the way out**, not on the way in — so the stored value never masquerades as the effective one, and a boolean stored there does not read as stage 1 |
 | The panel reviews before the promotion, not after | `tick._convene` runs, then facts are re-loaded and the gate re-evaluated. A review of something already promoted is an audit, and an audit is not a control |
+| A shadow book cannot drift from its own decisions | Nothing stores it. `shadow_job._replay` rebuilds it from `shadow_decisions` on every run, filling session S's intents at S+1's open with the same `execute_pending` a backtest uses. `test_shadow.py` asserts two runs over the same log agree |
+| Shadow mode reaches no venue | The deployment is created **disabled** and stays so; `_enabled_deployments` filters on status. `test_shadow.py` asserts the `orders` table stays empty |
+| Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |
 
 ## Adding a strategy
 
@@ -301,8 +304,9 @@ The AI programme adds `programme_config` (the operating prompt's section 2,
 NULL meaning TBD), `hypotheses` (append-only), `candidates` (a hypothesis as one
 testable configuration, carrying its lifecycle stage), `experiments` (the
 reproducibility record, with immutable preregistered criteria),
-`gate_evaluations`, `programme_decisions`, `programme_runs`, plus
-`role_assessments` and `findings` for the specialist panel and its veto. Three
+`gate_evaluations`, `programme_decisions`, `programme_runs`, `shadow_decisions`,
+plus `role_assessments` and `findings` for the specialist panel and its veto.
+Three
 of those carry rules rather than only columns — the no-delete rule on
 `hypotheses`, the immutable-preregistration trigger on `experiments`, and the
 operator-only closure constraint on `findings`. See the structural guarantees
@@ -356,17 +360,20 @@ inert while the backtest continues to honour them.
   under the same cost model is not a comparison. The
   awesome-systematic-trading median Sharpe is ~0.35 and seven entries are
   negative; expect disappointment and let the walk-forward say so.
-- **The AI programme does not reach paper trading.** It carries a candidate
-  through concept, rapid research and independent validation, with the twelve
-  specialist roles, the findings register and the veto mapping all in place.
-  Stages 3 to 8 return *not met — capability absent* and name what is missing:
-  shadow-mode operation on a schedule. That is deliberately unbuilt rather than
-  half-built — `SimulatedBroker` cannot be seeded with positions and `dry_run`
-  decides unconditionally by design, so shadow needs either a replay-from-log
-  book or a change to the live path, and that choice deserves to be made rather
-  than defaulted into. The scorecards and the statistics they need (deflated
-  Sharpe, probability of backtest overfitting, capacity) are a later slice. See
+- **The AI programme stops at the gate into broker paper trading.** It carries
+  a candidate automatically from concept through rapid research, independent
+  validation and shadow operation, with the twelve specialist roles, the
+  findings register and the veto mapping in place. It cannot cross into stage
+  4: that needs a venue, and Alpaca has never been contacted. Stages 4 to 8
+  return *not met — capability absent* and name what is missing. The
+  scorecards and the statistics they need (deflated Sharpe, probability of
+  backtest overfitting, capacity) are a later slice. See
   `docs/07-ai-programme-spine.md`.
+- **Shadow mode proves operation, not performance.** Twenty sessions carries a
+  Sharpe standard error near ±4, so the shadow book's equity is not a result
+  and the UI says so. It also does not exercise the halting limits: `dry_run`
+  seeds the risk gate's equity history from the *paper* book's marks, and a
+  shadow candidate has none of its own. Both are what stage 4 is for.
 - The programme has never called a model. `ANTHROPIC_API_KEY` is unset in this
   environment, so `author.py`'s prompts and its three validation layers are
   exercised by unit tests against fabricated replies and by nothing else. The

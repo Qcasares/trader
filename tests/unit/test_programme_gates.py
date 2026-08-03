@@ -15,7 +15,7 @@ to fail is not a gate.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -23,10 +23,12 @@ from src.programme.gates import (
     BLOCKING_SEVERITIES,
     FIRST_HUMAN_GATED_STAGE,
     MIN_BARS_PER_SYMBOL,
+    MIN_SHADOW_SESSIONS,
     VETO_ROLES,
     CandidateFacts,
     ExperimentFact,
     FindingFact,
+    ShadowFact,
     WalkforwardFact,
     evaluate,
     evaluate_preregistered,
@@ -351,8 +353,86 @@ class TestValidationGate:
 # ---------------------------------------------------------------------------
 
 
+class TestShadowGate:
+    """
+    Stage 3 -> 4.
+
+    Nothing here asks whether the shadow book made money, and that is the
+    point: twenty sessions carries a Sharpe standard error near four, so any
+    figure over that window is noise. What is being evidenced is that the
+    machinery runs.
+    """
+
+    def _shadow(self, n: int, **overrides: object) -> tuple[ShadowFact, ...]:
+        base = date(2024, 1, 2)
+        out = []
+        for i in range(n):
+            kwargs: dict[str, object] = {
+                "session": base + timedelta(days=i),
+                "rebalanced": i == 0,
+                "order_intents": 3 if i == 0 else 0,
+            }
+            kwargs.update(overrides)
+            out.append(ShadowFact(**kwargs))  # type: ignore[arg-type]
+        return tuple(out)
+
+    def _complete(self, **overrides: object) -> CandidateFacts:
+        base: dict[str, object] = {
+            "shadow": self._shadow(MIN_SHADOW_SESSIONS),
+            "has_deployment": True,
+        }
+        base.update(overrides)
+        return _facts(3, **base)
+
+    def test_a_clean_month_of_operation_passes(self) -> None:
+        assert evaluate(self._complete()).passed
+
+    def test_too_few_sessions_block_it(self) -> None:
+        facts = self._complete(shadow=self._shadow(MIN_SHADOW_SESSIONS - 1))
+        assert "shadow_sessions" in _unmet(facts)
+
+    def test_no_deployment_blocks_it(self) -> None:
+        assert "deployment_exists" in _unmet(self._complete(has_deployment=False))
+
+    def test_a_failed_session_blocks_it(self) -> None:
+        shadow = list(self._shadow(MIN_SHADOW_SESSIONS))
+        shadow[5] = ShadowFact(
+            session=shadow[5].session, rebalanced=False, error="no market data"
+        )
+        assert "shadow_without_errors" in _unmet(
+            self._complete(shadow=tuple(shadow))
+        )
+
+    def test_a_schedule_that_never_fired_blocks_it(self) -> None:
+        """Running is not the same as operating."""
+        shadow = self._shadow(MIN_SHADOW_SESSIONS, rebalanced=False)
+        assert "schedule_fired" in _unmet(self._complete(shadow=shadow))
+
+    def test_a_trimmed_buy_blocks_it(self) -> None:
+        """
+        The simulated venue trimmed a buy a real one would have rejected, so
+        the shadow book and a live one have already diverged.
+        """
+        shadow = list(self._shadow(MIN_SHADOW_SESSIONS))
+        shadow[3] = ShadowFact(
+            session=shadow[3].session, rebalanced=True, underfunded=1
+        )
+        assert "venue_would_have_agreed" in _unmet(
+            self._complete(shadow=tuple(shadow))
+        )
+
+    def test_no_shadow_history_at_all_blocks_it(self) -> None:
+        facts = self._complete(shadow=())
+        unmet = _unmet(facts)
+        assert {"shadow_sessions", "schedule_fired"} <= unmet
+
+    def test_it_does_not_need_an_operator(self) -> None:
+        """Stage 4 is broker paper trading, which is still below canary."""
+        assert not evaluate(self._complete()).requires_human
+
+
 class TestUnbuiltStages:
-    @pytest.mark.parametrize("stage", [3, 4, 5, 6, 7, 8])
+    @pytest.mark.parametrize("stage", [4, 5, 6, 7, 8])
     def test_they_refuse_and_name_the_missing_capability(self, stage: int) -> None:
         result = evaluate(_facts(stage))
         assert not result.passed
@@ -365,7 +445,7 @@ class TestUnbuiltStages:
 
     def test_they_never_pass_by_having_no_criteria(self) -> None:
         """An empty criteria list must not read as unanimous agreement."""
-        for stage in range(3, 9):
+        for stage in range(4, 9):
             assert not evaluate(_facts(stage)).passed
 
 
@@ -443,7 +523,9 @@ class TestTheVeto:
 
 class TestHumanGating:
     @pytest.mark.parametrize("stage", [0, 1, 2, 3])
-    def test_research_stages_do_not_need_an_operator(self, stage: int) -> None:
+    def test_research_and_shadow_do_not_need_an_operator(
+        self, stage: int
+    ) -> None:
         assert not evaluate(_facts(stage)).requires_human
 
     @pytest.mark.parametrize("stage", [4, 5, 6, 7])

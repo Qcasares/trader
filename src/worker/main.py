@@ -40,6 +40,7 @@ from src.worker.maintenance_jobs import (
     run_reconcile,
 )
 from src.worker.scheduling import plan_and_enqueue
+from src.worker.shadow_job import run_shadow_decision
 from src.worker.walkforward_job import run_walkforward_job
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,11 @@ HANDLERS: dict[str, JobHandler] = {
     "ingest_bars": run_ingest_bars,
     "eod_marks": run_eod_marks,
     "reconcile": run_reconcile,
+    # Enqueued by the AI programme, never by the session planner — so it is
+    # deliberately absent from SCHEDULED_KINDS below. It runs the shipped live
+    # decision path against a derived hypothetical book and submits nothing;
+    # the programme cannot run it itself because it may not import this module.
+    "shadow_decision": run_shadow_decision,
 }
 
 #: The scheduler is only useful if something runs it. Planning happens on

@@ -43,6 +43,7 @@ from src.programme.flags import (
 from src.programme.gates import (
     BLOCKING_SEVERITIES,
     FIRST_HUMAN_GATED_STAGE,
+    MIN_SHADOW_SESSIONS,
     STAGE_NAMES,
     VETO_ROLES,
     evaluate,
@@ -660,6 +661,24 @@ async def close_finding(
         detail={"status": body.status, "note": body.note},
     )
     return {"ref": ref, "status": body.status, "closed_by": actor}
+
+
+@router.get("/candidates/{candidate_id}/shadow")
+async def list_shadow(
+    candidate_id: str, session: AuthedSession, conn: DbConn
+) -> dict[str, Any]:
+    """
+    Shadow sessions, newest first.
+
+    ``equity`` is the derived book's value, not a P&L: the opening balance is a
+    fixed notional and the window is a few weeks, so a return computed from it
+    would carry a standard error several times its own size. It is here so an
+    operator can see the book moving, not so anyone can quote it.
+    """
+    return {
+        "sessions": await repo.list_shadow_decisions(conn, candidate_id),
+        "required": MIN_SHADOW_SESSIONS,
+    }
 
 
 @router.get("/candidates/{candidate_id}/assessments")

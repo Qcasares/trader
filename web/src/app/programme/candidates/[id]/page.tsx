@@ -22,6 +22,7 @@ import {
   type Candidate,
   type FindingsPage,
   type RoleAssessment,
+  type ShadowHistory,
 } from "@/lib/api";
 import { AiBadge, GateChecklist } from "@/components/GateChecklist";
 
@@ -43,6 +44,7 @@ export default function CandidatePage({
   const [candidate, setCandidate] = useState<Candidate | null>(null);
   const [assessments, setAssessments] = useState<RoleAssessment[]>([]);
   const [findings, setFindings] = useState<FindingsPage | null>(null);
+  const [shadow, setShadow] = useState<ShadowHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unmet, setUnmet] = useState<string[]>([]);
   const [confirm, setConfirm] = useState("");
@@ -51,14 +53,17 @@ export default function CandidatePage({
 
   const load = useCallback(async () => {
     try {
-      const [nextCandidate, nextAssessments, nextFindings] = await Promise.all([
-        api.candidate(id),
-        api.assessments(id),
-        api.findings({ candidateId: id }),
-      ]);
+      const [nextCandidate, nextAssessments, nextFindings, nextShadow] =
+        await Promise.all([
+          api.candidate(id),
+          api.assessments(id),
+          api.findings({ candidateId: id }),
+          api.shadow(id),
+        ]);
       setCandidate(nextCandidate);
       setAssessments(nextAssessments);
       setFindings(nextFindings);
+      setShadow(nextShadow);
       setError(null);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -258,6 +263,64 @@ export default function CandidatePage({
           </div>
         )}
       </section>
+
+      {shadow && shadow.sessions.length > 0 ? (
+        <section className="card">
+          <div className="card-head spread">
+            <h2>Shadow sessions</h2>
+            <span className="muted">
+              {shadow.sessions.length} of {shadow.required} required
+            </span>
+          </div>
+          <p className="muted">
+            The strategy deciding on a schedule and submitting nothing. The book
+            is not stored: it is rebuilt from these rows on every run, filling
+            each session&apos;s intents at the next session&apos;s open. Equity
+            is that derived book&apos;s value against a fixed notional, and is
+            not a P&amp;L — over this many sessions a return would carry a
+            standard error several times its own size.
+          </p>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Rebalanced</th>
+                  <th className="num">Intents</th>
+                  <th className="num">Book equity</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shadow.sessions.map((entry) => (
+                  <tr key={entry.session}>
+                    <td className="mono">{entry.session}</td>
+                    <td>{entry.rebalanced ? "yes" : "—"}</td>
+                    <td className="num mono">{entry.order_intents.length}</td>
+                    <td className="num mono">
+                      {entry.equity === null ? "—" : entry.equity.toFixed(2)}
+                    </td>
+                    <td>
+                      {entry.error ? (
+                        <span className="pill pill-bad">{entry.error}</span>
+                      ) : entry.underfunded.length > 0 ? (
+                        <span
+                          className="pill pill-warn"
+                          title="A real venue would have rejected these outright."
+                        >
+                          {entry.underfunded.length} buy trimmed
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <section className="card">
         <div className="card-head spread">

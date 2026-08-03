@@ -1,7 +1,7 @@
-# The AI programme spine
+# The AI programme
 
-Specification for the first slice of the AI trading programme. Owner: Quentin
-Casares. Status: approved for implementation, 3 August 2026.
+Specification and record of the AI trading programme. Owner: Quentin Casares.
+Slices 1 and 2 are built; slice 3 is not. Last revised 3 August 2026.
 
 ## What this is
 
@@ -12,15 +12,15 @@ slices, each with its own specification and implementation cycle.
 
 | Slice | Contents | Status |
 |---|---|---|
-| 1. Programme spine | Configuration, hypothesis ledger, experiment record, lifecycle model, deterministic gate engine, runner process, UI | This document |
-| 2. Autonomous loop | Twelve role personas, findings register, veto mapping, autonomy ceiling — **built**. Shadow operation and automatic promotion through stage 4 — **not built**, see below | Part built |
+| 1. Programme spine | Configuration, hypothesis ledger, experiment record, lifecycle model, deterministic gate engine, runner process, UI | Built |
+| 2. Autonomous loop | Twelve role personas, findings register, veto mapping, autonomy ceiling, shadow operation — **built**. A candidate can now be carried automatically to the gate into broker paper trading | Built |
 | 3. Scorecards and reports | Strategy scorecard, daily and monthly reports, validation report, and the statistics they need: deflated Sharpe, probability of backtest overfitting, turnover, capacity | Later |
 
-Slice 1 does not reach autonomous paper trading, and saying otherwise would be
-the first dishonest sentence in a system built to prevent them. It builds the
-ledger, the evidence chain and the engine that decides whether a stage has been
-earned. Stages 3 and 4 need shadow-mode operation on a schedule, which is
-slice 2.
+As built, a candidate can be carried automatically from concept to the gate
+into broker paper trading. It cannot cross that gate: stage 4 needs a venue,
+and stage 5 is where capital is exposed and no model may decide. Both limits
+are described below and both are enforced in code rather than described in
+prose.
 
 ## The constraint that shapes everything
 
@@ -101,19 +101,21 @@ renders the criteria above the outcome for the same reason.
 `src/programme/gates.py` exposes frozen dataclasses and one function:
 
 ```python
-def evaluate(stage: int, facts: CandidateFacts) -> GateResult
+def evaluate(facts: CandidateFacts) -> GateResult
 ```
 
-`CandidateFacts` is assembled from rows by `src/programme/facts.py`, which does
-the I/O. `GateResult` carries every criterion with its evidence, whether the
-gate passed, and whether promotion needs a human.
+`CandidateFacts` is assembled from rows by `repo.load_facts`, which does the
+I/O. `GateResult` carries every criterion with its evidence, whether the gate
+passed, and whether promotion needs a human.
 
 | Transition | Criteria, all read from rows |
 |---|---|
 | 0 → 1 | Card complete; owner set; falsification test stated; simplest credible baseline named; preregistered criteria present; the universe resolves in `daily_bars` for the requested window |
 | 1 → 2 | A succeeded backtest; a base-cost result and a stressed-cost result at `cost_stress_multiplier >= 2`; a parameter-neighbourhood experiment; a benchmark comparison; `effective_start` recorded; the preregistered criteria evaluate true against the recorded outcome |
 | 2 → 3 | A completed `walkforward_runs` study with `is_robust = true` for the same parameters; an independent replication within tolerance; `sharpe_is_significant` recorded; documented limitations non-empty; **`evidence_is_synthetic` false** |
-| 3 → 4 and beyond | Declared, and returned as not met with the reason "capability absent: shadow-mode operation", naming what slice 2 must build |
+| 3 → 4 | A deployment exists; at least 20 shadow sessions recorded; none errored; the rebalance schedule actually fired; no buy was trimmed for want of cash |
+| 4 → 8 | Declared, and returned as not met naming the missing capability — a venue, a canary allocation, a revalidation cycle |
+| every gate | Prepended: no open high or critical finding from a role holding a veto |
 
 ### Synthetic data
 
@@ -265,25 +267,42 @@ something already promoted is an audit, and an audit is not a control. The tick
 convenes, re-loads the facts, and re-evaluates — so a finding raised on this
 pass blocks this pass.
 
-### Shadow mode: not built, and why
+### Shadow mode: the book is derived, never stored
 
-Stage 3 is the remaining gap, and it turned out to be its own slice rather than
-an afternoon's work. Two facts settle it:
+Stage 3 runs the shipped live decision path against a hypothetical book and
+submits nothing. The design decision worth recording is that **no book is
+stored**.
 
-* `SimulatedBroker` takes an opening cash balance and has no way to be seeded
-  with positions, so a hypothetical book cannot be rehydrated per session
-  without either adding a seeding API to a parity-guarded class or replaying
-  the entire decision log on every run.
-* `dry_run` decides *unconditionally* by design — it answers "what would you do
-  if you rebalanced now" and reports `would_rebalance` separately. Shadow
-  operation needs the real schedule, so it needs either its own loop or a
-  change to the live path.
+A stored book would be a second source of truth about a portfolio that exists
+only on paper, free to drift from the decisions that produced it, and checking
+it against them would *be* the reconciliation rather than the thing reconciled.
+So every run seeds a fresh `SimulatedBroker` with a fixed notional and replays
+`shadow_decisions` in session order, filling each session's intents at the next
+session's open. "The hypothetical positions reconcile" becomes a property of
+the arrangement rather than a claim anyone has to check, and the decision lag
+comes free from the same `execute_pending` a backtest uses.
 
-Both routes touch the code CLAUDE.md is most emphatic about. The choice between
-them is a real design decision, not an implementation detail, so it is left
-open rather than settled by whichever was quicker to write. The gates for
-stages 3 and up continue to report *not met — capability absent* and name
-shadow-mode operation as the thing missing.
+Two constraints shaped it. `SimulatedBroker` cannot be seeded with positions,
+which rules out rehydrating a stored book without changing a parity-guarded
+class; and `dry_run` decides unconditionally by design, so the schedule is
+applied by the shadow job against its *own* last rebalance, read from the log
+rather than from a deployment whose schedule belongs to a live run that is not
+happening.
+
+`src/worker/shadow_job.py` lives in the worker, not the programme, because it
+must import `live_job` and the programme may not. The programme enqueues a
+`shadow_decision` job; the worker runs it. That is the same boundary that lets
+the programme hold a model client at all, and a test asserts the module is
+where it is and says why.
+
+The deployment a candidate shadows against is created **disabled** on entry to
+stage 3 and stays that way. `_enabled_deployments` filters on status, so the
+live loop can never pick it up.
+
+What stage 3 does not prove, and stage 4 exists for: `dry_run` seeds the risk
+gate's equity history from the paper book's marks, so a shadow candidate has
+none of its own and the halting limits are not exercised. No venue is contacted
+either. Both are what broker paper trading is for.
 
 ## What this deliberately does not do
 

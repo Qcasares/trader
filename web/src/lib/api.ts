@@ -478,6 +478,32 @@ export interface RoleAssessment {
   created_at: string;
 }
 
+/**
+ * One shadow session.
+ *
+ * `equity` is the derived book's value, not a P&L. The opening balance is a
+ * fixed notional and the window is weeks, so a return computed from it would
+ * carry a standard error several times its own size.
+ */
+export interface ShadowSession {
+  session: string;
+  rebalanced: boolean;
+  target_weights: Record<string, number>;
+  order_intents: Record<string, unknown>[];
+  risk_events: Record<string, unknown>[];
+  rationale: string;
+  equity: number | null;
+  /** Buys the simulated venue trimmed. A real venue rejects these outright. */
+  underfunded: Record<string, unknown>[];
+  error: string | null;
+  created_at: string;
+}
+
+export interface ShadowHistory {
+  sessions: ShadowSession[];
+  required: number;
+}
+
 export interface ProgrammeStatus {
   enabled: boolean;
   /** Already clamped and fail-closed by the API; render it as authoritative. */
@@ -689,6 +715,9 @@ export const api = {
       `/api/v1/programme/findings/${ref}/close`,
       { method: "POST", body: JSON.stringify({ status, note }) },
     ),
+
+  shadow: (candidateId: string) =>
+    request<ShadowHistory>(`/api/v1/programme/candidates/${candidateId}/shadow`),
 
   assessments: (candidateId: string) =>
     request<RoleAssessment[]>(

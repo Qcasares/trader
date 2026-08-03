@@ -123,6 +123,15 @@ VETO_ROLES: frozenset[str] = frozenset(
 #: Severities that block. Anything below is recorded and does not halt.
 BLOCKING_SEVERITIES: frozenset[str] = frozenset({"high", "critical"})
 
+#: Sessions a candidate must operate in shadow before it may reach a broker.
+#:
+#: Twenty is about a month of NYSE sessions. Not chosen because a month proves
+#: the strategy works — it proves nothing of the kind, and a Sharpe over twenty
+#: sessions has a standard error near ±4. It is long enough for the *operation*
+#: to fail: a monthly rebalance to actually fire, a data gap to appear, a
+#: schedule to drift. That is what this stage is evidencing.
+MIN_SHADOW_SESSIONS = 20
+
 
 # ---------------------------------------------------------------------------
 # Facts
@@ -251,6 +260,17 @@ class FindingFact:
 
 
 @dataclass(frozen=True, slots=True)
+class ShadowFact:
+    """One recorded shadow session."""
+
+    session: date
+    rebalanced: bool
+    order_intents: int = 0
+    underfunded: int = 0
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateFacts:
     """
     Everything a gate is allowed to know.
@@ -278,6 +298,10 @@ class CandidateFacts:
     walkforwards: tuple[WalkforwardFact, ...] = ()
     #: Every finding still open against this candidate, blocking or not.
     findings: tuple[FindingFact, ...] = ()
+    #: Shadow sessions recorded, oldest first.
+    shadow: tuple[ShadowFact, ...] = ()
+    #: Whether a deployment exists for this candidate to operate against.
+    has_deployment: bool = False
 
     @property
     def blocking_findings(self) -> tuple[FindingFact, ...]:
@@ -715,13 +739,107 @@ def _gate_validation_to_shadow(facts: CandidateFacts) -> tuple[Criterion, ...]:
     )
 
 
+def _gate_shadow_to_paper(facts: CandidateFacts) -> tuple[Criterion, ...]:
+    """
+    Stage 3 -> 4. It has operated on a schedule, and operated correctly.
+
+    Nothing here asks whether the shadow book made money, and it would be the
+    wrong question: twenty sessions carries a Sharpe standard error near four,
+    so any figure over that window is noise. What this stage evidences is that
+    the machinery runs — the schedule fires, the sessions are continuous, the
+    logs are complete, and the venue would have accepted what the book filled.
+    """
+    recorded = len(facts.shadow)
+    errors = [s for s in facts.shadow if s.error]
+    rebalances = [s for s in facts.shadow if s.rebalanced]
+    underfunded = [s for s in facts.shadow if s.underfunded]
+
+    return (
+        Criterion(
+            id="deployment_exists",
+            description="A deployment exists for the candidate to operate against",
+            met=facts.has_deployment,
+            detail=(
+                ""
+                if facts.has_deployment
+                else "one is created on entry to stage 3; this candidate has none"
+            ),
+        ),
+        Criterion(
+            id="shadow_sessions",
+            description=(
+                f"At least {MIN_SHADOW_SESSIONS} shadow sessions recorded"
+            ),
+            met=recorded >= MIN_SHADOW_SESSIONS,
+            evidence=Evidence("shadow_decisions", facts.hypothesis_ref, recorded),
+            detail=f"{recorded} recorded",
+        ),
+        Criterion(
+            id="shadow_without_errors",
+            description="No shadow session failed",
+            met=not errors,
+            evidence=(
+                Evidence(
+                    "shadow_decisions",
+                    ",".join(s.session.isoformat() for s in errors[:5]),
+                    len(errors),
+                )
+                if errors
+                else None
+            ),
+            detail=(
+                ""
+                if not errors
+                else f"{len(errors)} session(s) errored; stable operation is "
+                "the thing this stage exists to demonstrate"
+            ),
+        ),
+        Criterion(
+            id="schedule_fired",
+            description="The rebalance schedule actually fired at least once",
+            met=bool(rebalances),
+            evidence=(
+                Evidence(
+                    "shadow_decisions",
+                    rebalances[-1].session.isoformat(),
+                    len(rebalances),
+                )
+                if rebalances
+                else None
+            ),
+            detail=(
+                ""
+                if rebalances
+                else "a candidate that never rebalanced has not demonstrated "
+                "correct decision timing, only that it ran"
+            ),
+        ),
+        Criterion(
+            id="venue_would_have_agreed",
+            description="No buy was trimmed for want of cash",
+            met=not underfunded,
+            evidence=(
+                Evidence(
+                    "shadow_decisions",
+                    underfunded[-1].session.isoformat(),
+                    len(underfunded),
+                )
+                if underfunded
+                else None
+            ),
+            detail=(
+                ""
+                if not underfunded
+                else "the simulated venue trimmed a buy a real one would have "
+                "rejected, so the shadow book and a live one have already "
+                "diverged; set cash_buffer_pct"
+            ),
+        ),
+    )
+
+
 #: Why the later gates cannot be judged yet. Rendered to the operator verbatim.
 _MISSING_CAPABILITY: dict[int, str] = {
-    3: (
-        "shadow-mode operation is not built: a candidate must run on a "
-        "schedule producing decisions without submitting orders before its "
-        "operation can be evidenced"
-    ),
     4: (
         "broker paper trading against a live account, with position and cash "
         "reconciliation, is not built"
@@ -736,4 +854,5 @@ _GATES = {
     0: _gate_concept_to_research,
     1: _gate_research_to_validation,
     2: _gate_validation_to_shadow,
+    3: _gate_shadow_to_paper,
 }

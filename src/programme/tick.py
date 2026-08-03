@@ -46,6 +46,7 @@ from typing import Any
 
 import asyncpg
 
+from src.core import calendar
 from src.db.repos import backtests as backtest_repo
 from src.db.repos import jobs as job_repo
 from src.programme import author, flags, gates, repo, roles
@@ -77,6 +78,17 @@ STRESS_MULTIPLIER = max(3.0, MIN_COST_STRESS_MULTIPLIER)
 NEIGHBOURHOOD_FACTOR = 1.2
 
 DEFAULT_INITIAL_CASH = 100_000.0
+
+#: The stage at which a candidate operates in shadow.
+SHADOW_STAGE = 3
+
+#: How many shadow sessions may be queued in one pass.
+#:
+#: A candidate promoted into shadow with a year of calendar behind it would
+#: otherwise queue two hundred jobs at once, and the live decision path shares
+#: this queue. Ten a pass backfills a month in three passes and never starves
+#: anything.
+MAX_SHADOW_SESSIONS_PER_TICK = 10
 
 #: Experiment kinds this tick knows how to enqueue, and the gate criterion each
 #: one answers. Ordered so the plain backtest exists before anything is
@@ -490,6 +502,63 @@ async def _enqueue_missing_evidence(
             await _enqueue_walkforward(conn, candidate, report)
         else:
             await _enqueue_backtest(conn, candidate, kind, report)
+
+    if candidate["stage"] == SHADOW_STAGE:
+        await _enqueue_shadow(conn, candidate, report)
+
+
+async def _enqueue_shadow(
+    conn: asyncpg.Connection, candidate: dict[str, Any], report: TickReport
+) -> None:
+    """
+    Queue the shadow sessions this candidate has not yet recorded.
+
+    The programme cannot run one itself: the shadow job imports
+    ``src.worker.live_job``, and ``src/programme`` is forbidden from importing
+    the worker because it is the package holding the model client. So it
+    enqueues, with a dedupe key, and the worker picks the work up — the same
+    division as every other job this module creates.
+
+    ``shadow_decision`` is not a scheduled kind. The session planner does not
+    emit it, so it stays out of ``SCHEDULED_KINDS``; adding it there would
+    break the set comparison in ``test_scheduling.py`` and, worse, would start
+    shadowing every deployment on every session.
+    """
+    deployment_id = await repo.ensure_shadow_deployment(conn, candidate["id"])
+    if deployment_id is None:
+        report.note(
+            "shadow_blocked",
+            candidate=candidate["id"],
+            reason="no succeeded backtest to approve a deployment against",
+        )
+        return
+
+    entered = date.fromisoformat(candidate["stage_entered_at"][:10])
+    today = date.today()
+    if today <= entered:
+        return
+
+    already = await repo.shadow_sessions_recorded(conn, candidate["id"])
+    # Bounded per pass. A candidate promoted into shadow with a year of
+    # calendar behind it would otherwise queue two hundred jobs at once and
+    # starve the live decision path, which shares this queue.
+    pending = [
+        s
+        for s in calendar.sessions(entered, today)
+        if s not in already
+    ][:MAX_SHADOW_SESSIONS_PER_TICK]
+
+    for session in pending:
+        job_id = await job_repo.enqueue(
+            conn,
+            "shadow_decision",
+            {"candidate_id": candidate["id"], "session": session.isoformat()},
+            dedupe_key=f"shadow:{candidate['id']}:{session.isoformat()}",
+        )
+        if job_id is not None:
+            report.note(
+                "shadow_queued", candidate=candidate["id"], session=str(session)
+            )
 
 
 def _neighbouring_params(params: dict[str, Any]) -> dict[str, Any]:

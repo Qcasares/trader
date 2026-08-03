@@ -8,10 +8,9 @@ a candidate without a benchmark comparison, and a benchmark that is not
 runnable by the same engine, over the same window, under the same cost model,
 is not a comparison — it is a number quoted from somewhere else.
 
-So it is deliberately the dullest strategy that can be written: buy the
-universe in equal weights on the first session each symbol is available, and
-rebalance only when the drift band is breached. Anything cleverer would make it
-a competitor rather than a floor.
+So it is deliberately the dullest strategy that can be written: hold the
+universe in equal weights from the first session each symbol is available.
+Anything cleverer would make it a competitor rather than a floor.
 
 Two details matter for the comparison to be fair:
 
@@ -19,9 +18,11 @@ Two details matter for the comparison to be fair:
   symbol that has not listed is excluded from the denominator, not held at
   zero — otherwise the benchmark holds cash the strategy under test does not,
   and beating it means nothing.
-* Rebalancing is banded rather than periodic. A calendar rebalance would give
-  the benchmark a turnover the strategy under test does not have, and
-  therefore a cost the comparison would silently attribute to being passive.
+* The target never changes, so the benchmark's turnover is whatever price
+  drift forces through the sizer's minimum-trade threshold and no more. A
+  calendar rebalance would give it a turnover the strategy under test does not
+  have, and therefore a cost the comparison would silently attribute to being
+  passive.
 """
 
 from __future__ import annotations
@@ -49,16 +50,6 @@ class BuyAndHoldParams(StrategyParams):
         min_length=1,
         description="Symbols to hold in equal weight.",
     )
-    drift_band: float = Field(
-        default=0.05,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Rebalance once any holding's weight differs from its target by "
-            "more than this. Zero rebalances every session, which is a "
-            "different strategy and a much more expensive one."
-        ),
-    )
     min_history: int = Field(
         default=1,
         ge=1,
@@ -82,14 +73,13 @@ class BuyAndHoldParams(StrategyParams):
 
 @register
 class BuyAndHold(Strategy):
-    """Equal-weight the available universe; trade only to correct drift."""
+    """Equal-weight the available universe, and otherwise do nothing."""
 
     name = "buy_and_hold"
     version = "1.0"
     description = (
-        "Equal-weight every symbol that has listed, and rebalance only when a "
-        "holding drifts outside the band. The benchmark the promotion gates "
-        "compare against."
+        "Equal-weight every symbol that has listed and hold it. The benchmark "
+        "the promotion gates compare against."
     )
     source = "Benchmark floor; no external reference."
     params_model = BuyAndHoldParams
@@ -107,14 +97,21 @@ class BuyAndHold(Strategy):
         self, session: date, last_rebalance: date | None
     ) -> bool:
         """
-        Every session is a candidate; the weights decide whether anything moves.
+        Every session is a candidate, and almost none of them trade.
 
-        Returning ``True`` here and letting :meth:`target_weights` emit the
-        same weights as yesterday costs nothing: the order sizer turns an
-        unchanged target into no order. The alternative — deciding the band
-        here — would need the portfolio state, which this method is not given,
-        and inventing a calendar for it would give the benchmark a turnover it
-        does not have.
+        There is deliberately no drift band here and none in
+        :meth:`target_weights`. The target never changes, so once the book
+        matches it the sizer's minimum-trade threshold suppresses the small
+        deltas that price movement creates — which *is* a drift band,
+        implemented in the one place that knows both the current book and the
+        current prices.
+
+        An earlier version returned the *current* weights when nothing had
+        drifted, and it was wrong in a way worth recording: current weights are
+        position value at today's close over equity marked at whenever the
+        broker last marked. On the live path those are different moments, so
+        the weights could sum above one and trip the leverage guard in
+        ``TargetWeights``. Shadow mode found it on its fourth session.
         """
         return True
 
@@ -133,28 +130,4 @@ class BuyAndHold(Strategy):
             return TargetWeights({})
 
         target = 1.0 / len(available)
-        weights = {symbol: target for symbol in available}
-
-        # Hold the current book unless something has drifted out of band. The
-        # equity may be zero on the first session, before any mark exists; the
-        # band cannot be evaluated then, so buy in.
-        equity = float(state.equity or 0.0)
-        if equity <= 0.0:
-            return TargetWeights(weights)
-
-        current: dict[str, float] = {}
-        for symbol in available:
-            # Raw close, not adjusted: this is a money question, and the
-            # adjusted series disagrees with the broker by the cumulative
-            # dividend adjustment.
-            price = panel.latest(symbol, field="close")
-            quantity = float(state.qty_of(symbol))
-            current[symbol] = (
-                (quantity * float(price)) / equity if price is not None else 0.0
-            )
-
-        drifted = any(
-            abs(current[symbol] - target) > self.params.drift_band
-            for symbol in available
-        )
-        return TargetWeights(weights if drifted else current)
+        return TargetWeights({symbol: target for symbol in available})

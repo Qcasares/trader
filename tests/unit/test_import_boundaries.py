@@ -201,6 +201,24 @@ def test_the_programme_cannot_reach_an_order() -> None:
     )
 
 
+def test_shadow_mode_lives_in_the_worker_because_of_that_boundary() -> None:
+    """
+    The boundary above is why ``shadow_job`` is where it is.
+
+    Shadow mode runs the shipped live decision path, so it must import
+    ``src.worker.live_job``. The programme cannot, so it enqueues a
+    ``shadow_decision`` job and the worker runs it. If someone later moves that
+    module into ``src/programme`` to keep the programme's code together, the
+    test above fails — and this one says why, so the fix is to move it back
+    rather than to relax the rule.
+    """
+    assert (SRC / "worker" / "shadow_job.py").is_file(), (
+        "src/worker/shadow_job.py is missing; shadow mode cannot live in "
+        "src/programme because that package may not import the worker"
+    )
+    assert not (SRC / "programme" / "shadow_job.py").exists()
+
+
 def test_the_api_does_not_import_the_programme_runner() -> None:
     """
     The API may read the programme's rows; it may not become the runner.
