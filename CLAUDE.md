@@ -294,8 +294,22 @@ inert while the backtest continues to honour them.
   the 210-day SMA the one implemented strategy needs is impossible in a window
   that short. Read it as "the plumbing survives contact with real numbers",
   nothing more. Two bugs came out of it, both listed in the git log.
-- Alpaca has never been contacted. `AlpacaBroker` is tested against a fake
-  server modelling the documented contract.
+- **Alpaca has been contacted, read-only, on paper.** `AlpacaBroker` is still
+  tested against a fake server modelling the documented contract, and that is
+  still where the coverage is. What has now happened once, by hand, is
+  `get_account`, `get_positions` and `get_clock` against
+  `paper-api.alpaca.markets` through the shipped adapter — the account, the
+  empty position map and the market clock all came back correctly parsed. **No
+  order has ever been submitted to Alpaca, on paper or live.** `submit`,
+  `cancel_all` and `close_position` remain exercised only against the fake.
+- Verify which venue a key belongs to before storing it, by trying both. A
+  paper key is refused by `api.alpaca.markets` with a 401 and a live key is
+  refused by `paper-api.alpaca.markets` the same way, so one pair of requests
+  settles it. This is not hypothetical: the dashboard's live/paper toggle
+  decides which kind you get, the two look identical apart from a `PK` or `AK`
+  prefix, and a live key was pasted here once already. The three gates would
+  have refused to trade with it, but "something downstream would have caught
+  it" is not a reason to store the wrong credential.
 - **Crypto is not supported**, and this fixture does not change that. It has no
   24/7 scheduler, no crypto broker adapter and no venue-aware cost model;
   `src/data/cryptocom_source.py` exists to feed the engine real prices. The
