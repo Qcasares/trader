@@ -304,7 +304,24 @@ tier that allows a small fraction of that. The failure is not a slow API, it is
 Prefer the provider's pooled endpoint as well — Neon and Supabase both publish
 one, and it multiplexes properly rather than leaving each instance to guess.
 
-### Backend (Fly / Railway / Render)
+### The whole system in one action (Render Blueprint)
+
+`render.yaml` declares everything — Postgres, the API, the worker, **and the
+UI** — with the cross-references (`NEXT_PUBLIC_API_BASE`, `CORS_ORIGINS`) wired
+to whatever hostnames Render actually assigns. Deploying it is:
+
+1. **Render dashboard → New → Blueprint →** select this repository.
+2. Type one value when prompted: `ADMIN_PASSWORD_HASH` (bcrypt; the generator
+   is below). `SESSION_SECRET` is generated server-side and never displayed.
+3. Apply. Migrations run automatically before the API takes traffic
+   (`preDeployCommand`), so there is nothing to run by hand.
+
+The API and worker use paid instances deliberately — a free web service spins
+down, which delays the kill switch behind a cold start, and free Postgres
+expires after 90 days and takes `daily_marks` (the risk gate's memory) with
+it. The UI is free tier: a spun-down UI costs a wait, not a control.
+
+### Backend by hand (Fly / Railway / anything with a Docker runtime)
 
 `Dockerfile` builds one image; run it twice with different commands — the API
 (`uvicorn src.api.main:app`) and the worker (`python -m src.worker.main`). The

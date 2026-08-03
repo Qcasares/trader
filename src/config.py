@@ -349,7 +349,20 @@ def get_settings() -> Settings:
     admin_password_hash = os.environ.get("ADMIN_PASSWORD_HASH", "").strip()
 
     origins_raw = os.environ.get("CORS_ORIGINS", "").strip()
-    cors_origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
+    # A bare hostname is completed to an https origin. Render's Blueprint can
+    # wire one service's hostname into another's environment (`fromService`,
+    # property `host`), which is what lets CORS_ORIGINS point at the UI without
+    # anyone pasting a URL — but the property is a hostname, no scheme, and a
+    # browser's Origin header always carries one. Left unnormalised, the
+    # comparison fails exactly like an unset value: login 200, everything
+    # after 401. https specifically, because a cross-site cookie is
+    # SameSite=None and therefore Secure — an http origin could never present
+    # it anyway.
+    cors_origins = [
+        o if "://" in o else f"https://{o}"
+        for o in (piece.strip() for piece in origins_raw.split(","))
+        if o
+    ]
 
     samesite = os.environ.get("SESSION_COOKIE_SAMESITE", "lax").strip().lower()
     if samesite not in {"lax", "strict", "none"}:

@@ -1,20 +1,26 @@
 # render.yaml
 # -----------
-# The backend, as a Render Blueprint: Postgres, the API, and the worker.
-#
-# The frontend is not here. It goes to Vercel — locked decision 6 — because a
-# Next.js server has no business holding a trading loop, and this file would
-# quietly suggest otherwise.
-#
-# Render is not the only option; Fly and Railway both work and SETUP.md gives
-# the Fly commands. It is the one described declaratively because it is the
-# only one that can state the database and both processes in a single file, so
-# the deployment is reviewable in the diff rather than reconstructed from a
-# dashboard someone configured months ago.
+# The whole system, as a Render Blueprint: Postgres, the API, the worker, and
+# the UI. One dashboard action deploys a complete working application:
 #
 #   Render dashboard -> New -> Blueprint -> point at this repository
 #
-# Two values are deliberately left blank and must be set by hand; see below.
+# Exactly one value must be typed in by hand (ADMIN_PASSWORD_HASH; see below).
+# The two URLs the services need from each other — the UI's API base and the
+# API's allowed origin — are wired with `fromService`, so they resolve to
+# whatever hostnames Render actually assigns rather than to guesses.
+#
+# The UI here is a deliberate widening of locked decision 6 ("frontend on
+# Vercel"), not a reversal: the Vercel path remains documented in SETUP.md and
+# next.config.ts still targets it. It is included because a Blueprint that
+# stops one service short of a working system forces the remaining service
+# through a second provider's dashboard, and the deployment stops being
+# reviewable in one file. A Next.js server still holds no trading loop —
+# the worker below is the only process that runs one.
+#
+# Render is not the only option; Fly and Railway both work and SETUP.md gives
+# the Fly commands. It is the one described declaratively because it is the
+# only one that can state the database and every process in a single file.
 
 databases:
   - name: trader-db
@@ -75,12 +81,16 @@ services:
       - key: ADMIN_PASSWORD_HASH
         sync: false
 
-      # The Vercel origin, exactly: scheme, host, no trailing slash. A browser
-      # treats localhost and 127.0.0.1 as different origins and will treat a
-      # mismatch here the same way — as a CORS failure that looks like a broken
-      # login.
+      # The UI's own hostname, resolved by Render at deploy time. The property
+      # is a bare host — no scheme — and `get_settings` completes it to
+      # https://, because a browser's Origin header always carries one and the
+      # CORS match is exact. If the UI later moves to Vercel, replace this with
+      # that origin, exactly: scheme, host, no trailing slash.
       - key: CORS_ORIGINS
-        sync: false
+        fromService:
+          name: trader-ui
+          type: web
+          property: host
 
       # Required in this topology. onrender.com and vercel.app are different
       # *sites*, so the session cookie is cross-site, and a browser will not
@@ -97,6 +107,31 @@ services:
         value: "false"
       - key: ALPACA_ALLOW_LIVE
         value: "false"
+
+  # ---------------------------------------------------------------------
+  # The UI. Reads the API; holds nothing.
+  # ---------------------------------------------------------------------
+  - type: web
+    name: trader-ui
+    runtime: node
+    rootDir: web
+    # A production build, not the dev server web/Dockerfile runs — that image
+    # is for docker-compose on a laptop and says so at the top.
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- --port $PORT
+    # Free is acceptable here and only here: a spun-down UI costs a cold-start
+    # wait, not a missed mark or an unreachable kill switch. The API and
+    # worker stay paid for exactly that reason.
+    plan: free
+    envVars:
+      # The API's hostname, resolved by Render. Bare host again;
+      # next.config.ts completes the scheme. NEXT_PUBLIC_ values are inlined
+      # at build time, so a change here needs a redeploy to take effect.
+      - key: NEXT_PUBLIC_API_BASE
+        fromService:
+          name: trader-api
+          type: web
+          property: host
 
   # ---------------------------------------------------------------------
   # The only process that runs a backtest or places an order.

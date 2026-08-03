@@ -29,9 +29,22 @@ import type { NextConfig } from "next";
 const DEPLOYED_API_BASE = "https://trader-vert-xi.vercel.app";
 const LOCAL_API_BASE = "http://localhost:8000";
 
+/**
+ * Two normalisations, both for values a platform injects rather than a person
+ * types:
+ *
+ * - Empty counts as unset. `??` alone would accept `""`, and an empty base
+ *   turns every call into a relative fetch against the UI's own origin — a
+ *   page full of quiet 404s. A blueprint variable that failed to resolve
+ *   arrives as exactly this.
+ * - A bare hostname gains `https://`. Render's `fromService`/`host` provides
+ *   the API's hostname without a scheme; `fetch` needs one.
+ */
+const raw = (process.env.NEXT_PUBLIC_API_BASE ?? "").trim();
+const explicit = raw && !raw.includes("://") ? `https://${raw}` : raw;
+
 const apiBase =
-  process.env.NEXT_PUBLIC_API_BASE ??
-  (process.env.VERCEL ? DEPLOYED_API_BASE : LOCAL_API_BASE);
+  explicit || (process.env.VERCEL ? DEPLOYED_API_BASE : LOCAL_API_BASE);
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,

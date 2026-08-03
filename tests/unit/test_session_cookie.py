@@ -86,6 +86,43 @@ class TestConfiguration:
             _settings(monkeypatch, SESSION_COOKIE_SAMESITE="cross-site")
 
 
+class TestCorsOriginNormalisation:
+    """
+    A bare hostname in CORS_ORIGINS is completed to an https origin.
+
+    Render's Blueprint wires one service's hostname into another's environment
+    (``fromService``, property ``host``) — a hostname, no scheme. A browser's
+    ``Origin`` header always carries a scheme, and the CORS match is exact, so
+    an unnormalised bare host fails precisely like an unset value: login 200,
+    every call after it 401, nothing in the server logs.
+    """
+
+    def test_a_bare_host_becomes_an_https_origin(self, monkeypatch) -> None:
+        settings = _settings(monkeypatch, CORS_ORIGINS="trader-ui.onrender.com")
+        assert settings.cors_origins == ["https://trader-ui.onrender.com"]
+
+    def test_an_explicit_scheme_is_left_alone(self, monkeypatch) -> None:
+        # http specifically: local development is the one place it is right,
+        # and "normalising" it to https would break a working setup.
+        settings = _settings(monkeypatch, CORS_ORIGINS="http://localhost:3000")
+        assert settings.cors_origins == ["http://localhost:3000"]
+
+    def test_mixed_lists_normalise_per_entry(self, monkeypatch) -> None:
+        settings = _settings(
+            monkeypatch,
+            CORS_ORIGINS="ui.onrender.com, https://app.vercel.app ,http://localhost:3000",
+        )
+        assert settings.cors_origins == [
+            "https://ui.onrender.com",
+            "https://app.vercel.app",
+            "http://localhost:3000",
+        ]
+
+    def test_empty_pieces_are_dropped_not_normalised(self, monkeypatch) -> None:
+        settings = _settings(monkeypatch, CORS_ORIGINS=" , ,")
+        assert settings.cors_origins == []
+
+
 class TestSecureIsImpliedByNone:
     """
     Browsers reject ``SameSite=None`` without ``Secure`` outright. Requiring an
