@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from src.core.types import Bar
@@ -97,11 +97,18 @@ class YFinanceSource(PriceSource):
                 "yfinance is not installed; it is a research-only dependency"
             ) from exc
 
+        # `end` is exclusive in yfinance and inclusive in `PriceSource.fetch`,
+        # so the last session asked for has to be one day past the last session
+        # wanted. Without this the panel stops a day short of the requested
+        # window, and the failure surfaces nowhere near the cause: the ingest
+        # reports success, and the driver then refuses to read the final
+        # session's open with "panel as_of is <the day before>". A backtest to
+        # 2024-12-31 failed for exactly that reason.
         try:
             return yf.download(
                 list(symbols),
                 start=start.isoformat(),
-                end=end.isoformat(),
+                end=(end + timedelta(days=1)).isoformat(),
                 auto_adjust=False,  # keep BOTH raw OHLC and Adj Close
                 actions=False,
                 progress=False,
