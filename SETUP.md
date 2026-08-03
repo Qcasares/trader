@@ -233,47 +233,46 @@ is a system nobody can check.
 
 | Piece | Where | Plan |
 |---|---|---|
-| UI | https://trader-ui-black.vercel.app | Vercel, free |
-| API | https://trader-api-515t.onrender.com | Render web service, free |
-| Database | Render Postgres `trader-db`, Oregon | free, **expires 2026-09-02** |
+| UI | https://trader-ui-black.vercel.app | Vercel project `trader-ui`, free |
+| API | https://trader-vert-xi.vercel.app | Vercel project `trader`, free |
+| Database | Neon, via the Vercel marketplace (`neon-celeste-paddle`) | free, no expiry |
 | Worker | `.github/workflows/worker.yml` | GitHub Actions, unmetered on a public repo |
-| Keepalive | `.github/workflows/keepalive.yml` | GitHub Actions |
 
-The worker is the interesting one. Render has no free background-worker tier,
-so `trader-worker` from `render.yaml` does not exist here; the workflow runs
-`python -m src.worker.main` unchanged on a runner instead, chained so coverage
-is continuous rather than sampled. `worker.yml` explains the chaining. The
-System page reports it alive under `gha-<run id>`, and it claims a queued
-backtest in seconds.
+The worker is the one piece that cannot live on Vercel, and the reason is
+structural rather than a tier limit: every Vercel function is request-scoped
+and capped — 60 seconds here — while a worker has to hold a job lease, listen
+for NOTIFY, and write an end-of-day mark on a schedule. Cron plus the drain
+endpoint approximates it for research jobs only, and `src/api/drain.py`
+deliberately refuses trading kinds. So the workflow runs
+`python -m src.worker.main` unchanged on a runner, chained so coverage is
+continuous rather than sampled; `worker.yml` explains the chaining. The System
+page reports it alive under `gha-<run id>`.
 
-Two consequences of the free tiers, and one deliberate trade:
+Three properties of this arrangement worth knowing:
 
-- **The database expires after 30 days**, and it takes `daily_marks` with it —
-  the table both halting limits are measured against. Upgrade it before then or
-  the equity history goes, silently.
-- **The API sleeps after 15 minutes idle** and takes about a minute to answer
-  the request that wakes it. `keepalive.yml` mitigates it. Nothing
-  correctness-bearing depends on it; the worker holds its own database
-  connection and does not care whether the API is awake.
-- **The database accepts connections from anywhere** (`0.0.0.0/0` on Render's
-  IP allow list), protected by TLS and Render's generated password. This is not
-  a default worth keeping. It is here because the worker runs on GitHub's
-  runners, whose egress addresses are neither stable nor enumerable into an
-  allow list, and a worker with no route to the database is not a worker. A
-  worker inside Render would let the list be closed again and the internal
-  hostname used instead.
+- **Nothing here expires and nothing here needs a card.** This replaced an
+  earlier Render deployment whose free Postgres would have been deleted after
+  30 days, taking `daily_marks` with it — the table both halting limits are
+  measured against.
+- **The API is serverless**, so `DB_POOL_MAX_SIZE` is 2 and `DATABASE_URL` is
+  Neon's *pooled* endpoint. Ten concurrent cold starts each building a
+  ten-connection pool is how a managed free tier turns into
+  `too many clients already` exactly when traffic arrives.
+- **The worker uses Neon's direct (unpooled) endpoint**, and must. It wakes on
+  `LISTEN/NOTIFY`, which does not survive a transaction pooler: through the
+  pooled endpoint the worker would still function, but only on its polling
+  fallback, and every notification would be silently lost.
 
 **Live trading is not armed, and none of this arms it.** `LIVE_TRADING_ENABLED`
 and `ALPACA_ALLOW_LIVE` are false, no broker credentials are set, the
-deployment's own mode is the third gate, and the kill switch is engaged above
-all three. A `submit_orders` job on this deployment fails with "kill switch
-engaged", which is the control working rather than a fault. Arming real money
-should be done on a host you pay for.
+deployment's own mode is the third gate, and the kill switch sits above all
+three. A `submit_orders` job here fails with "kill switch engaged", which is
+the control working rather than a fault.
 
-Upgrading is one action: add a card to the Render account and deploy
-`render.yaml` as a Blueprint, which brings the paid database, the paid API and
-a worker beside them in one step. Both workflows become redundant then, and the
-allow list can be closed.
+`render.yaml` is still the reference topology and is still correct — it is the
+only file that states the database and every process in one place, and a paid
+Render Blueprint remains the cleanest way to run this if you would rather have
+one provider and a real worker service than three free tiers.
 
 ### Everything on Vercel — two projects from one repository
 
