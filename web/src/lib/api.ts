@@ -8,6 +8,15 @@
  * so the HttpOnly session cookie travels with it.
  */
 
+/**
+ * Where to send calls.
+ *
+ * An **empty** value is meaningful and is not a missing one: it means the API
+ * is reachable at this origin, because `next.config.ts` is rewriting `/api/*`
+ * to it. `${BASE}${path}` then yields a relative URL. That mode exists so the
+ * session cookie is first-party — see the `API_PROXY` note in `next.config.ts`
+ * for why Safari and Firefox make it necessary.
+ */
 const BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
@@ -57,9 +66,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // looking at their password, and the address bar is where the answer is.
     throw new ApiError(
       0,
-      `Cannot reach the API at ${BASE}. Either it is not running, or its ` +
-        `CORS_ORIGINS does not include this page's origin ` +
-        `(${typeof window === "undefined" ? "unknown" : window.location.origin}).`,
+      BASE === ""
+        ? `Cannot reach the API through this site's /api proxy. The API is ` +
+          `either down, or API_PROXY was set without NEXT_PUBLIC_API_BASE ` +
+          `naming it, so the rewrite has nowhere to forward to.`
+        : `Cannot reach the API at ${BASE}. Either it is not running, or its ` +
+          `CORS_ORIGINS does not include this page's origin ` +
+          `(${typeof window === "undefined" ? "unknown" : window.location.origin}).`,
     );
   }
 
