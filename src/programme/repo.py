@@ -53,6 +53,16 @@ EXPERIMENT_KINDS = (
 )
 
 
+def _maybe_float(value: Any) -> float | None:
+    """A number, or None. Never 0.0 for something that was not measured."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def loads_json(value: Any, default: Any) -> Any:
     """asyncpg returns JSONB as text on some drivers and dict on others."""
     if value is None:
@@ -745,7 +755,7 @@ async def load_facts(
 
     wf_rows = await conn.fetch(
         """
-        SELECT w.id, w.status, w.params, w.is_robust, w.degradation
+        SELECT w.id, w.status, w.params, w.is_robust, w.degradation, w.metrics
         FROM walkforward_runs w
         JOIN experiments e ON e.walkforward_run_id = w.id
         WHERE e.candidate_id = $1
@@ -759,6 +769,17 @@ async def load_facts(
             params=loads_json(r["params"], {}),
             is_robust=r["is_robust"],
             degradation=float(r["degradation"]) if r["degradation"] else None,
+            # `.get` rather than `[...]`: a study recorded before these
+            # statistics existed has no key, and a missing measurement must
+            # read as None rather than as a good score.
+            pbo=_maybe_float(
+                loads_json(r["metrics"], {}).get(
+                    "probability_of_backtest_overfitting"
+                )
+            ),
+            deflated_sharpe=_maybe_float(
+                loads_json(r["metrics"], {}).get("deflated_sharpe")
+            ),
         )
         for r in wf_rows
     )

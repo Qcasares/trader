@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.api.deps import AuthedSession, DbConn
 from src.db.repos import flags
-from src.programme import repo
+from src.programme import repo, reports, scorecard
 from src.programme.flags import (
     PROGRAMME_ENABLED,
     PROGRAMME_MAX_AUTO_STAGE,
@@ -661,6 +661,50 @@ async def close_finding(
         detail={"status": body.status, "note": body.note},
     )
     return {"ref": ref, "status": body.status, "closed_by": actor}
+
+
+@router.get("/report")
+async def daily_report(
+    session: AuthedSession,
+    conn: DbConn,
+    on: date | None = None,
+    mode: str = "paper",
+) -> dict[str, Any]:
+    """
+    The §8.11 daily trading report, assembled from rows.
+
+    No model writes any part of it. A daily report is the artefact an operator
+    skims fastest and trusts most, which makes it the worst possible place for
+    generated prose.
+
+    Sections this system cannot produce are returned with the reason rather
+    than omitted: a report listing only what it can measure reads as complete.
+    """
+    return (
+        await reports.build_daily_report(conn, on or date.today(), mode)
+    ).as_dict()
+
+
+@router.get("/candidates/{candidate_id}/scorecard")
+async def get_scorecard(
+    candidate_id: str, session: AuthedSession, conn: DbConn
+) -> dict[str, Any]:
+    """
+    The §11 scorecard: seventeen dimensions, no overall score.
+
+    Every cell is a number that traces to a row or the words "not measured".
+    There is deliberately no weighted average and no grade — collapsing the
+    dimensions into one figure is what lets a strong Sharpe outvote an
+    unmeasured capacity, and it produces a number nobody can trace.
+    """
+    facts = await repo.load_facts(conn, candidate_id)
+    if facts is None:
+        raise HTTPException(status_code=404, detail="no such candidate")
+    card = scorecard.build(facts, evaluate(facts))
+    payload = card.as_dict()
+    payload["candidate_id"] = candidate_id
+    payload["decisions"] = list(scorecard.DECISIONS)
+    return payload
 
 
 @router.get("/candidates/{candidate_id}/shadow")

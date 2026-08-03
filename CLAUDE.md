@@ -94,6 +94,16 @@ These exist because the research UI is a machine for fooling yourself.
 - **Never render a Sharpe without its standard error.** Five years of daily
   data gives roughly ±0.45, so a reported 0.50 is indistinguishable from zero.
   `PerformanceMetrics.sharpe_is_significant` is the check.
+- **Never quote a Sharpe from a search without deflating it.** The best of
+  fifty parameter sets has a flattering Sharpe by construction.
+  `src/engine/statistics.deflated_sharpe_ratio` discounts it for the number of
+  attempts; the walk-forward computes it and stores it beside the curve. It
+  takes a **per-observation** Sharpe — feeding it an annualised one inflates
+  the statistic by `sqrt(periods_per_year)`.
+- **An unmeasured metric is never zero.** Everywhere: the scorecard renders
+  "not measured", the daily report renders "no data", and both keep a genuine
+  zero as a zero. Reporting an unmeasured probability of backtest overfitting
+  as 0.00 is the single most flattering lie this system could tell.
 - **Never quote a performance figure without its cost assumption.** Every
   result carries `cost_stress_multiplier`.
 - **Never quote a metric without `effective_start`.** A 1999 backtest of the
@@ -203,7 +213,7 @@ than hide in a wall of dots.
 | Package | Responsibility |
 |---|---|
 | `src/core/` | Value types, `PricePanel`, calendar, clock, order sizing, risk gate |
-| `src/engine/` | `Driver`, metrics, scheduler, walk-forward |
+| `src/engine/` | `Driver`, metrics, scheduler, walk-forward, and `statistics.py`: deflated Sharpe, probability of backtest overfitting, capacity, days to exit — all pure |
 | `src/strategies/` | Strategy ABC, registry, strategy implementations |
 | `src/execution/` | `BrokerAdapter` protocol, `SimulatedBroker`, `AlpacaBroker` |
 | `src/data/` | `PriceSource` protocol, yfinance, synthetic generator |
@@ -211,7 +221,7 @@ than hide in a wall of dots.
 | `src/api/` | FastAPI control plane |
 | `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
-| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` and `roles.py` are everything the model may write and what happens to it first; `flags.py` holds the two fail-closed switches |
+| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` and `roles.py` are everything the model may write and what happens to it first; `flags.py` holds the two fail-closed switches; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either |
 | `web/` | Next.js frontend |
 
 ### Structural guarantees
@@ -253,6 +263,9 @@ Each is enforced by a test, not by discipline:
 | A veto is a row, not an opinion | `gates._no_blocking_findings` blocks on open, high-or-critical findings from a role in `VETO_ROLES`, and reads none of their text. Prepended to every gate, including the unbuilt ones |
 | The runner cannot promote past its ceiling | `programme_max_auto_stage` is read fail-closed to zero and clamped below `FIRST_HUMAN_GATED_STAGE` **on the way out**, not on the way in — so the stored value never masquerades as the effective one, and a boolean stored there does not read as stage 1 |
 | The panel reviews before the promotion, not after | `tick._convene` runs, then facts are re-loaded and the gate re-evaluated. A review of something already promoted is an audit, and an audit is not a control |
+| An unmeasured metric is never rendered as zero | `ScoreRow.observed` is nullable with no third state, and `test_programme_scorecard.py` asserts it over every row. A card showing 0.00 for an unmeasured probability of backtest overfitting asserts the most flattering possible value for the metric whose purpose is to be unflattering |
+| A missing measurement is `unknown`, not `fail` | Same file. An operator who cannot tell them apart will either dismiss real failures or chase phantom ones |
+| A search that selected noise cannot reach validation | Gate 1 → 2 refuses a *measured* PBO above `MAX_PBO`. It passes on an unmeasured one, because a single-candidate study has no selection to overfit and refusing on undefined would bar the honest case |
 | A shadow book cannot drift from its own decisions | Nothing stores it. `shadow_job._replay` rebuilds it from `shadow_decisions` on every run, filling session S's intents at S+1's open with the same `execute_pending` a backtest uses. `test_shadow.py` asserts two runs over the same log agree |
 | Shadow mode reaches no venue | The deployment is created **disabled** and stays so; `_enabled_deployments` filters on status. `test_shadow.py` asserts the `orders` table stays empty |
 | Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |

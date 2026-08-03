@@ -393,6 +393,7 @@ export default function ProgrammePage() {
       <p className="row">
         <Link href="/programme/hypotheses">Hypothesis ledger</Link>
         <Link href="/programme/findings">Findings</Link>
+        <Link href="/programme/report">Daily report</Link>
         <Link href="/programme/config">Programme configuration</Link>
       </p>
     </>

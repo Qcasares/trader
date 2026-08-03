@@ -504,6 +504,82 @@ export interface ShadowHistory {
   required: number;
 }
 
+/**
+ * One dimension of the §11 scorecard.
+ *
+ * `observed` is null when the figure does not exist, and `observed_display`
+ * carries the words "not measured" for that case. Render the display field:
+ * a card showing 0.00 for an unmeasured probability of backtest overfitting
+ * asserts the most flattering possible value for the metric whose whole
+ * purpose is to be unflattering.
+ */
+export interface ScoreRow {
+  dimension: string;
+  metric: string;
+  observed: number | string | null;
+  observed_display: number | string;
+  target: string;
+  /** pass | fail | unknown. `unknown` is an absent measurement, not a soft fail. */
+  status: "pass" | "fail" | "unknown";
+  commentary: string;
+  evidence: string;
+}
+
+export interface Scorecard {
+  candidate_id: string;
+  hypothesis_ref: string;
+  stage: number;
+  rows: ScoreRow[];
+  recommendation: string;
+  recommendation_reason: string;
+  approvers: string[];
+  unresolved: string[];
+  measured: number;
+  not_measured: number;
+  failing: number;
+  decisions: string[];
+}
+
+/** The §8.11 daily report. Every figure nullable; null means no data, not zero. */
+export interface DailyReport {
+  session: string;
+  portfolio: {
+    as_of: string | null;
+    equity: number | null;
+    cash: number | null;
+    daily_pnl: number | null;
+    cumulative_pnl: number | null;
+    drawdown_pct: number | null;
+    positions: { symbol: string; qty: number | null; avg_entry_price: number | null }[];
+    note: string | null;
+  };
+  risk: { trading_enabled: boolean; risk_events: Record<string, number>; note: string };
+  programme: {
+    by_stage: Record<string, number>;
+    open_findings: number;
+    severe_findings: number;
+    promotions_today: { candidate_id: string; to_stage: number; approved_by: string }[];
+  };
+  operations: {
+    decisions: number;
+    orders_submitted: number;
+    shadow_sessions: number;
+    shadow_failures: number;
+    jobs: Record<string, number>;
+    workers: { worker_id: string; age_seconds: number; stale: boolean }[];
+  };
+  data_health: {
+    symbols: number;
+    rows: number;
+    latest_session: string | null;
+    sessions_behind: number | null;
+    note: string | null;
+  };
+  required_actions: string[];
+  /** Sections §8.11 asks for that this system cannot produce, and why. */
+  unavailable_sections: Record<string, string>;
+}
+
 export interface ProgrammeStatus {
   enabled: boolean;
   /** Already clamped and fail-closed by the API; render it as authoritative. */
@@ -714,6 +790,14 @@ export const api = {
     request<{ ref: string; status: string; closed_by: string }>(
       `/api/v1/programme/findings/${ref}/close`,
       { method: "POST", body: JSON.stringify({ status, note }) },
+    ),
+
+  scorecard: (candidateId: string) =>
+    request<Scorecard>(`/api/v1/programme/candidates/${candidateId}/scorecard`),
+
+  dailyReport: (on?: string) =>
+    request<DailyReport>(
+      `/api/v1/programme/report${on ? `?on=${on}` : ""}`,
     ),
 
   shadow: (candidateId: string) =>

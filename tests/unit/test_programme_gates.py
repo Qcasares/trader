@@ -22,6 +22,7 @@ import pytest
 from src.programme.gates import (
     BLOCKING_SEVERITIES,
     FIRST_HUMAN_GATED_STAGE,
+    MAX_PBO,
     MIN_BARS_PER_SYMBOL,
     MIN_SHADOW_SESSIONS,
     VETO_ROLES,
@@ -341,6 +342,50 @@ class TestValidationGate:
         )
         unmet = _unmet(self._complete(experiments=experiments))
         assert "sharpe_significance_recorded" in unmet
+
+    def test_a_search_that_selected_noise_blocks_it(self) -> None:
+        walkforwards = (
+            WalkforwardFact(
+                run_id="wf-5",
+                status="succeeded",
+                params=dict(PARAMS),
+                is_robust=True,
+                pbo=0.62,
+            ),
+        )
+        assert "not_selected_by_noise" in _unmet(
+            self._complete(walkforwards=walkforwards)
+        )
+
+    def test_a_search_that_held_up_passes(self) -> None:
+        walkforwards = (
+            WalkforwardFact(
+                run_id="wf-6",
+                status="succeeded",
+                params=dict(PARAMS),
+                is_robust=True,
+                pbo=0.08,
+            ),
+        )
+        assert evaluate(self._complete(walkforwards=walkforwards)).passed
+
+    def test_an_unmeasured_overfitting_probability_passes(self) -> None:
+        """
+        The subtlest decision in the gate module. A single-parameter strategy
+        has no selection to overfit, so the statistic is undefined for it, and
+        refusing on an undefined value would bar every strategy that did the
+        honest thing and tried one configuration.
+        """
+        result = evaluate(self._complete())
+        criterion = next(
+            c for c in result.criteria if c.id == "not_selected_by_noise"
+        )
+        assert criterion.met
+        assert "not measured" in criterion.detail
+
+    def test_the_threshold_is_stricter_than_a_coin_toss(self) -> None:
+        """A bar set at "no worse than random" is not a bar."""
+        assert MAX_PBO < 0.5
 
     def test_undocumented_limitations_block_it(self) -> None:
         assert "limitations_documented" in _unmet(

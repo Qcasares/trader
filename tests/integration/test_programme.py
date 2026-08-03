@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import uuid
+from datetime import date
 
 import pytest
 
@@ -809,6 +810,140 @@ class TestTheAutonomyCeiling:
 
         _run(_with_conn(corrupt))
         assert authed.get("/api/v1/programme/status").json()["max_auto_stage"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The scorecard and the daily report
+# ---------------------------------------------------------------------------
+
+
+class TestTheScorecard:
+    def _candidate(self, authed) -> str:
+        hypothesis = authed.post(
+            "/api/v1/programme/hypotheses",
+            json={"title": "For the scorecard", "owner": "test", "card": CARD},
+        ).json()
+        return authed.post(
+            "/api/v1/programme/candidates",
+            json={
+                "hypothesis_ref": hypothesis["ref"],
+                "strategy": "asset_class_trend_following",
+                "start_session": "2010-01-04",
+                "end_session": "2020-12-31",
+            },
+        ).json()["candidate_id"]
+
+    def test_it_has_seventeen_dimensions(self, authed) -> None:
+        card = authed.get(
+            f"/api/v1/programme/candidates/{self._candidate(authed)}/scorecard"
+        ).json()
+        assert len(card["rows"]) == 17
+
+    def test_nothing_unmeasured_is_rendered_as_zero(self, authed) -> None:
+        """
+        The property the whole module exists for. An unmeasured probability of
+        backtest overfitting shown as 0.00 asserts the most flattering possible
+        value for the metric whose purpose is to be unflattering.
+        """
+        card = authed.get(
+            f"/api/v1/programme/candidates/{self._candidate(authed)}/scorecard"
+        ).json()
+        for row in card["rows"]:
+            if row["observed"] is None:
+                assert row["observed_display"] == "not measured"
+                assert row["status"] == "unknown"
+
+    def test_there_is_no_overall_score(self, authed) -> None:
+        card = authed.get(
+            f"/api/v1/programme/candidates/{self._candidate(authed)}/scorecard"
+        ).json()
+        assert "score" not in card
+        assert "grade" not in card
+
+    def test_the_recommendation_is_from_the_permitted_vocabulary(
+        self, authed
+    ) -> None:
+        card = authed.get(
+            f"/api/v1/programme/candidates/{self._candidate(authed)}/scorecard"
+        ).json()
+        assert card["recommendation"] in card["decisions"]
+
+    def test_an_unknown_candidate_is_a_404(self, authed) -> None:
+        assert (
+            authed.get(
+                "/api/v1/programme/candidates/"
+                "00000000-0000-0000-0000-000000000000/scorecard"
+            ).status_code
+            == 404
+        )
+
+
+class TestTheDailyReport:
+    def test_a_mode_with_no_marks_reports_null_not_zero(self, authed) -> None:
+        """
+        The state a report is most likely to lie about, and the reason every
+        money field here is nullable: a flat line at zero equity describes a
+        portfolio that lost everything, which is a very different day from one
+        that never traded.
+
+        Queried against a mode name nothing ever writes, so the absence is a
+        property of the query rather than of the fixture. Two earlier versions
+        of this test assumed an empty database and then an unused ``live``
+        mode; both passed alone and failed in the suite, which is a test
+        describing its fixture rather than the system.
+        """
+        report = authed.get(
+            "/api/v1/programme/report?mode=a-mode-nothing-writes"
+        ).json()
+        for key in ("equity", "cash", "daily_pnl", "cumulative_pnl"):
+            assert report["portfolio"][key] is None, key
+        assert report["portfolio"]["note"]
+
+    def test_a_mode_with_marks_reports_them(self, authed) -> None:
+        """The mirror: a real figure is not laundered into "no data" either."""
+
+        async def seed(conn):
+            await conn.execute(
+                """
+                INSERT INTO daily_marks (mode, session, equity, cash)
+                VALUES ('live', $1, 12345, 999)
+                ON CONFLICT DO NOTHING
+                """,
+                date(2024, 6, 3),
+            )
+
+        _run(_with_conn(seed))
+        report = authed.get(
+            "/api/v1/programme/report?mode=live&on=2024-06-03"
+        ).json()
+        assert report["portfolio"]["equity"] == 12345.0
+        assert report["portfolio"]["note"] is None
+
+    def test_it_names_the_sections_it_cannot_produce(self, authed) -> None:
+        """
+        A report listing only what it can measure reads as complete, and an
+        operator seeing no execution section would assume execution was clean.
+        """
+        report = authed.get("/api/v1/programme/report").json()
+        unavailable = report["unavailable_sections"]
+        assert "slippage" in unavailable
+        assert "no venue" in unavailable["slippage"]
+        assert all(reason.strip() for reason in unavailable.values())
+
+    def test_it_reports_no_data_as_an_action(self, authed) -> None:
+        report = authed.get("/api/v1/programme/report").json()
+        assert any(
+            "market data" in action for action in report["required_actions"]
+        )
+
+    def test_a_specific_session_can_be_requested(self, authed) -> None:
+        report = authed.get("/api/v1/programme/report?on=2024-01-02").json()
+        assert report["session"] == "2024-01-02"
+
+    def test_the_pipeline_census_is_included(self, authed) -> None:
+        report = authed.get("/api/v1/programme/report").json()
+        assert "by_stage" in report["programme"]
+        assert isinstance(report["programme"]["open_findings"], int)
 
 
 # ---------------------------------------------------------------------------

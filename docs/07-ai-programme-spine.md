@@ -14,7 +14,7 @@ slices, each with its own specification and implementation cycle.
 |---|---|---|
 | 1. Programme spine | Configuration, hypothesis ledger, experiment record, lifecycle model, deterministic gate engine, runner process, UI | Built |
 | 2. Autonomous loop | Twelve role personas, findings register, veto mapping, autonomy ceiling, shadow operation — **built**. A candidate can now be carried automatically to the gate into broker paper trading | Built |
-| 3. Scorecards and reports | Strategy scorecard, daily and monthly reports, validation report, and the statistics they need: deflated Sharpe, probability of backtest overfitting, turnover, capacity | Later |
+| 3. Scorecards and reports | Strategy scorecard, daily report, and the statistics the gates could not check: deflated Sharpe, probability of backtest overfitting, capacity, days to exit | Built |
 
 As built, a candidate can be carried automatically from concept to the gate
 into broker paper trading. It cannot cross that gate: stage 4 needs a venue,
@@ -303,6 +303,72 @@ What stage 3 does not prove, and stage 4 exists for: `dry_run` seeds the risk
 gate's equity history from the paper book's marks, so a shadow candidate has
 none of its own and the halting limits are not exercised. No venue is contacted
 either. Both are what broker paper trading is for.
+
+## Slice 3, as built: the statistics that decide whether a backtest is evidence
+
+A Sharpe ratio and its standard error answer "could this be zero?". They do not
+answer the two questions that actually kill a research programme, and
+`src/engine/statistics.py` adds both as pure functions.
+
+**How many times were the dice rolled?** The best of fifty parameter sets has a
+flattering Sharpe by construction. `deflated_sharpe_ratio` discounts the
+observed figure by the maximum one would expect from that many trials under a
+null of no skill, and corrects for the skew and fat tails that make the
+ordinary standard error optimistic. The same Sharpe can be evidence from one
+attempt and an order statistic from five hundred, and a test asserts exactly
+that flip.
+
+**Was the winner chosen by the noise?** `probability_of_backtest_overfitting`
+runs combinatorially symmetric cross-validation: cut the sample into blocks,
+take every way of choosing half as in-sample, and record how often the
+in-sample winner lands in the bottom half out of sample. Near 0.5 means the
+selection procedure is a coin toss dressed as research. The walk-forward job
+computes it — one extra backtest per candidate against the `folds x candidates`
+it already runs — and gate 1 → 2 refuses a *measured* value above 0.35.
+
+The word "measured" is doing real work there. A single-candidate study has no
+selection to overfit, so the statistic is undefined, and refusing on an
+undefined value would bar every strategy that did the honest thing and tried
+one configuration. The criterion passes on unmeasured and says which of the two
+situations it is in.
+
+`capacity_estimate` and `days_to_exit` bound the book by its thinnest leg
+rather than its average one, because a portfolio that is 90% liquid and 10%
+untradeable is capped by the untradeable tenth.
+
+### The scorecard, and the rule that shapes every cell
+
+**An unavailable metric is `not measured`, never zero.** A card rendering an
+unmeasured probability of backtest overfitting as 0.00 does not merely omit
+information: it asserts the most flattering possible value for the metric whose
+entire purpose is to be unflattering, and nothing downstream can tell it apart
+from a real measurement. `ScoreRow.observed` is nullable and has no third
+state.
+
+A missing measurement is `unknown`, not `fail`. An operator who cannot tell
+those apart will either dismiss real failures or chase phantom ones.
+
+There is deliberately **no overall score, no weighted average and no grade**.
+Collapsing seventeen dimensions into one number is precisely the move this
+programme exists to prevent: it lets a strong Sharpe outvote an unmeasured
+capacity, and produces a figure nobody can trace to a row.
+
+### The daily report
+
+`src/programme/reports.py`, §8.11, assembled entirely from rows. No model
+writes any part of it — a daily report is the artefact an operator skims
+fastest and trusts most, which makes it the worst possible place for generated
+prose.
+
+The sections this system cannot produce are returned **with their reason**
+rather than dropped: there is no venue, so there is no slippage and there are
+no rejections; there is no factor model, so there is no factor attribution. A
+report listing only what it can measure reads as complete, and an operator
+seeing no execution section would reasonably assume execution was clean.
+
+Every money figure is nullable, and null renders as "no data". A flat line at
+zero equity describes a portfolio that lost everything, which is a very
+different day from one that never traded.
 
 ## What this deliberately does not do
 

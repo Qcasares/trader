@@ -123,6 +123,21 @@ VETO_ROLES: frozenset[str] = frozenset(
 #: Severities that block. Anything below is recorded and does not halt.
 BLOCKING_SEVERITIES: frozenset[str] = frozenset({"high", "critical"})
 
+#: Highest probability of backtest overfitting a candidate may carry into
+#: validation.
+#:
+#: A study at 0.5 is a coin toss: whatever won in sample was no more likely
+#: than chance to win out of sample, so the winning configuration was chosen by
+#: the noise. Refusing above 0.35 leaves room for a study that is imperfect
+#: without being arbitrary, and is deliberately not 0.5 — a threshold set at
+#: "no worse than random" is not a threshold.
+#:
+#: A study that could not compute it (one candidate, or too short a sample) is
+#: *not* refused by this. That is the difference between a bad number and no
+#: number, and conflating them would force every single-parameter strategy to
+#: fail a test it cannot take.
+MAX_PBO = 0.35
+
 #: Sessions a candidate must operate in shadow before it may reach a broker.
 #:
 #: Twenty is about a month of NYSE sessions. Not chosen because a month proves
@@ -229,6 +244,11 @@ class WalkforwardFact:
     params: Mapping[str, Any] = field(default_factory=dict)
     is_robust: bool | None = None
     degradation: float | None = None
+    #: Probability of backtest overfitting. ``None`` means the study could not
+    #: support the estimate, which is not the same as a good one.
+    pbo: float | None = None
+    #: Deflated Sharpe of the stitched out-of-sample curve.
+    deflated_sharpe: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -735,6 +755,68 @@ def _gate_validation_to_shadow(facts: CandidateFacts) -> tuple[Criterion, ...]:
             description="The known limitations are written down",
             met=bool(str(limitations or "").strip()),
             evidence=Evidence("hypotheses", facts.hypothesis_ref),
+        ),
+        _overfitting_criterion(robust),
+    )
+
+
+def _overfitting_criterion(study: WalkforwardFact | None) -> Criterion:
+    """
+    The winner was not chosen by the noise.
+
+    Unmeasured passes. That is deliberate and it is the subtlest decision in
+    this module: a single-parameter strategy has no selection to overfit, so
+    the probability of backtest overfitting is undefined for it, and refusing
+    on an undefined value would bar every strategy that did the honest thing
+    and tried one configuration.
+
+    What the criterion refuses is a *measured* value above the threshold — a
+    study that looked at many configurations and found its winner was no more
+    likely than chance to keep winning. The detail line says which of the two
+    situations applies, because "no PBO recorded" and "PBO 0.08" are both green
+    ticks here for very different reasons.
+    """
+    if study is None:
+        return Criterion(
+            id="not_selected_by_noise",
+            description=(
+                f"The parameter search does not look like a coin toss "
+                f"(PBO at most {MAX_PBO:.2f})"
+            ),
+            met=False,
+            detail="no completed walk-forward study to read it from",
+        )
+
+    if study.pbo is None:
+        return Criterion(
+            id="not_selected_by_noise",
+            description=(
+                f"The parameter search does not look like a coin toss "
+                f"(PBO at most {MAX_PBO:.2f})"
+            ),
+            met=True,
+            evidence=Evidence("walkforward_runs", study.run_id, None),
+            detail=(
+                "not measured — the study had one candidate or too short a "
+                "sample, so there was no selection to overfit. Passing on an "
+                "undefined value, not on a good one"
+            ),
+        )
+
+    return Criterion(
+        id="not_selected_by_noise",
+        description=(
+            f"The parameter search does not look like a coin toss "
+            f"(PBO at most {MAX_PBO:.2f})"
+        ),
+        met=study.pbo <= MAX_PBO,
+        evidence=Evidence("walkforward_runs", study.run_id, study.pbo),
+        detail=(
+            ""
+            if study.pbo <= MAX_PBO
+            else f"PBO {study.pbo:.2f}: the configuration that won in sample "
+            "landed in the bottom half out of sample this often, so the "
+            "search selected noise"
         ),
     )
 

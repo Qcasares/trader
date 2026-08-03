@@ -22,6 +22,7 @@ import {
   type Candidate,
   type FindingsPage,
   type RoleAssessment,
+  type Scorecard,
   type ShadowHistory,
 } from "@/lib/api";
 import { AiBadge, GateChecklist } from "@/components/GateChecklist";
@@ -45,6 +46,7 @@ export default function CandidatePage({
   const [assessments, setAssessments] = useState<RoleAssessment[]>([]);
   const [findings, setFindings] = useState<FindingsPage | null>(null);
   const [shadow, setShadow] = useState<ShadowHistory | null>(null);
+  const [card, setCard] = useState<Scorecard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unmet, setUnmet] = useState<string[]>([]);
   const [confirm, setConfirm] = useState("");
@@ -53,17 +55,19 @@ export default function CandidatePage({
 
   const load = useCallback(async () => {
     try {
-      const [nextCandidate, nextAssessments, nextFindings, nextShadow] =
+      const [nextCandidate, nextAssessments, nextFindings, nextShadow, nextCard] =
         await Promise.all([
           api.candidate(id),
           api.assessments(id),
           api.findings({ candidateId: id }),
           api.shadow(id),
+          api.scorecard(id),
         ]);
       setCandidate(nextCandidate);
       setAssessments(nextAssessments);
       setFindings(nextFindings);
       setShadow(nextShadow);
+      setCard(nextCard);
       setError(null);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -209,6 +213,76 @@ export default function CandidatePage({
       </section>
 
       {gate ? <GateChecklist gate={gate} /> : null}
+
+      {card ? (
+        <section className="card">
+          <div className="card-head spread">
+            <h2>Scorecard</h2>
+            <span className="muted">
+              {card.measured} measured, {card.not_measured} not measured,{" "}
+              {card.failing} failing
+            </span>
+          </div>
+          <p className="muted">
+            Seventeen dimensions and deliberately no overall score. Collapsing
+            them into one number lets a strong Sharpe outvote an unmeasured
+            capacity, and produces a figure nobody can trace to a row. A cell
+            reading &ldquo;not measured&rdquo; is an absent measurement, not a
+            zero and not a failure.
+          </p>
+          <p className="banner banner-info">
+            Recommendation: <strong>{card.recommendation.replace(/_/g, " ")}</strong>{" "}
+            — {card.recommendation_reason}
+            {card.approvers.length > 0
+              ? ` Needs: ${card.approvers.join(", ")}.`
+              : null}
+          </p>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Dimension</th>
+                  <th>Metric</th>
+                  <th className="num">Observed</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Commentary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {card.rows.map((row) => (
+                  <tr key={row.metric}>
+                    <td>{row.dimension}</td>
+                    <td>{row.metric}</td>
+                    <td className="num mono">
+                      {row.observed === null ? (
+                        <span className="muted">not measured</span>
+                      ) : (
+                        String(row.observed_display)
+                      )}
+                    </td>
+                    <td className="muted">{row.target}</td>
+                    <td>
+                      <span
+                        className={
+                          row.status === "pass"
+                            ? "pill pill-good"
+                            : row.status === "fail"
+                              ? "pill pill-bad"
+                              : "pill pill-mute"
+                        }
+                      >
+                        {row.status}
+                      </span>
+                    </td>
+                    <td className="muted">{row.commentary}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <section className="card">
         <div className="card-head spread">
