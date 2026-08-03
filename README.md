@@ -74,8 +74,32 @@ Set these on the **API** project:
 And on the **UI** project: `NEXT_PUBLIC_API_BASE` = the API project's URL. It is
 inlined at *build* time, so changing it needs a redeploy.
 
-Then apply migrations once, from a checkout:
-`DATABASE_URL=... python -m src.db.migrate_cli`.
+Then apply migrations. Either from a checkout,
+`DATABASE_URL=... python -m src.db.migrate_cli`, or by dispatching the
+**migrate** workflow, which runs the same CLI with the repository's
+`DATABASE_URL` secret so the credential never leaves GitHub. That workflow is
+dispatch-only and defaults to a dry run: it reports the current schema version
+and what would be applied, and applying takes a second dispatch with `apply`
+set.
+
+### The AI programme
+
+`src/programme` is a third long-lived process and the only one permitted a
+model client. It has no home on Vercel — there is no long-lived process there —
+so it runs on a GitHub Actions runner, exactly as the worker does, via the
+**programme** workflow. It installs `requirements-programme.txt`, the one file
+in this repository that pulls in an LLM SDK.
+
+| Secret | Needed? | What happens without it |
+|---|---|---|
+| `DATABASE_URL` | yes | the runner exits; it cannot do anything |
+| `ANTHROPIC_API_KEY` | no | it still reconciles experiments, evaluates gates, promotes candidates and queues shadow sessions. It proposes no hypotheses and convenes no specialist panel. |
+
+**Deploying it does not turn it on.** `programme_enabled` is seeded false and
+read fail-closed, and `programme_max_auto_stage` is seeded zero, so a freshly
+deployed runner evaluates gates, records judgements and promotes nothing until
+an operator says otherwise from the Programme page. Arriving inert is the
+intended state.
 
 The three variables marked **required** each fail in a way that points somewhere
 other than the cause. They are the whole reason this table exists.
