@@ -31,6 +31,7 @@ from src.api.security import (
     constant_time_equals,
     verify_session,
 )
+from src.db.migrate import MigrationError, current_version, migrate
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
 
@@ -183,6 +184,52 @@ async def drain(
     return result
 
 
+@router.post("/migrate")
+async def migrate_database(
+    request: Request,
+    conn: DbConn,
+    settings: AppSettings,
+) -> dict:
+    """
+    Apply pending migrations through the API.
+
+    Exists for hosts with no shell. `python -m src.db.migrate_cli` assumes
+    somewhere to run it, and a serverless deployment has nowhere: the
+    database's own console is the only alternative, and pasting DDL into a
+    web form is how schemas drift. This endpoint runs the same runner the CLI
+    does — checksum verification and transactional application included — so
+    "the deployed schema" has exactly one definition.
+
+    Safe to call repeatedly: the runner is idempotent, and a concurrent
+    duplicate loses on the schema_migrations primary key and rolls back.
+
+    Same authentication as the drain — an operator session or CRON_SECRET —
+    and POST only, because unlike the drain no platform scheduler needs to
+    call it. Login works without a database, so the operator can mint the
+    session this needs on a deployment whose schema does not exist yet;
+    that ordering is the whole point.
+    """
+    actor = _drain_caller(request, settings)
+    try:
+        applied = await migrate(conn)
+    except MigrationError as exc:
+        # 409, not 500: the state of the world refuses the request — an
+        # edited applied migration or a malformed set — and retrying without
+        # changing the repository will refuse identically.
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    version = await current_version(conn)
+    logger.info(
+        "Migrate by %s applied %d migration(s); at version %d",
+        actor,
+        len(applied),
+        version,
+    )
+    return {
+        "applied": [str(m) for m in applied],
+        "current_version": version,
+    }
+
+
 def _drain_caller(request: Request, settings: AppSettings) -> str:
     """
     Identify the caller, or refuse.
@@ -216,7 +263,8 @@ def _drain_caller(request: Request, settings: AppSettings) -> str:
 
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED,
-        "drain requires an operator session or the CRON_SECRET bearer token",
+        "this endpoint requires an operator session or the CRON_SECRET "
+        "bearer token",
     )
 
 
