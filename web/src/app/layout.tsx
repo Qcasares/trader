@@ -24,6 +24,7 @@ export default function RootLayout({
             <Link href="/">Strategies</Link>
             <Link href="/backtests">Backtests</Link>
             <Link href="/portfolio">Portfolio</Link>
+            <Link href="/programme">Programme</Link>
             <Link href="/system">System</Link>
             <SessionControls />
           </nav>

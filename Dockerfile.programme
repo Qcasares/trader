@@ -1,0 +1,31 @@
+# The AI programme's image.
+#
+# A separate Dockerfile from the one the API and worker share, for one reason:
+# it installs `anthropic` and they must not. `src/programme` is the only
+# package permitted to hold a model client, and `src/api` and `src/worker` are
+# forbidden from importing one by
+# `tests/unit/test_import_boundaries.py`. Building all three from one image
+# would leave the SDK sitting in the container that holds the broker
+# credentials, where only a source-level test stood between it and an import.
+#
+# Two images means the boundary holds at runtime as well as in review: the
+# worker container could not import an LLM client if its code tried.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Build deps for asyncpg; removed afterwards to keep the image small.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt requirements-programme.txt ./
+RUN pip install --no-cache-dir -r requirements-programme.txt \
+ && apt-get purge -y gcc && apt-get autoremove -y
+
+COPY src/ ./src/
+COPY migrations/ ./migrations/
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "src.programme.main"]
