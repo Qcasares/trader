@@ -1,0 +1,78 @@
+# migrate.yml
+# -----------
+# Apply pending migrations to the deployed database.
+#
+# `workflow_dispatch` only. There is deliberately no `push` trigger and no
+# schedule: a schema change that lands on a merge is a schema change nobody
+# decided to make, and this repository's whole posture is that the moments
+# which change production are the ones a person should choose.
+#
+# It runs `python -m src.db.migrate_cli`, the same tool the README tells an
+# operator to run locally — not a hand-written SQL step. That matters because
+# `src/db/migrate.py` verifies a checksum against every already-applied
+# migration and refuses if one has been edited. A workflow that applied files
+# blindly would be a way to silently rewrite history on a database nobody can
+# inspect from here.
+#
+# Defaults to a dry run
+# ~~~~~~~~~~~~~~~~~~~~~
+# Dispatching with no input reports what *would* be applied and changes
+# nothing. Applying takes a second, deliberate dispatch with `apply` set to
+# true. That asymmetry is the same one the kill switch and every promotion
+# control in this repository already use: looking is free, acting is not.
+#
+# Migrations here are forward-only and additive by convention — never edit an
+# applied migration, write a new one — so the failure this guards against is
+# not a destructive statement but an unreviewed one.
+
+name: migrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Actually apply. Leave false for a dry run."
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  group: migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Report the current schema version
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.db.migrate_cli --version
+
+      - name: Show what would be applied
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.db.migrate_cli --dry-run
+
+      - name: Apply
+        if: ${{ inputs.apply }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.db.migrate_cli
+
+      - name: Report the resulting schema version
+        if: ${{ inputs.apply }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.db.migrate_cli --version
