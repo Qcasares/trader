@@ -68,6 +68,25 @@ jobs:
           # anywhere else, so "which one is alive" has an answer.
           WORKER_ID: gha-${{ github.run_id }}
           PYTHONUNBUFFERED: "1"
+
+          # Paper credentials, and the venue enforces that rather than trusting
+          # this comment: a key issued for paper is refused by
+          # api.alpaca.markets with a 401, exactly as a live key is refused by
+          # paper-api. That check is worth running on any key before it is
+          # stored — a key pasted from the dashboard's live view looks
+          # identical apart from its prefix.
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_PAPER: "true"
+
+          # The two environment gates, stated rather than omitted. Absent, they
+          # default to false and the behaviour is identical — but a reader
+          # asking "can this runner reach a live venue?" should find the answer
+          # here rather than infer it from a missing line. The deployment's own
+          # mode is the third gate and the database kill switch sits above all
+          # three.
+          LIVE_TRADING_ENABLED: "false"
+          ALPACA_ALLOW_LIVE: "false"
         run: |
           set -uo pipefail
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
