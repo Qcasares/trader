@@ -208,10 +208,10 @@ async def create_deployment(
     if not verdict["is_robust"]:
         raise HTTPException(
             422,
-            f"the walk-forward study for these parameters is NOT ROBUST "
-            f"(degradation {float(verdict['degradation']):+.3f}). "
-            "Out-of-sample performance did not survive fixing the parameters "
-            "in advance, which is strong evidence against this configuration.",
+            f"the walk-forward study for these parameters is NOT ROBUST. "
+            f"{_why_not_robust(verdict)} Failing this is strong evidence "
+            f"against the configuration. Degradation, for context, was "
+            f"{float(verdict['degradation']):+.3f}.",
         )
 
     deployment_id = uuid.uuid4()
@@ -392,7 +392,7 @@ async def _walkforward_verdict(
     """
     row = await conn.fetchrow(
         """
-        SELECT is_robust, degradation, id
+        SELECT is_robust, degradation, id, metrics, folds
         FROM walkforward_runs
         WHERE strategy_name = $1
           AND status = 'succeeded'
@@ -403,3 +403,64 @@ async def _walkforward_verdict(
         json.dumps(params, sort_keys=True),
     )
     return dict(row) if row is not None else None
+
+
+def _why_not_robust(verdict: dict) -> str:
+    """
+    Name the condition that actually failed.
+
+    The refusal used to quote `degradation` and say out-of-sample performance
+    "did not survive fixing the parameters in advance". Degradation is not the
+    test — `WalkForwardResult.is_robust` requires a *significant*, positive
+    stitched out-of-sample Sharpe and a majority of folds agreeing on one
+    parameter set, and reports degradation separately. So a study could be
+    refused at +0.046 degradation, which is performance very nearly surviving,
+    with a message asserting that it had not. An operator reading it would go
+    looking for overfitting in the wrong place.
+
+    Every failing condition, not the first: a configuration that is both
+    insignificant and unstable should say so once rather than over two
+    attempts.
+    """
+    metrics = verdict.get("metrics") or {}
+    if isinstance(metrics, str):
+        metrics = json.loads(metrics)
+    folds = verdict.get("folds") or []
+    if isinstance(folds, str):
+        folds = json.loads(folds)
+
+    reasons: list[str] = []
+
+    sharpe = float(metrics.get("sharpe", 0.0))
+    stderr = float(metrics.get("sharpe_stderr", 0.0))
+    if not metrics.get("sharpe_is_significant", False):
+        reasons.append(
+            f"the stitched out-of-sample Sharpe is {sharpe:+.3f} ± {stderr:.3f}, "
+            f"which does not clear two standard errors of zero — the result is "
+            f"indistinguishable from no edge"
+        )
+    elif sharpe <= 0:
+        reasons.append(f"the stitched out-of-sample Sharpe is {sharpe:+.3f}")
+
+    if folds:
+        chosen = [
+            json.dumps(f.get("chosen_params", {}), sort_keys=True) for f in folds
+        ]
+        stability = max(chosen.count(k) for k in set(chosen)) / len(chosen)
+        if stability < 0.5:
+            reasons.append(
+                f"only {stability:.0%} of folds chose the same parameter set, so "
+                f"there is no stable optimum to deploy"
+            )
+
+    if not reasons:
+        # The stored verdict disagrees with what the stored figures imply.
+        # Reporting the disagreement beats inventing a reason for it.
+        return (
+            "the stored verdict is not robust, though the recorded figures do "
+            "not show which condition failed; re-run the study."
+        )
+    # Upper-case the first character only. `str.capitalize` lower-cases the
+    # rest, which turns "Sharpe" into "sharpe".
+    joined = "; and ".join(reasons)
+    return joined[0].upper() + joined[1:] + "."
