@@ -1,0 +1,82 @@
+# worker.yml
+# ----------
+# The worker, on a host that does not charge for it.
+#
+# `render.yaml` gives `trader-worker` its own long-lived service, and that is
+# still the right shape. Render has no free tier for a background worker, so on
+# the deployment this repository currently runs there is no process to claim a
+# job — `daily_marks` is never written, and because both halting limits are
+# measured against that table, they go inert. The System page reports "no
+# worker is alive", which is exactly the thing that would be true.
+#
+# This repository is public, so GitHub Actions minutes are unmetered. That is
+# what makes a runner a plausible place to put a worker rather than a joke: it
+# runs `python -m src.worker.main` unchanged — the same module, the same
+# handlers, the same heartbeat — against the deployed database.
+#
+# Continuity, not a cron. A job is capped at six hours, so each run stops
+# itself at 5h45m and the schedule below fires every five hours. The
+# `concurrency` group means the next run does not start alongside the current
+# one; it queues and takes over as the current one exits. Coverage is
+# continuous rather than sampled, which is the property that matters — an
+# end-of-day mark missed is a halting limit disarmed for a day.
+#
+# What this does NOT make safe: live trading. `LIVE_TRADING_ENABLED` and
+# `ALPACA_ALLOW_LIVE` are absent from the environment below and therefore
+# false, the deployment's own mode is the third gate, and the database kill
+# switch sits on top of all three and fails closed. This worker runs research,
+# ingest, marks and reconciliation. Arming real money is a separate, deliberate
+# act, and it should be done on a host you pay for.
+
+name: worker
+
+on:
+  schedule:
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+# Queue, never overlap. Two workers claiming concurrently is safe — `claim`
+# uses FOR UPDATE SKIP LOCKED — but the free database has few connections to
+# spare and one worker is enough for one deployment.
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    # Above the 345 minutes below, so the step's own stop is what ends the run
+    # and GitHub's kill is only the backstop.
+    timeout-minutes: 355
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # requirements.txt, not requirements-dev.txt: this is a deployment, and
+      # it should install what a deployment installs.
+      - run: pip install -r requirements.txt
+
+      - name: Run the worker until just short of the job limit
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Distinguishable in `worker_heartbeats` from a worker running
+          # anywhere else, so "which one is alive" has an answer.
+          WORKER_ID: gha-${{ github.run_id }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -uo pipefail
+          # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
+          # the job in flight and closes the pool. --kill-after is the
+          # guarantee that a wedged process still exits.
+          timeout --signal=TERM --kill-after=60 20700 python -m src.worker.main
+          code=$?
+          # 124 is `timeout` reporting it had to stop a healthy worker, which
+          # is the expected end of every run. Anything else is a real failure
+          # and should turn the run red.
+          if [ "$code" -eq 124 ]; then exit 0; fi
+          exit "$code"
