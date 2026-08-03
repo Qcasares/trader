@@ -226,6 +226,38 @@ The split is locked: **frontend on Vercel, backend on its own host.** A Next.js
 server cannot hold a trading loop — a backtest is CPU-bound pandas work, and a
 serverless function that sleeps between market sessions is not a worker.
 
+### What is deployed right now
+
+Recorded here because a running system whose address lives only in a dashboard
+is a system nobody can check.
+
+| Piece | Where | Plan |
+|---|---|---|
+| UI | https://trader-ui-black.vercel.app | Vercel, free |
+| API | https://trader-api-515t.onrender.com | Render web service, free |
+| Database | Render Postgres `trader-db`, Oregon | free, **expires 2026-09-02** |
+| Job scheduler | `.github/workflows/drain.yml`, every 10 minutes | GitHub Actions |
+
+Three consequences of the free tiers, each of which changes what the system can
+be trusted to do:
+
+- **There is no worker.** Render has no free background-worker tier, so
+  `trader-worker` from `render.yaml` does not exist. `SERVERLESS_DRAIN_ENABLED`
+  lets the API run `backtest` and `walkforward` jobs itself and the workflow
+  above asks it to, so research works. **Live trading does not**, and the System
+  page says so: it reports no worker alive, which is true and is the right thing
+  for it to report. A live deployment needs the paid worker.
+- **The database expires after 30 days**, and it takes `daily_marks` with it —
+  the table both halting limits are measured against. Upgrade it before then or
+  the equity history goes, silently.
+- **The API sleeps after 15 minutes idle** and takes about a minute to answer
+  the request that wakes it. The ten-minute drain keeps it awake in practice.
+
+Upgrading is one action: add a card to the Render account and deploy
+`render.yaml` as a Blueprint, which brings the paid database, the paid API and
+the worker in one step. The workflow above becomes redundant then; the worker
+claims jobs faster than a ten-minute schedule can.
+
 ### Everything on Vercel — two projects from one repository
 
 The whole research lab runs on Vercel: the Next.js UI and the FastAPI control
