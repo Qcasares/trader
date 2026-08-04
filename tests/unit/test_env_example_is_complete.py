@@ -84,6 +84,34 @@ class TestTheInventoryIsComplete:
             "flag stayed invisible."
         )
 
+    def test_no_setting_is_assigned_twice(self) -> None:
+        """
+        One name, one assignment.
+
+        A ``.env`` is last-assignment-wins, so a variable listed twice is a trap
+        rather than a duplication: whoever fills in the first one and leaves the
+        second blank ends up with the empty value and no error anywhere.
+
+        ``ANTHROPIC_API_KEY`` was listed twice — once for the commentary layer
+        and once for the AI programme, each with its own honest explanation of
+        what that consumer does without it. Both were correct in isolation and
+        together they silently produced a programme that proposed nothing.
+        """
+        assignments = re.findall(
+            r"^\s*#?\s*([A-Z][A-Z0-9_]*)\s*=", ENV_EXAMPLE.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+        seen: dict[str, int] = {}
+        for name in assignments:
+            seen[name] = seen.get(name, 0) + 1
+        duplicated = sorted(name for name, count in seen.items() if count > 1)
+        assert not duplicated, (
+            f".env.example assigns {duplicated} more than once. A .env is "
+            "last-assignment-wins, so the earlier one is silently discarded — "
+            "document a setting once and cross-reference it from the other "
+            "section."
+        )
+
     def test_nothing_documented_has_been_deleted(self) -> None:
         """
         The other direction. A variable in the example that no longer exists
