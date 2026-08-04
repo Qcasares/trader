@@ -77,7 +77,7 @@ export type Column<T> = {
    * when that cell is already a plain string — see the note above about badges
    * and dates sorting by their own appearance.
    */
-  sortValue?: (row: T) => string | number;
+  sortValue?: (row: T) => string | number | undefined;
   /** Omit to make the column unsortable, which is the honest default for prose. */
   sortable?: boolean;
   /** Set true only where the largest value is the one worth seeing first. */
@@ -112,6 +112,12 @@ export function DataTable<T>({
         accessorFn: (row: T) =>
           column.sortValue ? column.sortValue(row) : "",
         enableSorting: column.sortable ?? false,
+        // An unmeasured figure sorts to the end in *both* directions rather
+        // than to whichever end is smallest. This is the sort-order form of the
+        // rule the badges follow: a backtest with no metrics has not got the
+        // worst Sharpe in the list, it has no Sharpe, and letting it settle at
+        // the bottom of an ascending sort would read as the former.
+        sortUndefined: "last",
         // TanStack sorts numeric columns *descending* on the first click. That
         // is a reasonable default for a leaderboard and the wrong one here: the
         // status column sorts on a severity index where 0 is `failed`, so
