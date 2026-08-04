@@ -32,8 +32,9 @@ export default function RootLayout({
         <main>{children}</main>
         <footer className="footer">
           Paper trading only. Live execution requires three independent
-          conditions — the deployment&apos;s mode, LIVE_TRADING_ENABLED and
-          ALPACA_ALLOW_LIVE — and the database kill switch on top of them.
+          conditions: the deployment&apos;s mode, LIVE_TRADING_ENABLED and
+          ALPACA_ALLOW_LIVE. The database kill switch sits on top of all three
+          and fails closed.
         </footer>
       </body>
     </html>

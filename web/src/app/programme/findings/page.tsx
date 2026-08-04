@@ -23,6 +23,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type Finding, type FindingsPage } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 
 const SEVERITY_PILL: Record<Finding["severity"], string> = {
   low: "pill pill-mute",
@@ -87,7 +88,7 @@ export default function FindingsPage() {
   };
 
   if (error && !page) return <p className="banner banner-bad">{error}</p>;
-  if (!page) return <p className="muted">Loading the register…</p>;
+  if (!page) return <Skeleton rows={5} label="Loading the register" />;
 
   const vetoRoles = new Set(page.veto_roles);
   const blockingSeverities = new Set(page.blocking_severities);

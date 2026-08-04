@@ -77,7 +77,7 @@ export function GateChecklist({ gate }: { gate: GateResult }) {
         <h2>
           Gate: {gate.from_stage_name} → {gate.to_stage_name}
         </h2>
-        <span className={gate.passed ? "pill pill-good" : "pill pill-mute"}>
+        <span className={gate.passed ? "pill pill-good" : "pill pill-warn"}>
           {gate.passed ? "passed" : `${unmet} unmet`}
         </span>
       </div>

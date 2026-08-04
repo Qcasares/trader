@@ -19,11 +19,12 @@ import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type Experiment } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 
 const CONCLUSION_PILL: Record<string, string> = {
   pass: "pill pill-good",
   fail: "pill pill-bad",
-  inconclusive: "pill pill-warn",
+  inconclusive: "pill pill-unknown",
 };
 
 /** Metrics worth surfacing, with the honesty fields kept next to their figure. */
@@ -77,7 +78,7 @@ export default function ExperimentPage({
   }, [load]);
 
   if (error) return <p className="banner banner-bad">{error}</p>;
-  if (!experiment) return <p className="muted">Loading {ref}…</p>;
+  if (!experiment) return <Skeleton rows={5} label={`Loading ${ref}`} />;
 
   const outcome = experiment.outcome ?? {};
   const hasOutcome = Object.keys(outcome).length > 0;

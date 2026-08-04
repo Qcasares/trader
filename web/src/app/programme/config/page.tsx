@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type ProgrammeConfig } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 
 function ConfigRow({
   item,
@@ -41,7 +42,7 @@ function ConfigRow({
       </td>
       <td>
         {item.value === null ? (
-          <span className={item.is_critical ? "pill pill-warn" : "pill pill-mute"}>
+          <span className={item.is_critical ? "pill pill-unknown" : "pill pill-mute"}>
             TBD
           </span>
         ) : (
@@ -99,7 +100,7 @@ export default function ProgrammeConfigPage() {
   };
 
   if (error && !config) return <p className="banner banner-bad">{error}</p>;
-  if (!config) return <p className="muted">Loading configuration…</p>;
+  if (!config) return <Skeleton rows={6} label="Loading the configuration" />;
 
   const critical = config.items.filter((i) => i.is_critical);
   const rest = config.items.filter((i) => !i.is_critical);

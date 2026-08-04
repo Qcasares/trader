@@ -19,6 +19,7 @@ import {
   type BacktestRun,
   type EquityPoint,
 } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 
 export default function BacktestDetailPage({
   params,
@@ -88,7 +89,7 @@ export default function BacktestDetailPage({
   }, [load]);
 
   if (error) return <p className="banner banner-bad">{error}</p>;
-  if (!run) return <p className="muted">Loading run…</p>;
+  if (!run) return <Skeleton rows={6} label="Loading this run" />;
 
   return (
     <>

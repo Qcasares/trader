@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, fmtUsd, type DailyReport } from "@/lib/api";
+import { SkeletonMetrics } from "@/components/Skeleton";
 
 /** A figure, or the words that say it does not exist. Never a zero stand-in. */
 function Figure({
@@ -60,7 +61,7 @@ export default function DailyReportPage() {
   }, [load]);
 
   if (error && !report) return <p className="banner banner-bad">{error}</p>;
-  if (!report) return <p className="muted">Loading the report…</p>;
+  if (!report) return <SkeletonMetrics count={6} />;
 
   return (
     <>
@@ -144,7 +145,7 @@ export default function DailyReportPage() {
           </div>
           <div className="metric">
             <dt>As of</dt>
-            <dd>{report.portfolio.as_of ?? "—"}</dd>
+            <dd>{report.portfolio.as_of ?? <span className="muted">no data</span>}</dd>
           </div>
         </dl>
       </section>
@@ -239,7 +240,7 @@ export default function DailyReportPage() {
           </div>
           <div className="metric">
             <dt>Latest session</dt>
-            <dd>{report.data_health.latest_session ?? "—"}</dd>
+            <dd>{report.data_health.latest_session ?? <span className="muted">none ingested</span>}</dd>
           </div>
           <div className="metric">
             <dt>Days behind</dt>
