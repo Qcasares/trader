@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { ApiError, api, type JobSummary, type SystemStatus } from "@/lib/api";
 
 const CONFIRM_PHRASE = "ENABLE TRADING";
@@ -86,7 +87,11 @@ export default function SystemPage() {
   return (
     <>
       <h1>System</h1>
-      <p className="subtitle">Control plane and worker health.</p>
+      <p className="subtitle">
+        Control plane and worker health.{" "}
+        <Link href="/system/configuration">Configuration</Link> holds what the AI
+        programme is pointed at and how often it runs.
+      </p>
 
       {error && <p className="banner banner-bad">{error}</p>}
 
