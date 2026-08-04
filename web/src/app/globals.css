@@ -272,6 +272,24 @@
 [data-slot="badge"][data-variant="blocked"]::before { content: "\2715" / ""; }
 [data-slot="badge"][data-variant="mute"]::before { content: "\2022" / ""; }
 
+/* ---------------------------------------------------------------------------
+ * Everything below is in `@layer base`, and it has to be.
+ *
+ * Tailwind v4 puts its utilities in a cascade layer. Unlayered CSS beats
+ * layered CSS outright — not on specificity, but because the cascade considers
+ * layer order before it ever looks at selectors. So while these rules sat
+ * unlayered, a plain `h2 { font-size: var(--t-lg) }` silently won against
+ * `class="text-xs"`, and every typographic utility in the app was a no-op with
+ * no error and no warning to say so. It showed up as sidebar group headings
+ * rendering at heading size.
+ *
+ * Wrapping them puts the legacy sheet *below* the utilities, which is the
+ * relationship a migration needs: the old rules keep styling every page that
+ * has not moved yet, and a utility on a migrated component overrides them
+ * without needing `!important` or a more specific selector.
+ * ------------------------------------------------------------------------- */
+@layer base {
+
 * { box-sizing: border-box; }
 
 html { color-scheme: dark light; }
@@ -341,19 +359,36 @@ body {
 .topbar nav a:hover { color: var(--text); border-bottom-color: var(--border-strong); }
 
 .footer {
-  max-width: 1100px;
-  margin: 0 auto;
   padding: var(--s-4) var(--s-5) var(--s-7);
   color: var(--muted);
   font-size: var(--t-sm);
   border-top: 1px solid var(--border);
 }
 
-main {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: var(--s-5) var(--s-5) var(--s-7);
+/* `main` no longer sets its own width or padding: it is a grid track inside
+   `AppShell`, and an element rule that also centred itself would disagree with
+   the track about how much room there is. The measure moved to the shell so
+   there is one owner of the layout rather than two. */
+
+/* Visible only when focused, and first in the tab order.
+   The sidebar is a dozen links; without this a keyboard user tabs through all
+   of them on every page before reaching the content. Positioned rather than
+   hidden with `display: none`, which would take it out of the tab order and
+   defeat the purpose. */
+.skip-link {
+  position: absolute;
+  left: var(--s-2);
+  top: -3rem;
+  z-index: var(--z-toast);
+  padding: var(--s-2) var(--s-3);
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--t-sm);
+  transition: top var(--fast) var(--ease);
 }
+.skip-link:focus-visible { top: var(--s-2); }
 
 /* --- structure ------------------------------------------------------- */
 
@@ -823,4 +858,5 @@ a:hover { text-decoration-thickness: 2px; }
     background: var(--panel-2);
   }
   @keyframes fade { from { opacity: .45; } to { opacity: .9; } }
+}
 }
