@@ -398,6 +398,48 @@ h2 { font-size: var(--t-lg); margin: var(--s-6) 0 var(--s-3); letter-spacing: -0
      line-height: 1.3; text-wrap: balance; }
 h3 { font-size: var(--t-md); margin: var(--s-5) 0 var(--s-2); letter-spacing: -0.006em; }
 
+/* Lists, given back the affordance Tailwind's preflight removes.
+ *
+ * Preflight sets `menu, ol, ul { list-style: none }` and zeroes their margin
+ * and padding, on the reasonable assumption that most lists in a Tailwind app
+ * are navigation and card grids rather than prose. This sheet had no list rules
+ * at all before, because it never needed any: the handful of real content lists
+ * relied on the browser default, and the one list that wanted to be flush —
+ * `.gate-list` — said so explicitly. Adopting Tailwind therefore silently
+ * stripped the bullets and the indent from the daily report's "Required
+ * actions", among others, turning a list of things an operator must do into
+ * four undifferentiated lines.
+ *
+ * Element selectors, deliberately, so both opt-outs keep working: `.gate-list`
+ * wins on specificity, and a `list-none` utility wins on layer order. The
+ * convention this restores is the one the codebase already had — a list looks
+ * like a list unless it asks not to.
+ *
+ * Indent and rhythm come from the spacing scale rather than the browser's 40px,
+ * which is wider than anything else here. */
+ul { list-style: disc; }
+ol { list-style: decimal; }
+ul, ol {
+  margin: var(--s-2) 0;
+  padding-inline-start: var(--s-5);
+}
+li { margin: var(--s-1) 0; }
+
+/* Paragraph rhythm, for the same reason and with the same cause: preflight
+ * zeroes the margin on `p` along with the headings, and this sheet never set
+ * one because the browser default was doing the job.
+ *
+ * That this was load-bearing is not a guess — it is recorded a few hundred
+ * lines below in `.banner p:first-child { margin-top: 0 }`. A rule that removes
+ * a paragraph's top margin only exists because paragraphs had one, so a
+ * multi-paragraph banner is exactly what stopped separating.
+ *
+ * Bottom-only rather than the browser's symmetric `1em 0`: there is no margin
+ * collapsing to reason about, and the two `.banner` rules that already exist
+ * keep working — the `:first-child` one becomes a no-op, the `:last-child` one
+ * still earns its place. */
+p { margin: 0 0 var(--s-3); }
+
 /* Prose that is actually read rather than scanned gets a measure. Tables and
    dense metadata are exempt and run as wide as they need. */
 .subtitle {
