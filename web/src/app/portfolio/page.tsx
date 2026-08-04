@@ -8,19 +8,40 @@
  *
  * Two rules govern this page, both learned elsewhere in the system:
  *
- * 1. **Unknown is not zero.** Every money field arrives nullable, and a null
- *    renders as an em dash with an explanatory banner — never as $0.00. A flat
- *    line at zero is exactly what a broken mark writer would also draw, so the
- *    two states must not look the same.
+ * 1. **Unknown is not zero.** Every money field arrives nullable, and a null is
+ *    rendered as an absence — never as $0.00. A flat line at zero is exactly
+ *    what a broken mark writer would also draw, so the two states must not look
+ *    the same.
  *
  * 2. **Paper and live are never mixed.** Separate accounts, separate curves.
  *    The mode is on screen at all times rather than implied by a setting
  *    somewhere else.
+ *
+ * Three things changed in the rebuild, each for a reason worth keeping:
+ *
+ * - **The page no longer renders its own `<main>`.** `AppShell` provides one,
+ *   and this was the only page that also brought its own — two `main` landmarks
+ *   in the accessibility tree, where the whole point of the landmark is that
+ *   there is exactly one.
+ *
+ * - **The two honesty hints are visible prose rather than `title` tooltips.**
+ *   "P&L is a change in marked equity, never a sum of cash flow" is precisely
+ *   the kind of statement this system exists to make out loud; hiding it behind
+ *   a hover that no keyboard reaches made it decoration. A Radix tooltip would
+ *   have been accessible but would have added a tab stop per metric to a grid
+ *   of eight.
+ *
+ * - **`.metric-grid` is kept, not reimplemented.** It is dense, tuned, and
+ *   already correct. Rebuilding it out of utilities would have produced a
+ *   parallel lookalike and two places to change the same thing.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { EquityChart } from "@/components/EquityChart";
+import { DataTable } from "@/components/DataTable";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ApiError,
   api,
@@ -75,23 +96,31 @@ export default function PortfolioPage() {
   }));
 
   return (
-    <main>
-      <div className="spread">
+    <>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1>Portfolio</h1>
-          <p className="subtitle">
+          <h1 className="mb-1">Portfolio</h1>
+          <p className="m-0 text-base text-ink-muted">
             The account, not a backtest. P&amp;L is a change in marked equity.
           </p>
         </div>
-        <div className="row">
+        {/*
+          `aria-pressed` rather than a tab list: these are two buttons that
+          change which account is being read, not two panels of one document.
+          A screen reader announces the current one as pressed, which the old
+          colour-only distinction did not convey at all.
+        */}
+        <div className="flex gap-1.5" role="group" aria-label="Account mode">
           {MODES.map((m) => (
-            <button
+            <Button
               key={m}
-              className={m === mode ? "primary" : undefined}
+              size="sm"
+              variant={m === mode ? "default" : "outline"}
+              aria-pressed={m === mode}
               onClick={() => setMode(m)}
             >
               {m}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -114,75 +143,115 @@ export default function PortfolioPage() {
         </p>
       )}
 
-      <dl className="metric-grid">
-        <Metric label="Equity" value={money(portfolio?.equity)} />
-        <Metric label="Cash" value={money(portfolio?.cash)} />
-        <Metric
-          label="Daily P&L"
-          value={money(portfolio?.daily_pnl)}
-          hint="Change in marked equity less net deposits — never a sum of cash flow."
-        />
-        <Metric
-          label="Cumulative P&L"
-          value={money(portfolio?.cumulative_pnl)}
-        />
-        <Metric
-          label="Drawdown"
-          value={
-            portfolio?.drawdown_pct == null
-              ? "—"
-              : fmtPct(portfolio.drawdown_pct)
-          }
-          hint="Measured against the high-water mark, not the opening balance."
-        />
-        <Metric label="Peak equity" value={money(portfolio?.peak_equity)} />
-        <Metric label="As of" value={portfolio?.as_of ?? "—"} />
-        <Metric label="Mode" value={mode} />
-      </dl>
-
-      <h2>Equity</h2>
-      {points.length >= 2 ? (
-        <EquityChart points={points} />
-      ) : (
-        <p className="chart-empty">
-          A curve needs at least two marks; {points.length} recorded.
-        </p>
-      )}
-
-      <h2>Positions</h2>
-      <div className="card">
-        {portfolio && portfolio.positions.length > 0 ? (
-          <table>
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th className="num">Quantity</th>
-                <th className="num">Average entry</th>
-              </tr>
-            </thead>
-            <tbody>
-              {portfolio.positions.map((p) => (
-                <tr key={p.symbol}>
-                  <td>{p.symbol}</td>
-                  <td className="num">{p.qty.toFixed(6)}</td>
-                  <td className="num">
-                    {p.avg_entry_price == null
-                      ? "—"
-                      : fmtUsd(p.avg_entry_price)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <p className="chart-empty">
-            No open positions. These are derived from recorded fills rather
-            than read from a snapshot, so an empty table means no fill has been
-            recorded — not that a snapshot has gone stale.
+      <Card>
+        <CardContent>
+          <dl className="metric-grid">
+            <Metric label="Equity" value={money(portfolio?.equity)} />
+            <Metric label="Cash" value={money(portfolio?.cash)} />
+            <Metric label="Daily P&L" value={money(portfolio?.daily_pnl)} />
+            <Metric
+              label="Cumulative P&L"
+              value={money(portfolio?.cumulative_pnl)}
+            />
+            <Metric
+              label="Drawdown"
+              value={
+                portfolio?.drawdown_pct == null
+                  ? "—"
+                  : fmtPct(portfolio.drawdown_pct)
+              }
+            />
+            <Metric label="Peak equity" value={money(portfolio?.peak_equity)} />
+            <Metric label="As of" value={portfolio?.as_of ?? "—"} />
+            <Metric label="Mode" value={mode} />
+          </dl>
+          {/*
+            Said out loud rather than hidden in a `title`. Both sentences are
+            corrections of the obvious wrong reading of the figure above them,
+            which makes them the last thing that should need a hover to find.
+          */}
+          <p className="mt-3 mb-0 text-sm text-ink-muted text-pretty">
+            P&amp;L is the change in marked equity less net deposits, never a
+            sum of cash flow. Drawdown is measured against the high-water mark,
+            not the opening balance.
           </p>
-        )}
-      </div>
-    </main>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Equity</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {points.length >= 2 ? (
+            <EquityChart points={points} />
+          ) : (
+            <p className="chart-empty">
+              A curve needs at least two marks; {points.length} recorded.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Positions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {portfolio && portfolio.positions.length > 0 ? (
+            <DataTable
+              rows={portfolio.positions}
+              getRowId={(p) => p.symbol}
+              initialSort={[{ id: "symbol", desc: false }]}
+              columns={[
+                {
+                  id: "symbol",
+                  header: "Symbol",
+                  sortable: true,
+                  sortValue: (p) => p.symbol,
+                  className: "font-mono",
+                  cell: (p) => p.symbol,
+                },
+                {
+                  id: "qty",
+                  header: "Quantity",
+                  sortable: true,
+                  sortValue: (p) => p.qty,
+                  headerClassName: "text-right",
+                  className: "text-right font-mono tabular-nums",
+                  cell: (p) => p.qty.toFixed(6),
+                },
+                {
+                  id: "entry",
+                  header: "Average entry",
+                  sortable: true,
+                  sortValue: (p) => p.avg_entry_price ?? undefined,
+                  headerClassName: "text-right",
+                  className: "text-right font-mono tabular-nums",
+                  // `no-data` rather than an em dash, because this column is
+                  // right-aligned: beside a column of numbers a bare dash reads
+                  // as a minus sign, which is the one thing an absent price
+                  // must never be mistaken for. The metric grid above is
+                  // left-aligned, where a dash is unambiguous, and keeps it.
+                  cell: (p) =>
+                    p.avg_entry_price == null ? (
+                      <span className="no-data">no data</span>
+                    ) : (
+                      fmtUsd(p.avg_entry_price)
+                    ),
+                },
+              ]}
+            />
+          ) : (
+            <p className="chart-empty">
+              No open positions. These are derived from recorded fills rather
+              than read from a snapshot, so an empty table means no fill has
+              been recorded — not that a snapshot has gone stale.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </>
   );
 }
 
@@ -191,17 +260,9 @@ function money(value: number | null | undefined): string {
   return value == null ? "—" : fmtUsd(value);
 }
 
-function Metric({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-}) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="metric" title={hint}>
+    <div className="metric">
       <dt>{label}</dt>
       <dd>{value}</dd>
     </div>

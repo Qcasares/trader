@@ -57,11 +57,26 @@ async def portfolio(
     """
     _check_mode(mode)
 
+    # `owner_id` is filtered here for the same reason `marks.history` and
+    # `marks.peak_equity` filter it, and this query was the one place that did
+    # not. `daily_marks` is keyed on (owner_id, mode, session), so without it
+    # this read crosses accounts while the two figures it is displayed beside
+    # do not: the equity in the metric grid came from whichever owner happened
+    # to hold the newest row, while the curve underneath it and the peak it is
+    # measured against came from `default`. One owner's balance above another
+    # owner's equity curve, with nothing on screen to say so.
+    #
+    # Latent while `record_mark` is the only writer, since it defaults to
+    # `default` — but a query that disagrees with its two siblings is a bug
+    # waiting for a second account, and it produced exactly that mismatch the
+    # first time one existed.
     latest = await conn.fetchrow(
         """
         SELECT session, equity, cash, daily_pnl, cumulative_pnl, drawdown_pct
-        FROM daily_marks WHERE mode = $1 ORDER BY session DESC LIMIT 1
+        FROM daily_marks WHERE owner_id = $1 AND mode = $2
+        ORDER BY session DESC LIMIT 1
         """,
+        marks.DEFAULT_OWNER,
         mode,
     )
     peak = await marks.peak_equity(conn, mode=mode)
