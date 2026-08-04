@@ -352,6 +352,54 @@ class TestPortfolio:
         assert body["cumulative_pnl"] is None
         assert body["note"] == "no marks recorded yet"
 
+    def test_a_mark_owned_by_someone_else_is_not_reported(self, authed) -> None:
+        """
+        The snapshot reads one account, the same one the curve and the peak do.
+
+        `daily_marks` is keyed on (owner_id, mode, session), and every query in
+        `src/db/repos/marks.py` filters on the owner. The snapshot query in the
+        portfolio router did not, so it returned whichever owner held the newest
+        row while `/history` and `peak_equity` beside it returned `default`'s.
+        The visible symptom was an equity figure in the metric grid sitting
+        above an equity curve that said "0 marks recorded" — one account's
+        balance over another account's history, with nothing on screen to say
+        the two were different.
+
+        Latent while `record_mark` is the only writer, because it defaults to
+        `default`. This test creates the second owner that makes it not latent.
+        """
+        import asyncio as _asyncio
+        from datetime import date as _date
+
+        async def seed_foreign_mark():
+            conn = await asyncpg.connect(TEST_DSN)
+            try:
+                await conn.execute("DELETE FROM daily_marks")
+                await conn.execute(
+                    """
+                    INSERT INTO daily_marks (owner_id, mode, session, equity,
+                        cash, deposits, withdrawals, daily_pnl, cumulative_pnl,
+                        drawdown_pct)
+                    VALUES ('somebody-else', 'paper', $1, 999999, 0, 0, 0, 0, 0, 0)
+                    """,
+                    _date(2026, 7, 1),
+                )
+            finally:
+                await conn.close()
+
+        _asyncio.run(seed_foreign_mark())
+
+        body = authed.get("/api/v1/portfolio").json()
+        assert body["equity"] is None, (
+            "the snapshot returned another owner's equity; it must read the "
+            "same account as /history and peak_equity"
+        )
+        assert body["note"] == "no marks recorded yet"
+
+        # And the two agree: neither sees the foreign row.
+        history = authed.get("/api/v1/portfolio/history").json()
+        assert history["marks"] == []
+
     def test_reports_the_latest_mark_and_the_peak(self, authed) -> None:
         import asyncio as _asyncio
         from datetime import date as _date
