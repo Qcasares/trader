@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 /*
  * globals.css
  * -----------
@@ -160,6 +162,115 @@
     --settled: oklch(0.524 0.075 158);
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Tailwind's theme, sourced from the tokens above rather than beside them.
+ *
+ * `@theme inline` means every utility resolves to `var(--bg)` and friends at
+ * use time, so the light theme in the media query above keeps working with no
+ * second set of values to hold in sync. One palette, defined once, in the file
+ * that explains it.
+ *
+ * shadcn's variable contract is adopted so `shadcn add` keeps working
+ * unmodified, but two of its names mean something different here than they do
+ * upstream, and mapping them naively would have been a silent regression:
+ *
+ * 1. **`muted`.** shadcn's `--muted` is a *surface* and `--muted-foreground` is
+ *    the text on it. This file's `--muted` is *text*. So shadcn's surface is
+ *    sourced from `--panel-2` and its foreground from this file's `--muted`.
+ *    Aliasing the two by name would have put body-text lightness onto a panel.
+ *
+ * 2. **`accent`.** shadcn's `accent` is the quiet hover surface behind a menu
+ *    item. This product's accent is the brand steel — the loudest thing on the
+ *    page after the signal colours. Mapping one onto the other would fill every
+ *    hover with brand. shadcn's `accent` is therefore `--panel-2`, and the
+ *    brand lands on shadcn's `primary`, where it belongs. The brand is also
+ *    exposed directly as `brand` for the cases that are not a button.
+ *
+ * What shadcn has no slot for at all is `unknown`. Its palette runs
+ * default / secondary / destructive / outline, and the nearest fit for "not
+ * measured" is `secondary`, which renders grey — the exact regression the
+ * palette note above describes fixing. So `blocked`, `unknown` and `settled`
+ * keep their own names and are added to the component variants rather than
+ * folded into shadcn's. `destructive` is aliased to `blocked` so the stock
+ * components still read correctly where they use it.
+ *
+ * `--color-ink*` rather than `--color-text*` because Tailwind v4 already owns
+ * the `--text-*` namespace for font sizes; `text-ink-muted` for a colour and
+ * `text-sm` for a size then cannot be confused for one another.
+ * ------------------------------------------------------------------------- */
+@theme inline {
+  /* --- shadcn's contract, sourced from the palette above ---------------- */
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--text);
+  --color-popover: var(--panel);
+  --color-popover-foreground: var(--text);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-ink);
+  --color-secondary: var(--panel-2);
+  --color-secondary-foreground: var(--text);
+  --color-muted: var(--panel-2);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--panel-2);
+  --color-accent-foreground: var(--text);
+  --color-destructive: var(--blocked);
+  --color-destructive-foreground: var(--accent-ink);
+  --color-border: var(--border);
+  --color-input: var(--border-strong);
+  --color-ring: var(--accent);
+
+  /* --- this product's own names ----------------------------------------- */
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+
+  --color-ink: var(--text);
+  --color-ink-muted: var(--muted);
+  --color-ink-faint: var(--faint);
+
+  --color-brand: var(--accent);
+  --color-brand-ink: var(--accent-ink);
+  --color-brand-dim: var(--accent-dim);
+
+  --color-blocked: var(--blocked);
+  --color-unknown: var(--unknown);
+  --color-settled: var(--settled);
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+
+  --text-xs: var(--t-xs);
+  --text-sm: var(--t-sm);
+  --text-base: var(--t-base);
+  --text-body: var(--t-body);
+  --text-md: var(--t-md);
+  --text-lg: var(--t-lg);
+  --text-xl: var(--t-xl);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.5);
+
+  --ease-out-quint: var(--ease);
+}
+
+/* The glyph half of the status badges.
+ *
+ * Here rather than as a Tailwind `before:content-[…]` utility because these
+ * need the two-value form: the second value is the alternative text, and empty
+ * is what stops a screen reader announcing the decoration in addition to the
+ * label. The same syntax the legacy `.pill-*` classes further down use, for the
+ * same reason — this is the accessibility half of "status is never colour
+ * alone", and it survives the component library changing underneath it. */
+[data-slot="badge"][data-variant="settled"]::before { content: "\2713" / ""; }
+[data-slot="badge"][data-variant="unknown"]::before { content: "?" / ""; }
+[data-slot="badge"][data-variant="blocked"]::before { content: "\2715" / ""; }
+[data-slot="badge"][data-variant="mute"]::before { content: "\2022" / ""; }
 
 * { box-sizing: border-box; }
 
