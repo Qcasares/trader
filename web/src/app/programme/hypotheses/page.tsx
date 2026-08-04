@@ -20,6 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type Hypothesis } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 import { AiBadge } from "@/components/GateChecklist";
 
 const STATUS_PILL: Record<Hypothesis["status"], string> = {
@@ -53,7 +54,7 @@ export default function HypothesisLedgerPage() {
   }, [refresh]);
 
   if (error && !rows) return <p className="banner banner-bad">{error}</p>;
-  if (!rows) return <p className="muted">Loading the ledger…</p>;
+  if (!rows) return <Skeleton rows={5} label="Loading the ledger" />;
 
   const rejected = rows.filter((r) => r.status === "rejected").length;
 
@@ -115,7 +116,7 @@ export default function HypothesisLedgerPage() {
                   <td>
                     {row.title} <AiBadge origin={row.origin} />
                   </td>
-                  <td className="muted">{row.owner || "—"}</td>
+                  <td className="muted">{row.owner || <span className="muted">unassigned</span>}</td>
                   <td
                     className="num mono"
                     title="How many configurations this idea has spawned. Every extra one is another draw."

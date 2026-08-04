@@ -300,7 +300,7 @@ def _required_actions(
     stale = [w["worker_id"] for w in operations["workers"] if w["stale"]]
     if stale:
         actions.append(
-            f"stale heartbeat from {', '.join(stale)} — a dead process "
+            f"stale heartbeat from {', '.join(stale)}: a dead process "
             "produces no error anywhere and both halting limits go inert"
         )
     if operations["shadow_failures"]:

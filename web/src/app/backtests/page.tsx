@@ -6,6 +6,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, fmtNum, fmtPct, type BacktestRun } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
+
+/** An absent figure. A bare dash beside right-aligned numbers reads as a minus. */
+const NO_DATA = <span className="no-data">no data</span>;
 
 export default function BacktestsPage() {
   const router = useRouter();
@@ -27,7 +31,7 @@ export default function BacktestsPage() {
       .finally(() => setLoading(false));
   }, [router]);
 
-  if (loading) return <p className="muted">Loading…</p>;
+  if (loading) return <Skeleton rows={6} label="Loading backtests" />;
   if (error) return <p className="banner banner-bad">{error}</p>;
 
   return (
@@ -86,7 +90,7 @@ export default function BacktestsPage() {
                     </span>
                   </td>
                   <td className="num">
-                    {run.metrics ? fmtPct(run.metrics.total_return) : "—"}
+                    {run.metrics ? fmtPct(run.metrics.total_return) : NO_DATA}
                   </td>
                   <td className="num">
                     {run.metrics ? (
@@ -104,16 +108,16 @@ export default function BacktestsPage() {
                         {fmtNum(run.metrics.sharpe_stderr)}
                       </span>
                     ) : (
-                      "—"
+                      NO_DATA
                     )}
                   </td>
                   <td className="num">
-                    {run.metrics ? fmtPct(run.metrics.max_drawdown) : "—"}
+                    {run.metrics ? fmtPct(run.metrics.max_drawdown) : NO_DATA}
                   </td>
                   <td className="num">
                     {run.metrics
                       ? `${run.metrics.cost_stress_multiplier}×`
-                      : "—"}
+                      : NO_DATA}
                   </td>
                   <td>
                     <Link href={`/backtests/${run.id}`}>view</Link>

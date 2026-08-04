@@ -20,6 +20,7 @@ import {
   type JsonSchemaProperty,
   type StrategyDescriptor,
 } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 
 export default function StrategiesPage() {
   const router = useRouter();
@@ -45,7 +46,7 @@ export default function StrategiesPage() {
       .finally(() => setLoading(false));
   }, [router]);
 
-  if (loading) return <p className="muted">Loading strategies…</p>;
+  if (loading) return <Skeleton rows={5} label="Loading strategies" />;
   if (error) return <p className="banner banner-bad">{error}</p>;
 
   const active = strategies.find((s) => s.name === selected) ?? null;

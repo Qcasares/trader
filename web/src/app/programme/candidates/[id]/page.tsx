@@ -25,6 +25,7 @@ import {
   type Scorecard,
   type ShadowHistory,
 } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 import { AiBadge, GateChecklist } from "@/components/GateChecklist";
 
 const CONFIRM_PHRASE = "PROMOTE";
@@ -32,7 +33,7 @@ const CONFIRM_PHRASE = "PROMOTE";
 const CONCLUSION_PILL: Record<string, string> = {
   pass: "pill pill-good",
   fail: "pill pill-bad",
-  inconclusive: "pill pill-warn",
+  inconclusive: "pill pill-unknown",
 };
 
 export default function CandidatePage({
@@ -137,7 +138,7 @@ export default function CandidatePage({
   };
 
   if (error && !candidate) return <p className="banner banner-bad">{error}</p>;
-  if (!candidate) return <p className="muted">Loading candidate…</p>;
+  if (!candidate) return <Skeleton rows={6} label="Loading this candidate" />;
 
   const gate = candidate.gate ?? null;
   const canPromote = Boolean(gate?.passed) && candidate.status === "active";
@@ -197,7 +198,7 @@ export default function CandidatePage({
           </div>
           <div className="assumption-row">
             <dt>Universe</dt>
-            <dd className="mono">{candidate.universe.join(", ") || "—"}</dd>
+            <dd className="mono">{candidate.universe.join(", ") || <span className="muted">empty</span>}</dd>
           </div>
           <div className="assumption-row">
             <dt>Window</dt>
@@ -269,7 +270,7 @@ export default function CandidatePage({
                             ? "pill pill-good"
                             : row.status === "fail"
                               ? "pill pill-bad"
-                              : "pill pill-mute"
+                              : "pill pill-unknown"
                         }
                       >
                         {row.status}
@@ -372,7 +373,11 @@ export default function CandidatePage({
                     <td>{entry.rebalanced ? "yes" : "—"}</td>
                     <td className="num mono">{entry.order_intents.length}</td>
                     <td className="num mono">
-                      {entry.equity === null ? "—" : entry.equity.toFixed(2)}
+                      {entry.equity === null ? (
+                        <span className="no-data">no data</span>
+                      ) : (
+                        entry.equity.toFixed(2)
+                      )}
                     </td>
                     <td>
                       {entry.error ? (

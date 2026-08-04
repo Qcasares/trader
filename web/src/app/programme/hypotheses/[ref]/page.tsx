@@ -14,6 +14,7 @@ import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type Hypothesis } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 import { AiBadge } from "@/components/GateChecklist";
 
 /** Section 7.1's order, with a readable label for each. */
@@ -64,7 +65,7 @@ export default function HypothesisPage({
   }, [load]);
 
   if (error) return <p className="banner banner-bad">{error}</p>;
-  if (!hypothesis) return <p className="muted">Loading {ref}…</p>;
+  if (!hypothesis) return <Skeleton rows={6} label={`Loading ${ref}`} />;
 
   return (
     <>

@@ -491,7 +491,7 @@ def _sharpe_note(outcome: dict[str, Any]) -> str:
         return "no standard error recorded; the figure is not interpretable"
     if outcome.get("sharpe_is_significant") is False:
         return (
-            f"±{float(stderr):.2f} — not distinguishable from zero, so read it "
+            f"±{float(stderr):.2f}: not distinguishable from zero, so read it "
             "as no evidence of an edge rather than as a small one"
         )
     return f"±{float(stderr):.2f}"

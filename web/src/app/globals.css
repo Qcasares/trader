@@ -1,56 +1,191 @@
 /*
  * globals.css
  * -----------
- * A dense, quiet interface. This is an instrument panel, not a marketing page:
- * numbers are monospaced and aligned, warnings are impossible to miss, and
- * nothing animates.
+ * A dense, quiet instrument. Numbers are monospaced and aligned, the states
+ * that matter are impossible to miss, and motion only ever reports a change.
+ *
+ * The scene this is designed for: one person at a desk, late, in a room lit by
+ * the screen, reading a table of numbers to decide whether a month of compute
+ * produced anything real. That forces dark, and it forces density.
+ *
+ * Three decisions worth knowing before editing anything below.
+ *
+ * 1. The palette is OKLCH and it is this product's own.
+ *    It used to be GitHub Primer near-verbatim — #0e1116, #4493f8, #3fb950 —
+ *    which is a recognisable other product wearing this one's clothes. The
+ *    neutrals now carry a small chroma toward the accent's own hue rather than
+ *    the default drift toward warm, and the accent is a low-chroma steel that
+ *    is deliberately *not* the SaaS blue, not navy-and-gold, and not terminal
+ *    phosphor green. See PRODUCT.md's anti-references.
+ *
+ * 2. Status is never colour alone, and `unknown` is not grey.
+ *    Every status carries a glyph as well as a hue, so the colour could be
+ *    removed entirely without losing information. Roughly 8% of men have some
+ *    red-green colour vision deficiency and this interface is status-dense.
+ *    The hues are additionally separated on the blue/orange axis, which is the
+ *    one that survives both protanopia and deuteranopia, and on lightness.
+ *
+ *    The more consequential half: `--unknown` is a distinct amber, not the
+ *    muted grey it used to be. This system's first principle is that an
+ *    unmeasured figure is a state rather than a zero, and rendering that state
+ *    in the quietest colour available made the most important honest thing on
+ *    the page the easiest to miss.
+ *
+ * 3. The uncomfortable state is the loud one.
+ *    `--blocked` has the highest chroma here and `--settled` the lowest. That
+ *    inverts the usual dashboard instinct, where success is the bright colour.
+ *    An operator opens this to find out what is wrong; a page where "passed"
+ *    shouts and "refused" murmurs is optimised for the wrong reader.
  */
 
 :root {
-  --bg: #0e1116;
-  --panel: #161b22;
-  --panel-2: #1c2230;
-  --border: #2a313c;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #4493f8;
-  --good: #3fb950;
-  --warn: #d29922;
-  --bad: #f85149;
+  /* --- surfaces ------------------------------------------------------
+     Graphite with a small lean toward the accent's hue (250). Tinted
+     toward the brand rather than toward warmth-by-default, which is the
+     cross-project monoculture move. */
+  --bg: oklch(0.178 0.011 255);
+  --panel: oklch(0.221 0.013 255);
+  --panel-2: oklch(0.262 0.015 255);
+  --border: oklch(0.322 0.016 255);
+  --border-strong: oklch(0.412 0.018 255);
+
+  /* --- ink ------------------------------------------------------------
+     `--muted` is held at L 0.72, which clears 4.5:1 on both --bg and
+     --panel. Light-grey body text "for elegance" is the single biggest
+     reason interfaces like this become unreadable at hour three. */
+  --text: oklch(0.955 0.004 255);
+  --muted: oklch(0.723 0.013 255);
+  --faint: oklch(0.645 0.012 255);
+
+  /* --- accent ---------------------------------------------------------
+     Primary action, current selection, focus. Nothing decorative, and
+     never more than a tenth of the surface. Low chroma on purpose: it has
+     to sit beside the signal colours below without competing with them. */
+  --accent: oklch(0.740 0.093 232);
+  --accent-ink: oklch(0.185 0.020 232);
+  --accent-dim: oklch(0.560 0.070 232);
+
+  /* --- signal ---------------------------------------------------------
+     Ordered by how much attention each deserves, which is the reverse of
+     the usual order. Lightness is deliberately well separated so the three
+     remain distinguishable with no colour at all.
+
+     Attention is carried by **chroma**, not lightness: settled 0.072 <
+     unknown 0.140 < blocked 0.185. Lightness is spent instead on keeping
+     the three at least 0.06 apart, so they stay distinguishable in
+     greyscale and under both protanopia and deuteranopia.
+
+     Every value was solved for rather than chosen. Each must clear 4.5:1
+     against `--panel-2`, which is what a pill renders on. The first draft
+     tinted each pill with 16% of its own hue, and that coupling made the
+     contrast target and the lightness-separation target mutually
+     unsatisfiable on dark — blocked and settled were both pinned near L
+     0.70. Dropping the tint for a neutral chip freed lightness entirely,
+     and is quieter on a status-dense page besides. Measured, not eyeballed:
+     three of the original values failed. */
+  --blocked: oklch(0.725 0.185 30);    /* refused, failed, halted   loudest */
+  --unknown: oklch(0.800 0.140 78);    /* not measured, indeterminate       */
+  --settled: oklch(0.660 0.072 158);   /* met, passed, alive       quietest */
+
+  /* --- type -----------------------------------------------------------
+     System stacks. A product UI does not need a display face, and a
+     well-tuned sans carrying headings, labels, buttons and data is one
+     fewer thing that can drift out of tune. */
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Fixed rem, not clamp. Users read this at one DPI on one desk, and a
+     heading that resizes with the viewport looks worse in a panel, not
+     better. Ratio ~1.2: there are many type roles on these screens and
+     exaggerated contrast between them reads as noise. */
+  --t-xs: 0.6875rem;   /* 11px  labels, eyebrow-free small caps    */
+  --t-sm: 0.75rem;     /* 12px  table cells, dense metadata        */
+  --t-base: 0.8125rem; /* 13px  secondary prose                    */
+  --t-body: 0.875rem;  /* 14px  body                               */
+  --t-md: 1rem;        /* 16px  h3 / metric values                 */
+  --t-lg: 1.1875rem;   /* 19px  h2                                 */
+  --t-xl: 1.4375rem;   /* 23px  h1                                 */
+
+  /* --- rhythm ---------------------------------------------------------
+     A 4px base. Varied deliberately: sections breathe, rows do not. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+
+  /* --- motion ---------------------------------------------------------
+     150-250ms. The user is in a task; nothing here is worth waiting to
+     watch. Exponential ease-out only: no bounce, no elastic, because a
+     control panel that springs is a control panel you distrust. */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --fast: 140ms;
+  --base: 200ms;
+
+  /* --- depth ----------------------------------------------------------
+     Named, ordered, and complete. Never an arbitrary 999. */
+  --z-sticky: 100;
+  --z-dropdown: 200;
+  --z-backdrop: 300;
+  --z-modal: 400;
+  --z-toast: 500;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f8fa;
-    --panel: #ffffff;
-    --panel-2: #f0f3f6;
-    --border: #d6dbe1;
-    --text: #1f2328;
-    --muted: #59636e;
-    --accent: #0969da;
-    --good: #1a7f37;
-    --warn: #9a6700;
-    --bad: #cf222e;
+    --bg: oklch(0.977 0.003 255);
+    --panel: oklch(1 0 0);
+    --panel-2: oklch(0.958 0.004 255);
+    --border: oklch(0.885 0.006 255);
+    --border-strong: oklch(0.800 0.010 255);
+
+    --text: oklch(0.240 0.014 255);
+    --muted: oklch(0.487 0.016 255);
+    --faint: oklch(0.528 0.014 255);
+
+    --accent: oklch(0.520 0.110 232);
+    --accent-ink: oklch(0.995 0.004 232);
+    --accent-dim: oklch(0.660 0.080 232);
+
+    /* Darkened for contrast against a light surface while holding the same
+       lightness *ordering* — blocked darkest, unknown lightest — so the
+       no-colour reading survives the theme switch. */
+    --blocked: oklch(0.404 0.190 30);
+    --unknown: oklch(0.464 0.130 70);
+    --settled: oklch(0.524 0.075 158);
   }
 }
 
 * { box-sizing: border-box; }
+
+html { color-scheme: dark light; }
 
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--t-body);
   line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
 }
 
-main {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 24px 20px 64px;
+/* Every figure on this screen is read down a column and compared with the one
+   above it. Proportional digits make that a reading task instead of a glance. */
+.mono, code, kbd, table, input, select, textarea {
+  font-variant-numeric: tabular-nums;
+}
+
+/* One ring, everywhere, and never suppressed without replacement. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 /* --- top bar --------------------------------------------------------- */
@@ -58,17 +193,21 @@ main {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 12px 20px;
+  gap: var(--s-5);
+  padding: var(--s-3) var(--s-5);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--s-2);
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
   text-decoration: none;
 }
@@ -80,128 +219,171 @@ main {
   background: var(--accent);
 }
 
-.topbar nav { display: flex; gap: 18px; margin-left: auto; }
-.topbar nav a { color: var(--muted); text-decoration: none; }
-.topbar nav a:hover { color: var(--text); }
+.topbar nav { display: flex; gap: var(--s-4); margin-left: auto; align-items: center; }
+.topbar nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: var(--s-1) 0;
+  border-bottom: 1px solid transparent;
+  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+.topbar nav a:hover { color: var(--text); border-bottom-color: var(--border-strong); }
 
 .footer {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 16px 20px 40px;
+  padding: var(--s-4) var(--s-5) var(--s-7);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--t-sm);
   border-top: 1px solid var(--border);
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--s-5) var(--s-5) var(--s-7);
 }
 
 /* --- structure ------------------------------------------------------- */
 
-h1 { font-size: 20px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 28px 0 10px; }
-h3 { font-size: 13px; margin: 20px 0 8px; color: var(--muted);
-     text-transform: uppercase; letter-spacing: .04em; }
+h1 { font-size: var(--t-xl); margin: 0 0 var(--s-1); letter-spacing: -0.018em;
+     line-height: 1.25; text-wrap: balance; }
+h2 { font-size: var(--t-lg); margin: var(--s-6) 0 var(--s-3); letter-spacing: -0.012em;
+     line-height: 1.3; text-wrap: balance; }
+h3 { font-size: var(--t-md); margin: var(--s-5) 0 var(--s-2); letter-spacing: -0.006em; }
 
-.subtitle { color: var(--muted); margin: 0 0 20px; }
+/* Prose that is actually read rather than scanned gets a measure. Tables and
+   dense metadata are exempt and run as wide as they need. */
+.subtitle {
+  color: var(--muted);
+  margin: 0 0 var(--s-5);
+  max-width: 68ch;
+  text-wrap: pretty;
+}
 
 .card {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 14px;
+  border-radius: var(--radius);
+  padding: var(--s-4);
+  margin-bottom: var(--s-3);
 }
+
+/* A card inside a card is always a mistake: the second border says "separate
+   thing" about something that is part of the first. */
+.card .card { border: none; background: none; padding: 0; margin: 0; }
 
 .card-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--s-3);
   flex-wrap: wrap;
+  margin-bottom: var(--s-3);
 }
+.card-head h2 { margin: 0; }
 
-.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-.spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.row { display: flex; gap: var(--s-3); flex-wrap: wrap; align-items: center; }
+.spread { display: flex; justify-content: space-between; align-items: center;
+          gap: var(--s-3); }
 
 /* --- banners --------------------------------------------------------- */
 
 .banner {
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin: 0 0 12px;
-  border-left: 3px solid;
-  font-size: 13px;
+  border-radius: var(--radius);
+  padding: var(--s-3);
+  margin: 0 0 var(--s-3);
+  border: 1px solid;
+  font-size: var(--t-base);
+  text-wrap: pretty;
 }
-.banner-warn { background: color-mix(in srgb, var(--warn) 12%, transparent);
-               border-color: var(--warn); }
-.banner-info { background: color-mix(in srgb, var(--accent) 12%, transparent);
-               border-color: var(--accent); }
-.banner-bad  { background: color-mix(in srgb, var(--bad) 14%, transparent);
-               border-color: var(--bad); }
+.banner p:first-child { margin-top: 0; }
+.banner p:last-child, .banner ul:last-child { margin-bottom: 0; }
+
+.banner-warn {
+  background: color-mix(in oklab, var(--unknown) 10%, transparent);
+  border-color: color-mix(in oklab, var(--unknown) 42%, transparent);
+}
+.banner-info {
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 38%, transparent);
+}
+.banner-bad {
+  background: color-mix(in oklab, var(--blocked) 12%, transparent);
+  border-color: color-mix(in oklab, var(--blocked) 48%, transparent);
+}
 
 /* --- metrics --------------------------------------------------------- */
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   overflow: hidden;
-  margin: 0 0 18px;
+  margin: 0 0 var(--s-4);
 }
 
-.metric { background: var(--panel); padding: 10px 12px; }
-.metric dt { color: var(--muted); font-size: 11px; text-transform: uppercase;
-             letter-spacing: .04em; }
-.metric dd { margin: 2px 0 0; font-family: var(--mono); font-size: 15px; }
+.metric { background: var(--panel); padding: var(--s-3); }
+.metric dt { color: var(--muted); font-size: var(--t-xs); text-transform: uppercase;
+             letter-spacing: .045em; }
+.metric dd { margin: var(--s-1) 0 0; font-family: var(--mono); font-size: var(--t-md);
+             line-height: 1.3; }
 
+/* Model-authored content. The convention `src/llm/commentary.py` established:
+   output is output, never input, and it must not look identical to a measured
+   fact. */
 .badge {
   display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
+  padding: 1px var(--s-2);
   border-radius: 10px;
   font-family: var(--sans);
-  font-size: 10px;
+  font-size: var(--t-xs);
   text-transform: uppercase;
-  letter-spacing: .04em;
-  background: color-mix(in srgb, var(--warn) 22%, transparent);
-  color: var(--warn);
+  letter-spacing: .045em;
+  background: var(--panel-2);
+  color: var(--unknown);
+  border: 1px solid color-mix(in oklab, var(--unknown) 45%, transparent);
   vertical-align: middle;
 }
 
 .assumptions { margin: 0; }
 .assumption-row {
   display: grid;
-  grid-template-columns: 180px 1fr;
-  gap: 12px;
-  padding: 6px 0;
+  grid-template-columns: 190px 1fr;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
   border-bottom: 1px solid var(--border);
 }
+.assumption-row:last-child { border-bottom: none; }
 .assumption-row dt { color: var(--muted); }
-.assumption-row dd { margin: 0; font-family: var(--mono); font-size: 13px; }
+.assumption-row dd { margin: 0; font-family: var(--mono); font-size: var(--t-base);
+                     text-wrap: pretty; }
 .hint { display: block; color: var(--muted); font-family: var(--sans);
-        font-size: 12px; margin-top: 2px; }
+        font-size: var(--t-sm); margin-top: 2px; }
 
 /* --- chart ----------------------------------------------------------- */
 
-.chart { margin: 0 0 18px; }
+.chart { margin: 0 0 var(--s-4); }
 .chart svg { width: 100%; height: auto; display: block; }
-.chart figcaption { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.chart-empty { color: var(--muted); padding: 40px; text-align: center; }
+.chart figcaption { color: var(--muted); font-size: var(--t-sm); margin-top: var(--s-2); }
+.chart-empty { color: var(--muted); padding: var(--s-7); text-align: center; }
 
 .grid { stroke: var(--border); stroke-width: 1; }
 .axis { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
-.axis-line { stroke: var(--border); stroke-width: 1; }
+.axis-line { stroke: var(--border-strong); stroke-width: 1; }
 .equity-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
-.drawdown-area { fill: color-mix(in srgb, var(--bad) 30%, transparent);
-                 stroke: var(--bad); stroke-width: 1; }
-.warmup { fill: color-mix(in srgb, var(--muted) 12%, transparent); }
-.effective-line { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 3 3; }
-.effective-label { fill: var(--warn); font-size: 10px; font-family: var(--mono); }
+.drawdown-area { fill: color-mix(in oklab, var(--blocked) 26%, transparent);
+                 stroke: var(--blocked); stroke-width: 1; }
+.warmup { fill: color-mix(in oklab, var(--muted) 12%, transparent); }
+.effective-line { stroke: var(--unknown); stroke-width: 1; stroke-dasharray: 3 3; }
+.effective-label { fill: var(--unknown); font-size: 10px; font-family: var(--mono); }
 
 /* --- forms ----------------------------------------------------------- */
 
-label { display: block; margin-bottom: 10px; }
-label > span { display: block; color: var(--muted); font-size: 12px;
+label { display: block; margin-bottom: var(--s-3); }
+label > span { display: block; color: var(--muted); font-size: var(--t-sm);
                margin-bottom: 3px; }
 
 input, select, textarea {
@@ -209,62 +391,145 @@ input, select, textarea {
   padding: 7px 9px;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   color: var(--text);
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--t-base);
+  transition: border-color var(--fast) var(--ease);
 }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+input:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--border-strong); }
+input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+/* Placeholders are read, so they are held to the body contrast ratio rather
+   than the usual near-invisible default. `--muted`, not `--faint`: the first
+   draft used the latter and measured 3.32:1, which is the exact failure this
+   comment claimed to prevent. */
+::placeholder { color: var(--muted); opacity: 1; }
+
+input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 0 14px;
+  gap: 0 var(--s-4);
 }
 
 button {
-  padding: 8px 14px;
-  border-radius: 5px;
-  border: 1px solid var(--border);
+  padding: 7px var(--s-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
   background: var(--panel-2);
   color: var(--text);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: var(--t-base);
   cursor: pointer;
+  transition: border-color var(--fast) var(--ease),
+              background-color var(--fast) var(--ease);
 }
-button:hover:not(:disabled) { border-color: var(--accent); }
-button:disabled { opacity: .5; cursor: not-allowed; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel); }
+button:active:not(:disabled) { background: var(--panel-2); }
+/* Inactive controls never carry saturated colour: a disabled button that still
+   looks primary invites the click it is about to refuse. */
+button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--border); }
+
+/* The committing direction. Deliberately the only filled control on a screen,
+   so the asymmetry between stopping and starting is visible before the label
+   is read. */
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+button.primary:hover:not(:disabled) { background: var(--accent-dim); border-color: var(--accent-dim); }
+button.danger { background: var(--blocked); border-color: var(--blocked); color: oklch(0.99 0 0); }
 
 /* --- tables ---------------------------------------------------------- */
 
-table { width: 100%; border-collapse: collapse; font-family: var(--mono);
-        font-size: 12px; }
+/* Sans by default, monospace only where figures live. A table set entirely in
+   monospace turns every label and sentence in it into pseudo-data: "Risk-adjusted
+   return" renders with a hyphen the width of an en dash and reads as a formula.
+   `.num` and `.mono` opt individual cells back in, which is where tabular
+   figures actually earn the face. */
+table { width: 100%; border-collapse: collapse; font-family: var(--sans);
+        font-size: var(--t-sm); }
+td.num, th.num, td.mono { font-family: var(--mono); }
 th { text-align: left; color: var(--muted); font-family: var(--sans);
-     font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-     padding: 6px 8px; border-bottom: 1px solid var(--border); }
-td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+     font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .045em;
+     padding: var(--s-2); border-bottom: 1px solid var(--border-strong);
+     white-space: nowrap; }
+td { padding: var(--s-2); border-bottom: 1px solid var(--border);
+     vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background-color var(--fast) var(--ease); }
 tbody tr:hover { background: var(--panel-2); }
-.num { text-align: right; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .table-scroll { overflow-x: auto; }
 
-/* --- status ---------------------------------------------------------- */
+/* Prose inside a data table sets in the sans face at a readable measure; the
+   monospace inherited from the table is for figures, not sentences. */
+td.prose { max-width: 42ch; text-wrap: pretty; color: var(--muted); }
+
+/* An absent figure in a numeric column. Not a bare dash: beside right-aligned
+   numbers a dash reads as a minus sign, and this system's first principle is
+   that an absent measurement must never be mistakable for a value. */
+.no-data { color: var(--muted); font-family: var(--sans); font-size: var(--t-xs);
+           text-transform: uppercase; letter-spacing: .04em; }
+
+/* --- status ----------------------------------------------------------
+   Colour is never the only channel. Each pill carries a glyph, so the hue
+   could be stripped entirely and the meaning would survive; the glyph is
+   given an empty alternative text so a screen reader announces the label
+   rather than the decoration.
+
+   `pill-unknown` exists because "not measured" is this system's most
+   important honest state and it used to render in the same grey as
+   "nothing to say here". Those are different facts. */
 
 .pill {
-  display: inline-block;
-  padding: 1px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px var(--s-2);
   border-radius: 10px;
-  font-size: 11px;
+  font-size: var(--t-xs);
   font-family: var(--sans);
   text-transform: uppercase;
-  letter-spacing: .04em;
+  letter-spacing: .045em;
+  white-space: nowrap;
+  border: 1px solid transparent;
 }
-.pill-good { background: color-mix(in srgb, var(--good) 20%, transparent); color: var(--good); }
-.pill-warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-.pill-bad  { background: color-mix(in srgb, var(--bad) 20%, transparent);  color: var(--bad); }
-.pill-mute { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+.pill::before { font-family: var(--mono); font-size: 10px; line-height: 1; }
+
+.pill-good {
+  background: var(--panel-2);
+  color: var(--settled);
+  border-color: color-mix(in oklab, var(--settled) 45%, transparent);
+}
+.pill-good::before { content: "\2713" / ""; }
+
+.pill-warn,
+.pill-unknown {
+  background: var(--panel-2);
+  color: var(--unknown);
+  border-color: color-mix(in oklab, var(--unknown) 45%, transparent);
+}
+.pill-warn::before { content: "\25B2" / ""; }
+.pill-unknown::before { content: "?" / ""; }
+
+.pill-bad {
+  background: var(--panel-2);
+  color: var(--blocked);
+  border-color: color-mix(in oklab, var(--blocked) 52%, transparent);
+}
+.pill-bad::before { content: "\2715" / ""; }
+
+.pill-mute {
+  background: var(--panel-2);
+  color: var(--muted);
+  border-color: var(--border);
+}
+.pill-mute::before { content: "\2022" / ""; }
 
 /* Sits among the nav links, so it reads as one rather than as a control. */
 .linklike {
@@ -272,92 +537,179 @@ tbody tr:hover { background: var(--panel-2); }
   border: none;
   background: none;
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--t-body);
   font-family: var(--sans);
 }
-.linklike:hover:not(:disabled) { color: var(--text); border: none; }
+.linklike:hover:not(:disabled) { color: var(--text); border: none; background: none; }
+
+/* Available to a screen reader, absent from the layout. Used for the loading
+   labels that a skeleton conveys only by shape. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); }
-.error { color: var(--bad); }
+.faint { color: var(--faint); }
+.error { color: var(--blocked); }
 
-a { color: var(--accent); }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
 
-/* ---------------------------------------------------------------------------
-   The AI programme
+/* --- loading ---------------------------------------------------------
+   A skeleton in the shape of the thing being loaded, not a spinner in the
+   middle of a page. The operator should be able to see what is arriving. */
 
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--panel-2) 0%,
+    color-mix(in oklab, var(--panel-2) 60%, var(--border)) 50%,
+    var(--panel-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: sweep 1.4s var(--ease) infinite;
+  border-radius: var(--radius-sm);
+  height: 1em;
+}
+.skeleton-row { height: 28px; margin-bottom: var(--s-2); }
+.skeleton-w-40 { width: 40%; }
+.skeleton-w-70 { width: 70%; }
+
+@keyframes sweep {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* A value that has just changed. The only decorative-looking motion here, and
+   it is not decorative: on a page that polls, a figure updating with no
+   acknowledgement is a figure the operator has to diff against memory. */
+.changed { animation: mark var(--base) var(--ease); }
+@keyframes mark {
+  from { background: color-mix(in oklab, var(--accent) 26%, transparent); }
+  to { background: transparent; }
+}
+
+/* --- the AI programme ------------------------------------------------
    The pipeline is a horizontally scrolling row of nine stage columns. It
-   scrolls inside its own container rather than widening the page: nine columns
-   never fit a laptop, and a body that scrolls sideways makes every other page
-   feel broken.
-   --------------------------------------------------------------------------- */
+   scrolls inside its own container rather than widening the page: nine
+   columns never fit a laptop, and a body that scrolls sideways makes every
+   other page feel broken. */
 
 .pipeline {
   display: flex;
-  gap: 12px;
+  gap: var(--s-3);
   overflow-x: auto;
-  padding-bottom: 8px;
+  padding-bottom: var(--s-2);
+  scroll-snap-type: x proximity;
 }
 
 .pipeline-column {
-  flex: 0 0 200px;
+  flex: 0 0 208px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--s-2);
+  scroll-snap-align: start;
 }
 
 .pipeline-head {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--t-xs);
   font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
-  letter-spacing: .04em;
+  letter-spacing: .045em;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
+  padding-bottom: var(--s-2);
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--s-1);
   flex-wrap: wrap;
+  min-height: 34px;
 }
 
-.pipeline-empty { margin: 0; font-size: 12px; }
+/* Stages beyond what the system can evidence. Dimmed rather than hidden, so
+   the lifecycle reads as one thing with an end the operator has not reached
+   rather than as a board that stops for no stated reason. */
+.pipeline-column-unreachable .pipeline-head { color: var(--faint); }
+.pipeline-column-unreachable .pipeline-empty { color: var(--faint); }
+
+.pipeline-empty { margin: 0; font-size: var(--t-sm); }
 
 .pipeline-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 10px;
+  gap: var(--s-1);
+  padding: var(--s-3);
   background: var(--panel);
   border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   text-decoration: none;
   color: var(--text);
+  transition: border-color var(--fast) var(--ease),
+              background-color var(--fast) var(--ease);
 }
 
-.pipeline-card:hover { border-color: var(--accent); }
-.pipeline-card-ref { font-size: 11px; color: var(--muted); }
-.pipeline-card-title { font-size: 13px; line-height: 1.3; }
-.pipeline-card-meta { font-size: 11px; }
+.pipeline-card:hover { border-color: var(--accent); background: var(--panel-2); }
+.pipeline-card-ref { font-size: var(--t-xs); color: var(--muted); }
+.pipeline-card-title { font-size: var(--t-base); line-height: 1.35; }
+.pipeline-card-meta { font-size: var(--t-xs); }
+
+/* --- gate checklist --------------------------------------------------
+   The densest reading on the site: an operator scanning for the one line
+   that says why something is refused. Unmet rows carry a left marker in
+   addition to the pill, which is the one place a directional accent earns
+   its keep — it is a scan target in a long list, not decoration on a card. */
 
 .gate-list { list-style: none; margin: 0; padding: 0; }
 
 .gate-criterion {
   display: grid;
-  grid-template-columns: 70px 1fr;
-  gap: 12px;
+  grid-template-columns: 84px 1fr;
+  gap: var(--s-3);
   align-items: start;
-  padding: 10px 0;
+  padding: var(--s-3) 0;
   border-bottom: 1px solid var(--border);
 }
 
 .gate-criterion:last-child { border-bottom: none; }
-.gate-criterion-desc { margin: 0; }
-.gate-criterion-detail { margin: 4px 0 0; font-size: 12px; }
-.gate-criterion-evidence { margin: 4px 0 0; font-size: 11px; }
+.gate-criterion-desc { margin: 0; text-wrap: pretty; }
+.gate-criterion-detail { margin: var(--s-1) 0 0; font-size: var(--t-base);
+                         max-width: 70ch; text-wrap: pretty; }
+.gate-criterion-evidence { margin: var(--s-1) 0 0; font-size: var(--t-xs); }
 
 @media (max-width: 640px) {
+  main { padding: var(--s-4) var(--s-4) var(--s-6); }
   .assumption-row { grid-template-columns: 1fr; gap: 0; }
-  .topbar { flex-wrap: wrap; gap: 10px; }
-  .topbar nav { margin-left: 0; }
-  .gate-criterion { grid-template-columns: 1fr; gap: 4px; }
+  .topbar { flex-wrap: wrap; gap: var(--s-3); }
+  .topbar nav { margin-left: 0; gap: var(--s-3); }
+  .gate-criterion { grid-template-columns: 1fr; gap: var(--s-1); }
+  h1 { font-size: var(--t-lg); }
+}
+
+/* Reduced motion gets an alternative, not a removal: the skeleton still needs
+   to read as "loading" and a changed value still needs to announce itself. The
+   sweep becomes a steady pulse in opacity, which conveys the same thing
+   without translating anything across the screen. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .skeleton {
+    animation: fade 1.6s ease-in-out infinite alternate !important;
+    animation-duration: 1.6s !important;
+    animation-iteration-count: infinite !important;
+    background: var(--panel-2);
+  }
+  @keyframes fade { from { opacity: .45; } to { opacity: .9; } }
 }

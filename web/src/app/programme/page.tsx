@@ -26,6 +26,7 @@ import {
   type PipelineBoard,
   type ProgrammeStatus,
 } from "@/lib/api";
+import { Skeleton } from "@/components/Skeleton";
 import { AiBadge } from "@/components/GateChecklist";
 
 const CONFIRM_PHRASE = "ENABLE PROGRAMME";
@@ -179,7 +180,7 @@ export default function ProgrammePage() {
   };
 
   if (error && !status) return <p className="banner banner-bad">{error}</p>;
-  if (!status || !board) return <p className="muted">Loading the programme…</p>;
+  if (!status || !board) return <Skeleton rows={6} label="Loading the programme" />;
 
   const runner = status.runner;
   const byStage = new Map<number, Candidate[]>();
@@ -370,7 +371,15 @@ export default function ProgrammePage() {
           {board.stages.map((stage) => {
             const cards = byStage.get(stage.stage) ?? [];
             return (
-              <div className="pipeline-column" key={stage.stage}>
+              <div
+                className={
+                  "pipeline-column" +
+                  (stage.stage > LAST_BUILT_STAGE
+                    ? " pipeline-column-unreachable"
+                    : "")
+                }
+                key={stage.stage}
+              >
                 <h3 className="pipeline-head">
                   <span className="mono">{stage.stage}</span> {stage.name}
                   {stage.stage >= board.first_human_gated_stage ? (
