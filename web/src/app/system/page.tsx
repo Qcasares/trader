@@ -26,6 +26,7 @@ import { CircleSlash, Settings2 } from "lucide-react";
 import { ApiError, api, type JobSummary, type SystemStatus } from "@/lib/api";
 import { StatusBadge, jobStatus, livenessStatus } from "@/components/StatusBadge";
 import { fmtInstant } from "@/lib/format";
+import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -40,6 +41,9 @@ import {
 } from "@/components/ui/table";
 
 const CONFIRM_PHRASE = "ENABLE TRADING";
+
+/** Job statuses, loudest first. The order the status column sorts in. */
+const JOB_ORDER = ["failed", "expired", "running", "queued", "succeeded"];
 
 /** Heartbeat age, in the largest unit that still reads as a number. */
 function fmtAge(seconds: number): string {
@@ -325,51 +329,62 @@ export default function SystemPage() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Kind</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Attempts</TableHead>
-                  <TableHead>Error</TableHead>
-                  <TableHead>Created</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {jobs.length === 0 ? (
-                  <TableRow>
-                    <TableCell
-                      colSpan={5}
-                      className="py-6 text-center text-ink-muted"
-                    >
-                      No jobs yet.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  jobs.slice(0, 25).map((job) => (
-                    <TableRow key={job.id}>
-                      <TableCell className="font-mono">{job.kind}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={jobStatus(job.status)}>
-                          {job.status}
-                        </StatusBadge>
-                      </TableCell>
-                      <TableCell className="text-right font-mono tabular-nums">
-                        {job.attempts}/{job.max_attempts}
-                      </TableCell>
-                      <TableCell className="max-w-[36ch] text-blocked text-pretty">
-                        {job.error ?? ""}
-                      </TableCell>
-                      <TableCell className="text-ink-muted">
-                        {fmtInstant(job.created_at)}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+          <DataTable
+            rows={jobs}
+            getRowId={(job) => job.id}
+            filterPlaceholder="Filter jobs"
+            empty="No jobs yet."
+            initialSort={[{ id: "created", desc: true }]}
+            columns={[
+              {
+                id: "kind",
+                header: "Kind",
+                sortable: true,
+                sortValue: (job) => job.kind,
+                className: "font-mono",
+                cell: (job) => job.kind,
+              },
+              {
+                id: "status",
+                header: "Status",
+                sortable: true,
+                // Sorted by how much attention it deserves, not alphabetically.
+                // `failed` before `queued` is the order an operator scans in;
+                // alphabetical would bury it under `expired` and `queued`.
+                sortValue: (job) => JOB_ORDER.indexOf(job.status),
+                cell: (job) => (
+                  <StatusBadge status={jobStatus(job.status)}>
+                    {job.status}
+                  </StatusBadge>
+                ),
+              },
+              {
+                id: "attempts",
+                header: "Attempts",
+                sortable: true,
+                sortValue: (job) => job.attempts,
+                headerClassName: "text-right",
+                className: "text-right font-mono tabular-nums",
+                cell: (job) => `${job.attempts}/${job.max_attempts}`,
+              },
+              {
+                id: "error",
+                header: "Error",
+                // Deliberately unsortable: there is no meaningful order over
+                // free text, and a sort button implies there is one.
+                className: "max-w-[36ch] text-blocked text-pretty",
+                cell: (job) => job.error ?? "",
+              },
+              {
+                id: "created",
+                header: "Created",
+                sortable: true,
+                sortValue: (job) => job.created_at ?? "",
+                className: "text-ink-muted whitespace-nowrap",
+                cell: (job) => fmtInstant(job.created_at),
+              },
+            ]}
+          />
         </CardContent>
       </Card>
     </>
