@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { SessionControls } from "@/components/SessionControls";
+import { AppShell } from "@/components/AppShell";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,21 +14,19 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <header className="topbar">
-          <Link href="/" className="brand">
-            <span className="brand-mark" aria-hidden="true" />
-            Systematic Trading
-          </Link>
-          <nav>
-            <Link href="/">Strategies</Link>
-            <Link href="/backtests">Backtests</Link>
-            <Link href="/portfolio">Portfolio</Link>
-            <Link href="/programme">Programme</Link>
-            <Link href="/system">System</Link>
-            <SessionControls />
-          </nav>
-        </header>
-        <main>{children}</main>
+        {/*
+          A skip link, first in the tab order and visible only when focused.
+          The sidebar is roughly a dozen links, and without this a keyboard
+          user tabs through all of them on every single page before reaching
+          the content — which is exactly the cost that made the old top bar
+          "only five links" feel like a virtue.
+        */}
+        <a href="#content" className="skip-link">
+          Skip to content
+        </a>
+        <AppShell>
+          <div id="content">{children}</div>
+        </AppShell>
         <footer className="footer">
           Paper trading only. Live execution requires three independent
           conditions: the deployment&apos;s mode, LIVE_TRADING_ENABLED and
