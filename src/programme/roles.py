@@ -40,7 +40,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.programme.client import ModelCall, ask_json
 from src.programme.gates import BLOCKING_SEVERITIES, VETO_ROLES
 
 logger = logging.getLogger(__name__)
@@ -310,7 +309,7 @@ def validate_assessment(assessment: Assessment) -> None:
         )
 
 
-def _system_prompt(role: Role) -> str:
+def system_prompt(role: Role) -> str:
     veto = (
         "You hold a veto. A finding you raise at high or critical severity "
         "stops this candidate advancing until an operator closes it, and you "
@@ -345,38 +344,6 @@ prefer to see done differently.
 - Reply with a single JSON object: verdict, summary, findings (a list, \
 possibly empty, each with severity, title, detail, remediation).
 """
-
-
-async def assess(
-    role: Role,
-    api_key: str | None,
-    model: str,
-    facts_brief: str,
-) -> Assessment:
-    """
-    Ask one role for its view.
-
-    ``facts_brief`` is rendered from rows by the caller. This function never
-    fetches anything: a role sees exactly what the programme decided to show
-    it, and that decision is auditable in one place.
-    """
-    payload = await ask_json(
-        ModelCall(
-            system=_system_prompt(role),
-            prompt=(
-                "Assess this candidate for promotion out of its current "
-                "stage.\n\n"
-                f"{facts_brief}\n\n"
-                "Return a JSON object with keys: verdict, summary, findings."
-            ),
-            max_tokens=1500,
-        ),
-        api_key,
-        model,
-    )
-    assessment = Assessment(**payload)
-    validate_assessment(assessment)
-    return assessment
 
 
 def blocking_count(assessment: Assessment, role: Role) -> int:

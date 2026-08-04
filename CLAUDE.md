@@ -146,6 +146,14 @@ python -m src.programme.main                 # the AI programme; needs the extra
                                              # requirements file below
 cd web && npm run dev                        # Next.js frontend
 
+# Which model the programme is pointed at, at what effort, under what token
+# ceiling, and how often it runs are settings in the control plane, on
+# System > Configuration. They are stored in `system_flags`, seeded by
+# migration 0010, and re-read on every pass. `PROGRAMME_MODEL` and
+# `PROGRAMME_TICK_SECONDS` used to be environment variables and are no longer
+# read at all. The API key stays in the environment: it is a credential, and it
+# belongs to the one process permitted to hold a model client.
+
 # The programme's dependencies. Deliberately a third file: `anthropic` must not
 # be installed alongside the broker credentials.
 pip install -r requirements-programme.txt
@@ -221,7 +229,7 @@ than hide in a wall of dots.
 | `src/api/` | FastAPI control plane |
 | `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
-| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` and `roles.py` are everything the model may write and what happens to it first; `flags.py` holds the two fail-closed switches; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either |
+| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` is everything the model may write and what happens to it first; `roles.py` is the twelve specialists as vocabulary and `panel.py` is the one function that asks a model to speak as one; `flags.py` holds the fail-closed switches and settings; `models.py` is the provider/model/effort catalogue; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either |
 | `web/` | Next.js frontend |
 
 ### Structural guarantees
@@ -269,6 +277,10 @@ Each is enforced by a test, not by discipline:
 | A shadow book cannot drift from its own decisions | Nothing stores it. `shadow_job._replay` rebuilds it from `shadow_decisions` on every run, filling session S's intents at S+1's open with the same `execute_pending` a backtest uses. `test_shadow.py` asserts two runs over the same log agree |
 | Shadow mode reaches no venue | The deployment is created **disabled** and stays so; `_enabled_deployments` filters on status. `test_shadow.py` asserts the `orders` table stays empty |
 | Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |
+| The API cannot reach a model client *transitively* | Every check in `test_import_boundaries.py` used to read one module's own imports, which is enough for a direct `import anthropic` and not enough for an indirect one. `test_the_programme_modules_the_api_imports_hold_no_client` walks the closure, and found a real hole: `src/api` imports `roles` for the role vocabulary, and `roles` imported `client`. `assess` now lives in `panel.py`, which nothing in `src/api` imports |
+| An effort level the model rejects is refused, not sent | Effort is a per-model capability — Haiku 4.5 has none and sending one is a 400 on *every* subsequent pass. `src/programme/models.py` carries the supported levels per model, `client.ask_json` omits `output_config` entirely where there are none, and the same `settings_problem` runs at the form and at the row |
+| Unusable model settings mean no model call | `flags.model_settings` returns `None` on a missing row, an unreadable value or one the catalogue refuses, and `run_tick` treats that as "reconcile, evaluate and promote, but call nothing". Falling back to a default would spend at a vendor under a configuration nobody chose and write the result into the ledger as though somebody had |
+| A model client is never handed a tool | `test_the_model_client_passes_no_tools` refuses the strings `tools` and `tool_choice` anywhere in `client.py` — keyword *or* dict key, since the request is assembled as a dict so `output_config` can be omitted. `test_model_request.py` asserts the same at the wire |
 
 ## Adding a strategy
 
@@ -311,7 +323,8 @@ migration**, write a new one.
 Key tables: `daily_bars` (raw prices, `source` in the PK so vendors can be
 reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
 `deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `walkforward_runs`,
-`system_flags` (the kill switch), `jobs`, `audit_log`, `commentary`.
+`system_flags` (the kill switch, the programme's switch and autonomy ceiling,
+and the model settings), `jobs`, `audit_log`, `commentary`.
 
 The AI programme adds `programme_config` (the operating prompt's section 2,
 NULL meaning TBD), `hypotheses` (append-only), `candidates` (a hypothesis as one

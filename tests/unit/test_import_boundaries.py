@@ -253,6 +253,111 @@ def test_the_api_does_not_import_the_programme_runner() -> None:
     )
 
 
+def test_the_programme_modules_the_api_imports_hold_no_client() -> None:
+    """
+    The transitive half of the rule above.
+
+    Every scan in this file is per-file: it reads one module's own import
+    statements. That is enough for a direct ``import anthropic`` and not enough
+    for an indirect one. ``src/api`` legitimately imports four modules out of
+    ``src/programme`` — ``repo``, ``flags``, ``gates`` and ``models`` — and if
+    any of *those* grew an SDK import, the API process would hold a model client
+    and every test above would still pass, because no file in ``src/api`` would
+    name it.
+
+    So the closure is walked rather than one level of it. This found a real
+    hole when it was written: ``src/api/routers/programme.py`` imports
+    ``src.programme.roles`` for the role vocabulary the findings page renders,
+    and ``roles`` imported ``src.programme.client`` at module level — so the API
+    reached a model client through two hops while every check above passed.
+    ``roles`` now imports it inside ``assess``, where only the caller that needs
+    it pays for it.
+
+    It is also why the model catalogue is a module of its own rather than a few
+    constants in ``client.py``: the API needs that vocabulary to draw the
+    selector and to validate what comes back from it, and the only safe way to
+    share a vocabulary with a package that holds an SDK is to put it somewhere
+    the SDK is forbidden.
+    """
+    frontier: list[str] = []
+    for path in _module_files("api"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module == f"src.{MODEL_HOLDING_PACKAGE}":
+                    frontier.extend(a.name for a in node.names)
+                elif node.module.startswith(f"src.{MODEL_HOLDING_PACKAGE}."):
+                    frontier.append(node.module.split(".")[2])
+
+    seen: set[str] = set()
+    offenders: list[str] = []
+    while frontier:
+        name = frontier.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        path = SRC / MODEL_HOLDING_PACKAGE / f"{name}.py"
+        if not path.is_file():  # pragma: no cover - not a module of its own
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            # `ast.walk` reaches function bodies, so a lazily imported SDK is
+            # caught here as readily as a top-level one. That is deliberate: an
+            # import one function call away is still a capability this process
+            # holds.
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            for module in names:
+                if module.split(".")[0] in FORBIDDEN_PREFIXES:
+                    offenders.append(f"{path.relative_to(SRC)} imports {module}")
+                elif module.startswith(f"src.{MODEL_HOLDING_PACKAGE}."):
+                    frontier.append(module.split(".")[2])
+
+    assert seen, "the scan found no src.programme imports in src/api at all"
+    assert not offenders, (
+        "src/api reaches an LLM client through src.programme:\n"
+        + "\n".join(sorted(set(offenders)))
+        + "\n\nEvery module in that chain is loaded by the API process. Move "
+        "the vocabulary the API needs into a module that holds no client, as "
+        "src/programme/models.py does."
+    )
+
+
+def test_the_model_client_passes_no_tools() -> None:
+    """
+    The programme's model may emit text and nothing else.
+
+    ``commentary.py`` is checked two tests up for a ``tools=`` keyword.
+    ``client.py`` needs its own check and a wider one, because it no longer
+    passes keyword arguments: the request is assembled as a dict so that
+    ``output_config`` can be omitted for a model with no effort parameter. A
+    keyword-only scan would not see ``request["tools"] = ...``, and "the model
+    cannot call a function" is the guarantee that makes a model client
+    acceptable in this system at all.
+    """
+    forbidden = {"tools", "tool_choice"}
+    source = (SRC / MODEL_HOLDING_PACKAGE / "client.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg in forbidden:
+                    offenders.append(f"keyword {keyword.arg}=")
+        elif isinstance(node, ast.Constant) and node.value in forbidden:
+            # Covers `request["tools"] = ...` and `{"tools": [...]}` alike: in
+            # a module this small, the string appearing at all is the signal.
+            offenders.append(f"string literal {node.value!r}")
+    assert not offenders, (
+        "src/programme/client.py names a tool-granting request field, which "
+        "would give the model the ability to act rather than only to write "
+        "text:\n" + "\n".join(offenders)
+    )
+
+
 def test_strategies_do_not_perform_io() -> None:
     """
     Strategies must be pure. An HTTP call or a DB read inside

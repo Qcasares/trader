@@ -186,6 +186,31 @@ class ReleaseKillSwitchRequest(BaseModel):
         return value
 
 
+class SystemConfigurationRequest(BaseModel):
+    """
+    The five settings that decide what the programme sends and how often.
+
+    ``extra="forbid"`` for the same reason ``RiskLimitsRequest`` forbids unknown
+    keys: a mistyped field that is silently dropped leaves the operator looking
+    at a page that says their change was saved and a runner that never saw it.
+
+    Every field is required. A partial update would mean validating one setting
+    against four stored ones, and the validity of ``effort`` depends on which
+    model is chosen — so the four have to be checked as a set or not at all.
+    Nothing here is range-checked by pydantic on purpose: the rules live in
+    ``src.programme.models`` because the runner applies exactly the same ones
+    when it reads the row back, and two copies of a rule is one copy too many.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    provider: str
+    model: str
+    effort: str
+    max_tokens: int
+    tick_seconds: int
+
+
 class JobSummary(BaseModel):
     id: str
     kind: str

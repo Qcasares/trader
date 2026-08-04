@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from src.programme.client import ModelCall, ask_json
 from src.programme.gates import REQUIRED_CARD_FIELDS
+from src.programme.models import ModelSettings
 from src.strategies import build_strategy, describe_all, get_strategy_class
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ clears is not a test.
 
 async def propose_hypothesis(
     api_key: str | None,
-    model: str,
+    settings: ModelSettings,
     context: str,
     existing_titles: list[str],
 ) -> tuple[str, dict[str, Any]]:
@@ -242,7 +243,7 @@ async def propose_hypothesis(
     payload = await ask_json(
         ModelCall(system=_CARD_SYSTEM, prompt=prompt, max_tokens=2500),
         api_key,
-        model,
+        settings,
     )
     card_model = HypothesisCard(**payload)
     card = card_model.as_card()
@@ -255,7 +256,7 @@ async def propose_hypothesis(
 
 async def propose_configuration(
     api_key: str | None,
-    model: str,
+    settings: ModelSettings,
     hypothesis: dict[str, Any],
 ) -> Configuration:
     """
@@ -279,7 +280,7 @@ async def propose_configuration(
     payload = await ask_json(
         ModelCall(system=_CONFIG_SYSTEM, prompt=prompt, max_tokens=1500),
         api_key,
-        model,
+        settings,
     )
     config = Configuration(**payload)
     validate_configuration(config)

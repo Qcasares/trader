@@ -55,6 +55,7 @@ from src.programme.gates import (
     evaluate,
     replication_agrees,
 )
+from src.programme.models import ModelSettings
 from src.strategies import build_strategy, get_strategy_class
 
 logger = logging.getLogger(__name__)
@@ -130,10 +131,29 @@ def code_version() -> str:
 
 
 async def run_tick(
-    conn: asyncpg.Connection, api_key: str | None, model: str
+    conn: asyncpg.Connection,
+    api_key: str | None,
+    settings: ModelSettings | None,
 ) -> TickReport:
-    """Do one pass. Never raises for a single candidate's sake."""
+    """
+    Do one pass. Never raises for a single candidate's sake.
+
+    ``settings`` is ``None`` when the operator's model configuration could not
+    be read or is unusable, and that is not the same condition as a missing API
+    key even though both land in the same place: no model call. Both are noted
+    on the run, because a pass that reconciled experiments and evaluated gates
+    without proposing anything should say which of the two reasons applied
+    rather than look like a pass with nothing to propose.
+    """
     report = TickReport()
+    if settings is None:
+        report.note(
+            "model_unconfigured",
+            reason=(
+                "the model settings are missing or unusable; this pass will "
+                "reconcile, evaluate and promote, and will not call a model"
+            ),
+        )
 
     await _reconcile_experiments(conn, report)
 
@@ -145,14 +165,14 @@ async def run_tick(
     ]
     for candidate in candidates:
         try:
-            await _advance(conn, candidate, report, ceiling, api_key, model)
+            await _advance(conn, candidate, report, ceiling, api_key, settings)
         except Exception as exc:  # noqa: BLE001 - one bad candidate is not a tick
             logger.exception("candidate %s failed to advance", candidate["id"])
             report.note("candidate_error", candidate=candidate["id"], error=str(exc))
 
     research_count = sum(1 for c in candidates if c["stage"] <= 2)
     if research_count < MAX_ACTIVE_RESEARCH_CANDIDATES:
-        await _propose(conn, api_key, model, report)
+        await _propose(conn, api_key, settings, report)
     else:
         report.note(
             "proposal_skipped",
@@ -299,7 +319,7 @@ async def _advance(
     report: TickReport,
     ceiling: int,
     api_key: str | None,
-    model: str,
+    settings: ModelSettings | None,
 ) -> None:
     facts = await repo.load_facts(conn, candidate["id"])
     if facts is None:
@@ -310,7 +330,7 @@ async def _advance(
     # The panel runs before the promotion decision, not after it, so a finding
     # raised this pass blocks this pass. Reviewing something already promoted
     # is an audit, and an audit is not a control.
-    await _convene(conn, candidate, result, report, api_key, model)
+    await _convene(conn, candidate, result, report, api_key, settings)
 
     # Reloaded, because the panel may have just raised a blocking finding. The
     # first evaluation is what the roles were shown; this one is what decides.
@@ -369,7 +389,7 @@ async def _convene(
     result: Any,
     report: TickReport,
     api_key: str | None,
-    model: str,
+    settings: ModelSettings | None,
 ) -> None:
     """
     Run the stage-relevant panel, record every view, and open any findings.
@@ -382,7 +402,7 @@ async def _convene(
     Findings are opened, never closed. The only close path is an operator
     endpoint, and the schema refuses any other.
     """
-    if not api_key:
+    if not api_key or settings is None:
         return
 
     panel = roles.roles_for_stage(candidate["stage"])
@@ -421,7 +441,7 @@ async def _convene(
         if role.key in seen:
             continue
         try:
-            assessment = await roles.assess(role, api_key, model, brief)
+            assessment = await panel.assess(role, api_key, settings, brief)
         except Exception as exc:  # noqa: BLE001 - one role is not the panel
             report.note("assessment_failed", role=role.key, error=str(exc))
             continue
@@ -433,7 +453,7 @@ async def _convene(
             verdict=assessment.verdict,
             summary=assessment.summary,
             stage=candidate["stage"],
-            model=model,
+            model=settings.model,
             evidence={"gate": result.as_dict()},
         )
         report.note(
@@ -827,7 +847,7 @@ def _grid_around(params: dict[str, Any]) -> dict[str, list[Any]]:
 async def _propose(
     conn: asyncpg.Connection,
     api_key: str | None,
-    model: str,
+    settings: ModelSettings | None,
     report: TickReport,
 ) -> None:
     """
@@ -841,6 +861,11 @@ async def _propose(
     if not api_key:
         report.note("proposal_skipped", reason="no ANTHROPIC_API_KEY configured")
         return
+    if settings is None:
+        report.note(
+            "proposal_skipped", reason="the model settings are unusable"
+        )
+        return
 
     config_rows = await repo.get_config(conn)
     context = "\n".join(
@@ -850,21 +875,26 @@ async def _propose(
 
     try:
         title, card = await author.propose_hypothesis(
-            api_key, model, context, existing
+            api_key, settings, context, existing
         )
     except Exception as exc:  # noqa: BLE001 - recorded, never fatal
         report.note("hypothesis_rejected", error=str(exc))
         return
 
     hypothesis = await repo.create_hypothesis(
-        conn, title=title, card=card, owner="programme", origin="model", model=model
+        conn,
+        title=title,
+        card=card,
+        owner="programme",
+        origin="model",
+        model=settings.model,
     )
-    report.model_used = model
+    report.model_used = settings.model
     report.note("hypothesis_recorded", ref=hypothesis["ref"], title=title)
 
     try:
         config = await author.propose_configuration(
-            api_key, model, {"title": title, "card": card}
+            api_key, settings, {"title": title, "card": card}
         )
     except Exception as exc:  # noqa: BLE001
         report.note(

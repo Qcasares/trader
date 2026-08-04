@@ -13,6 +13,7 @@ starting should not.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
@@ -22,6 +23,7 @@ from src.api.schemas import (
     JobSummary,
     KillSwitchRequest,
     ReleaseKillSwitchRequest,
+    SystemConfigurationRequest,
     SystemStatus,
 )
 from src.api.security import (
@@ -34,6 +36,8 @@ from src.api.security import (
 from src.db.migrate import MigrationError, current_version, migrate
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
+from src.programme import flags as programme_flags
+from src.programme import models as model_catalogue
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
@@ -145,6 +149,156 @@ async def resume(
     """
     await flags.release_kill_switch(conn, actor=session.subject, note=body.note)
     return await _build_status(conn, settings)
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+#
+# Which model the programme is pointed at, how hard it is asked to think, the
+# ceiling on a reply, and how often it runs.
+#
+# These are read here through `src.programme.flags` and `src.programme.models`,
+# and that is the whole list — the API may not import `src.programme.client`,
+# `.tick`, `.author` or `.main`, which is asserted by
+# `tests/unit/test_import_boundaries.py`. Importing any of them to reach the
+# catalogue would drag a model SDK into the process that commands the worker,
+# which is the one thing the three-process split exists to prevent. The
+# catalogue lives in its own module precisely so this endpoint can read it
+# without doing that.
+
+
+async def _configuration(conn: DbConn) -> dict[str, Any]:
+    """
+    The catalogue, what is stored, and whether the two agree.
+
+    ``stored`` and ``effective`` are reported separately, the same way the
+    autonomy ceiling reports ``requested`` and ``effective``. They can differ in
+    one direction only: a stored value the runner refuses is reported as stored
+    with ``usable`` false, and never smoothed into a working default. A page
+    that renders a broken setting as though it were fine describes a programme
+    that is about to do nothing and cannot say why.
+    """
+    raw = {
+        key: await flags.get_flag(conn, key)
+        for key in programme_flags.SETTING_KEYS
+    }
+    rows = await conn.fetch(
+        "SELECT key, updated_by, updated_at FROM system_flags WHERE key = ANY($1)",
+        list(programme_flags.SETTING_KEYS),
+    )
+    provenance = {
+        r["key"]: {
+            "updated_by": r["updated_by"],
+            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        }
+        for r in rows
+    }
+
+    settings_problem = model_catalogue.settings_problem(
+        raw[programme_flags.PROGRAMME_PROVIDER],
+        raw[programme_flags.PROGRAMME_MODEL],
+        raw[programme_flags.PROGRAMME_EFFORT],
+        raw[programme_flags.PROGRAMME_MAX_TOKENS],
+    )
+    tick_problem = model_catalogue.tick_seconds_problem(
+        raw[programme_flags.PROGRAMME_TICK_SECONDS]
+    )
+
+    settings = None if settings_problem else await programme_flags.model_settings(conn)
+    payload = model_catalogue.catalogue()
+    payload["stored"] = {
+        "provider": raw[programme_flags.PROGRAMME_PROVIDER],
+        "model": raw[programme_flags.PROGRAMME_MODEL],
+        "effort": raw[programme_flags.PROGRAMME_EFFORT],
+        "max_tokens": raw[programme_flags.PROGRAMME_MAX_TOKENS],
+        "tick_seconds": raw[programme_flags.PROGRAMME_TICK_SECONDS],
+    }
+    payload["provenance"] = provenance
+    payload["settings_problem"] = settings_problem
+    payload["tick_problem"] = tick_problem
+    payload["usable"] = settings_problem is None
+    # Whether `output_config.effort` is actually sent. False for a model with no
+    # effort parameter, where sending one is a 400 — the stored value is kept
+    # for the day the model changes, and reporting it as though it were in
+    # effect would be the same lie as rendering an unmeasured metric as zero.
+    payload["effort_applies"] = bool(settings and settings.effort_applies)
+    # The API process does not hold ANTHROPIC_API_KEY and cannot see whether the
+    # programme process does. Saying so beats a "key: absent" pill that is
+    # really "this process would not know".
+    payload["api_key_visible_here"] = False
+    return payload
+
+
+@router.get("/configuration")
+async def get_configuration(
+    session: AuthedSession, conn: DbConn
+) -> dict[str, Any]:
+    """What the programme is pointed at, and everything it could be pointed at."""
+    return await _configuration(conn)
+
+
+@router.post("/configuration")
+async def set_configuration(
+    body: SystemConfigurationRequest, session: AuthedSession, conn: DbConn
+) -> dict[str, Any]:
+    """
+    Point the programme somewhere else.
+
+    Validated through the same functions the runner uses to read the row back,
+    so a value this endpoint accepts is a value the runner will act on. 422 with
+    the reason rather than a repaired value: an effort level the chosen model
+    does not accept is a 400 at the vendor, and finding that out on the next
+    tick, in a log, is worse than finding it out on the form.
+
+    The four model settings are written in one transaction. Half-applied, they
+    describe a request nobody chose — a new model with the old model's effort
+    level, which is exactly the combination that errors.
+    """
+    problem = model_catalogue.settings_problem(
+        body.provider, body.model, body.effort, body.max_tokens
+    )
+    if problem is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
+    tick_problem = model_catalogue.tick_seconds_problem(body.tick_seconds)
+    if tick_problem is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, tick_problem)
+
+    actor = f"operator:{session.subject}"
+    before = {
+        key: await flags.get_flag(conn, key)
+        for key in programme_flags.SETTING_KEYS
+    }
+    async with conn.transaction():
+        await flags.set_flag(
+            conn, programme_flags.PROGRAMME_PROVIDER, body.provider, actor
+        )
+        await flags.set_flag(conn, programme_flags.PROGRAMME_MODEL, body.model, actor)
+        await flags.set_flag(conn, programme_flags.PROGRAMME_EFFORT, body.effort, actor)
+        await flags.set_flag(
+            conn, programme_flags.PROGRAMME_MAX_TOKENS, body.max_tokens, actor
+        )
+        await flags.set_flag(
+            conn, programme_flags.PROGRAMME_TICK_SECONDS, body.tick_seconds, actor
+        )
+        await flags.record_audit(
+            conn,
+            actor=actor,
+            action="system_configuration_updated",
+            entity_type="system",
+            detail={"before": before, "after": body.model_dump()},
+        )
+    logger.warning(
+        "Programme configuration set by %s: provider=%s model=%s effort=%s "
+        "max_tokens=%s tick=%ss",
+        actor,
+        body.provider,
+        body.model,
+        body.effort,
+        body.max_tokens,
+        body.tick_seconds,
+    )
+    return await _configuration(conn)
 
 
 @router.api_route("/drain", methods=["GET", "POST"])

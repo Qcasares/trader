@@ -36,19 +36,15 @@ import asyncpg
 
 from src.config import get_settings, require_database_url
 from src.programme import repo
-from src.programme.client import DEFAULT_MODEL
-from src.programme.flags import PROGRAMME_WORKER_ID, programme_enabled
+from src.programme.flags import (
+    PROGRAMME_WORKER_ID,
+    model_settings,
+    programme_enabled,
+    tick_seconds,
+)
 from src.programme.tick import run_tick
 
 logger = logging.getLogger(__name__)
-
-#: How long between scheduled passes.
-#:
-#: Hourly because the work a pass can do is bounded by what the worker has
-#: finished since the last one, and a backtest takes minutes. Ticking every
-#: thirty seconds would mostly re-read rows that had not changed and pay a
-#: model call for the privilege.
-DEFAULT_TICK_INTERVAL_SECONDS = 3600.0
 
 #: How often liveness is written. Matches the worker's cadence, because the
 #: API's staleness threshold is a multiple of it and applies to both.
@@ -59,25 +55,11 @@ HEARTBEAT_INTERVAL_SECONDS = 15.0
 REQUEST_POLL_SECONDS = 5.0
 
 
-def tick_interval() -> float:
-    raw = os.environ.get("PROGRAMME_TICK_SECONDS", "").strip()
-    if not raw:
-        return DEFAULT_TICK_INTERVAL_SECONDS
-    try:
-        return max(60.0, float(raw))
-    except ValueError:
-        logger.warning(
-            "PROGRAMME_TICK_SECONDS is not a number (%r); using the default", raw
-        )
-        return DEFAULT_TICK_INTERVAL_SECONDS
-
-
 class Programme:
     """The loop. Claims a tick, runs it, records what it did."""
 
-    def __init__(self, dsn: str, model: str, api_key: str | None) -> None:
+    def __init__(self, dsn: str, api_key: str | None) -> None:
         self._dsn = dsn
-        self._model = model
         self._api_key = api_key
         self._pool: asyncpg.Pool | None = None
         self._stopping = asyncio.Event()
@@ -87,10 +69,9 @@ class Programme:
         require_database_url(get_settings())
         self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=4)
         logger.info(
-            "Programme process up (model=%s, key=%s, interval=%.0fs)",
-            self._model,
+            "Programme process up (key=%s); the model and the cadence are read "
+            "from the control plane on every pass",
             "set" if self._api_key else "absent",
-            tick_interval(),
         )
         heartbeat = asyncio.create_task(self._heartbeat_loop())
         try:
@@ -106,10 +87,15 @@ class Programme:
 
     async def _loop(self) -> None:
         assert self._pool is not None
-        interval = tick_interval()
         while not self._stopping.is_set():
             try:
                 async with self._pool.acquire() as conn:
+                    # Re-read every pass rather than once at startup. The
+                    # cadence is a spend control, and a control an operator can
+                    # only change by restarting the process is one they will
+                    # reach for last.
+                    interval = float(await tick_seconds(conn))
+
                     if not await programme_enabled(conn):
                         # Requested ticks are left in place rather than
                         # consumed, so enabling the programme runs the pass the
@@ -142,7 +128,12 @@ class Programme:
         if run_id is None:  # pragma: no cover - another runner took it
             return
         try:
-            report = await run_tick(conn, self._api_key, self._model)
+            # Read here rather than held on the instance, so an operator's
+            # change takes effect on the next pass instead of the next deploy.
+            # `model_settings` fails closed to None, and `run_tick` treats that
+            # as "do everything that does not need a model".
+            settings = await model_settings(conn)
+            report = await run_tick(conn, self._api_key, settings)
         except Exception as exc:  # noqa: BLE001 - recorded on the run row
             logger.exception("Tick %s failed", run_id)
             await repo.finish_tick(conn, run_id, [], status="failed", error=str(exc))
@@ -205,9 +196,7 @@ async def _amain() -> None:
             "experiments, evaluate gates and promote candidates; it will not "
             "propose new hypotheses."
         )
-    model = os.environ.get("PROGRAMME_MODEL", "").strip() or DEFAULT_MODEL
-
-    programme = Programme(settings.database_url, model, api_key)
+    programme = Programme(settings.database_url, api_key)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, programme.stop)

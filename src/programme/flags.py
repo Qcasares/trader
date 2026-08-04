@@ -25,11 +25,31 @@ import logging
 import asyncpg
 
 from src.db.repos import flags as flag_repo
+from src.programme import models
 
 logger = logging.getLogger(__name__)
 
 #: Seeded ``false`` by migration 0007.
 PROGRAMME_ENABLED = "programme_enabled"
+
+#: Which model the programme is pointed at, how hard it is asked to think, and
+#: the token ceiling on a reply. Seeded by migration 0010.
+PROGRAMME_PROVIDER = "programme_provider"
+PROGRAMME_MODEL = "programme_model"
+PROGRAMME_EFFORT = "programme_effort"
+PROGRAMME_MAX_TOKENS = "programme_max_tokens"
+
+#: How long between scheduled passes. Seeded by migration 0010.
+PROGRAMME_TICK_SECONDS = "programme_tick_seconds"
+
+#: Every key this module owns, in the order the configuration page renders them.
+SETTING_KEYS = (
+    PROGRAMME_PROVIDER,
+    PROGRAMME_MODEL,
+    PROGRAMME_EFFORT,
+    PROGRAMME_MAX_TOKENS,
+    PROGRAMME_TICK_SECONDS,
+)
 
 #: How far the runner may promote without an operator. Seeded ``0`` by
 #: migration 0008.
@@ -100,3 +120,77 @@ async def max_auto_stage(conn: asyncpg.Connection) -> int:
             )
         return NO_AUTOMATIC_PROMOTION
     return max(NO_AUTOMATIC_PROMOTION, min(int(value), ceiling))
+
+
+async def model_settings(conn: asyncpg.Connection) -> models.ModelSettings | None:
+    """
+    What the programme should send, or ``None`` if that cannot be established.
+
+    ``None`` means **make no model call**, and that is the fail-closed direction
+    here rather than an obvious one, so it is worth stating why. The tempting
+    alternative is to fall back to the module defaults on an unreadable row. But
+    the runner is not paralysed without a model: reconciliation, gate evaluation
+    and promotion all run without one, and a tick that does them and records
+    that it could not reach a model is a correct tick. Substituting a default
+    instead spends money at a vendor under a configuration nobody chose, and
+    writes the result into the ledger as though somebody had. Between "do less"
+    and "spend under a guess", the control has to pick the first.
+
+    A missing row is treated the same way. Migration 0010 seeds all four, so an
+    absent one means something removed it, and inventing a replacement is how a
+    deleted setting stops looking like a deleted setting.
+    """
+    try:
+        stored = {
+            key: await flag_repo.get_flag(conn, key)
+            for key in (
+                PROGRAMME_PROVIDER,
+                PROGRAMME_MODEL,
+                PROGRAMME_EFFORT,
+                PROGRAMME_MAX_TOKENS,
+            )
+        }
+    except Exception as exc:  # noqa: BLE001 - deliberately broad; see docstring
+        logger.error("Cannot read the model settings (%s); no model call", exc)
+        return None
+
+    problem = models.settings_problem(
+        stored[PROGRAMME_PROVIDER],
+        stored[PROGRAMME_MODEL],
+        stored[PROGRAMME_EFFORT],
+        stored[PROGRAMME_MAX_TOKENS],
+    )
+    if problem is not None:
+        logger.error("Model settings are unusable (%s); no model call", problem)
+        return None
+    return models.build_settings(
+        stored[PROGRAMME_PROVIDER],
+        stored[PROGRAMME_MODEL],
+        stored[PROGRAMME_EFFORT],
+        stored[PROGRAMME_MAX_TOKENS],
+    )
+
+
+async def tick_seconds(conn: asyncpg.Connection) -> int:
+    """
+    How long between scheduled passes.
+
+    Falls back to the documented default rather than to zero, because this one
+    is not a safety control in the same direction as the others: an unreadable
+    value that halted the loop would take the programme down over a setting,
+    while an unreadable value that ticks hourly costs at most one pass an hour
+    — and every pass is still gated by ``programme_enabled`` and by
+    ``model_settings`` above, both of which fail closed. Failing *slow* is the
+    conservative direction for a cadence.
+    """
+    try:
+        value = await flag_repo.get_flag(conn, PROGRAMME_TICK_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad; see docstring
+        logger.error("Cannot read the tick interval (%s); using the default", exc)
+        return models.DEFAULT_TICK_SECONDS
+
+    problem = models.tick_seconds_problem(value)
+    if problem is not None:
+        logger.error("Tick interval is unusable (%s); using the default", problem)
+        return models.DEFAULT_TICK_SECONDS
+    return int(value)

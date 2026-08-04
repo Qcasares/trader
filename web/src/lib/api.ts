@@ -604,6 +604,81 @@ export interface PipelineBoard {
   candidates: Candidate[];
 }
 
+/** A route to a model, and whether this deployment can actually take it. */
+export interface ProviderChoice {
+  key: string;
+  title: string;
+  available: boolean;
+  /** Why it is unavailable and what taking it would require. Empty when it is. */
+  note: string;
+}
+
+export interface ModelChoice {
+  id: string;
+  title: string;
+  provider: string;
+  /**
+   * The effort levels this model accepts. **Empty means the model has no
+   * effort parameter at all**, and sending one is a 400 — which is why this is
+   * a property of the model rather than one global list.
+   */
+  efforts: string[];
+  max_output: number;
+  input_usd_per_mtok: number;
+  output_usd_per_mtok: number;
+  note: string;
+}
+
+/**
+ * What the programme is pointed at, and everything it could be pointed at.
+ *
+ * `stored` is typed `unknown` on purpose. These are rows, and a row can hold
+ * something the runner refuses — that is the case `settings_problem` exists to
+ * describe. Typing them as `string` would make the page render a broken value
+ * as a working one, which is the failure the endpoint is built to expose.
+ */
+export interface SystemConfiguration {
+  providers: ProviderChoice[];
+  models: ModelChoice[];
+  efforts: string[];
+  /** Prices are a dated fact. Rendered with the figures, never without. */
+  prices_as_of: string;
+  limits: {
+    min_max_tokens: number;
+    min_tick_seconds: number;
+    max_tick_seconds: number;
+  };
+  defaults: SystemConfigurationBody;
+  stored: {
+    provider: unknown;
+    model: unknown;
+    effort: unknown;
+    max_tokens: unknown;
+    tick_seconds: unknown;
+  };
+  provenance: Record<string, { updated_by: string; updated_at: string | null }>;
+  /** Null when the stored settings are usable; a sentence when they are not. */
+  settings_problem: string | null;
+  tick_problem: string | null;
+  usable: boolean;
+  /** Whether `output_config.effort` is actually sent for the chosen model. */
+  effort_applies: boolean;
+  /**
+   * Always false. The API process does not hold ANTHROPIC_API_KEY and cannot
+   * see whether the programme process does, so it says so rather than
+   * rendering a pill that really means "this process would not know".
+   */
+  api_key_visible_here: boolean;
+}
+
+export interface SystemConfigurationBody {
+  provider: string;
+  model: string;
+  effort: string;
+  max_tokens: number;
+  tick_seconds: number;
+}
+
 // ---------------------------------------------------------------------------
 // Calls
 // ---------------------------------------------------------------------------
@@ -669,6 +744,23 @@ export const api = {
 
   jobs: (status?: string) =>
     request<JobSummary[]>(`/api/v1/system/jobs${status ? `?status=${status}` : ""}`),
+
+  systemConfiguration: () =>
+    request<SystemConfiguration>("/api/v1/system/configuration"),
+
+  /**
+   * All five settings, always together.
+   *
+   * There is no partial update, and that is the API's shape rather than this
+   * client's convenience: whether an effort level is legal depends on which
+   * model is chosen, so the settings have to be validated as a set. Sent as
+   * POST rather than PUT for the CORS reason noted below.
+   */
+  setSystemConfiguration: (body: SystemConfigurationBody) =>
+    request<SystemConfiguration>("/api/v1/system/configuration", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /**
    * Ask the API to run queued research jobs itself.
