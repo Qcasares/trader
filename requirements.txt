@@ -22,6 +22,12 @@ asyncpg>=0.29.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 bcrypt>=4.1.0
+
+# Encrypts operator-set credentials in the `secrets` table (src/crypto.py).
+# Required, not optional: Python's standard library has hashing but no
+# authenticated cipher, so there is no stdlib route to storing a credential
+# encrypted, and hand-rolling one is not a route at all.
+cryptography>=42.0.0
 python-dotenv>=1.0.0
 
 # Research-only price history. Never on the live path.

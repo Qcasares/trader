@@ -35,6 +35,7 @@ import {
   type SystemConfigurationBody,
 } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { SecretField } from "@/components/SecretField";
 
 /** Money, at the precision a per-call figure actually carries. */
 function usd(value: number): string {
@@ -444,6 +445,38 @@ export default function SystemConfigurationPage() {
 
       <section className="card">
         <div className="card-head">
+          <h2>Credentials</h2>
+        </div>
+        <p className="muted">
+          Stored encrypted, and never readable back. There is no endpoint that
+          returns a credential, so the most this page can ever show is that one
+          is set and which one it is. The fingerprint answers &quot;is this the
+          key I think it is&quot; without being any part of the key.
+        </p>
+        {config.secrets_key_problem ? (
+          <p className="banner banner-warn">
+            <strong>This deployment cannot store a credential.</strong>{" "}
+            {config.secrets_key_problem}. Generate one with{" "}
+            <code>python -m src.db.secrets_cli keygen</code> and set it as{" "}
+            <code>SECRETS_KEY</code> for the API and the programme — and not for
+            the worker, which holds the broker credentials and must not be able
+            to decrypt a model key. Until then the programme falls back to
+            <code> ANTHROPIC_API_KEY</code> from its own environment, which is
+            how this worked before.
+          </p>
+        ) : null}
+        {config.secrets.map((secret) => (
+          <SecretField
+            key={secret.name}
+            secret={secret}
+            disabled={config.secrets_key_problem !== null}
+            onChanged={() => void refresh()}
+          />
+        ))}
+      </section>
+
+      <section className="card">
+        <div className="card-head">
           <h2>The other controls</h2>
         </div>
         <p className="muted">
@@ -469,22 +502,7 @@ export default function SystemConfigurationPage() {
               <Link href="/programme/config">Programme configuration</Link>
             </dd>
           </div>
-          <div className="assumption-row">
-            <dt>Model API key</dt>
-            <dd>
-              {config.api_key_visible_here
-                ? "visible here"
-                : "not visible from here"}
-            </dd>
-          </div>
         </dl>
-        <p className="muted">
-          The key is an environment variable of the programme process, which is
-          the only one permitted to hold a model client. This page is served by
-          the API process, which does not have it and cannot tell whether the
-          programme does — so it says that, rather than showing a pill that
-          really means &quot;this process would not know&quot;.
-        </p>
       </section>
     </>
   );

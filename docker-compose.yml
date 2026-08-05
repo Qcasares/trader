@@ -90,6 +90,20 @@ services:
       LIVE_TRADING_ENABLED: "false"
       ALPACA_ALLOW_LIVE: "false"
       WORKER_ID: worker-1
+      # Blanked on purpose, overriding whatever `.env` holds.
+      #
+      # This process holds the broker credentials and is the only one that
+      # submits an order. It can also read every row in the database, including
+      # the encrypted `secrets` table — so the only thing between it and a model
+      # credential is not holding the key that decrypts one. Without these two
+      # lines it inherits both from the shared env_file, and the separation is a
+      # comment rather than a fact.
+      #
+      # The same boundary tests/unit/test_import_boundaries.py enforces on
+      # imports, expressed in which process holds which key. Asserted by
+      # tests/unit/test_secret_isolation.py against this file.
+      SECRETS_KEY: ""
+      ANTHROPIC_API_KEY: ""
     depends_on:
       db:
         condition: service_healthy

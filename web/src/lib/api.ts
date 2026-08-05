@@ -664,11 +664,31 @@ export interface SystemConfiguration {
   /** Whether `output_config.effort` is actually sent for the chosen model. */
   effort_applies: boolean;
   /**
-   * Always false. The API process does not hold ANTHROPIC_API_KEY and cannot
-   * see whether the programme process does, so it says so rather than
-   * rendering a pill that really means "this process would not know".
+   * Which credentials are stored, and which key each one is — never the value.
+   * There is no endpoint that returns a secret, so this is the most the browser
+   * can ever learn about one.
    */
-  api_key_visible_here: boolean;
+  secrets: SecretDescription[];
+  /**
+   * Why this deployment cannot store a secret, or null if it can. Reported up
+   * front rather than discovered on save: a form that accepts a credential and
+   * then refuses it has already had the operator paste the credential.
+   */
+  secrets_key_problem: string | null;
+}
+
+/** What a stored secret is, without what it is. */
+export interface SecretDescription {
+  name: string;
+  configured: boolean;
+  /**
+   * A truncated digest of the plaintext. Enough to answer "is the key here the
+   * one I think it is", useless to anyone who has it, and deliberately not the
+   * last four characters of the credential.
+   */
+  fingerprint: string | null;
+  updated_by: string | null;
+  updated_at: string | null;
 }
 
 export interface SystemConfigurationBody {
@@ -744,6 +764,24 @@ export const api = {
 
   jobs: (status?: string) =>
     request<JobSummary[]>(`/api/v1/system/jobs${status ? `?status=${status}` : ""}`),
+
+  /**
+   * Store a credential. There is deliberately no `getSecret`.
+   *
+   * The response is a description — configured, fingerprint, who, when — and
+   * never the value. Nothing in this client can read a secret back, because
+   * nothing in the API can.
+   */
+  setSecret: (name: string, value: string) =>
+    request<SecretDescription>(`/api/v1/system/secrets/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ value }),
+    }),
+
+  clearSecret: (name: string) =>
+    request<SecretDescription>(`/api/v1/system/secrets/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
 
   systemConfiguration: () =>
     request<SystemConfiguration>("/api/v1/system/configuration"),

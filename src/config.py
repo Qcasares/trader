@@ -311,6 +311,20 @@ class Settings:
     #: endpoint without an operator session. Empty disables that route in.
     cron_secret: str = ""
 
+    #: Key that encrypts operator-set credentials in the `secrets` table.
+    #:
+    #: Held by the API, which writes them, and by the programme, which uses
+    #: them. Deliberately **withheld from the worker**: that process holds the
+    #: broker credentials and submits orders, so it is the one component that
+    #: must not be able to read a model key even though it can read every row in
+    #: the database. Without this it sees ciphertext and can do nothing with it.
+    #:
+    #: Empty is a supported state, not a broken one. Nothing can be set from the
+    #: UI without it, and the programme falls back to ANTHROPIC_API_KEY from the
+    #: environment — which is how every deployment worked before the vault
+    #: existed and must keep working after it.
+    secrets_key: str = ""
+
     #: Connection pool bounds.
     #:
     #: The default suits a long-lived process: one pool, reused for the life of
@@ -406,6 +420,7 @@ def get_settings() -> Settings:
         worker_id=os.environ.get("WORKER_ID", "worker-1"),
         serverless_drain_enabled=_bool_env("SERVERLESS_DRAIN_ENABLED", False),
         cron_secret=os.environ.get("CRON_SECRET", "").strip(),
+        secrets_key=os.environ.get("SECRETS_KEY", "").strip(),
         db_pool_min_size=_int_env("DB_POOL_MIN_SIZE", 1),
         db_pool_max_size=_int_env("DB_POOL_MAX_SIZE", 10),
         alpaca_key_id=os.environ.get("ALPACA_KEY_ID", ""),

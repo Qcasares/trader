@@ -35,6 +35,7 @@ import socket
 import asyncpg
 
 from src.config import get_settings, require_database_url
+from src.db.repos import secrets as secret_repo
 from src.programme import repo
 from src.programme.flags import (
     PROGRAMME_WORKER_ID,
@@ -58,9 +59,10 @@ REQUEST_POLL_SECONDS = 5.0
 class Programme:
     """The loop. Claims a tick, runs it, records what it did."""
 
-    def __init__(self, dsn: str, api_key: str | None) -> None:
+    def __init__(self, dsn: str, api_key: str | None, secrets_key: str) -> None:
         self._dsn = dsn
         self._api_key = api_key
+        self._secrets_key = secrets_key
         self._pool: asyncpg.Pool | None = None
         self._stopping = asyncio.Event()
         self._last_scheduled = 0.0
@@ -133,7 +135,8 @@ class Programme:
             # `model_settings` fails closed to None, and `run_tick` treats that
             # as "do everything that does not need a model".
             settings = await model_settings(conn)
-            report = await run_tick(conn, self._api_key, settings)
+            api_key = await self._resolve_api_key(conn)
+            report = await run_tick(conn, api_key, settings)
         except Exception as exc:  # noqa: BLE001 - recorded on the run row
             logger.exception("Tick %s failed", run_id)
             await repo.finish_tick(conn, run_id, [], status="failed", error=str(exc))
@@ -142,6 +145,30 @@ class Programme:
             conn, run_id, report.actions, model=report.model_used
         )
         logger.info("Tick %s finished with %d actions", run_id, len(report.actions))
+
+    async def _resolve_api_key(self, conn: asyncpg.Connection) -> str | None:
+        """
+        The model credential: the vault first, the environment second.
+
+        Read per pass rather than held on the instance, so setting the key in
+        the UI takes effect on the next tick instead of the next restart. That
+        is the point of putting it in the control plane at all.
+
+        The environment remains a fallback rather than being removed, because
+        every deployment that existed before the vault used it and none of them
+        should break on upgrade. The order is vault-then-environment because the
+        vault is the one an operator can see and change; a stale `.env` silently
+        overriding what the UI displays would make the page a liar.
+
+        Both absent is a supported state. The runner reconciles experiments,
+        evaluates gates and promotes candidates without a model, and says so.
+        """
+        from_vault = await secret_repo.get(
+            conn, secret_repo.ANTHROPIC_API_KEY, self._secrets_key
+        )
+        if from_vault:
+            return from_vault
+        return self._api_key
 
     async def _wait(self, seconds: float) -> None:
         try:
@@ -196,7 +223,7 @@ async def _amain() -> None:
             "experiments, evaluate gates and promote candidates; it will not "
             "propose new hypotheses."
         )
-    programme = Programme(settings.database_url, api_key)
+    programme = Programme(settings.database_url, api_key, settings.secrets_key)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, programme.stop)
