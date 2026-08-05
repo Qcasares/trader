@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+playwright-report/
+# Screenshots this suite takes of the live site. Useful to look at, never worth
+# committing: they change on every palette tweak and prove nothing a failing
+# assertion does not already say.
+shots/
