@@ -96,3 +96,56 @@ class TestTheWorkerCannotDecryptASecret:
             f"{service} needs SECRETS_KEY: the API encrypts with it and the "
             "programme decrypts with it. Blanking it here disables the vault."
         )
+
+
+class TestTheSameSeparationWhereTheseActuallyRun:
+    """
+    The compose file above is how this system runs locally. In the deployment it
+    is two GitHub Actions workflows and a Vercel function, and the assertions
+    above say nothing about any of them — so the guarantee held exactly where it
+    was cheapest to check and nowhere that mattered.
+
+    The mechanism differs. Compose services share `env_file: .env`, so isolation
+    there has to be an explicit blank. A workflow job inherits nothing, so
+    absence *is* isolation. What survives translation is the rule, not the
+    override: the job that submits orders must not name this key, and the job
+    that reads the vault must.
+    """
+
+    WORKER = ROOT / ".github/workflows/worker.yml"
+    PROGRAMME = ROOT / ".github/workflows/programme.yml"
+
+    def test_the_scan_finds_the_workflows(self) -> None:
+        for path in (self.WORKER, self.PROGRAMME):
+            assert path.exists(), path
+
+    @pytest.mark.parametrize("name", ["SECRETS_KEY", "ANTHROPIC_API_KEY"])
+    def test_the_worker_job_names_neither_key(self, name: str) -> None:
+        """
+        Matched anywhere in the file, not only in an `env:` block. A step that
+        exported one into `$GITHUB_ENV`, or a `secrets:` passed to a reusable
+        workflow, would put it in the process just as effectively.
+        """
+        assert name not in self.WORKER.read_text(encoding="utf-8"), (
+            f"worker.yml must not mention {name}. That job holds the broker "
+            "credentials and is the only thing here that submits an order. It "
+            "can already read every row in the database, so the key is the only "
+            "thing stopping it reading a model credential."
+        )
+
+    def test_the_programme_job_carries_the_decryption_key(self) -> None:
+        """
+        The other direction, for the same reason as the compose test above: a
+        change that removed the key everywhere would pass every prohibition here
+        while quietly making the UI's vault unreadable by the one process that
+        needs it.
+        """
+        assert re.search(
+            r"^\s+SECRETS_KEY:\s*\$\{\{\s*secrets\.SECRETS_KEY\s*\}\}\s*$",
+            self.PROGRAMME.read_text(encoding="utf-8"),
+            re.M,
+        ), (
+            "programme.yml must pass SECRETS_KEY through. Without it the "
+            "credential an operator sets from the UI is stored and never read, "
+            "and the runner silently falls back to the environment."
+        )

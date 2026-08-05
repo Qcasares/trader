@@ -74,6 +74,17 @@ jobs:
           # promotes candidates and queues shadow sessions; it simply proposes
           # no new hypotheses and convenes no panel.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Decrypts the model credential an operator set from the UI. The
+          # runner reads the vault first and this environment variable second,
+          # so without the key the row in `secrets` is unreadable and the
+          # fallback above is all there is.
+          #
+          # Deliberately absent from `worker.yml`. That job holds the broker
+          # credentials and is the only thing here that submits an order; it can
+          # read every row in the database, so the key is what stops it reading
+          # a model credential. `tests/unit/test_secret_isolation.py` asserts
+          # both directions against these files.
+          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
           # Recorded on every experiment row, so a result can be reproduced
           # from the commit that produced it.
           GIT_COMMIT: ${{ github.sha }}
