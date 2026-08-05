@@ -3,6 +3,10 @@
 .env.local
 .env.production
 
+# Neon CLI workspace link: project and branch IDs, written by `neon link` /
+# `neon checkout`. Local state, and the Neon skill documents it as ignored.
+.neon
+
 # Python
 __pycache__/
 *.py[cod]
