@@ -13,6 +13,13 @@
  * everything. And the sections the system cannot produce are listed with their
  * reason rather than dropped, because a report showing only what it can
  * measure reads as complete.
+ *
+ * Rebuilt on shadcn primitives. `.metric-grid`, `.assumptions` and `.banner`
+ * are kept verbatim — they are tuned, and a report page is exactly the density
+ * they were built for. What changed is every place a status used to be a
+ * legacy `.pill`: worker liveness now goes through the same `StatusBadge` and
+ * `livenessStatus` helper the system page uses, so a stale worker reads the
+ * same colour on both pages rather than each page inventing its own amber.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -20,6 +27,18 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, fmtUsd, type DailyReport } from "@/lib/api";
 import { SkeletonMetrics } from "@/components/Skeleton";
+import { StatusBadge, livenessStatus } from "@/components/StatusBadge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 /** A figure, or the words that say it does not exist. Never a zero stand-in. */
 function Figure({
@@ -32,9 +51,31 @@ function Figure({
   suffix?: string;
 }) {
   if (value === null || value === undefined) {
-    return <span className="muted">no data</span>;
+    return <span className="no-data">no data</span>;
   }
-  return <>{money ? fmtUsd(value) : value.toLocaleString()}{suffix}</>;
+  return (
+    <>
+      {money ? fmtUsd(value) : value.toLocaleString()}
+      {suffix}
+    </>
+  );
+}
+
+/** Heartbeat age, in the largest unit that still reads as a number. */
+/**
+ * A heartbeat age.
+ *
+ * The unreachable branch returns the page's own absence marker rather than a
+ * bare dash: this renders in a right-aligned column, where a dash sits in the
+ * minus-sign position. `age_seconds` is non-nullable in the API contract so the
+ * branch should never fire, which is exactly why it must not be the one place
+ * that quietly disagrees with the convention if it ever does.
+ */
+function fmtAge(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "no data";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
 }
 
 export default function DailyReportPage() {
@@ -65,29 +106,38 @@ export default function DailyReportPage() {
 
   return (
     <>
-      <p className="muted">
-        <Link href="/programme">← Programme</Link>
-      </p>
-      <h1>Daily report</h1>
-      <p className="subtitle">
-        Assembled from rows. Nothing on this page was written by a model, and no
-        figure that does not exist is shown as zero.
-      </p>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <Link
+            href="/programme"
+            className="mb-1 block text-sm text-ink-muted hover:text-ink"
+          >
+            ← Programme
+          </Link>
+          <h1 className="mb-1">Daily report</h1>
+          <p className="m-0 text-base text-ink-muted text-pretty">
+            Assembled from rows. Nothing on this page was written by a model,
+            and no figure that does not exist is shown as zero.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="on" className="text-ink-muted">
+            Session
+          </Label>
+          <Input
+            id="on"
+            type="date"
+            value={on}
+            onChange={(e) => setOn(e.target.value)}
+            className="h-8 w-auto"
+          />
+          <span className="font-mono text-sm text-ink-muted">
+            {report.session}
+          </span>
+        </div>
+      </div>
 
       {error ? <p className="banner banner-bad">{error}</p> : null}
-
-      <div className="row">
-        <label htmlFor="on" className="muted">
-          Session
-        </label>
-        <input
-          id="on"
-          type="date"
-          value={on}
-          onChange={(e) => setOn(e.target.value)}
-        />
-        <span className="muted mono">{report.session}</span>
-      </div>
 
       {report.required_actions.length > 0 ? (
         <div className="banner banner-warn">
@@ -100,175 +150,222 @@ export default function DailyReportPage() {
         </div>
       ) : (
         <p className="banner banner-info">
-          Nothing crossed a threshold today. That is not the same as everything
-          being well — the sections below say what is actually known.
+          Nothing crossed a threshold today. That is not the same as
+          everything being well — the sections below say what is actually
+          known.
         </p>
       )}
 
-      <section className="card">
-        <div className="card-head">
-          <h2>Portfolio</h2>
-        </div>
-        {report.portfolio.note ? (
-          <p className="muted">{report.portfolio.note}</p>
-        ) : null}
-        <dl className="metric-grid">
-          <div className="metric">
-            <dt>Equity</dt>
-            <dd>
-              <Figure value={report.portfolio.equity} money />
-            </dd>
-          </div>
-          <div className="metric">
-            <dt>Cash</dt>
-            <dd>
-              <Figure value={report.portfolio.cash} money />
-            </dd>
-          </div>
-          <div className="metric">
-            <dt>Daily P&amp;L</dt>
-            <dd>
-              <Figure value={report.portfolio.daily_pnl} money />
-            </dd>
-          </div>
-          <div className="metric">
-            <dt>Cumulative P&amp;L</dt>
-            <dd>
-              <Figure value={report.portfolio.cumulative_pnl} money />
-            </dd>
-          </div>
-          <div className="metric">
-            <dt>Drawdown</dt>
-            <dd>
-              <Figure value={report.portfolio.drawdown_pct} suffix="%" />
-            </dd>
-          </div>
-          <div className="metric">
-            <dt>As of</dt>
-            <dd>{report.portfolio.as_of ?? <span className="muted">no data</span>}</dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="card">
-        <div className="card-head spread">
-          <h2>Programme</h2>
-          <span
-            className={
-              report.programme.severe_findings > 0
-                ? "pill pill-warn"
-                : "pill pill-mute"
-            }
-          >
-            {report.programme.open_findings} open finding
-            {report.programme.open_findings === 1 ? "" : "s"}
-          </span>
-        </div>
-        <dl className="metric-grid">
-          {Object.entries(report.programme.by_stage).map(([stage, count]) => (
-            <div className="metric" key={stage}>
-              <dt>Stage {stage}</dt>
-              <dd>{count}</dd>
+      <Card>
+        <CardHeader>
+          <CardTitle>Portfolio</CardTitle>
+          {report.portfolio.note ? (
+            <p className="m-0 text-sm text-ink-muted text-pretty">
+              {report.portfolio.note}
+            </p>
+          ) : null}
+        </CardHeader>
+        <CardContent>
+          <dl className="metric-grid">
+            <div className="metric">
+              <dt>Equity</dt>
+              <dd>
+                <Figure value={report.portfolio.equity} money />
+              </dd>
             </div>
-          ))}
-        </dl>
-        {report.programme.promotions_today.length > 0 ? (
-          <p>
-            Promoted today:{" "}
-            {report.programme.promotions_today
-              .map((p) => `stage ${p.to_stage} by ${p.approved_by}`)
-              .join(", ")}
+            <div className="metric">
+              <dt>Cash</dt>
+              <dd>
+                <Figure value={report.portfolio.cash} money />
+              </dd>
+            </div>
+            <div className="metric">
+              <dt>Daily P&amp;L</dt>
+              <dd>
+                <Figure value={report.portfolio.daily_pnl} money />
+              </dd>
+            </div>
+            <div className="metric">
+              <dt>Cumulative P&amp;L</dt>
+              <dd>
+                <Figure value={report.portfolio.cumulative_pnl} money />
+              </dd>
+            </div>
+            <div className="metric">
+              <dt>Drawdown</dt>
+              <dd>
+                <Figure value={report.portfolio.drawdown_pct} suffix="%" />
+              </dd>
+            </div>
+            <div className="metric">
+              <dt>As of</dt>
+              <dd>
+                {report.portfolio.as_of ?? (
+                  <span className="no-data">no data</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            Programme
+            <StatusBadge
+              status={
+                report.programme.severe_findings > 0
+                  ? "blocked"
+                  : report.programme.open_findings > 0
+                    ? "mute"
+                    : "settled"
+              }
+            >
+              {report.programme.open_findings} open finding
+              {report.programme.open_findings === 1 ? "" : "s"}
+            </StatusBadge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="metric-grid">
+            {Object.entries(report.programme.by_stage).map(
+              ([stage, count]) => (
+                <div className="metric" key={stage}>
+                  <dt>Stage {stage}</dt>
+                  <dd>{count}</dd>
+                </div>
+              ),
+            )}
+          </dl>
+          {report.programme.promotions_today.length > 0 ? (
+            <p className="m-0">
+              Promoted today:{" "}
+              {report.programme.promotions_today
+                .map((p) => `stage ${p.to_stage} by ${p.approved_by}`)
+                .join(", ")}
+            </p>
+          ) : (
+            <p className="m-0 text-ink-muted">No promotions today.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Operations</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="metric-grid">
+            <div className="metric">
+              <dt>Decisions</dt>
+              <dd>{report.operations.decisions}</dd>
+            </div>
+            <div className="metric">
+              <dt>Orders submitted</dt>
+              <dd>{report.operations.orders_submitted}</dd>
+            </div>
+            <div className="metric">
+              <dt>Shadow sessions</dt>
+              <dd>{report.operations.shadow_sessions}</dd>
+            </div>
+            <div className="metric">
+              <dt>Shadow failures</dt>
+              <dd>{report.operations.shadow_failures}</dd>
+            </div>
+          </dl>
+          {report.operations.workers.length === 0 ? (
+            <p className="m-0 text-ink-muted">
+              No process has ever reported a heartbeat.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Worker</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Age</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {report.operations.workers.map((worker) => (
+                  <TableRow key={worker.worker_id}>
+                    <TableCell className="font-mono">
+                      {worker.worker_id}
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={livenessStatus(worker.stale)}>
+                        {worker.stale ? "stale" : "alive"}
+                      </StatusBadge>
+                    </TableCell>
+                    <TableCell className="text-right font-mono tabular-nums">
+                      {fmtAge(worker.age_seconds)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Data health</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {report.data_health.note ? (
+            <p className="banner banner-warn">{report.data_health.note}</p>
+          ) : null}
+          <dl className="metric-grid">
+            <div className="metric">
+              <dt>Symbols</dt>
+              <dd>{report.data_health.symbols}</dd>
+            </div>
+            <div className="metric">
+              <dt>Bars</dt>
+              <dd>{report.data_health.rows.toLocaleString()}</dd>
+            </div>
+            <div className="metric">
+              <dt>Latest session</dt>
+              <dd>
+                {report.data_health.latest_session ?? (
+                  <span className="no-data">none ingested</span>
+                )}
+              </dd>
+            </div>
+            <div className="metric">
+              <dt>Days behind</dt>
+              <dd>
+                <Figure value={report.data_health.sessions_behind} />
+              </dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Sections this system cannot produce</CardTitle>
+          <p className="m-0 text-sm text-ink-muted text-pretty">
+            Listed rather than dropped. A report showing only what it can
+            measure reads as complete, and an operator seeing no execution
+            section would reasonably assume execution was clean.
           </p>
-        ) : (
-          <p className="muted">No promotions today.</p>
-        )}
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>Operations</h2>
-        </div>
-        <dl className="metric-grid">
-          <div className="metric">
-            <dt>Decisions</dt>
-            <dd>{report.operations.decisions}</dd>
-          </div>
-          <div className="metric">
-            <dt>Orders submitted</dt>
-            <dd>{report.operations.orders_submitted}</dd>
-          </div>
-          <div className="metric">
-            <dt>Shadow sessions</dt>
-            <dd>{report.operations.shadow_sessions}</dd>
-          </div>
-          <div className="metric">
-            <dt>Shadow failures</dt>
-            <dd>{report.operations.shadow_failures}</dd>
-          </div>
-        </dl>
-        {report.operations.workers.length === 0 ? (
-          <p className="muted">No process has ever reported a heartbeat.</p>
-        ) : (
-          <ul>
-            {report.operations.workers.map((worker) => (
-              <li key={worker.worker_id}>
-                <span className="mono">{worker.worker_id}</span>{" "}
-                <span className={worker.stale ? "pill pill-bad" : "pill pill-good"}>
-                  {worker.stale ? "stale" : "alive"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>Data health</h2>
-        </div>
-        {report.data_health.note ? (
-          <p className="banner banner-warn">{report.data_health.note}</p>
-        ) : null}
-        <dl className="metric-grid">
-          <div className="metric">
-            <dt>Symbols</dt>
-            <dd>{report.data_health.symbols}</dd>
-          </div>
-          <div className="metric">
-            <dt>Bars</dt>
-            <dd>{report.data_health.rows.toLocaleString()}</dd>
-          </div>
-          <div className="metric">
-            <dt>Latest session</dt>
-            <dd>{report.data_health.latest_session ?? <span className="muted">none ingested</span>}</dd>
-          </div>
-          <div className="metric">
-            <dt>Days behind</dt>
-            <dd>
-              <Figure value={report.data_health.sessions_behind} />
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>Sections this system cannot produce</h2>
-        </div>
-        <p className="muted">
-          Listed rather than dropped. A report showing only what it can measure
-          reads as complete, and an operator seeing no execution section would
-          reasonably assume execution was clean.
-        </p>
-        <dl className="assumptions">
-          {Object.entries(report.unavailable_sections).map(([name, reason]) => (
-            <div className="assumption-row" key={name}>
-              <dt className="mono">{name}</dt>
-              <dd className="muted">{reason}</dd>
-            </div>
-          ))}
-        </dl>
-      </section>
+        </CardHeader>
+        <CardContent>
+          <dl className="assumptions">
+            {Object.entries(report.unavailable_sections).map(
+              ([name, reason]) => (
+                <div className="assumption-row" key={name}>
+                  <dt className="mono">{name}</dt>
+                  <dd className="text-ink-muted">{reason}</dd>
+                </div>
+              ),
+            )}
+          </dl>
+        </CardContent>
+      </Card>
     </>
   );
 }

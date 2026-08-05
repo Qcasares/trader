@@ -11,47 +11,80 @@
  * Critical unknowns are separated from the rest because the prompt asks for
  * exactly that separation: an absent reporting timezone should not block useful
  * work, and an absent maximum drawdown should.
+ *
+ * Rebuilt on shadcn primitives, one change beyond the markup: TBD now reads as
+ * `StatusBadge status="unknown"` everywhere, critical or not. The legacy page
+ * dimmed a non-critical TBD to a grey "mute" pill — the same neutral-grey
+ * treatment the rest of this migration exists to remove, because "not
+ * measured" told quietly is still the same lie. Which section a key sits in
+ * already carries how much a gap matters; the badge only needs to say whether
+ * one exists.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, api, type ProgrammeConfig } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type ProgrammeConfig,
+  type ProgrammeConfigItem,
+} from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { StatusBadge } from "@/components/StatusBadge";
+import { DataTable, type Column } from "@/components/DataTable";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
-function ConfigRow({
-  item,
-  draft,
-  onChange,
-}: {
-  item: ProgrammeConfig["items"][number];
-  draft: string | undefined;
-  onChange: (key: string, value: string) => void;
-}) {
-  const current = draft ?? item.value ?? "";
-  return (
-    <tr>
-      <td className="mono">{item.key}</td>
-      <td>
-        <input
-          type="text"
-          value={current}
+/** Shared by the critical and the everything-else table, so both sort and filter the same way. */
+function configColumns(
+  draft: Record<string, string>,
+  onChange: (key: string, value: string) => void,
+): Column<ProgrammeConfigItem>[] {
+  return [
+    {
+      id: "key",
+      header: "Key",
+      sortable: true,
+      sortValue: (item) => item.key,
+      className: "font-mono whitespace-nowrap",
+      cell: (item) => item.key,
+    },
+    {
+      id: "value",
+      header: "Value",
+      className: "min-w-[18ch]",
+      cell: (item) => (
+        <Input
+          value={draft[item.key] ?? item.value ?? ""}
           placeholder="TBD"
           onChange={(e) => onChange(item.key, e.target.value)}
           aria-label={item.key}
+          className="h-8"
         />
-      </td>
-      <td>
-        {item.value === null ? (
-          <span className={item.is_critical ? "pill pill-unknown" : "pill pill-mute"}>
-            TBD
-          </span>
+      ),
+    },
+    {
+      id: "state",
+      header: "State",
+      sortable: true,
+      // TBD first on an ascending sort — the state an operator is scanning
+      // for is the gap, not the confirmation that a key is already set.
+      sortValue: (item) => (item.value === null ? 0 : 1),
+      cell: (item) =>
+        item.value === null ? (
+          <StatusBadge status="unknown">TBD</StatusBadge>
         ) : (
-          <span className="pill pill-good">set</span>
-        )}
-      </td>
-      <td className="muted">{item.notes}</td>
-    </tr>
-  );
+          <StatusBadge status="settled">set</StatusBadge>
+        ),
+    },
+    {
+      id: "notes",
+      header: "Notes",
+      className: "max-w-[40ch] text-ink-muted text-pretty",
+      cell: (item) => item.notes,
+    },
+  ];
 }
 
 export default function ProgrammeConfigPage() {
@@ -104,93 +137,70 @@ export default function ProgrammeConfigPage() {
 
   const critical = config.items.filter((i) => i.is_critical);
   const rest = config.items.filter((i) => !i.is_critical);
+  const changes = Object.keys(draft).length;
+  const columns = configColumns(draft, change);
 
   return (
     <>
-      <h1>Programme configuration</h1>
-      <p className="subtitle">
-        An empty field is TBD, and TBD is what it stays. Nothing here substitutes
-        a plausible default for a value nobody supplied, because a guessed risk
-        limit is indistinguishable from an agreed one once it is in the table.
-      </p>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="mb-1">Programme configuration</h1>
+          <p className="m-0 text-base text-ink-muted text-pretty">
+            An empty field is TBD, and TBD is what it stays. Nothing here
+            substitutes a plausible default for a value nobody supplied,
+            because a guessed risk limit is indistinguishable from an agreed
+            one once it is in the table.
+          </p>
+        </div>
+        <Button onClick={save} disabled={busy || changes === 0}>
+          Save {changes || ""} change{changes === 1 ? "" : "s"}
+        </Button>
+      </div>
 
       {error ? <p className="banner banner-bad">{error}</p> : null}
       {saved ? <p className="banner banner-info">Saved.</p> : null}
 
-      <section className="card">
-        <div className="card-head spread">
-          <h2>Critical</h2>
-          <span className="muted">
-            {config.critical_unknowns.length} still TBD
-          </span>
-        </div>
-        <p className="muted">
-          These bound what the programme may do or how a figure is interpreted.
-          The runner works without them; a recommendation that depends on one is
-          not worth making until it is set.
-        </p>
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th>Value</th>
-                <th>State</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
-            <tbody>
-              {critical.map((item) => (
-                <ConfigRow
-                  key={item.key}
-                  item={item}
-                  draft={draft[item.key]}
-                  onChange={change}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-baseline gap-2">
+            Critical
+            <span className="text-sm font-normal text-ink-muted">
+              {config.critical_unknowns.length} still TBD
+            </span>
+          </CardTitle>
+          <p className="m-0 text-sm text-ink-muted text-pretty">
+            These bound what the programme may do or how a figure is
+            interpreted. The runner works without them; a recommendation that
+            depends on one is not worth making until it is set.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <DataTable
+            rows={critical}
+            getRowId={(item) => item.key}
+            filterPlaceholder="Filter critical keys"
+            empty="No critical keys."
+            initialSort={[{ id: "state", desc: false }]}
+            columns={columns}
+          />
+        </CardContent>
+      </Card>
 
-      <section className="card">
-        <div className="card-head">
-          <h2>Everything else</h2>
-        </div>
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Key</th>
-                <th>Value</th>
-                <th>State</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rest.map((item) => (
-                <ConfigRow
-                  key={item.key}
-                  item={item}
-                  draft={draft[item.key]}
-                  onChange={change}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <div className="row">
-        <button
-          type="button"
-          onClick={save}
-          disabled={busy || Object.keys(draft).length === 0}
-        >
-          Save {Object.keys(draft).length || ""} change
-          {Object.keys(draft).length === 1 ? "" : "s"}
-        </button>
-      </div>
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Everything else</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <DataTable
+            rows={rest}
+            getRowId={(item) => item.key}
+            filterPlaceholder="Filter keys"
+            empty="No further keys."
+            initialSort={[{ id: "key", desc: false }]}
+            columns={columns}
+          />
+        </CardContent>
+      </Card>
     </>
   );
 }

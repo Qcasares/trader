@@ -13,18 +13,31 @@
  * The conclusion itself is computed, not typed: it is the criteria evaluated
  * against the metrics the engine produced. Nothing on this page was decided by
  * reading prose.
+ *
+ * Rebuilt on shadcn primitives to match `system/page.tsx` and
+ * `backtests/page.tsx`. `.metric-grid`/`.metric` and `.assumptions`/
+ * `.assumption-row` are kept — they are tuned and neither the headline metrics
+ * nor the reproducibility record changed what they compute. What changed:
+ * sections are `Card`s, the conclusion is a `StatusBadge` rather than a local
+ * `pill-*` class, and the back link moved to a `Button` at the foot of the
+ * page, matching `backtests/[id]/page.tsx`.
  */
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import { ApiError, api, type Experiment } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { StatusBadge, type Status } from "@/components/StatusBadge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-const CONCLUSION_PILL: Record<string, string> = {
-  pass: "pill pill-good",
-  fail: "pill pill-bad",
-  inconclusive: "pill pill-unknown",
+/** A conclusion, on the same four states every other page uses. */
+const CONCLUSION_STATUS: Record<NonNullable<Experiment["conclusion"]>, Status> = {
+  pass: "settled",
+  fail: "blocked",
+  inconclusive: "unknown",
 };
 
 /** Metrics worth surfacing, with the honesty fields kept next to their figure. */
@@ -85,121 +98,140 @@ export default function ExperimentPage({
 
   return (
     <>
-      <p className="muted">
-        <Link href={`/programme/candidates/${experiment.candidate_id}`}>
-          ← Candidate
-        </Link>
-      </p>
-      <h1>
-        <span className="mono">{experiment.ref}</span> {experiment.kind}
-      </h1>
-      <p className="subtitle row">
-        <span className="muted">{experiment.status}</span>
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="mb-1">
+            <span className="font-mono">{experiment.ref}</span> {experiment.kind}
+          </h1>
+          <p className="subtitle">{experiment.status}</p>
+        </div>
         {experiment.conclusion ? (
-          <span className={CONCLUSION_PILL[experiment.conclusion]}>
+          <StatusBadge status={CONCLUSION_STATUS[experiment.conclusion]}>
             {experiment.conclusion}
-          </span>
+          </StatusBadge>
         ) : null}
-      </p>
+      </div>
 
-      <section className="card">
-        <div className="card-head">
-          <h2>Preregistered criteria</h2>
-        </div>
-        <p className="muted">
-          Fixed when the experiment was registered, before it ran. The database
-          refuses to change them afterwards, which is what stops an acceptance
-          test being written once the answer is known.
-        </p>
-        {experiment.preregistered_criteria.length === 0 ? (
-          <p className="banner banner-bad">
-            None recorded. This should be impossible — the schema requires them.
+      <Card>
+        <CardHeader>
+          <CardTitle>Preregistered criteria</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-ink-muted text-pretty">
+            Fixed when the experiment was registered, before it ran. The
+            database refuses to change them afterwards, which is what stops an
+            acceptance test being written once the answer is known.
           </p>
-        ) : (
-          <ul className="mono">
-            {experiment.preregistered_criteria.map((criterion, index) => (
-              <li key={`${criterion.metric}-${index}`}>
-                {criterion.metric} {criterion.op} {criterion.value}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+          {experiment.preregistered_criteria.length === 0 ? (
+            <p className="banner banner-bad">
+              None recorded. This should be impossible — the schema requires
+              them.
+            </p>
+          ) : (
+            <ul className="mono">
+              {experiment.preregistered_criteria.map((criterion, index) => (
+                <li key={`${criterion.metric}-${index}`}>
+                  {criterion.metric} {criterion.op} {criterion.value}
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
 
-      <section className="card">
-        <div className="card-head">
-          <h2>Outcome</h2>
-        </div>
-        {!hasOutcome ? (
-          <p className="muted">
-            Not yet. The engine has not finished, or the run failed —{" "}
-            {experiment.error || "no error recorded"}.
-          </p>
-        ) : (
-          <dl className="metric-grid">
-            {HEADLINE.filter((entry) => entry[0] in outcome).map(([key, label]) => (
-              <div className="metric" key={key}>
-                <dt>{label}</dt>
-                <dd>{show(outcome[key])}</dd>
-              </div>
-            ))}
-          </dl>
-        )}
-        {hasOutcome && outcome.sharpe_is_significant === false ? (
-          <p className="banner banner-warn">
-            This Sharpe is not distinguishable from zero at two standard errors.
-            Read it as no evidence of an edge, not as a small one.
-          </p>
-        ) : null}
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>Reproducibility</h2>
-        </div>
-        <dl className="assumptions">
-          <div className="assumption-row">
-            <dt>Code commit</dt>
-            <dd className="mono">
-              {experiment.code_commit || (
-                <span className="muted">
-                  not recorded — the deployment did not supply one
-                </span>
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Outcome</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {!hasOutcome ? (
+            <p className="text-sm text-ink-muted">
+              Not yet. The engine has not finished, or the run failed —{" "}
+              {experiment.error || "no error recorded"}.
+            </p>
+          ) : (
+            <dl className="metric-grid">
+              {HEADLINE.filter((entry) => entry[0] in outcome).map(
+                ([key, label]) => (
+                  <div className="metric" key={key}>
+                    <dt>{label}</dt>
+                    <dd>{show(outcome[key])}</dd>
+                  </div>
+                ),
               )}
-            </dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Seed</dt>
-            <dd className="mono">{show(experiment.seed)}</dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Universe</dt>
-            <dd className="mono">{experiment.universe.join(", ") || "—"}</dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Dataset manifest</dt>
-            <dd className="mono">{JSON.stringify(experiment.dataset_manifest)}</dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Cost assumptions</dt>
-            <dd className="mono">{JSON.stringify(experiment.cost_assumptions)}</dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Engine rows</dt>
-            <dd className="mono">
-              {experiment.backtest_run_id ? (
-                <Link href={`/backtests/${experiment.backtest_run_id}`}>
-                  backtest run
-                </Link>
-              ) : null}
-              {experiment.walkforward_run_id ? " walk-forward study" : null}
-              {!experiment.backtest_run_id && !experiment.walkforward_run_id
-                ? "—"
-                : null}
-            </dd>
-          </div>
-        </dl>
-      </section>
+            </dl>
+          )}
+          {hasOutcome && outcome.sharpe_is_significant === false ? (
+            <p className="banner banner-warn">
+              This Sharpe is not distinguishable from zero at two standard
+              errors. Read it as no evidence of an edge, not as a small one.
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Reproducibility</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="assumptions">
+            <div className="assumption-row">
+              <dt>Code commit</dt>
+              <dd className="mono">
+                {experiment.code_commit || (
+                  <span className="text-ink-muted">
+                    not recorded — the deployment did not supply one
+                  </span>
+                )}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Seed</dt>
+              <dd className="mono">{show(experiment.seed)}</dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Universe</dt>
+              <dd className="mono">{experiment.universe.join(", ") || "—"}</dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Dataset manifest</dt>
+              <dd className="mono">
+                {JSON.stringify(experiment.dataset_manifest)}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Cost assumptions</dt>
+              <dd className="mono">
+                {JSON.stringify(experiment.cost_assumptions)}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Engine rows</dt>
+              <dd className="mono">
+                {experiment.backtest_run_id ? (
+                  <Link href={`/backtests/${experiment.backtest_run_id}`}>
+                    backtest run
+                  </Link>
+                ) : null}
+                {experiment.walkforward_run_id ? " walk-forward study" : null}
+                {!experiment.backtest_run_id && !experiment.walkforward_run_id
+                  ? "—"
+                  : null}
+              </dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
+
+      <p className="mt-4">
+        <Button asChild variant="ghost" size="sm">
+          <Link href={`/programme/candidates/${experiment.candidate_id}`}>
+            <ArrowLeft aria-hidden="true" />
+            Candidate
+          </Link>
+        </Button>
+      </p>
     </>
   );
 }

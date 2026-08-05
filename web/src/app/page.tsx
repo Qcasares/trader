@@ -10,6 +10,16 @@
  * Python makes it appear here with no frontend change — and, more importantly,
  * the same declaration that renders the field is the one that validates it, so
  * the form cannot drift from what the engine accepts.
+ *
+ * Rebuilt on shadcn primitives to match System and Backtests: each strategy is
+ * a Card, status pills become StatusBadge, and the parameter/run-settings
+ * inputs are Label + Input + Select rather than bare `<label><input>` pairs.
+ * The schema-driven field logic, the multiple-testing counter and both
+ * honesty banners (synthetic data, cost stress) are unchanged — only their
+ * markup. The one presentational addition is that each parameter's
+ * `schema.description` now renders as a visible `.hint` line under its label
+ * instead of an inaccessible `title=` tooltip, since it is documentation of
+ * what the field accepts, not decoration.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -21,6 +31,19 @@ import {
   type StrategyDescriptor,
 } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { StatusBadge } from "@/components/StatusBadge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export default function StrategiesPage() {
   const router = useRouter();
@@ -53,42 +76,56 @@ export default function StrategiesPage() {
 
   return (
     <>
-      <h1>Strategies</h1>
-      <p className="subtitle">
-        Deterministic, backtestable rules. Parameters are tunable here and take
-        effect on the next run — no redeploy.
-      </p>
+      <div className="mb-4">
+        <h1 className="mb-1">Strategies</h1>
+        <p className="subtitle">
+          Deterministic, backtestable rules. Parameters are tunable here and
+          take effect on the next run — no redeploy.
+        </p>
+      </div>
 
-      {strategies.map((strategy) => (
-        <div key={strategy.name} className="card">
-          <div className="card-head">
-            <strong>{strategy.name}</strong>
-            <span className="pill pill-mute">v{strategy.version}</span>
-            <BacktestCount count={strategy.backtest_count} />
-            <button
-              style={{ marginLeft: "auto" }}
-              onClick={() =>
-                setSelected(selected === strategy.name ? null : strategy.name)
-              }
-            >
-              {selected === strategy.name ? "Hide" : "Configure & run"}
-            </button>
-          </div>
-          <p className="muted" style={{ margin: "6px 0" }}>
-            {strategy.description}
-          </p>
-          <p className="mono muted" style={{ fontSize: 12 }}>
-            {strategy.universe.join(" · ")} — warm-up{" "}
-            {strategy.warmup_sessions} sessions
-          </p>
-          {strategy.source && (
-            <p className="muted" style={{ fontSize: 12 }}>
-              Source: {strategy.source}
-            </p>
-          )}
-          {selected === strategy.name && active && <RunForm strategy={active} />}
-        </div>
-      ))}
+      <div className="space-y-3">
+        {strategies.map((strategy) => (
+          <Card key={strategy.name}>
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">
+                {strategy.name}
+                <StatusBadge status="mute">v{strategy.version}</StatusBadge>
+                <BacktestCount count={strategy.backtest_count} />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto"
+                  onClick={() =>
+                    setSelected(
+                      selected === strategy.name ? null : strategy.name,
+                    )
+                  }
+                >
+                  {selected === strategy.name ? "Hide" : "Configure & run"}
+                </Button>
+              </CardTitle>
+              <p className="m-0 text-sm text-ink-muted text-pretty">
+                {strategy.description}
+              </p>
+              <p className="mono m-0 text-xs text-ink-faint">
+                {strategy.universe.join(" · ")} — warm-up{" "}
+                {strategy.warmup_sessions} sessions
+              </p>
+              {strategy.source && (
+                <p className="m-0 text-xs text-ink-faint">
+                  Source: {strategy.source}
+                </p>
+              )}
+            </CardHeader>
+            {selected === strategy.name && active && (
+              <CardContent>
+                <RunForm strategy={active} />
+              </CardContent>
+            )}
+          </Card>
+        ))}
+      </div>
     </>
   );
 }
@@ -98,15 +135,17 @@ export default function StrategiesPage() {
  *
  * The tune-rerun-look-at-Sharpe loop is how people fool themselves. Showing
  * the roll count makes the multiple-testing problem impossible to ignore.
+ * `unknown` (amber) carries the same weight here as it does for synthetic
+ * data on the Backtests page — a state the operator should not skim past.
  */
 function BacktestCount({ count }: { count: number }) {
-  if (count === 0) return <span className="pill pill-mute">never run</span>;
+  if (count === 0) return <StatusBadge status="mute">never run</StatusBadge>;
   const heavy = count >= 20;
   return (
-    <span className={`pill ${heavy ? "pill-warn" : "pill-mute"}`}>
+    <StatusBadge status={heavy ? "unknown" : "mute"}>
       {count} backtest{count === 1 ? "" : "s"} run
       {heavy ? " — mind the multiple testing" : ""}
-    </span>
+    </StatusBadge>
   );
 }
 
@@ -146,9 +185,9 @@ function RunForm({ strategy }: { strategy: StrategyDescriptor }) {
   const properties = strategy.params_schema.properties ?? {};
 
   return (
-    <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
-      <h3>Parameters</h3>
-      <div className="field-grid">
+    <div>
+      <h3 className="mb-2 text-sm font-medium">Parameters</h3>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {Object.entries(properties).map(([key, schema]) => (
           <ParamField
             key={key}
@@ -160,72 +199,97 @@ function RunForm({ strategy }: { strategy: StrategyDescriptor }) {
         ))}
       </div>
 
-      <h3>Run settings</h3>
-      <div className="field-grid">
-        <label>
-          <span>Start</span>
-          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} />
-        </label>
-        <label>
-          <span>End</span>
-          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} />
-        </label>
-        <label>
-          <span>Initial cash (USD)</span>
-          <input
+      <Separator className="my-4" />
+
+      <h3 className="mb-2 text-sm font-medium">Run settings</h3>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="start">Start</Label>
+          <Input
+            id="start"
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="end">End</Label>
+          <Input
+            id="end"
+            type="date"
+            value={end}
+            onChange={(e) => setEnd(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="cash">Initial cash (USD)</Label>
+          <Input
+            id="cash"
             type="number"
             value={cash}
             min={1000}
             step={1000}
             onChange={(e) => setCash(Number(e.target.value))}
           />
-        </label>
-        <label>
-          <span>Data source</span>
-          <select value={source} onChange={(e) => setSource(e.target.value)}>
-            <option value="synthetic">synthetic (engine verification only)</option>
-            <option value="yfinance">yfinance (real history, research only)</option>
-          </select>
-        </label>
-        <label>
-          <span>Slippage (bps)</span>
-          <input
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="source">Data source</Label>
+          <Select value={source} onValueChange={setSource}>
+            <SelectTrigger id="source" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="synthetic">
+                synthetic (engine verification only)
+              </SelectItem>
+              <SelectItem value="yfinance">
+                yfinance (real history, research only)
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="slippage">Slippage (bps)</Label>
+          <Input
+            id="slippage"
             type="number"
             value={slippage}
             min={0}
             step={0.5}
             onChange={(e) => setSlippage(Number(e.target.value))}
           />
-        </label>
-        <label>
-          <span>Cost stress (×)</span>
-          <input
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="cost-stress">Cost stress (×)</Label>
+          <Input
+            id="cost-stress"
             type="number"
             value={costStress}
             min={0}
             step={0.5}
             onChange={(e) => setCostStress(Number(e.target.value))}
           />
-        </label>
+        </div>
       </div>
 
       {source === "synthetic" && (
-        <p className="banner banner-warn">
+        <p className="banner banner-warn mt-4">
           Synthetic prices are generated, not observed. Useful for checking the
           engine; meaningless as evidence about a strategy.
         </p>
       )}
       {costStress === 1 && (
-        <p className="banner banner-info">
-          Run this again at 3× cost stress before believing the result. A strategy
-          whose sign flips under realistic costs does not have an edge.
+        <p className="banner banner-info mt-4">
+          Run this again at 3× cost stress before believing the result. A
+          strategy whose sign flips under realistic costs does not have an
+          edge.
         </p>
       )}
-      {error && <p className="banner banner-bad">{error}</p>}
+      {error && <p className="banner banner-bad mt-4">{error}</p>}
 
-      <button className="primary" onClick={submit} disabled={busy}>
+      <Button className="mt-2" onClick={submit} disabled={busy}>
         {busy ? "Queueing…" : "Run backtest"}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -242,34 +306,42 @@ function ParamField({
   onChange: (value: unknown) => void;
 }) {
   const label = schema.title ?? name;
+  const fieldId = `param-${name}`;
 
   // A closed set of values is rendered as a closed control. Falling through to
   // a free-text box would let the operator type something the API rejects with
   // a 422 they cannot act on.
   if (Array.isArray(schema.enum) && schema.enum.length > 0) {
     return (
-      <label>
-        <span title={schema.description}>{label}</span>
-        <select
+      <div className="space-y-1.5">
+        <Label htmlFor={fieldId}>{label}</Label>
+        <Select
           value={typeof value === "string" ? value : String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
+          onValueChange={onChange}
         >
-          {schema.enum.map((option) => (
-            <option key={String(option)} value={String(option)}>
-              {String(option)}
-            </option>
-          ))}
-        </select>
-      </label>
+          <SelectTrigger id={fieldId} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {schema.enum.map((option) => (
+              <SelectItem key={String(option)} value={String(option)}>
+                {String(option)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {schema.description && <span className="hint">{schema.description}</span>}
+      </div>
     );
   }
 
   if (schema.type === "array") {
     const list = Array.isArray(value) ? (value as string[]) : [];
     return (
-      <label>
-        <span title={schema.description}>{label} (comma separated)</span>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor={fieldId}>{label} (comma separated)</Label>
+        <Input
+          id={fieldId}
           value={list.join(", ")}
           onChange={(e) =>
             onChange(
@@ -280,15 +352,17 @@ function ParamField({
             )
           }
         />
-      </label>
+        {schema.description && <span className="hint">{schema.description}</span>}
+      </div>
     );
   }
 
   if (schema.type === "integer" || schema.type === "number") {
     return (
-      <label>
-        <span title={schema.description}>{label}</span>
-        <input
+      <div className="space-y-1.5">
+        <Label htmlFor={fieldId}>{label}</Label>
+        <Input
+          id={fieldId}
           type="number"
           value={typeof value === "number" ? value : ""}
           min={schema.minimum ?? schema.exclusiveMinimum}
@@ -296,17 +370,20 @@ function ParamField({
           step={schema.type === "integer" ? 1 : "any"}
           onChange={(e) => onChange(Number(e.target.value))}
         />
-      </label>
+        {schema.description && <span className="hint">{schema.description}</span>}
+      </div>
     );
   }
 
   return (
-    <label>
-      <span title={schema.description}>{label}</span>
-      <input
+    <div className="space-y-1.5">
+      <Label htmlFor={fieldId}>{label}</Label>
+      <Input
+        id={fieldId}
         value={typeof value === "string" ? value : String(value ?? "")}
         onChange={(e) => onChange(e.target.value)}
       />
-    </label>
+      {schema.description && <span className="hint">{schema.description}</span>}
+    </div>
   );
 }

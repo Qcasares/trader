@@ -17,6 +17,22 @@
  * defect is a real decision and it is not the same as fixing one, and a
  * register that collapsed them would describe a programme with no outstanding
  * problems.
+ *
+ * Rebuilt on `DataTable` for sorting and a free-text filter. Two things this
+ * rebuild is careful about:
+ *
+ * - **A blocking finding sorts to the top, not the alphabet.** The severity
+ *   column's `sortValue` is a rank, not the severity word: a finding that
+ *   `blocks()` gets rank 0–3, everything else 10–13, so a "blocking" veto from
+ *   a role that holds one always sorts above a bare "critical" from a role
+ *   that does not, and severity breaks ties within each group. Ascending is
+ *   the default direction throughout this app for exactly this shape of rank
+ *   (see `JOB_ORDER` on the system page) — the worst thing is rank zero, so
+ *   the first click needs no override.
+ * - **Prose stays prose.** `detail_md`, `remediation` and the close form do
+ *   not fit a table cell, so the table is the sortable, filterable list of
+ *   every finding and selecting one opens its full record — and the closing
+ *   form — beneath it, rather than cramming a form into a row.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -24,19 +40,48 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api, type Finding, type FindingsPage } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { DataTable } from "@/components/DataTable";
+import { StatusBadge, type Status } from "@/components/StatusBadge";
+import { fmtInstant } from "@/lib/format";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-const SEVERITY_PILL: Record<Finding["severity"], string> = {
-  low: "pill pill-mute",
-  medium: "pill pill-mute",
-  high: "pill pill-warn",
-  critical: "pill pill-bad",
+/** Lower is more urgent. Blocking findings occupy 0–3, everything else 10–13. */
+const SEVERITY_URGENCY: Record<Finding["severity"], number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
 };
 
-const STATUS_PILL: Record<Finding["status"], string> = {
-  open: "pill pill-warn",
-  remediated: "pill pill-good",
-  accepted: "pill pill-mute",
-  withdrawn: "pill pill-mute",
+/**
+ * Severity onto the four house states. `unknown` stays reserved for "not
+ * measured" — a severity is a real, assessed magnitude, never an absence —
+ * so `high`/`critical` map to `blocked` and `low`/`medium` to `mute`. The
+ * word itself still tells the two apart within each pair; the badge draws the
+ * attention split the four states can actually carry.
+ */
+const SEVERITY_STATUS: Record<Finding["severity"], Status> = {
+  low: "mute",
+  medium: "mute",
+  high: "blocked",
+  critical: "blocked",
+};
+
+const FINDING_STATUS: Record<Finding["status"], Status> = {
+  open: "mute",
+  remediated: "settled",
+  accepted: "mute",
+  withdrawn: "mute",
 };
 
 const CLOSURES = ["remediated", "accepted", "withdrawn"] as const;
@@ -46,7 +91,8 @@ export default function FindingsPage() {
   const [page, setPage] = useState<FindingsPage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [onlyOpen, setOnlyOpen] = useState(false);
-  const [closing, setClosing] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [closing, setClosing] = useState(false);
   const [closure, setClosure] = useState<string>("remediated");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -76,7 +122,7 @@ export default function FindingsPage() {
     setBusy(true);
     try {
       await api.closeFinding(ref, closure, note.trim());
-      setClosing(null);
+      setClosing(false);
       setNote("");
       await refresh();
       setError(null);
@@ -99,15 +145,18 @@ export default function FindingsPage() {
 
   const blocking = page.findings.filter(blocks).length;
   const titles = new Map(page.roles.map((r) => [r.key, r.title]));
+  const current = page.findings.find((f) => f.ref === selected) ?? null;
 
   return (
     <>
-      <h1>Findings</h1>
-      <p className="subtitle">
-        A veto is a row, not an opinion. A finding blocks a promotion when it is
-        open, at high or critical severity, and raised by a role holding a veto.
-        Nothing reads its text to decide.
-      </p>
+      <div className="mb-4">
+        <h1 className="mb-1">Findings</h1>
+        <p className="m-0 text-base text-ink-muted">
+          A veto is a row, not an opinion. A finding blocks a promotion when it
+          is open, at high or critical severity, and raised by a role holding a
+          veto. Nothing reads its text to decide.
+        </p>
+      </div>
 
       {error ? <p className="banner banner-bad">{error}</p> : null}
 
@@ -119,111 +168,207 @@ export default function FindingsPage() {
         </p>
       ) : null}
 
-      <div className="row">
-        <label className="muted">
-          <input
-            type="checkbox"
-            checked={onlyOpen}
-            onChange={(e) => setOnlyOpen(e.target.checked)}
-          />{" "}
-          Open only
-        </label>
-        <span className="muted">{page.findings.length} shown</span>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Register</CardTitle>
+          <div className="flex items-center gap-2">
+            <input
+              id="only-open"
+              type="checkbox"
+              checked={onlyOpen}
+              onChange={(e) => setOnlyOpen(e.target.checked)}
+              className="size-3.5"
+            />
+            <Label htmlFor="only-open" className="text-sm font-normal text-ink-muted">
+              Open only
+            </Label>
+            {/*
+              The old page showed this count and the rebuild dropped it. On a
+              register whose whole purpose is an accurate tally of what is and
+              is not outstanding, "how many are there" is the question the page
+              answers, and a filter box is not a substitute for it.
+            */}
+            <span className="text-sm text-ink-muted">
+              {page.findings.length} shown
+            </span>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <DataTable
+            rows={page.findings}
+            getRowId={(f) => f.ref}
+            filterPlaceholder="Filter by ref, title or role"
+            empty="Nothing on the register. That is either a clean programme or a panel that has not run."
+            initialSort={[{ id: "severity", desc: false }]}
+            columns={[
+              {
+                id: "severity",
+                header: "Severity",
+                sortable: true,
+                sortValue: (f) => (blocks(f) ? 0 : 10) + SEVERITY_URGENCY[f.severity],
+                cell: (f) => (
+                  <div className="flex flex-wrap items-center gap-1">
+                    <StatusBadge status={SEVERITY_STATUS[f.severity]}>
+                      {f.severity}
+                    </StatusBadge>
+                    {blocks(f) ? (
+                      <StatusBadge status="blocked">blocking</StatusBadge>
+                    ) : null}
+                  </div>
+                ),
+              },
+              {
+                id: "ref",
+                header: "Ref",
+                sortable: true,
+                sortValue: (f) => f.ref,
+                className: "font-mono",
+                cell: (f) => f.ref,
+              },
+              {
+                id: "title",
+                header: "Title",
+                sortable: true,
+                sortValue: (f) => f.title,
+                cell: (f) => f.title,
+              },
+              {
+                id: "raised_by",
+                header: "Raised by",
+                sortable: true,
+                sortValue: (f) => titles.get(f.raised_by) ?? f.raised_by,
+                cell: (f) => (
+                  <span>
+                    {titles.get(f.raised_by) ?? f.raised_by}
+                    {vetoRoles.has(f.raised_by) ? (
+                      <span className="text-ink-faint"> (holds a veto)</span>
+                    ) : null}
+                  </span>
+                ),
+              },
+              {
+                id: "status",
+                header: "Status",
+                sortable: true,
+                sortValue: (f) => f.status,
+                cell: (f) => (
+                  <StatusBadge status={FINDING_STATUS[f.status]}>
+                    {f.status}
+                  </StatusBadge>
+                ),
+              },
+              {
+                id: "opened",
+                header: "Opened",
+                sortable: true,
+                sortValue: (f) => f.opened_at,
+                className: "text-ink-muted whitespace-nowrap",
+                cell: (f) => fmtInstant(f.opened_at),
+              },
+              {
+                id: "candidate",
+                header: "Candidate",
+                cell: (f) =>
+                  f.candidate_id ? (
+                    <Link href={`/programme/candidates/${f.candidate_id}`}>
+                      view
+                    </Link>
+                  ) : (
+                    "—"
+                  ),
+              },
+              {
+                id: "open_detail",
+                header: "",
+                className: "text-right",
+                cell: (f) => (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelected(f.ref);
+                      setClosing(false);
+                      setNote("");
+                    }}
+                  >
+                    view
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </CardContent>
+      </Card>
 
-      {page.findings.length === 0 ? (
-        <p className="muted">
-          Nothing on the register. That is either a clean programme or a panel
-          that has not run.
-        </p>
-      ) : (
-        page.findings.map((finding) => (
-          <section className="card" key={finding.ref}>
-            <div className="card-head spread">
-              <h2>
-                <span className="mono">{finding.ref}</span> {finding.title}
-              </h2>
-              <span className="row">
-                <span className={SEVERITY_PILL[finding.severity]}>
-                  {finding.severity}
-                </span>
-                <span className={STATUS_PILL[finding.status]}>
-                  {finding.status}
-                </span>
-                {blocks(finding) ? (
-                  <span className="pill pill-bad">blocking</span>
-                ) : null}
-              </span>
-            </div>
-
-            <p className="muted">
-              Raised by {titles.get(finding.raised_by) ?? finding.raised_by}
-              {vetoRoles.has(finding.raised_by) ? " (holds a veto)" : ""} ·{" "}
-              {finding.opened_at.slice(0, 10)}
-              {finding.candidate_id ? (
-                <>
-                  {" · "}
-                  <Link href={`/programme/candidates/${finding.candidate_id}`}>
-                    candidate
-                  </Link>
-                </>
-              ) : null}
+      {current ? (
+        <Card className="mt-3">
+          <CardHeader>
+            <CardTitle className="flex flex-wrap items-baseline gap-2">
+              <span className="font-mono text-sm">{current.ref}</span>
+              {current.title}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="m-0 text-sm text-ink-muted">
+              Raised by {titles.get(current.raised_by) ?? current.raised_by}
+              {vetoRoles.has(current.raised_by) ? " (holds a veto)" : ""} ·{" "}
+              {fmtInstant(current.opened_at)}
             </p>
 
-            {finding.detail_md ? <p>{finding.detail_md}</p> : null}
-            {finding.remediation ? (
-              <p className="muted">
-                <strong>Remediation:</strong> {finding.remediation}
+            {current.detail_md ? <p className="m-0">{current.detail_md}</p> : null}
+            {current.remediation ? (
+              <p className="m-0 text-sm text-ink-muted">
+                <strong className="text-ink">Remediation:</strong>{" "}
+                {current.remediation}
               </p>
             ) : null}
 
-            {finding.status !== "open" ? (
-              <p className="muted">
-                Closed as {finding.status} by {finding.closed_by} —{" "}
-                {finding.close_note || "no note"}
+            {current.status !== "open" ? (
+              <p className="m-0 text-sm text-ink-muted">
+                Closed as {current.status} by {current.closed_by} —{" "}
+                {current.close_note || "no note"}
               </p>
-            ) : closing === finding.ref ? (
-              <div className="row">
-                <select
-                  value={closure}
-                  onChange={(e) => setClosure(e.target.value)}
-                  aria-label="Closure"
-                >
-                  {CLOSURES.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="text"
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="What changed, or why this is being accepted"
-                />
-                <button
-                  type="button"
-                  onClick={() => close(finding.ref)}
-                  disabled={busy}
-                >
+            ) : closing ? (
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="closure">Closure</Label>
+                  <Select value={closure} onValueChange={setClosure}>
+                    <SelectTrigger id="closure" size="sm" className="w-40">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLOSURES.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="min-w-[24ch] flex-1 space-y-1">
+                  <Label htmlFor="close-note">Note</Label>
+                  <Input
+                    id="close-note"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="What changed, or why this is being accepted"
+                  />
+                </div>
+                <Button onClick={() => close(current.ref)} disabled={busy}>
                   Close it
-                </button>
-                <button
-                  type="button"
-                  className="linklike"
-                  onClick={() => setClosing(null)}
-                >
+                </Button>
+                <Button variant="ghost" onClick={() => setClosing(false)}>
                   Cancel
-                </button>
+                </Button>
               </div>
             ) : (
-              <button type="button" onClick={() => setClosing(finding.ref)}>
+              <Button size="sm" onClick={() => setClosing(true)}>
                 Close this finding
-              </button>
+              </Button>
             )}
-          </section>
-        ))
-      )}
+          </CardContent>
+        </Card>
+      ) : null}
     </>
   );
 }
