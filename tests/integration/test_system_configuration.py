@@ -101,9 +101,21 @@ def restore_defaults(authed):
     Ordering matters more here than in most fixtures: these rows are read by the
     runner, and a test that left a deployment pointed at a model nobody chose
     would be a test that changed production behaviour.
+
+    The restore is asserted rather than fired and forgotten. A bare POST here
+    fails silently when the session cookie is missing, and the corruption then
+    leaks into whichever test runs next — which is how
+    `test_a_fresh_deployment_can_call_a_model` came to fail in a suite run and
+    pass on its own. A cleanup that can quietly not clean up is worse than none,
+    because it moves the failure somewhere unrelated.
     """
     yield
-    authed.post(ENDPOINT, json=_defaults())
+    # Signs in again rather than reusing the session the test was handed. The
+    # test that proves an unauthenticated caller is refused does so by clearing
+    # the cookie, and a teardown that inherited that state could never restore
+    # anything.
+    authed.post("/api/v1/auth/login", json={"password": PASSWORD})
+    assert authed.post(ENDPOINT, json=_defaults()).status_code == 200
 
 
 class TestTheMigrationSeedsSomethingUsable:

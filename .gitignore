@@ -59,3 +59,4 @@ web/out/
 web/next-env.d.ts
 web/*.tsbuildinfo
 .screenshots/
+.gstack/
