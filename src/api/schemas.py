@@ -211,6 +211,25 @@ class SystemConfigurationRequest(BaseModel):
     tick_seconds: int
 
 
+class SetSecretRequest(BaseModel):
+    """
+    A credential, on its way in and never on its way out.
+
+    ``extra="forbid"`` and a single field, so there is no shape in which a
+    caller can smuggle a second value alongside the one being stored.
+
+    No ``max_length``: a vendor decides how long its tokens are and a ceiling
+    guessed here would reject a valid credential for no reason. The minimum
+    exists because an empty secret is a cleared secret, and clearing has its own
+    endpoint — a blank submission is far more likely to be a mistyped paste than
+    an intention, and storing it would leave a row that reads as configured.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    value: str = Field(min_length=1)
+
+
 class JobSummary(BaseModel):
     id: str
     kind: str

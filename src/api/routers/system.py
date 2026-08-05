@@ -17,12 +17,14 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from src import crypto
 from src.api.deps import AppSettings, AuthedSession, DbConn
 from src.api.drain import drain_once
 from src.api.schemas import (
     JobSummary,
     KillSwitchRequest,
     ReleaseKillSwitchRequest,
+    SetSecretRequest,
     SystemConfigurationRequest,
     SystemStatus,
 )
@@ -36,6 +38,7 @@ from src.api.security import (
 from src.db.migrate import MigrationError, current_version, migrate
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
+from src.db.repos import secrets as secret_repo
 from src.programme import flags as programme_flags
 from src.programme import models as model_catalogue
 
@@ -168,7 +171,7 @@ async def resume(
 # without doing that.
 
 
-async def _configuration(conn: DbConn) -> dict[str, Any]:
+async def _configuration(conn: DbConn, app: AppSettings) -> dict[str, Any]:
     """
     The catalogue, what is stored, and whether the two agree.
 
@@ -223,24 +226,35 @@ async def _configuration(conn: DbConn) -> dict[str, Any]:
     # for the day the model changes, and reporting it as though it were in
     # effect would be the same lie as rendering an unmeasured metric as zero.
     payload["effort_applies"] = bool(settings and settings.effort_applies)
-    # The API process does not hold ANTHROPIC_API_KEY and cannot see whether the
-    # programme process does. Saying so beats a "key: absent" pill that is
-    # really "this process would not know".
-    payload["api_key_visible_here"] = False
+    # What the operator-settable credentials are, and which one is stored —
+    # never the value. `describe` cannot decrypt and is not given a key, so
+    # there is no path from a browser request to a plaintext credential even
+    # though this process holds the key that could produce one.
+    payload["secrets"] = [
+        (await secret_repo.describe(conn, name)).as_dict()
+        for name in secret_repo.KNOWN_SECRETS
+    ]
+    # Whether this deployment can accept a secret at all. Reported rather than
+    # discovered at the moment of saving: a form that accepts a credential and
+    # then refuses it has already had the operator paste the credential.
+    payload["secrets_key_problem"] = crypto.key_problem(app.secrets_key)
     return payload
 
 
 @router.get("/configuration")
 async def get_configuration(
-    session: AuthedSession, conn: DbConn
+    session: AuthedSession, conn: DbConn, settings: AppSettings
 ) -> dict[str, Any]:
     """What the programme is pointed at, and everything it could be pointed at."""
-    return await _configuration(conn)
+    return await _configuration(conn, settings)
 
 
 @router.post("/configuration")
 async def set_configuration(
-    body: SystemConfigurationRequest, session: AuthedSession, conn: DbConn
+    body: SystemConfigurationRequest,
+    session: AuthedSession,
+    conn: DbConn,
+    settings: AppSettings,
 ) -> dict[str, Any]:
     """
     Point the programme somewhere else.
@@ -298,7 +312,93 @@ async def set_configuration(
         body.max_tokens,
         body.tick_seconds,
     )
-    return await _configuration(conn)
+    return await _configuration(conn, settings)
+
+
+@router.post("/secrets/{name}")
+async def set_secret(
+    name: str,
+    body: SetSecretRequest,
+    session: AuthedSession,
+    conn: DbConn,
+    settings: AppSettings,
+) -> dict[str, Any]:
+    """
+    Store a credential, encrypted.
+
+    Three properties this endpoint has and is meant to keep:
+
+    **It never returns what it stored.** The response is the same description
+    the configuration page already renders — configured, fingerprint, who and
+    when. There is no read endpoint at all, so a stolen session cannot exfiltrate
+    a credential that a stolen session did not already set.
+
+    **It refuses before it stores.** ``crypto.encrypt`` raises on a missing or
+    malformed ``SECRETS_KEY``, so a deployment that cannot encrypt says so
+    instead of writing something it will never read back. That is a 503 rather
+    than a 400: the request was fine, the deployment is not configured to serve
+    it.
+
+    **The audit entry carries the fingerprint, never the value.** An operator
+    reviewing the log can see that the key changed, to which key, and by whom.
+    Logging the credential itself would move the secret into the one table
+    nobody thinks of as holding secrets.
+    """
+    if name not in secret_repo.KNOWN_SECRETS:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"unknown secret {name!r}; known: {list(secret_repo.KNOWN_SECRETS)}",
+        )
+
+    problem = crypto.key_problem(settings.secrets_key)
+    if problem is not None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"this deployment cannot store a secret: {problem}",
+        )
+
+    actor = f"operator:{session.subject}"
+    described = await secret_repo.set_secret(
+        conn, name, body.value.strip(), settings.secrets_key, actor
+    )
+    await flags.record_audit(
+        conn,
+        actor=actor,
+        action="secret_set",
+        entity_type="secret",
+        entity_id=name,
+        detail={"fingerprint": described.fingerprint},
+    )
+    logger.warning("Secret %s set by %s (%s)", name, actor, described.fingerprint)
+    return described.as_dict()
+
+
+@router.delete("/secrets/{name}")
+async def clear_secret(
+    name: str, session: AuthedSession, conn: DbConn
+) -> dict[str, Any]:
+    """
+    Remove a credential.
+
+    Needs no confirmation and no encryption key. Clearing is the safe direction
+    — the same asymmetry the kill switch has, where stopping is frictionless and
+    starting is not — and a deployment whose ``SECRETS_KEY`` is missing or wrong
+    is exactly the one that most needs to be able to delete what it can no
+    longer read.
+    """
+    if name not in secret_repo.KNOWN_SECRETS:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"unknown secret {name!r}; known: {list(secret_repo.KNOWN_SECRETS)}",
+        )
+
+    actor = f"operator:{session.subject}"
+    await secret_repo.clear_secret(conn, name)
+    await flags.record_audit(
+        conn, actor=actor, action="secret_cleared", entity_type="secret", entity_id=name
+    )
+    logger.warning("Secret %s cleared by %s", name, actor)
+    return (await secret_repo.describe(conn, name)).as_dict()
 
 
 @router.api_route("/drain", methods=["GET", "POST"])

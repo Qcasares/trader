@@ -27,6 +27,10 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "bcrypt>=4.1.0",
+    # Encrypts operator-set credentials (src/crypto.py). Not optional: the
+    # standard library has no authenticated cipher, so there is no stdlib route
+    # to storing a credential encrypted.
+    "cryptography>=42.0.0",
     "python-dotenv>=1.0.0",
     "yfinance>=0.2.60",
     "aiohttp>=3.9.0",
