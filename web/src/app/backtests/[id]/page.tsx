@@ -5,10 +5,32 @@
  *
  * Polls while the run is queued or running, because a 25-year backtest takes
  * long enough that a static page would just look broken.
+ *
+ * Rebuilt on shadcn primitives to match `system/page.tsx` and
+ * `backtests/page.tsx`. The polling logic, `MetricsPanel` (which already
+ * carries all four honesty figures — cost assumption, effective start,
+ * periods per year and the Sharpe standard error, in the same cell as the
+ * figure they qualify) and `EquityChart` are untouched: nothing here changed
+ * what they compute or say, only how the page around them is composed.
+ * Three things changed:
+ *
+ * - **Sections are `Card`s** rather than the bare `.spread` header and inline
+ *   `<h2>`s the old page used, so this page reads as the same instrument as
+ *   System and Backtests rather than a third layout.
+ * - **The status pill is `StatusBadge`**, driven by the same `jobStatus`
+ *   mapping every other page uses, instead of a local `pill-*` ternary that
+ *   only this file maintained.
+ * - **Fills are a `DataTable`.** The 200-row cap stays (a 25-year daily
+ *   rebalance can produce thousands of fills, and the table is not
+ *   virtualised), but the fills within it are now filterable and sortable —
+ *   qty, price, notional and commission are never null on a recorded fill,
+ *   so no column here needs the "no data" treatment the orders/portfolio
+ *   tables do.
  */
 
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import { EquityChart } from "@/components/EquityChart";
 import { MetricsPanel } from "@/components/MetricsPanel";
 import {
@@ -20,6 +42,10 @@ import {
   type EquityPoint,
 } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
+import { DataTable } from "@/components/DataTable";
+import { StatusBadge, jobStatus } from "@/components/StatusBadge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function BacktestDetailPage({
   params,
@@ -93,14 +119,14 @@ export default function BacktestDetailPage({
 
   return (
     <>
-      <div className="spread">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1>{run.strategy_name}</h1>
+          <h1 className="mb-1">{run.strategy_name}</h1>
           <p className="subtitle mono">
             {run.id} · {run.universe.join(" ")}
           </p>
         </div>
-        <StatusPill status={run.status} />
+        <StatusBadge status={jobStatus(run.status)}>{run.status}</StatusBadge>
       </div>
 
       {(run.status === "queued" || run.status === "running") && (
@@ -119,72 +145,133 @@ export default function BacktestDetailPage({
 
       {run.status === "succeeded" && run.metrics && (
         <>
-          <EquityChart
-            points={equity}
-            effectiveStart={run.metrics.effective_start}
-          />
-          <MetricsPanel run={run} metrics={run.metrics} />
+          <Card>
+            <CardHeader>
+              <CardTitle>Equity</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <EquityChart
+                points={equity}
+                effectiveStart={run.metrics.effective_start}
+              />
+            </CardContent>
+          </Card>
 
-          <h2>Fills ({orders.length})</h2>
-          <div className="card table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Session</th>
-                  <th>Symbol</th>
-                  <th>Side</th>
-                  <th className="num">Qty</th>
-                  <th className="num">Price</th>
-                  <th className="num">Notional</th>
-                  <th className="num">Commission</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.slice(0, 200).map((order, index) => (
-                  <tr key={`${order.session}-${order.symbol}-${index}`}>
-                    <td>{order.session}</td>
-                    <td>{order.symbol}</td>
-                    <td>
+          <Card className="mt-3">
+            <CardHeader>
+              <CardTitle>Performance</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <MetricsPanel run={run} metrics={run.metrics} />
+            </CardContent>
+          </Card>
+
+          <Card className="mt-3">
+            <CardHeader>
+              <CardTitle>Fills ({orders.length})</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <DataTable
+                rows={orders.slice(0, 200).map((order, index) => ({
+                  ...order,
+                  // `DataTable.getRowId` takes one argument, and fills have no
+                  // natural id — two legs of the same rebalance can otherwise
+                  // share session, symbol, side, qty and price. The index
+                  // travels on the row instead so identity survives sorting.
+                  rowKey: `${order.session}-${order.symbol}-${index}`,
+                }))}
+                getRowId={(order) => order.rowKey}
+                filterPlaceholder="Filter fills by symbol"
+                empty="No fills recorded."
+                initialSort={[{ id: "session", desc: false }]}
+                columns={[
+                  {
+                    id: "session",
+                    header: "Session",
+                    sortable: true,
+                    sortValue: (o) => o.session,
+                    className: "font-mono whitespace-nowrap",
+                    cell: (o) => o.session,
+                  },
+                  {
+                    id: "symbol",
+                    header: "Symbol",
+                    sortable: true,
+                    sortValue: (o) => o.symbol,
+                    className: "font-mono",
+                    cell: (o) => o.symbol,
+                  },
+                  {
+                    id: "side",
+                    header: "Side",
+                    sortable: true,
+                    sortValue: (o) => o.side,
+                    cell: (o) => (
                       <span
-                        className={`pill ${
-                          order.side === "buy" ? "pill-good" : "pill-warn"
+                        className={`font-mono text-xs ${
+                          o.side === "buy" ? "text-settled" : "text-unknown"
                         }`}
                       >
-                        {order.side}
+                        {o.side}
                       </span>
-                    </td>
-                    <td className="num">{order.qty.toFixed(4)}</td>
-                    <td className="num">{fmtUsd(order.price)}</td>
-                    <td className="num">{fmtUsd(order.notional)}</td>
-                    <td className="num">{fmtUsd(order.commission)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {orders.length > 200 && (
-              <p className="muted" style={{ marginTop: 8 }}>
-                Showing the 200 most recent of {orders.length}.
-              </p>
-            )}
-          </div>
+                    ),
+                  },
+                  {
+                    id: "qty",
+                    header: "Qty",
+                    sortable: true,
+                    sortValue: (o) => o.qty,
+                    headerClassName: "text-right",
+                    className: "text-right font-mono tabular-nums",
+                    cell: (o) => o.qty.toFixed(4),
+                  },
+                  {
+                    id: "price",
+                    header: "Price",
+                    sortable: true,
+                    sortValue: (o) => o.price,
+                    headerClassName: "text-right",
+                    className: "text-right font-mono tabular-nums",
+                    cell: (o) => fmtUsd(o.price),
+                  },
+                  {
+                    id: "notional",
+                    header: "Notional",
+                    sortable: true,
+                    sortValue: (o) => o.notional,
+                    headerClassName: "text-right",
+                    className: "text-right font-mono tabular-nums",
+                    cell: (o) => fmtUsd(o.notional),
+                  },
+                  {
+                    id: "commission",
+                    header: "Commission",
+                    sortable: true,
+                    sortValue: (o) => o.commission,
+                    headerClassName: "text-right",
+                    className: "text-right font-mono tabular-nums",
+                    cell: (o) => fmtUsd(o.commission),
+                  },
+                ]}
+              />
+              {orders.length > 200 && (
+                <p className="mt-2 mb-0 text-sm text-ink-muted">
+                  Showing the 200 most recent of {orders.length}.
+                </p>
+              )}
+            </CardContent>
+          </Card>
         </>
       )}
 
-      <p style={{ marginTop: 20 }}>
-        <Link href="/backtests">← All backtests</Link>
+      <p className="mt-4">
+        <Button asChild variant="ghost" size="sm">
+          <Link href="/backtests">
+            <ArrowLeft aria-hidden="true" />
+            All backtests
+          </Link>
+        </Button>
       </p>
     </>
   );
-}
-
-function StatusPill({ status }: { status: string }) {
-  const tone =
-    status === "succeeded"
-      ? "pill-good"
-      : status === "failed"
-        ? "pill-bad"
-        : status === "running"
-          ? "pill-warn"
-          : "pill-mute";
-  return <span className={`pill ${tone}`}>{status}</span>;
 }
