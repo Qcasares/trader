@@ -1,0 +1,90 @@
+# smoke.yml
+# ---------
+# Playwright against the deployed system, on demand.
+#
+# Why this exists
+# ~~~~~~~~~~~~~~~
+# Every other check in this repository runs against a stack the runner stood
+# up. That proves the code is right and says nothing about the deployment: the
+# routing, the proxy, the headers, the environment and the build are all
+# different things, and more than one of them has been what was actually
+# broken.
+#
+# The specific failure it is here to catch has already happened. A frontend
+# rebuild was reported as shipped while its pull request sat unmerged, and the
+# only reason anyone found out was that the operator looked at the site and
+# said it looked no different. "CI is green" and "the deployed system works"
+# are separate claims, and until now only the first had a check.
+#
+# `workflow_dispatch` only
+# ~~~~~~~~~~~~~~~~~~~~~~~~
+# No `push` and no `schedule`, for the same reason `migrate.yml` has neither.
+# This suite talks to production: it performs one deliberately-failed login,
+# and `src/api/throttle.py` backs off exponentially per source after five. A
+# scheduled run would spend those attempts on nobody's behalf, and on a bad day
+# would be competing with an operator trying to reach the kill switch.
+#
+# It is read-only otherwise. Nothing here submits a form that writes, toggles a
+# switch or creates a row.
+
+name: smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      ui_url:
+        description: "UI base URL"
+        default: "https://trader-ui-black.vercel.app"
+        required: false
+      api_url:
+        description: "API base URL"
+        default: "https://trader-vert-xi.vercel.app"
+        required: false
+
+# One at a time. Two concurrent runs would perform two failed logins from the
+# same source, which is the thing the suite is careful about everywhere else.
+concurrency:
+  group: smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests/e2e/live
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/e2e/live/package-lock.json
+
+      - run: npm ci
+
+      # Chromium only. The suite asserts behaviour and layout, not per-engine
+      # rendering, so three browsers would triple the runtime for no finding.
+      - run: npx playwright install --with-deps chromium
+
+      - name: Smoke the deployment
+        env:
+          E2E_BASE_URL: ${{ inputs.ui_url }}
+          E2E_API_URL: ${{ inputs.api_url }}
+          # Absent is the expected state, and the authenticated journey skips
+          # rather than fails without it. Set the secret to include the checks
+          # that need a session — among them the one confirming the model
+          # credential is stored and rendered as a fingerprint rather than a
+          # value.
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+        run: npm test
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/e2e/live/playwright-report/
+          retention-days: 7

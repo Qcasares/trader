@@ -1,0 +1,16 @@
+{
+  "name": "trader-live-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Playwright against the deployed system. Its own package on purpose: Vercel builds web/ and installs that package's devDependencies, so Playwright there would add a browser download to every frontend build for a suite the build never runs.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report"
+  },
+  "author": "Quentin Casares",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

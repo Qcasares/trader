@@ -174,7 +174,22 @@ ruff check src/ tests/
 
 # Browser journey — needs the whole stack running, so it is not in CI
 .venv/bin/python tests/e2e/test_browser_journey.py
+
+# Smoke the DEPLOYED system. Its own npm package so Vercel, which builds web/,
+# never installs Playwright. `E2E_CHANNEL=chrome` borrows the installed
+# browser instead of downloading one.
+cd tests/e2e/live && npm ci && E2E_CHANNEL=chrome npm test
+# ...and the authenticated half, which is skipped rather than failed without it
+E2E_PASSWORD='…' npm test
 ```
+
+Everything above runs against a stack this machine stood up. `tests/e2e/live`
+is the exception and the reason it exists: it talks to the deployment, where
+the routing, the proxy, the headers, the environment and the build are all
+different things. It is `workflow_dispatch` only (`.github/workflows/smoke.yml`),
+never scheduled, because it performs one deliberately-failed login and
+`src/api/throttle.py` backs off per source after five — a scheduled run would
+spend those on nobody's behalf. Read-only in every other respect.
 
 Both commands above lint and run everything. The only `ruff` exclusion left is
 `src/bankr_client.py` and its test — a reference file no strategy imports,
