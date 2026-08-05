@@ -60,3 +60,10 @@ web/next-env.d.ts
 web/*.tsbuildinfo
 .screenshots/
 .gstack/
+.vercel
+.env*
+# `.env*` above was added by `vercel link` and catches `.env.example`, which is
+# the file documenting every setting this system reads. It survives today only
+# because it is already tracked; removing and re-adding it would make it vanish
+# silently.
+!.env.example
