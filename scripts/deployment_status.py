@@ -133,13 +133,19 @@ async def _report_database(advance_ingest: bool) -> list[str]:
             print("  none yet")
 
         print("\nrecent orders")
+        # `orders` has no created_at. It has `updated_at`, which is always set,
+        # and `submitted_at`, which is null until the venue accepted it — and
+        # that null is the difference between an order that was planned and one
+        # that was sent, so it is printed rather than coalesced away.
         orders = await conn.fetch(
-            "SELECT symbol, side, status, created_at FROM orders "
-            "ORDER BY created_at DESC LIMIT 5"
+            "SELECT symbol, side, status, mode, submitted_at, updated_at "
+            "FROM orders ORDER BY updated_at DESC LIMIT 5"
         )
         for row in orders:
+            sent = row["submitted_at"] or "not submitted"
             print(
-                f"  {row['symbol']} {row['side']} {row['status']} {row['created_at']}"
+                f"  {row['symbol']} {row['side']} {row['status']} "
+                f"({row['mode']}) sent={sent}"
             )
         if not orders:
             print("  none yet")
