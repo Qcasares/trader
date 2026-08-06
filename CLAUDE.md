@@ -376,10 +376,23 @@ inert while the backtest continues to honour them.
 
 ## Known limitations
 
-- **No result in this repository is a real backtest.** Equity data hosts
-  (Yahoo, Stooq, `data.alpaca.markets`) are blocked by this environment's
-  egress policy, so no strategy has ever been measured on real equity prices.
-  Run against real data before drawing any conclusion.
+- **Both implemented strategies have now been measured on real equity prices,
+  and the interesting one failed.** The egress policy that blocked Yahoo,
+  Stooq and `data.alpaca.markets` no longer does. Over 2007-01-03..2026-07-31,
+  `asset_class_trend_following` returns +82.5% at Sharpe 0.303 ± 0.226, which
+  is inside two standard errors of zero, and its walk-forward over
+  `sma_period` in {105, 150, 210, 252} comes back **NOT ROBUST**: parameter
+  stability 44%, stitched out-of-sample Sharpe +0.186 ± 0.251. `buy_and_hold`
+  on SPY over the same window returns +428.7% at Sharpe 0.532 ± 0.226 and
+  walks forward **ROBUST**, stitched OOS +0.722 ± 0.251, deflated Sharpe
+  0.998. The trend follower's one honest advantage is drawdown, -28.2%
+  against the benchmark's -56.5%; it buys that with roughly six points of
+  CAGR. At 3x costs it decays to Sharpe 0.269, so the result is not a cost
+  artefact. The deployment gate refuses it, which is the gate working.
+- **The backtest was kinder than a venue would have been.** That run logged 29
+  entries in `SimulatedBroker.underfunded_buys`, one trimmed as far as 13.7%
+  short. Check that list before believing any result, and set
+  `RiskLimits.cash_buffer_pct` when it is non-empty.
 - **The engine, separately, has been run on real prices.**
   `tests/fixtures/cryptocom_candles.json` holds 24 daily candles for four spot
   pairs, captured from the Crypto.com public API, and `tests/unit/test_real_data.py`
@@ -389,14 +402,19 @@ inert while the backtest continues to honour them.
   the 210-day SMA the one implemented strategy needs is impossible in a window
   that short. Read it as "the plumbing survives contact with real numbers",
   nothing more. Two bugs came out of it, both listed in the git log.
-- **Alpaca has been contacted, read-only, on paper.** `AlpacaBroker` is still
-  tested against a fake server modelling the documented contract, and that is
-  still where the coverage is. What has now happened once, by hand, is
-  `get_account`, `get_positions` and `get_clock` against
-  `paper-api.alpaca.markets` through the shipped adapter — the account, the
-  empty position map and the market clock all came back correctly parsed. **No
-  order has ever been submitted to Alpaca, on paper or live.** `submit`,
-  `cancel_all` and `close_position` remain exercised only against the fake.
+- **An order has now been submitted to Alpaca, on paper.** `AlpacaBroker` is
+  still tested against a fake server modelling the documented contract, and
+  that is still where the coverage is. What has also happened, from the runner
+  that will actually place the orders, is a full pass of the shipped adapter
+  against `paper-api.alpaca.markets`: `get_account`, `get_clock`,
+  `get_positions`, `submit`, `get_order`, `get_order_by_client_id`,
+  `cancel_all` and `close_position`. The deterministic client order id round
+  trips, which is the property the worker's retry safety rests on.
+  `tests/e2e/broker_check.py` is that pass, and `broker-check.yml` runs it on
+  dispatch. **Still untested against the venue: a fill.** The probe ran with
+  the market closed, so the order was acknowledged and cancelled rather than
+  filled, and `close_position` took its no-op branch. Nothing has yet proven
+  how a real fill is parsed back into a `Fill`.
 - Verify which venue a key belongs to before storing it, by trying both. A
   paper key is refused by `api.alpaca.markets` with a 401 and a live key is
   refused by `paper-api.alpaca.markets` the same way, so one pair of requests
@@ -419,7 +437,8 @@ inert while the backtest continues to honour them.
   a candidate automatically from concept through rapid research, independent
   validation and shadow operation, with the twelve specialist roles, the
   findings register and the veto mapping in place. It cannot cross into stage
-  4: that needs a venue, and Alpaca has never been contacted. Stages 4 to 8
+  4: that needs a venue that has been proven to fill, and the paper venue has
+  so far only been proven to accept and cancel. Stages 4 to 8
   return *not met — capability absent* and name what is missing. The
   scorecards and the statistics they need (deflated Sharpe, probability of
   backtest overfitting, capacity) are a later slice. See
