@@ -1,0 +1,68 @@
+# deployment-status.yml
+# ---------------------
+# Look at production without changing it.
+#
+# Why this exists
+# ~~~~~~~~~~~~~~~
+# Every read endpoint on the deployed API needs an operator session, `vercel
+# env pull` returns `[SENSITIVE]` for `DATABASE_URL`, and no Neon client is
+# configured anywhere. So the only way to answer "is it actually trading?" was
+# to dispatch something that writes and read its logs. A system that can only
+# be inspected by changing it is one people stop inspecting, and the whole
+# point of the halting limits and the kill switch is that somebody looks.
+#
+# `deployment_status.py` writes nothing unless `advance_ingest` is set, which
+# moves one queued job's schedule and touches nothing that trades.
+#
+# It holds broker credentials because the dry-run reads the account state from
+# the venue — that is what makes it a test of the decision path rather than of
+# the strategy in isolation. It submits nothing: `dry_run` computes intents and
+# returns them. `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` are absent here
+# and therefore false, and `SECRETS_KEY` is deliberately not passed.
+
+name: deployment-status
+
+on:
+  workflow_dispatch:
+    inputs:
+      advance_ingest:
+        description: "Move today's queued ingest_bars job to now"
+        type: boolean
+        required: false
+        default: false
+  # Once a day, an hour after the US close, which is after the session's
+  # decision and ingest have both had their turn. Read-only, so a schedule
+  # costs nothing and means a broken pipeline is noticed by someone other than
+  # the person who happened to look.
+  schedule:
+    - cron: "0 22 * * 1-5"
+
+concurrency:
+  group: deployment-status
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Report, and dry-run the decision path
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_PAPER: "true"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python scripts/deployment_status.py \
+            ${{ inputs.advance_ingest && '--advance-ingest' || '' }}
