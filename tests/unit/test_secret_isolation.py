@@ -149,3 +149,51 @@ class TestTheSameSeparationWhereTheseActuallyRun:
             "credential an operator sets from the UI is stored and never read, "
             "and the runner silently falls back to the environment."
         )
+
+
+class TestTheRuleAndNotJustTheTwoFilesItWasWrittenAgainst:
+    """
+    The class above names `worker.yml` and `programme.yml` literally, which was
+    right when they were the only two workflows. They are not any more:
+    `broker-check.yml` and `deployment-status.yml` both hold the broker
+    credentials, and both were added without anything checking them.
+
+    The rule was never "worker.yml is special". It is that a process holding
+    the keys to a venue must not also hold the key that decrypts a model
+    credential, in either direction, because the combination is what turns a
+    leak of one job into a leak of everything. So this reads the rule off the
+    directory rather than off a list somebody has to remember to extend.
+    """
+
+    WORKFLOWS = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    BROKER_MARKERS = ("ALPACA_KEY_ID", "ALPACA_SECRET_KEY")
+    VAULT_MARKERS = ("SECRETS_KEY", "ANTHROPIC_API_KEY")
+
+    def test_the_scan_finds_workflows(self) -> None:
+        assert len(self.WORKFLOWS) >= 4, [p.name for p in self.WORKFLOWS]
+
+    def test_no_job_holds_both_a_venue_key_and_the_vault_key(self) -> None:
+        offenders = []
+        for path in self.WORKFLOWS:
+            text = path.read_text(encoding="utf-8")
+            # A workflow that only *mentions* a name in a comment is not
+            # holding it. What puts a value in the process is a `secrets.`
+            # reference, so that is what is matched.
+            holds_broker = any(
+                re.search(rf"secrets\.{marker}\b", text)
+                for marker in self.BROKER_MARKERS
+            )
+            holds_vault = [
+                marker
+                for marker in self.VAULT_MARKERS
+                if re.search(rf"secrets\.{marker}\b", text)
+            ]
+            if holds_broker and holds_vault:
+                offenders.append(f"{path.name} also carries {holds_vault}")
+        assert not offenders, (
+            "these workflows hold both a venue credential and the vault key: "
+            f"{offenders}. Split them into separate jobs. A process that can "
+            "place an order and decrypt a model credential is the single "
+            "compromise this separation exists to prevent, and it does not "
+            "become safe because the job is dispatch-only."
+        )

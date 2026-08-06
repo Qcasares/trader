@@ -150,6 +150,62 @@ async def _report_database(advance_ingest: bool) -> list[str]:
         if not orders:
             print("  none yet")
 
+        print("\nAI programme")
+        # Both of these are seeded off and read fail-closed, so an operator who
+        # set a model credential and stopped has a programme that holds a key
+        # and does nothing. That is the state worth being able to see.
+        prog = {
+            row["key"]: row["value"]
+            for row in await conn.fetch(
+                "SELECT key, value FROM system_flags WHERE key LIKE 'programme%'"
+            )
+        }
+        for key in sorted(prog):
+            print(f"  {key:<28} {prog[key]}")
+        if not prog:
+            print("  no programme flags found")
+
+        # `configured` and a fingerprint, never the value, and no decryption
+        # attempted: this job holds the broker credentials, and the whole point
+        # of the vault separation is that nothing holds both.
+        secret = await conn.fetchrow(
+            "SELECT fingerprint, updated_by, updated_at FROM secrets "
+            "WHERE name = 'anthropic_api_key'"
+        )
+        if secret is None:
+            print("  model credential            not set")
+        else:
+            print(
+                f"  model credential            set ({secret['fingerprint']}), "
+                f"by {secret['updated_by']} at {secret['updated_at']}"
+            )
+
+        # Ordered by created_at, not started_at: started_at is null until a
+        # pass is claimed, and DESC sorts nulls first in Postgres, so ordering
+        # on it would show requested-but-never-started passes as the newest.
+        #
+        # `model` is the column that answers "has the AI actually done
+        # anything". It defaults to the empty string, so a run that completed
+        # without ever reaching the model is visibly different from one that
+        # did, and neither is guessed from the status.
+        runs = await conn.fetch(
+            "SELECT status, model, created_at, error FROM programme_runs "
+            "ORDER BY created_at DESC LIMIT 5"
+        )
+        print("  recent passes")
+        for row in runs:
+            model = row["model"] or "no model call"
+            line = f"    {row['created_at']}  {row['status']:<10} {model}"
+            if row["error"]:
+                line += f"\n      error: {row['error'][:200]}"
+            print(line)
+        if not runs:
+            print("    none yet — the programme has never completed a pass")
+
+        for table in ("hypotheses", "candidates", "experiments", "findings"):
+            count = await conn.fetchval(f"SELECT count(*) FROM {table}")
+            print(f"  {table:<28} {count}")
+
         if advance_ingest:
             moved = await conn.execute(
                 "UPDATE jobs SET scheduled_for = NOW() "
