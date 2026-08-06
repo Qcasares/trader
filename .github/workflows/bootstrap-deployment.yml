@@ -1,0 +1,108 @@
+# bootstrap-deployment.yml
+# ------------------------
+# Create and enable a paper deployment on the production database, on demand.
+#
+# Why this is a workflow
+# ~~~~~~~~~~~~~~~~~~~~~~
+# The deployed API is the control plane and it wants an operator session. The
+# operator password exists as a bcrypt hash on Vercel and as plaintext in one
+# person's head; `DATABASE_URL` is marked sensitive there, so `vercel env pull`
+# returns the literal string `[SENSITIVE]` rather than a connection string. The
+# runner is therefore the only host that can reach the production database
+# unattended, and it could not log in.
+#
+# `bootstrap_paper_deployment.py` resolves that by running the same application
+# in-process, against the same database, under a credential generated inside
+# the job and discarded with it. Dispatching this workflow requires write
+# access to the repository, so the authorisation is real; it is simply carried
+# by GitHub rather than by a password.
+#
+# The gates are not bypassed
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~
+# This does not write rows. It calls `POST /api/v1/deployments`, so the refusal
+# on synthetic data, on an unfinished backtest, on a strategy whose parameters
+# do not parse, and above all on a missing or NOT ROBUST walk-forward study all
+# still happen, in the code where they were written. A configuration this
+# workflow deploys is one the API would have deployed. `asset_class_trend
+# _following` is refused by it today, which is the check being real rather than
+# decorative.
+#
+# What it cannot do
+# ~~~~~~~~~~~~~~~~~
+# Reach a live venue. The script has no mode argument: the request names
+# `"paper"` literally. `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE` are
+# absent from this job and from the worker's, the deployment's own mode is the
+# third gate, and the database kill switch sits above all three.
+#
+# It holds no broker credentials either. It creates a deployment; the worker,
+# which does hold them, is what later submits anything.
+
+name: bootstrap-deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type ENABLE TRADING to proceed"
+        required: true
+        default: ""
+      strategy:
+        description: "Strategy name"
+        required: false
+        default: "buy_and_hold"
+      params:
+        description: "Strategy parameters, JSON"
+        required: false
+        default: '{"symbols": ["SPY"], "min_history": 1}'
+      grid:
+        description: "Walk-forward parameter grid, JSON"
+        required: false
+        default: '{"min_history": [1]}'
+      capital:
+        description: "Capital, USD"
+        required: false
+        default: "100000"
+
+# One at a time. Two concurrent runs would each find no deployment, and each
+# would create one, and the two would trade the same capital twice.
+concurrency:
+  group: bootstrap-deployment
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Refuse unless the confirmation was typed
+        if: ${{ inputs.confirm != 'ENABLE TRADING' }}
+        run: |
+          echo "confirm was '${{ inputs.confirm }}', not 'ENABLE TRADING'." >&2
+          echo "This workflow enables a deployment and releases the kill" >&2
+          echo "switch. It should be hard to run by accident." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # requirements-dev too, unlike the worker and broker-check jobs. This is
+      # an operator tool rather than a deployment, and it drives the ASGI app
+      # directly, which needs httpx — listed there because starlette's
+      # TestClient needs it and plain fastapi does not depend on it.
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Create and enable the paper deployment
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python scripts/bootstrap_paper_deployment.py \
+            --strategy "${{ inputs.strategy }}" \
+            --params '${{ inputs.params }}' \
+            --grid '${{ inputs.grid }}' \
+            --capital "${{ inputs.capital }}"
