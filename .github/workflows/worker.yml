@@ -89,6 +89,13 @@ jobs:
           ALPACA_ALLOW_LIVE: "false"
         run: |
           set -uo pipefail
+          # `+e` is the whole point of the next four lines existing. GitHub
+          # runs a `run:` block under `bash -e`, so `timeout`'s 124 aborted the
+          # script here — before `code=$?` was ever reached — and the branch
+          # below that calls 124 a success never ran. Every scheduled worker
+          # run went red while the worker itself was healthy, which trains an
+          # operator to ignore the one signal that says the worker died.
+          set +e
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
           # the job in flight and closes the pool. --kill-after is the
           # guarantee that a wedged process still exits.

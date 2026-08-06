@@ -92,6 +92,10 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -uo pipefail
+          # `+e` for the same reason as worker.yml: a `run:` block executes
+          # under `bash -e`, so 124 exited the script before `code=$?` and the
+          # branch calling it a success was unreachable.
+          set +e
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
           # the tick in flight, records it on its `programme_runs` row and
           # closes the pool. A killed tick would leave a row stuck 'running'.

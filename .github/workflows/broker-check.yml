@@ -1,0 +1,60 @@
+# broker-check.yml
+# ----------------
+# The shipped Alpaca adapter, against the real paper venue, on demand.
+#
+# Why a workflow rather than a test
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# The paper credentials exist in exactly one place this repository controls:
+# the Actions secret store. They are not in `.env` on any developer machine —
+# `ALPACA_KEY_ID` is empty there — so a check that needs them can only run
+# here. That is also the honest place for it: this runner is the host that will
+# actually submit the orders, so a green run says the path works where it is
+# going to be used rather than where it happened to be tested.
+#
+# `workflow_dispatch` only, like `migrate.yml` and `smoke.yml`. This one
+# writes: it submits one $1 notional order, cancels it, and closes the position
+# if the order filled. A schedule would put a trickle of unattended orders
+# through a book the reconciliation job is trying to keep honest.
+#
+# What this does NOT make safe
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Nothing about live trading. `broker_check.py` names `TradingMode.PAPER`
+# literally, takes no mode argument, and refuses to proceed unless
+# api.alpaca.markets answers 401 for the key it was given — which is what the
+# live venue does to a paper key. `LIVE_TRADING_ENABLED` and `ALPACA_ALLOW_LIVE`
+# are absent below and therefore false.
+
+name: broker-check
+
+on:
+  workflow_dispatch:
+
+# One at a time. Two concurrent runs would leave two probe orders in the book
+# and each would try to unwind the other's fill.
+concurrency:
+  group: broker-check
+  cancel-in-progress: false
+
+jobs:
+  broker-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # requirements.txt, not -dev: the point is to exercise what a deployment
+      # installs, against the venue a deployment talks to.
+      - run: pip install -r requirements.txt
+
+      - name: Exercise the adapter against paper
+        env:
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: python tests/e2e/broker_check.py
