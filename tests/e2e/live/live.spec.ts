@@ -304,7 +304,10 @@ test.describe("Signed in", () => {
     // `set_secret` computes it from the plaintext and writes both together, so
     // twelve hex characters here means the ciphertext was written under a key
     // the deployment could actually use.
-    const marker = await row.locator(".font-mono").first().innerText();
+    const marker = await row
+      .locator(".font-mono")
+      .filter({ hasText: /^[0-9a-f]{12}$/ })
+      .innerText();
     expect(marker).toMatch(/^[0-9a-f]{12}$/);
 
     // And the value itself is nowhere on the page, in any form.

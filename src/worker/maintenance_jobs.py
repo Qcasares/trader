@@ -17,6 +17,7 @@ second one.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -196,6 +197,7 @@ async def run_reconcile(
         mode = deployment["mode"]
         broker = _broker_for(deployment, broker_factory)
         async with _maybe_context(broker):
+            await _sync_orders(conn, deployment["id"], broker)
             account = await broker.get_account()
             venue_positions = await broker.get_positions()
 
@@ -320,6 +322,43 @@ async def _recorded_positions(
         for r in rows
         if r["qty"] is not None and abs(Decimal(r["qty"])) > POSITION_TOLERANCE
     }
+
+
+async def _sync_orders(
+    conn: asyncpg.Connection, deployment_id: Any, broker: Any
+) -> None:
+    rows = await conn.fetch(
+        "SELECT id, broker_order_id FROM orders "
+        "WHERE deployment_id = $1 AND broker_order_id IS NOT NULL "
+        "AND status IN ('pending', 'submitted', 'partially_filled')",
+        deployment_id,
+    )
+    for row in rows:
+        status = await broker.get_order(row["broker_order_id"])
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE orders SET status = $2, updated_at = NOW() WHERE id = $1",
+                row["id"],
+                status.state.value,
+            )
+            if status.fills:
+                fill = status.fills[0]
+                await conn.execute("DELETE FROM fills WHERE order_id = $1", row["id"])
+                await conn.execute(
+                    """
+                    INSERT INTO fills (id, order_id, symbol, side, qty, price,
+                                       commission, filled_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                    """,
+                    uuid.uuid4(),
+                    row["id"],
+                    fill.symbol,
+                    fill.side.value,
+                    fill.qty,
+                    fill.price,
+                    fill.commission,
+                    fill.filled_at,
+                )
 
 
 def _default_source() -> Any:
