@@ -241,7 +241,7 @@ async def propose_hypothesis(
         + "."
     )
     payload = await ask_json(
-        ModelCall(system=_CARD_SYSTEM, prompt=prompt, max_tokens=2500),
+        ModelCall(system=_CARD_SYSTEM, prompt=prompt, max_tokens=5000),
         api_key,
         settings,
     )
