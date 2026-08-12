@@ -29,13 +29,10 @@
  *   response and re-read only the effective figure. That made the distinction
  *   architecturally real and invisible at once; the confirmation banner below
  *   the selector now states both explicitly.
- * - **A run history was drafted and removed again.** `api.programmeRuns` and
- *   the `ProgrammeRun` type exist and no page uses them, and an operator asking
- *   "is this thing doing anything" wants the history rather than the single
- *   latest pass. But adding it here put a third request into a loop that polls
- *   every ten seconds for as long as the tab is open, which is a change in what
- *   this page costs rather than in how it looks. It belongs in its own change,
- *   scoped and argued on its own terms.
+ * - **Recent passes use the runner heartbeat to identify stalls.** A persisted
+ *   `running` status cannot say whether its process died; a stale or missing
+ *   heartbeat can, so the display combines the two without inventing another
+ *   timeout.
  * - **The pipeline board is rebuilt in Tailwind rather than the legacy
  *   `.pipeline`/`.pill`/`.card` classes**, to match the utility-first layout
  *   `/system`, `/backtests` and `/portfolio` already settled on. `.metric-grid`
@@ -60,6 +57,7 @@ import {
   api,
   type Candidate,
   type PipelineBoard,
+  type ProgrammeRun,
   type ProgrammeStatus,
 } from "@/lib/api";
 import { Skeleton } from "@/components/Skeleton";
@@ -137,6 +135,7 @@ export default function ProgrammePage() {
   const router = useRouter();
   const [status, setStatus] = useState<ProgrammeStatus | null>(null);
   const [board, setBoard] = useState<PipelineBoard | null>(null);
+  const [runs, setRuns] = useState<ProgrammeRun[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
   const [reason, setReason] = useState("");
@@ -145,12 +144,14 @@ export default function ProgrammePage() {
 
   const refresh = useCallback(async () => {
     try {
-      const [nextStatus, nextBoard] = await Promise.all([
+      const [nextStatus, nextBoard, nextRuns] = await Promise.all([
         api.programmeStatus(),
         api.pipeline(),
+        api.programmeRuns(10),
       ]);
       setStatus(nextStatus);
       setBoard(nextBoard);
+      setRuns(nextRuns);
       setError(null);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -249,6 +250,7 @@ export default function ProgrammePage() {
         "Pass requested. The runner picks it up within a few seconds; the API " +
           "never runs one inline.",
       );
+      await refresh();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -446,6 +448,77 @@ export default function ProgrammePage() {
               Run a pass now
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Recent passes</CardTitle>
+          <p className="m-0 text-sm text-ink-muted text-pretty">
+            The latest ten programme passes. A running pass is stalled when no
+            live runner heartbeat exists to finish it.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <DataTable
+            rows={runs}
+            getRowId={(run) => run.id}
+            empty="No programme passes yet."
+            columns={[
+              {
+                id: "status",
+                header: "Status",
+                cell: (run) => {
+                  const displayStatus =
+                    run.status === "running" && (runner === null || runner.stale)
+                      ? "stalled"
+                      : run.status;
+                  return (
+                    <StatusBadge
+                      status={
+                        displayStatus === "stalled"
+                          ? "blocked"
+                          : jobStatus(displayStatus)
+                      }
+                    >
+                      {displayStatus}
+                    </StatusBadge>
+                  );
+                },
+              },
+              {
+                id: "trigger",
+                header: "Trigger",
+                cell: (run) => run.trigger,
+              },
+              {
+                id: "actions",
+                header: "Actions",
+                cell: (run) => String(run.actions.length),
+              },
+              {
+                id: "model",
+                header: "Model",
+                cell: (run) => run.model || "no model",
+              },
+              {
+                id: "timing",
+                header: "Timing",
+                cell: (run) => (
+                  <span className="whitespace-nowrap">
+                    requested {fmtInstant(run.created_at)}
+                    <br />
+                    started {fmtInstant(run.started_at)}
+                  </span>
+                ),
+              },
+              {
+                id: "error",
+                header: "Error",
+                cell: (run) => run.error || "—",
+              },
+            ]}
+          />
         </CardContent>
       </Card>
 
