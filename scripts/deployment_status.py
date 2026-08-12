@@ -21,12 +21,9 @@ runs the deployment's own dry-run, which computes order intents through the
 real strategy, the real risk gate and the real broker account state without
 submitting anything.
 
-`--advance-ingest` is the one exception and it is opt-in. It moves today's
-`ingest_bars` job to now so the worker claims it immediately, because on the
-day a deployment is created the session's ingest is scheduled after that
-session's decision, and the first decision would otherwise find an empty
-`daily_bars` and do nothing. It touches one row of the job queue and nothing
-that trades.
+The `--advance-ingest` and `--advance-reconcile` exceptions are opt-in. Each
+moves today's matching queued job to now so the worker claims it immediately.
+They touch only the job schedule and neither submits an order.
 """
 
 from __future__ import annotations
@@ -54,7 +51,9 @@ def _install_ephemeral_operator() -> None:
     os.environ.pop("CORS_ORIGINS", None)
 
 
-async def _report_database(advance_ingest: bool) -> list[str]:
+async def _report_database(
+    advance_ingest: bool, advance_reconcile: bool
+) -> list[str]:
     """Everything the API has no endpoint for. Returns the deployed universe."""
     import asyncpg
 
@@ -214,6 +213,14 @@ async def _report_database(advance_ingest: bool) -> list[str]:
             )
             print(f"\nadvanced today's ingest job to now ({moved})")
 
+        if advance_reconcile:
+            moved = await conn.execute(
+                "UPDATE jobs SET scheduled_for = NOW() "
+                "WHERE kind = 'reconcile' AND status = 'queued' "
+                "AND scheduled_for::date = CURRENT_DATE"
+            )
+            print(f"\nadvanced today's reconcile job to now ({moved})")
+
         return universe
     finally:
         await conn.close()
@@ -264,7 +271,7 @@ async def _dry_run() -> None:
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    await _report_database(args.advance_ingest)
+    await _report_database(args.advance_ingest, args.advance_reconcile)
     if not args.no_dry_run:
         await _dry_run()
     return 0
@@ -280,6 +287,11 @@ def main() -> int:
         "--advance-ingest",
         action="store_true",
         help="move today's queued ingest_bars job to now",
+    )
+    parser.add_argument(
+        "--advance-reconcile",
+        action="store_true",
+        help="move today's queued reconcile job to now",
     )
     parser.add_argument("--no-dry-run", action="store_true")
     return asyncio.run(main_async(parser.parse_args()))
