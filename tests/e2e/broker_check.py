@@ -22,6 +22,7 @@ does is prove the key is refused by the live host.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
@@ -63,7 +64,7 @@ async def _key_is_not_a_live_key(key_id: str, secret_key: str) -> None:
     print("  live host refuses the key (401)      -> it is a paper key")
 
 
-async def main() -> int:
+async def main(reset_account: bool = False) -> int:
     key_id = os.environ.get("ALPACA_KEY_ID", "").strip()
     secret_key = os.environ.get("ALPACA_SECRET_KEY", "").strip()
     if not key_id or not secret_key:
@@ -81,6 +82,16 @@ async def main() -> int:
 
         before = await broker.get_positions()
         print(f"  get_positions                      -> {len(before)} held")
+
+        if reset_account:
+            cancelled = await broker.cancel_all()
+            for symbol in before:
+                await broker.close_position(symbol)
+            print(
+                "  reset paper account                 -> "
+                f"{cancelled} orders, {len(before)} positions"
+            )
+            return 0
 
         # A deterministic id is what makes a retried job safe, so the check
         # should use one rather than proving a path the worker does not take.
@@ -127,8 +138,11 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--reset-account", action="store_true")
+    args = parser.parse_args()
     try:
-        sys.exit(asyncio.run(main()))
+        sys.exit(asyncio.run(main(args.reset_account)))
     except BrokerCheckError as error:
         print(f"\nFAILED: {error}", file=sys.stderr)
         sys.exit(1)
