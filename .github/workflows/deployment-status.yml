@@ -11,7 +11,7 @@
 # be inspected by changing it is one people stop inspecting, and the whole
 # point of the halting limits and the kill switch is that somebody looks.
 #
-# `deployment_status.py` writes nothing unless `advance_ingest` is set, which
+# `deployment_status.py` writes nothing unless an advance input is set, which
 # moves one queued job's schedule and touches nothing that trades.
 #
 # It holds broker credentials because the dry-run reads the account state from
@@ -27,6 +27,11 @@ on:
     inputs:
       advance_ingest:
         description: "Move today's queued ingest_bars job to now"
+        type: boolean
+        required: false
+        default: false
+      advance_reconcile:
+        description: "Move today's queued reconcile job to now"
         type: boolean
         required: false
         default: false
@@ -65,4 +70,5 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           python scripts/deployment_status.py \
-            ${{ inputs.advance_ingest && '--advance-ingest' || '' }}
+            ${{ inputs.advance_ingest && '--advance-ingest' || '' }} \
+            ${{ inputs.advance_reconcile && '--advance-reconcile' || '' }}
