@@ -13,6 +13,7 @@ imported here so that ``list_strategies()`` is complete after a single
 from src.strategies import (
     asset_class_trend_following,  # noqa: F401,E402
     buy_and_hold,  # noqa: F401,E402
+    momentum,  # noqa: F401,E402
 )
 from src.strategies.base import Strategy, StrategyParams  # noqa: F401
 from src.strategies.registry import (  # noqa: F401
