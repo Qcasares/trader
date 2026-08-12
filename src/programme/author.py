@@ -278,7 +278,7 @@ async def propose_configuration(
         "preregistered_criteria."
     )
     payload = await ask_json(
-        ModelCall(system=_CONFIG_SYSTEM, prompt=prompt, max_tokens=1500),
+        ModelCall(system=_CONFIG_SYSTEM, prompt=prompt, max_tokens=3000),
         api_key,
         settings,
     )
