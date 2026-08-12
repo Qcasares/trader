@@ -28,6 +28,12 @@ name: broker-check
 
 on:
   workflow_dispatch:
+    inputs:
+      reset_account:
+        description: "Cancel every paper order and close every paper position"
+        type: boolean
+        required: false
+        default: false
 
 # One at a time. Two concurrent runs would leave two probe orders in the book
 # and each would try to unwind the other's fill.
@@ -61,4 +67,4 @@ jobs:
           # sys.path, not the working directory, so `import src` fails. pytest
           # hides this locally by putting the rootdir on the path itself.
           PYTHONPATH: ${{ github.workspace }}
-        run: python tests/e2e/broker_check.py
+        run: python tests/e2e/broker_check.py ${{ inputs.reset_account && '--reset-account' || '' }}
