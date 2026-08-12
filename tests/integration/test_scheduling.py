@@ -24,7 +24,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -34,7 +34,14 @@ pytest.importorskip("asyncpg")
 import asyncpg  # noqa: E402
 
 from src.core.calendar import sessions as nyse_sessions  # noqa: E402
-from src.core.types import AccountState, Position  # noqa: E402
+from src.core.types import (  # noqa: E402
+    AccountState,
+    Fill,
+    OrderState,
+    OrderStatus,
+    Position,
+    Side,
+)
 from src.data import SyntheticSource  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
 from src.db.repos import marks  # noqa: E402
@@ -113,9 +120,12 @@ def deployment(dsn):
 class FakeBroker:
     """A venue with a known book, so reconciliation has something to disagree with."""
 
-    def __init__(self, cash=Decimal("50000"), positions=None) -> None:
+    def __init__(
+        self, cash=Decimal("50000"), positions=None, order_statuses=None
+    ) -> None:
         self._cash = cash
         self._positions = positions or {}
+        self._order_statuses = order_statuses or {}
 
     async def get_account(self) -> AccountState:
         invested = sum(
@@ -129,6 +139,9 @@ class FakeBroker:
 
     async def get_positions(self) -> dict[str, Position]:
         return dict(self._positions)
+
+    async def get_order(self, broker_order_id: str) -> OrderStatus:
+        return self._order_statuses[broker_order_id]
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +372,94 @@ class TestEodMarks:
 
 
 class TestReconcile:
+    def test_a_venue_fill_is_recorded_before_positions_are_compared(
+        self, dsn, deployment
+    ) -> None:
+        broker_order_id = "venue-order-1"
+        filled_at = datetime(2021, 6, 15, 13, 35, tzinfo=UTC)
+        fill = Fill(
+            broker_order_id=broker_order_id,
+            symbol="SPY",
+            side=Side.BUY,
+            qty=Decimal("10"),
+            price=Decimal("400"),
+            commission=Decimal("0"),
+            filled_at=filled_at,
+        )
+        status = OrderStatus(
+            broker_order_id=broker_order_id,
+            symbol="SPY",
+            side=Side.BUY,
+            state=OrderState.FILLED,
+            filled_qty=fill.qty,
+            avg_fill_price=fill.price,
+            fills=(fill,),
+        )
+
+        async def check():
+            conn = await asyncpg.connect(dsn)
+            try:
+                order_id = uuid.uuid4()
+                await conn.execute(
+                    """
+                    INSERT INTO orders (id, deployment_id, client_order_id,
+                        broker_order_id, mode, symbol, side, status, submitted_at)
+                    VALUES ($1,$2,'reconcile-fill','venue-order-1','paper',
+                            'SPY','buy','submitted',NOW())
+                    """,
+                    order_id,
+                    deployment,
+                )
+                result = await run_reconcile(
+                    conn,
+                    {"session": SESSION.isoformat()},
+                    broker_factory=lambda: FakeBroker(
+                        positions={
+                            "SPY": Position(
+                                symbol="SPY",
+                                qty=Decimal("10"),
+                                avg_entry_price=Decimal("400"),
+                            )
+                        },
+                        order_statuses={broker_order_id: status},
+                    ),
+                )
+                await run_reconcile(
+                    conn,
+                    {"session": SESSION.isoformat()},
+                    broker_factory=lambda: FakeBroker(
+                        positions={
+                            "SPY": Position(
+                                symbol="SPY",
+                                qty=Decimal("10"),
+                                avg_entry_price=Decimal("400"),
+                            )
+                        },
+                        order_statuses={broker_order_id: status},
+                    ),
+                )
+                order = await conn.fetchrow(
+                    "SELECT status FROM orders WHERE id = $1", order_id
+                )
+                recorded = await conn.fetchrow(
+                    "SELECT qty, price, filled_at FROM fills WHERE order_id = $1",
+                    order_id,
+                )
+                fill_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM fills WHERE order_id = $1", order_id
+                )
+                return result, order, recorded, fill_count
+            finally:
+                await conn.close()
+
+        result, order, recorded, fill_count = asyncio.run(check())
+        assert result["mismatches"] == []
+        assert order["status"] == "filled"
+        assert fill_count == 1
+        assert recorded["qty"] == Decimal("10")
+        assert recorded["price"] == Decimal("400")
+        assert recorded["filled_at"] == filled_at
+
     def test_a_clean_book_reports_no_mismatch(self, dsn, deployment) -> None:
         async def check():
             conn = await asyncpg.connect(dsn)
