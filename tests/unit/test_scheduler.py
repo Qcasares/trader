@@ -100,6 +100,28 @@ class TestOrdinarySession:
         delay = (ingest.run_at - session_close(session)).total_seconds() / 60
         assert delay >= 15
 
+    def test_decision_follows_the_ingest(self) -> None:
+        """
+        The decision reads `daily_bars`; today's close is only *in* that table
+        once the ingest job has run. Scheduled the other way round, every live
+        decision computes targets from yesterday's close while recording
+        today's date — a one-session signal lag the backtest does not model,
+        and the parity test cannot see it because both paths run the same
+        driver on whatever panel they are handed.
+        """
+        session = date(2026, 3, 10)
+        jobs = plan_session(session)
+        ingest = next(j for j in jobs if j.kind is JobKind.INGEST_BARS)
+        decision = next(j for j in jobs if j.kind is JobKind.LIVE_DECISION)
+        assert decision.run_at > ingest.run_at
+
+    def test_marks_follow_the_decision(self) -> None:
+        session = date(2026, 3, 10)
+        jobs = plan_session(session)
+        decision = next(j for j in jobs if j.kind is JobKind.LIVE_DECISION)
+        marks = next(j for j in jobs if j.kind is JobKind.EOD_MARKS)
+        assert marks.run_at > decision.run_at
+
 
 class TestEarlyCloses:
     """Half-days shift end-of-day work earlier; nothing may assume 16:00."""

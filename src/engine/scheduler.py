@@ -76,15 +76,20 @@ RECONCILE_BEFORE_OPEN = timedelta(minutes=5)
 #: that the live system can never achieve.
 SUBMIT_AFTER_OPEN = timedelta(minutes=5)
 
-#: Decide after the close using the official closing prices.
-DECIDE_AFTER_CLOSE = timedelta(minutes=30)
-
-#: Mark the book once end-of-day data has settled.
-MARKS_AFTER_CLOSE = timedelta(minutes=60)
-
 #: Alpaca's free tier will not return a bar until it is at least 15 minutes
 #: old. A job asking for today's bar at 16:05 ET gets nothing at all.
 INGEST_AFTER_CLOSE = timedelta(minutes=45)
+
+#: Decide after the close using the official closing prices — which means
+#: after the ingest that *stores* them, not merely after the bell. The
+#: decision reads `daily_bars`, so a decision scheduled before the ingest
+#: computes targets from yesterday's close while recording today's date:
+#: a one-session signal lag the backtest does not model, invisible to the
+#: parity test because it lives in the schedule rather than the driver.
+DECIDE_AFTER_CLOSE = INGEST_AFTER_CLOSE + timedelta(minutes=15)
+
+#: Mark the book after the decision, preserving their relative order.
+MARKS_AFTER_CLOSE = DECIDE_AFTER_CLOSE + timedelta(minutes=15)
 
 
 def plan_session(
