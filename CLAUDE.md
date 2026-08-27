@@ -411,10 +411,18 @@ inert while the backtest continues to honour them.
   `cancel_all` and `close_position`. The deterministic client order id round
   trips, which is the property the worker's retry safety rests on.
   `tests/e2e/broker_check.py` is that pass, and `broker-check.yml` runs it on
-  dispatch. **Still untested against the venue: a fill.** The probe ran with
-  the market closed, so the order was acknowledged and cancelled rather than
-  filled, and `close_position` took its no-op branch. Nothing has yet proven
-  how a real fill is parsed back into a `Fill`.
+  dispatch. **A real fill has now round-tripped.** On 2026-08-26 the live
+  worker submitted the first autonomous order (buy 124.240332854 SPY, market,
+  `client_order_id 025d937d:20260825:SPY`), the venue filled it at an average
+  of 765.335855, and the next morning's reconcile polled `get_order`, wrote
+  the first `fills` row, and reported the position matching the venue to all
+  nine decimals. Decide → stage → submit → fill → parse → reconcile has run
+  end to end against `paper-api.alpaca.markets` on a scheduled session, not a
+  probe. One honest caveat: the paper account was not flat — it carries five
+  pre-existing positions from an earlier experiment (AAPL, AMZN, GOOGL, MSFT,
+  NVDA, ~$95k) that the operator has been asked to clear, so the venue funded
+  the buy on paper margin and every daily reconcile flags those five until the
+  account is reset. The system's own ledger holds only what it traded.
 - Verify which venue a key belongs to before storing it, by trying both. A
   paper key is refused by `api.alpaca.markets` with a 401 and a live key is
   refused by `paper-api.alpaca.markets` the same way, so one pair of requests
@@ -437,8 +445,9 @@ inert while the backtest continues to honour them.
   a candidate automatically from concept through rapid research, independent
   validation and shadow operation, with the twelve specialist roles, the
   findings register and the veto mapping in place. It cannot cross into stage
-  4: that needs a venue that has been proven to fill, and the paper venue has
-  so far only been proven to accept and cancel. Stages 4 to 8
+  4. The venue-side prerequisite has since been met — the paper venue has now
+  been proven to fill, not merely accept and cancel — but the stage 4 to 8
+  gates themselves are still unbuilt: they
   return *not met — capability absent* and name what is missing. The
   scorecards and the statistics they need (deflated Sharpe, probability of
   backtest overfitting, capacity) are a later slice. See
