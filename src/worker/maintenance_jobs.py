@@ -39,8 +39,15 @@ INGEST_LOOKBACK_DAYS = 10
 #: muted.
 POSITION_TOLERANCE = Decimal("0.000001")
 
-#: Absolute tolerance for a cash mismatch, in dollars.
-CASH_TOLERANCE = Decimal("0.01")
+#: Absolute tolerance for a cash mismatch, in dollars. Not a cent: the
+#: comparison is cross-time — the previous close's mark against the venue at
+#: the next pre-open — and the venue's overnight processing moves cash by a
+#: few cents on a margin account (observed: a constant $0.04 on the paper
+#: book, every session). A cent-level tolerance therefore alerts daily on
+#: noise, and an alert that fires every day is one that gets muted — the same
+#: reasoning as POSITION_TOLERANCE above. A real unaccounted cash move is
+#: bounded below by the sizer's minimum trade, so a dollar still catches it.
+CASH_TOLERANCE = Decimal("1.00")
 
 
 # ---------------------------------------------------------------------------
