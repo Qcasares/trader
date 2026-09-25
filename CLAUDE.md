@@ -77,8 +77,14 @@ predicting the live system, which is worse than the bug being fixed.
    not import `src.execution` or `src.worker`. That prohibition is the price of
    the permission; without it the separation is a convention that one import
    would end. `src/api` may read the programme's rows (`repo`, `flags`,
-   `gates`) and may not import its runner (`tick`, `author`, `client`, `main`),
-   which would drag the SDK into the process that commands the worker.
+   `gates`) and may not import its runner (`tick`, `author`, `client`, `main`,
+   `panel`, and the future `jev_client` and `jev_lane`), which would drag an
+   SDK into the process that commands the worker.
+
+   An amendment admitting typed Jev answers to a paper-only order path is
+   **proposed** in `docs/08-jev-integration.md`; it lands in phase F and is not
+   in force, so until then this rule covers Jev exactly as it covers any other
+   model.
 6. **Never commit credentials.** Not values, not placeholders, not defaults —
    `docker-compose.yml` reads everything from gitignored `.env`.
 7. **The programme's switch fails closed too.** `programme_enabled` is read
@@ -261,9 +267,11 @@ Each is enforced by a test, not by discipline:
 | The risk gate binds live, not just in backtests | `tests/integration/test_live_path.py::TestRiskGateOnTheLivePath` asserts against the shipped job, not the driver it ought to use |
 | The halting limits can actually halt | `Driver` populates `RiskState`'s equity fields and seeds them from `daily_marks` on the live path; `tests/unit/test_real_data.py` and `TestMarksFeedTheRiskGate` drive both directions |
 | Every scheduled job kind has a handler | `test_scheduling.py::test_every_scheduled_kind_has_a_handler` compares the planner's output against the worker's dispatch table as sets |
+| The worker claims only what it can run | The queue is shared with the programme, and a kind with no handler was claimed, failed with `retry=False` and retired for good. `_drain` passes `kinds=list(HANDLERS)`, read at claim time so the filter cannot drift from the dispatch table. `test_worker_claim.py` pins the argument; `test_scheduling.py::TestTheWorkerClaimsOnlyWhatItCanRun` leaves a foreign kind queued and untouched |
 | Re-planning a session is free | scheduled jobs carry `dedupe_key = "{kind}:{session}"` under a partial unique index, so a worker restart re-plans without duplicating |
 | The rebalance schedule survives a restart | `deployments.last_rebalance` is written after every live decision; `TestTheRebalanceScheduleSurvivesRestarts` requires four consecutive sessions to decline after the first |
 | Walk-forward before deployment | `walkforward_runs` persists each study's verdict; the deployment gate refuses without a completed, robust study **for the same parameters** |
+| Enabling asks the gate again | `POST /deployments/{id}/enable` used to flip the status and check nothing, while `create` — which only ever writes a disabled row — held the whole gate. The programme inserts its shadow rows directly, and evidence changes after creation. Both now ask one `_deployment_gate`, `enable` of the row as stored, and `enable` answers **409** for any owner but `default` before asking it. `test_deployment_enable_gate.py` asserts every refusal leaves the row disabled |
 | A late submission is refused, not filled | `run_submit_orders` expires a batch whose window closed over two hours ago rather than filling at a price the backtest never modelled |
 | Honest timestamps | `Driver.step` seeks the injected clock to the session it is processing, so a fill carries the date it happened |
 | Venue divergence is visible | `SimulatedBroker.underfunded_buys` records every buy it trimmed that a venue would have rejected |
@@ -286,16 +294,21 @@ Each is enforced by a test, not by discipline:
 | A veto is a row, not an opinion | `gates._no_blocking_findings` blocks on open, high-or-critical findings from a role in `VETO_ROLES`, and reads none of their text. Prepended to every gate, including the unbuilt ones |
 | The runner cannot promote past its ceiling | `programme_max_auto_stage` is read fail-closed to zero and clamped below `FIRST_HUMAN_GATED_STAGE` **on the way out**, not on the way in — so the stored value never masquerades as the effective one, and a boolean stored there does not read as stage 1 |
 | The panel reviews before the promotion, not after | `tick._convene` runs, then facts are re-loaded and the gate re-evaluated. A review of something already promoted is an audit, and an audit is not a control |
+| The panel actually sits | Until phase A of the Jev integration it did not. `_convene` named the stage's roles `panel` and called `panel.assess` — on the tuple, since the module was never imported. The per-role `except` recorded `assessment_failed` for every role, the gate went on promoting, and ruff, CI and every test stayed green. `panel` is now imported as `specialist_panel`. `test_programme_convene.py` asserts every role is asked and recorded; `test_programme.py::TestThePanelSitsBeforeThePromotion` that a veto raised in a pass blocks that pass |
+| A panel that did not finish holds the promotion | Once the panel could sit, the per-role `except` still let a role fail and the pass promote as if it had been heard — the defect above, one role at a time. `_convene` now returns the roles that were due and did not report, and `_advance` withholds the promotion (`promotion_withheld`, the roles named) until they have; only those roles are asked again. A panel never convened — no key, unusable settings — holds nothing, by design. `test_programme_convene.py::TestAPanelThatDidNotFinishHoldsThePromotion` drives all three cases |
 | An unmeasured metric is never rendered as zero | `ScoreRow.observed` is nullable with no third state, and `test_programme_scorecard.py` asserts it over every row. A card showing 0.00 for an unmeasured probability of backtest overfitting asserts the most flattering possible value for the metric whose purpose is to be unflattering |
 | A missing measurement is `unknown`, not `fail` | Same file. An operator who cannot tell them apart will either dismiss real failures or chase phantom ones |
 | A search that selected noise cannot reach validation | Gate 1 → 2 refuses a *measured* PBO above `MAX_PBO`. It passes on an unmeasured one, because a single-candidate study has no selection to overfit and refusing on undefined would bar the honest case |
 | A shadow book cannot drift from its own decisions | Nothing stores it. `shadow_job._replay` rebuilds it from `shadow_decisions` on every run, filling session S's intents at S+1's open with the same `execute_pending` a backtest uses. `test_shadow.py` asserts two runs over the same log agree |
-| Shadow mode reaches no venue | The deployment is created **disabled** and stays so; `_enabled_deployments` filters on status. `test_shadow.py` asserts the `orders` table stays empty |
+| Shadow mode reaches no venue | The deployment is created **disabled** and stays so. `_enabled_deployments` filters on status **and** on `owner_id = 'default'` (`TRADED_OWNER`), as does the maintenance jobs' selection, so a programme row flipped to enabled by any path still reaches no venue; the API's enable route refuses it first. `test_shadow.py` asserts the `orders` table stays empty; `test_deployment_enable_gate.py::TestTheWorkerTradesOnlyTheOperatorsRows` asserts the filter |
 | Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |
 | The API cannot reach a model client *transitively* | Every check in `test_import_boundaries.py` used to read one module's own imports, which is enough for a direct `import anthropic` and not enough for an indirect one. `test_the_programme_modules_the_api_imports_hold_no_client` walks the closure, and found a real hole: `src/api` imports `roles` for the role vocabulary, and `roles` imported `client`. `assess` now lives in `panel.py`, which nothing in `src/api` imports |
+| Nothing that can move money reaches a model by any route | `test_import_boundaries.py` builds one import graph of `src/` — `from a import b` read as `a.b` (the old check compared the module alone, so `from src.programme import tick` passed it), relative and function-level imports resolved, package `__init__`s followed, `api/index.py` and the scripts that build the API walked as `api` — and walks the closure from **every** protected package, not only `src/api`. `FORBIDDEN_PREFIXES`, matched on whole dotted segments, adds the TypeSafe names (`typesafe_sdk`, `typesafe`, `typesafe_ai`, `jev`, `cooksafe`, and `httpx2`, the SDK's transport) and the other model SDKs; `RUNNER_ONLY` adds `panel`, `jev_client` and `jev_lane`. `test_the_order_path_cannot_reach_the_programme_at_all` keeps the decision path and the worker out of `src/programme` entirely, a computed import is refused, and `test_only_the_jev_modules_spell_the_typesafe_endpoint` keeps `api.typesafe.ai` out of every file but two, because `aiohttp` reaches a model with no import to catch |
+| A model SDK is installed only where it may be imported | `test_dependency_boundaries.py` reads requirements as pip does, includes followed, plus the Dockerfiles, compose and workflows: a model SDK is declared only in `requirements-programme.txt`, installed only by `Dockerfile.programme`, built only by the `programme` service and installed only by `programme.yml` — `worker.yml` *is* the worker, with the broker keys. The one TypeSafe name allowed is `typesafe-sdk`, from PyPI; nothing redirects pip or uv to another index; no npm package claims to be TypeSafe's; the lookalike hosts appear in nothing that ships |
 | An effort level the model rejects is refused, not sent | Effort is a per-model capability — Haiku 4.5 has none and sending one is a 400 on *every* subsequent pass. `src/programme/models.py` carries the supported levels per model, `client.ask_json` omits `output_config` entirely where there are none, and the same `settings_problem` runs at the form and at the row |
 | Unusable model settings mean no model call | `flags.model_settings` returns `None` on a missing row, an unreadable value or one the catalogue refuses, and `run_tick` treats that as "reconcile, evaluate and promote, but call nothing". Falling back to a default would spend at a vendor under a configuration nobody chose and write the result into the ledger as though somebody had |
 | A model client is never handed a tool | `test_the_model_client_passes_no_tools` refuses the strings `tools` and `tool_choice` anywhere in `client.py` — keyword *or* dict key, since the request is assembled as a dict so `output_config` can be omitted. `test_model_request.py` asserts the same at the wire |
+| No process holds both a venue key and a model key | Every compose service is handed the whole `.env`, so possession is decided by blanking. The worker blanks `SECRETS_KEY`, `ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY`; the API both model keys; the programme `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` and `BANKR_API_KEY`, because a venue key needs no import to use. `test_secret_isolation.py` asserts both directions against compose and the workflows, takes the broker key names from `src/config.py` rather than a list, counts only `""` as a blank (a bare `NAME:` passes the shell's value through), refuses a model key read from the environment outside `src/programme`, and refuses the reseller's `JEV_API_KEY` anywhere in product files. The API still holds the broker keys beside `SECRETS_KEY`, for `broker_configured` |
 
 ## Adding a strategy
 
@@ -451,7 +464,8 @@ inert while the backtest continues to honour them.
   return *not met — capability absent* and name what is missing. The
   scorecards and the statistics they need (deflated Sharpe, probability of
   backtest overfitting, capacity) are a later slice. See
-  `docs/07-ai-programme-spine.md`.
+  `docs/07-ai-programme-spine.md`, and `docs/08-jev-integration.md` for the Jev
+  integration planned on top of it.
 - **Shadow mode proves operation, not performance.** Twenty sessions carries a
   Sharpe standard error near ±4, so the shadow book's equity is not a result
   and the UI says so. It also does not exercise the halting limits: `dry_run`
@@ -462,3 +476,12 @@ inert while the backtest continues to honour them.
   exercised by unit tests against fabricated replies and by nothing else. The
   gates, the reconciliation and the promotions do not need the model and are
   tested end to end against real Postgres.
+- **Jev is planned, not integrated.** TypeSafe AI's System One model is to
+  categorise research and operations, record signals, and — on paper only, and
+  only once the proposed Rule 5 amendment is in force — make direct decisions.
+  `docs/08-jev-integration.md` is the plan, the verified facts behind it, and
+  the record of each phase. Phase A, the safety prerequisites, is done: the
+  panel sits, enabling asks the gate, the worker claims only its own kinds, and
+  the import, dependency and key boundaries refuse Jev before it arrives. There
+  is no Jev code and no call has ever been made. The next live step needs a
+  TypeSafe key from an existing account, because TypeSafe has paused signups.

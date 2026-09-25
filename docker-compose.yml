@@ -40,6 +40,16 @@
 #   # fill in POSTGRES_PASSWORD, SESSION_SECRET, ADMIN_PASSWORD_HASH
 #   docker compose up --build
 #   docker compose run --rm api python -m src.db.migrate_cli
+#
+# One shared file means every service is handed every key, so which process
+# holds which is decided below, by blanking, and not by what `.env` contains:
+#
+#   worker     holds the broker keys    blanks SECRETS_KEY and the model keys
+#   programme  holds the model keys     blanks the broker keys
+#   api        holds SECRETS_KEY        blanks the model keys, and still holds
+#                                       the broker keys; its block says why
+#
+# tests/unit/test_secret_isolation.py asserts each of those against this file.
 
 services:
   db:
@@ -74,6 +84,21 @@ services:
       # closed. Leave both false.
       LIVE_TRADING_ENABLED: "false"
       ALPACA_ALLOW_LIVE: "false"
+      # Blanked on purpose, overriding whatever `.env` holds.
+      #
+      # This process commands the worker and needs no model credential of its
+      # own. It *stores* one, encrypting it under SECRETS_KEY, and it reports
+      # whether one is set by reading the `secrets` row — never by reading
+      # these variables — so blanking them cannot make the configuration page
+      # say anything untrue. The programme's environment fallback means both
+      # can legitimately be in `.env`, and without the override this process
+      # would inherit them for nothing.
+      #
+      # Not blanked, and worth knowing: ALPACA_KEY_ID and ALPACA_SECRET_KEY.
+      # `/system/status` reports `broker_configured` from them, and a blank
+      # here would read "not configured" while the worker held a working pair.
+      ANTHROPIC_API_KEY: ""
+      TYPESAFE_API_KEY: ""
     ports:
       - "8000:8000"
     depends_on:
@@ -95,15 +120,21 @@ services:
       # This process holds the broker credentials and is the only one that
       # submits an order. It can also read every row in the database, including
       # the encrypted `secrets` table — so the only thing between it and a model
-      # credential is not holding the key that decrypts one. Without these two
-      # lines it inherits both from the shared env_file, and the separation is a
-      # comment rather than a fact.
+      # credential is not holding the key that decrypts one. Without these
+      # lines it inherits all three from the shared env_file, and the separation
+      # is a comment rather than a fact.
+      #
+      # TYPESAFE_API_KEY is the Jev model credential. Like ANTHROPIC_API_KEY it
+      # belongs to the programme alone, vault first and environment second, so
+      # it is a second model key this process must not hold — blanked before
+      # the integration that reads it lands rather than after.
       #
       # The same boundary tests/unit/test_import_boundaries.py enforces on
       # imports, expressed in which process holds which key. Asserted by
       # tests/unit/test_secret_isolation.py against this file.
       SECRETS_KEY: ""
       ANTHROPIC_API_KEY: ""
+      TYPESAFE_API_KEY: ""
     depends_on:
       db:
         condition: service_healthy
@@ -135,6 +166,23 @@ services:
       # posture had to be inferred.
       LIVE_TRADING_ENABLED: "false"
       ALPACA_ALLOW_LIVE: "false"
+      # The worker's blanks, in the other direction.
+      #
+      # This is the one process permitted a model client, and the price of that
+      # permission is that it cannot reach an order: the import test forbids it
+      # importing `src.execution` or `src.worker`. That says nothing about a key
+      # already sitting in its environment, and a venue key needs no import to
+      # use — one HTTP request with two headers places an order. Without these
+      # lines it inherits the broker pair from the shared env_file, and "it
+      # holds no broker credentials", which programme.yml says of the
+      # deployment, was false here.
+      #
+      # BANKR_API_KEY belongs to src/bankr_client.py, which nothing runs today.
+      # It is a venue key all the same, for a venue that trades on a prompt,
+      # and `.env.example` invites an operator to fill it in.
+      ALPACA_KEY_ID: ""
+      ALPACA_SECRET_KEY: ""
+      BANKR_API_KEY: ""
     depends_on:
       db:
         condition: service_healthy

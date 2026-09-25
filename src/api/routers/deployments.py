@@ -10,6 +10,10 @@ plane rather than parallel to it, which is the one structural defence against
 the failure mode where a beautiful control plane ends up driving a strategy
 nobody ever tested.
 
+The same gate is asked again at ``enable``, which is the moment that matters:
+creation only writes a disabled row, and ``create`` is not the only thing that
+writes rows.
+
 ``POST /{id}/dry-run`` is the most useful endpoint in this module. It computes
 today's target weights and the exact orders that would follow — including their
 deterministic client order ids — and submits nothing. It is how you check what
@@ -28,12 +32,21 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.api.deps import AppSettings, AuthedSession, DbConn
-from src.db.repos import flags
+from src.config import Settings
+from src.db.repos import flags, marks
 from src.strategies import build_strategy, get_strategy_class, list_strategies
 from src.worker.live_job import NoDeploymentError, dry_run
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/deployments", tags=["deployments"])
+
+#: The one owner whose deployments this API will enable: the operator's own
+#: account, which ``create_deployment`` writes by the column's default and whose
+#: marks the risk gate reads. The programme inserts its shadow deployments under
+#: ``programme``, disabled, and they must stay that way — shadow mode reaches no
+#: venue. The worker's ``_enabled_deployments`` also filters on owner, so this
+#: is the first of two refusals rather than the only one.
+ENABLEABLE_OWNER = marks.DEFAULT_OWNER
 
 
 class RiskLimitsRequest(BaseModel):
@@ -137,82 +150,14 @@ async def create_deployment(
     settings: AppSettings,
 ) -> DeploymentResponse:
     """Create a deployment. Always starts disabled."""
-    try:
-        get_strategy_class(body.strategy)
-        build_strategy(body.strategy, body.params)
-    except KeyError:
-        raise HTTPException(
-            404,
-            f"unknown strategy {body.strategy!r}; registered: {list_strategies()}",
-        ) from None
-    except Exception as exc:  # noqa: BLE001 - surfaced verbatim
-        raise HTTPException(422, f"invalid parameters: {exc}") from exc
-
-    if body.mode == "live" and not settings.live_trading_enabled:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Live deployments require LIVE_TRADING_ENABLED in the environment. "
-            "That gate needs a redeploy to change, deliberately.",
-        )
-
-    # The gate: no completed backtest, no deployment.
-    try:
-        run_uuid = uuid.UUID(body.approved_backtest_run_id)
-    except ValueError:
-        raise HTTPException(422, "approved_backtest_run_id is not a valid id") from None
-
-    run = await conn.fetchrow(
-        "SELECT id, status, strategy_name, data_source, metrics "
-        "FROM backtest_runs WHERE id = $1",
-        run_uuid,
+    run_uuid = await _deployment_gate(
+        conn,
+        strategy=body.strategy,
+        params=body.params,
+        mode=body.mode,
+        approved_backtest_run_id=body.approved_backtest_run_id,
+        settings=settings,
     )
-    if run is None:
-        raise HTTPException(
-            422, f"unknown backtest run {body.approved_backtest_run_id}"
-        )
-    if run["status"] != "succeeded":
-        raise HTTPException(
-            422,
-            f"backtest run is '{run['status']}', not 'succeeded'. A deployment "
-            "must be backed by a completed backtest.",
-        )
-    if run["strategy_name"] != body.strategy:
-        raise HTTPException(
-            422,
-            f"backtest run is for {run['strategy_name']!r}, not {body.strategy!r}",
-        )
-    if run["data_source"] == "synthetic":
-        raise HTTPException(
-            422,
-            "that backtest ran on synthetic data, which says nothing about real "
-            "performance. Deploy only against a run on real market data.",
-        )
-
-    # The plan's own mitigation for its risk 7 — that a research UI is an
-    # overfitting machine, and edit-params/rerun/look-at-Sharpe is exactly how
-    # people fool themselves. A single backtest cannot distinguish a real edge
-    # from parameters fitted to noise; only walking the parameters forward can.
-    #
-    # This refuses rather than warns. A warning on the screen where somebody is
-    # already committed to deploying is not a control, and this gate is the
-    # last point at which the question gets asked.
-    verdict = await _walkforward_verdict(conn, body.strategy, body.params)
-    if verdict is None:
-        raise HTTPException(
-            422,
-            "no completed walk-forward study for this strategy and these "
-            "parameters. A single backtest cannot tell an edge from parameters "
-            "fitted to noise. Run POST /api/v1/backtests/{id}/walkforward "
-            "first.",
-        )
-    if not verdict["is_robust"]:
-        raise HTTPException(
-            422,
-            f"the walk-forward study for these parameters is NOT ROBUST. "
-            f"{_why_not_robust(verdict)} Failing this is strong evidence "
-            f"against the configuration. Degradation, for context, was "
-            f"{float(verdict['degradation']):+.3f}.",
-        )
 
     deployment_id = uuid.uuid4()
     await conn.execute(
@@ -247,9 +192,43 @@ async def enable(
     body: EnableRequest,
     session: AuthedSession,
     conn: DbConn,
+    settings: AppSettings,
 ) -> DeploymentResponse:
-    """Enable a deployment. Requires the typed confirmation."""
+    """
+    Enable a deployment. Requires the typed confirmation, and the gate.
+
+    This used to flip the status and nothing else, on the reasoning that the
+    gate had already been asked at creation. It had been asked of *that*
+    request. ``create_deployment`` is one way into the table, not the only one —
+    the programme inserts its shadow deployments directly, and any row can be
+    written by hand — and the evidence can change after creation: a newer
+    walk-forward of the same parameters that comes back NOT ROBUST supersedes
+    the one that admitted the deployment. Enabling is the moment a strategy is
+    turned loose on an account, so it is where the question has to be asked.
+
+    Ownership is checked first, so a shadow deployment is refused for what it
+    is rather than for whichever piece of evidence it happens to lack.
+    """
     row = await _require(conn, deployment_id)
+    if row["owner_id"] != ENABLEABLE_OWNER:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"deployment {deployment_id} belongs to {row['owner_id']!r}, not the "
+            f"operator's account. Only the operator's own deployments can be "
+            f"enabled here: the programme's shadow deployments stay disabled "
+            f"because shadow mode reaches no venue, and no other owner has a "
+            f"path to one yet.",
+        )
+    await _deployment_gate(
+        conn,
+        strategy=row["strategy_name"],
+        # Passed as stored, not coerced with `or {}`: a row whose params are
+        # JSON null would otherwise borrow the default parameters' walk-forward.
+        params=_maybe_json(row["params"]),
+        mode=row["mode"],
+        approved_backtest_run_id=row["approved_backtest_run_id"],
+        settings=settings,
+    )
     await conn.execute(
         "UPDATE deployments SET status='enabled', enabled_at=NOW(), "
         "halt_reason=NULL WHERE id=$1",
@@ -377,9 +356,113 @@ def _shape(row) -> DeploymentResponse:
     )
 
 
-async def _walkforward_verdict(
-    conn, strategy: str, params: dict
-) -> dict | None:
+async def _deployment_gate(
+    conn,
+    *,
+    strategy: str,
+    params: dict,
+    mode: str,
+    approved_backtest_run_id: str | uuid.UUID | None,
+    settings: Settings,
+) -> uuid.UUID:
+    """
+    Everything a deployment must have before it may exist or be enabled.
+
+    Raises ``HTTPException`` naming the first unmet condition; returns the
+    approved backtest's id when every condition holds. One function for both
+    ``create_deployment`` and ``enable``: a gate asked in one place and assumed
+    in the other is how ``enable`` came to check nothing at all, and two copies
+    would drift, the unwatched one first.
+    """
+    try:
+        get_strategy_class(strategy)
+        build_strategy(strategy, params)
+    except KeyError:
+        raise HTTPException(
+            404,
+            f"unknown strategy {strategy!r}; registered: {list_strategies()}",
+        ) from None
+    except Exception as exc:  # noqa: BLE001 - surfaced verbatim
+        raise HTTPException(422, f"invalid parameters: {exc}") from exc
+
+    # Anything but paper needs the environment gate. The request model and the
+    # schema both restrict mode to paper or live, so this reads the same as
+    # `mode == "live"` today; written this way, a mode nobody anticipated
+    # fails closed instead of being waved through as not-live.
+    if mode != "paper" and not settings.live_trading_enabled:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Live deployments require LIVE_TRADING_ENABLED in the environment. "
+            "That gate needs a redeploy to change, deliberately.",
+        )
+
+    # The gate: no completed backtest, no deployment.
+    if approved_backtest_run_id is None:
+        # Only reachable from a row: the request model requires the field.
+        raise HTTPException(
+            422,
+            "no approved backtest run. A deployment must be backed by a "
+            "completed backtest.",
+        )
+    try:
+        run_uuid = uuid.UUID(str(approved_backtest_run_id))
+    except ValueError:
+        raise HTTPException(422, "approved_backtest_run_id is not a valid id") from None
+
+    run = await conn.fetchrow(
+        "SELECT id, status, strategy_name, data_source, metrics "
+        "FROM backtest_runs WHERE id = $1",
+        run_uuid,
+    )
+    if run is None:
+        raise HTTPException(422, f"unknown backtest run {approved_backtest_run_id}")
+    if run["status"] != "succeeded":
+        raise HTTPException(
+            422,
+            f"backtest run is '{run['status']}', not 'succeeded'. A deployment "
+            "must be backed by a completed backtest.",
+        )
+    if run["strategy_name"] != strategy:
+        raise HTTPException(
+            422,
+            f"backtest run is for {run['strategy_name']!r}, not {strategy!r}",
+        )
+    if run["data_source"] == "synthetic":
+        raise HTTPException(
+            422,
+            "that backtest ran on synthetic data, which says nothing about real "
+            "performance. Deploy only against a run on real market data.",
+        )
+
+    # The plan's own mitigation for its risk 7 — that a research UI is an
+    # overfitting machine, and edit-params/rerun/look-at-Sharpe is exactly how
+    # people fool themselves. A single backtest cannot distinguish a real edge
+    # from parameters fitted to noise; only walking the parameters forward can.
+    #
+    # This refuses rather than warns. A warning on the screen where somebody is
+    # already committed to deploying is not a control, and this gate is the
+    # last point at which the question gets asked.
+    verdict = await _walkforward_verdict(conn, strategy, params)
+    if verdict is None:
+        raise HTTPException(
+            422,
+            "no completed walk-forward study for this strategy and these "
+            "parameters. A single backtest cannot tell an edge from parameters "
+            "fitted to noise. Run POST /api/v1/backtests/{id}/walkforward "
+            "first.",
+        )
+    if not verdict["is_robust"]:
+        raise HTTPException(
+            422,
+            f"the walk-forward study for these parameters is NOT ROBUST. "
+            f"{_why_not_robust(verdict)} Failing this is strong evidence "
+            f"against the configuration. Degradation, for context, was "
+            f"{float(verdict['degradation']):+.3f}.",
+        )
+    return run_uuid
+
+
+async def _walkforward_verdict(conn, strategy: str, params: dict) -> dict | None:
     """
     The most recent completed walk-forward for this exact configuration.
 
@@ -443,9 +526,7 @@ def _why_not_robust(verdict: dict) -> str:
         reasons.append(f"the stitched out-of-sample Sharpe is {sharpe:+.3f}")
 
     if folds:
-        chosen = [
-            json.dumps(f.get("chosen_params", {}), sort_keys=True) for f in folds
-        ]
+        chosen = [json.dumps(f.get("chosen_params", {}), sort_keys=True) for f in folds]
         stability = max(chosen.count(k) for k in set(chosen)) / len(chosen)
         if stability < 0.5:
             reasons.append(

@@ -61,6 +61,8 @@ HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 JobHandler = Callable[[asyncpg.Connection, dict[str, Any]], Awaitable[dict]]
 
+#: The dispatch table, and also the claim filter: the worker claims exactly
+#: these kinds and leaves every other row in ``jobs`` for whoever owns it.
 HANDLERS: dict[str, JobHandler] = {
     "backtest": run_backtest_job,
     "walkforward": run_walkforward_job,
@@ -182,7 +184,14 @@ class Worker:
         did_work = False
         while not self._stopping.is_set():
             async with self._pool.acquire() as conn:
-                job = await job_repo.claim(conn, self._worker_id)
+                # Only the kinds this process can run. The queue is shared, and
+                # not every kind in it is the worker's: one owned by another
+                # process (the programme's, say) would be claimed, failed as
+                # "no handler" with no retry, and so retired for good — while
+                # every one of the worker's own jobs succeeded. Read HANDLERS at
+                # claim time rather than copied into a second list, so the
+                # filter and the dispatch table cannot disagree.
+                job = await job_repo.claim(conn, self._worker_id, kinds=list(HANDLERS))
                 if job is None:
                     return did_work
                 did_work = True
@@ -192,6 +201,10 @@ class Worker:
     async def _execute(self, conn: asyncpg.Connection, job: job_repo.Job) -> None:
         handler = HANDLERS.get(job.kind)
         if handler is None:
+            # Unreachable while `claim` is passed the same key set, and cheap
+            # insurance if that ever drifts: refusing loudly beats guessing at
+            # a handler. It fails without retry, so a drift here would retire
+            # another process's job — which is why the filter above exists.
             logger.error("No handler for job kind %r", job.kind)
             await job_repo.fail(conn, job.id, f"no handler for {job.kind}", retry=False)
             return

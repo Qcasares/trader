@@ -15,7 +15,8 @@ The order is deliberate and it is the order a careful researcher would use:
    audit is not a control.
 3. **Judge.** Re-evaluate the gate — the panel may have just raised a blocking
    finding — record the judgement, and promote where the gate passed, no
-   operator is required, and the autonomy ceiling permits it.
+   operator is required, the autonomy ceiling permits it, and every role the
+   panel was summoned to hear has reported.
 4. **Fill the gaps.** For a candidate the gate refused, enqueue the experiments
    whose absence refused it. This is the only reason the programme queues work:
    it never runs an experiment because a result might be interesting.
@@ -25,7 +26,9 @@ The order is deliberate and it is the order a careful researcher would use:
 Steps 1, 3 and 4 need no model at all. A tick with no API key does all of them
 and records that it skipped the other two, which is the right degradation: the
 governance machinery is the part that must keep working. The panel's absence
-never *unblocks* anything, because a finding it already raised stays open.
+never *unblocks* anything, because a finding it already raised stays open. A
+panel that *was* convened and did not finish is not absence, though: it holds
+the promotion until the roles that failed have spoken.
 
 Three independent things must agree before this promotes a candidate: the gate
 passes, ``requires_human`` is false, and the stage is within the autonomy
@@ -50,6 +53,16 @@ from src.core import calendar
 from src.db.repos import backtests as backtest_repo
 from src.db.repos import jobs as job_repo
 from src.programme import author, flags, gates, repo, roles
+
+# Aliased because "panel" is the natural name for the tuple of roles a stage
+# summons, and that is exactly what happened: ``_convene`` bound the tuple to
+# ``panel`` and then called ``panel.assess``, on a module this file had never
+# imported. The AttributeError landed in the one-role-is-not-the-panel
+# ``except``, so every role was recorded as ``assessment_failed``, no role ever
+# reviewed a candidate, and the veto could not fire — while the gate went on
+# promoting as though the panel had sat. A module name that cannot be mistaken
+# for what it returns is the cheapest way to stop that happening twice.
+from src.programme import panel as specialist_panel
 from src.programme.gates import (
     MIN_COST_STRESS_MULTIPLIER,
     evaluate,
@@ -330,15 +343,23 @@ async def _advance(
     # The panel runs before the promotion decision, not after it, so a finding
     # raised this pass blocks this pass. Reviewing something already promoted
     # is an audit, and an audit is not a control.
-    await _convene(conn, candidate, result, report, api_key, settings)
+    unheard = await _convene(conn, candidate, result, report, api_key, settings)
 
     # Reloaded, because the panel may have just raised a blocking finding. The
     # first evaluation is what the roles were shown; this one is what decides.
     facts = await repo.load_facts(conn, candidate["id"]) or facts
     result = evaluate(facts)
 
+    # A panel that was summoned and did not finish has not reviewed anything.
+    # Promoting past it would be the defect the specialist panel once had in
+    # full — every role failing inside the one-role-is-not-the-panel `except`
+    # while the gate promoted regardless — reduced to one role at a time. A
+    # panel that was never convened (no key, unusable settings) is a different
+    # case and deliberately does not hold anything: see the module docstring.
     within_ceiling = result.to_stage <= ceiling
-    promoted = result.passed and not result.requires_human and within_ceiling
+    promoted = (
+        result.passed and not result.requires_human and within_ceiling and not unheard
+    )
     await repo.record_gate(conn, candidate["id"], result, promoted=promoted)
 
     if result.passed and not result.requires_human and not within_ceiling:
@@ -349,6 +370,22 @@ async def _advance(
             reason=(
                 f"the autonomy ceiling is {ceiling}; raise it to promote "
                 "without an operator"
+            ),
+        )
+        return
+
+    if result.passed and not result.requires_human and unheard:
+        # Only the roles that did not speak are asked again next pass, so the
+        # retry costs what failed and no more.
+        report.note(
+            "promotion_withheld",
+            candidate=candidate["id"],
+            to_stage=result.to_stage,
+            reason=(
+                "the panel did not finish sitting: "
+                f"{', '.join(unheard)} did not report. A review that did not "
+                "happen cannot clear a promotion; those roles are asked again "
+                "next pass"
             ),
         )
         return
@@ -390,7 +427,7 @@ async def _convene(
     report: TickReport,
     api_key: str | None,
     settings: ModelSettings | None,
-) -> None:
+) -> list[str]:
     """
     Run the stage-relevant panel, record every view, and open any findings.
 
@@ -401,13 +438,18 @@ async def _convene(
 
     Findings are opened, never closed. The only close path is an operator
     endpoint, and the schema refuses any other.
+
+    Returns the roles that were due to speak this pass and did not. Empty means
+    either that the panel sat in full or that it was never convened (no key or
+    no usable settings) — the two cases ``_advance`` must treat differently
+    from a panel that was summoned and failed to finish.
     """
     if not api_key or settings is None:
-        return
+        return []
 
-    panel = roles.roles_for_stage(candidate["stage"])
-    if not panel:
-        return
+    stage_roles = roles.roles_for_stage(candidate["stage"])
+    if not stage_roles:
+        return []
 
     # Convened once per stage, not once per tick. The evidence a role reasons
     # about changes when an experiment completes, and an hourly re-run of the
@@ -419,8 +461,8 @@ async def _convene(
         uuid.UUID(candidate["id"]),
         candidate["stage"],
     )
-    if int(already or 0) >= len(panel):
-        return
+    if int(already or 0) >= len(stage_roles):
+        return []
 
     seen = {
         r["role"]
@@ -437,13 +479,15 @@ async def _convene(
     )
     brief = roles.facts_brief(candidate_view, result.as_dict())
 
-    for role in panel:
+    failed: list[str] = []
+    for role in stage_roles:
         if role.key in seen:
             continue
         try:
-            assessment = await panel.assess(role, api_key, settings, brief)
+            assessment = await specialist_panel.assess(role, api_key, settings, brief)
         except Exception as exc:  # noqa: BLE001 - one role is not the panel
             report.note("assessment_failed", role=role.key, error=str(exc))
+            failed.append(role.key)
             continue
 
         await repo.record_assessment(
@@ -483,6 +527,8 @@ async def _convene(
                 blocks=role.holds_veto
                 and proposed.severity in gates.BLOCKING_SEVERITIES,
             )
+
+    return failed
 
 
 async def _enqueue_missing_evidence(
