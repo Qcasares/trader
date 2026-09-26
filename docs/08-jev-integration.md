@@ -5,9 +5,10 @@ Owner: Quentin Casares. Phases A and B of eight are built; C to H are not.
 Phase B's code is dark: every Jev switch is seeded off, no lane is wired into
 the programme's tick, and nothing enqueues the one job that could make a call.
 A TypeSafe key exists, as the `TYPESAFE_API_KEY` repository secret set on 26
-September 2026, but no request has yet been sent to TypeSafe from this
-repository: the dispatch-only key check, `jev-check.yml`, is the first thing
-that will use it. Last revised 26 September 2026.
+September 2026, and the dispatch-only key check proved it against TypeSafe's
+own host the same day: the listing named the aliases only, and the pinned
+`jev-1.13.0` answered the connectivity probe as expected. The programme itself
+has made no call. Last revised 26 September 2026.
 
 ## What this is
 
@@ -964,9 +965,12 @@ Everything needed to make one real, recorded, validated call, and nothing
 switched on. Every Jev switch is seeded off; no lane is wired into `tick`,
 `author` or `panel`; nothing in `src/api` or `web/src` reads the ledger; and
 the one job the programme can now run, `jev_probe`, has no producer outside
-the tests. The worker is untouched. No call has been made: the key exists as a
-repository secret, and the dispatch-only key check is the first thing that will
-use it.
+the tests. The worker is untouched. The programme has made no call. The only
+traffic to TypeSafe so far is the key check's, by dispatch: one listing and one
+probe on 2026-09-26 (run 36270381727), both HTTP 200, the listing naming only
+`jev-latest` and `jev-preview` — which is why the check had to stop looking for
+the pin there — and the probe answered by `jev-1.13.0` in 201 ms, `true` at
+p=0.99 with a margin of 0.98, 290 tokens in and 23 out. Nothing was recorded.
 
 **Record once, replay forever, in the lane and in the schema.** Jev is not
 deterministic (fact 1), so an answer is an event that happened once, not a
@@ -1331,10 +1335,10 @@ Inputs, not approvals.
    probe, which needs `programme_enabled` and `jev_enabled` on and a
    `jev_probe` job in the queue (open item 18). The key itself is checked
    first, by hand, with the dispatch-only `jev-check.yml`, which records
-   nothing. The operator set the repository secret on 2026-09-26, and the next
-   step is to dispatch `jev-check.yml` once it is on the default branch. Phases
-   A to G are built and tested against fakes regardless, and the programme
-   makes no live call until a probe is enqueued with both switches on.
+   nothing. The operator set the repository secret on 2026-09-26, and the key
+   check passed against TypeSafe the same day. Phases A to G are built and
+   tested against fakes regardless, and the programme makes no live call until
+   a probe is enqueued with both switches on.
 2. **A replacement Alpaca paper key** for the revoked one.
 3. **For phase H, a second Alpaca paper account's key**: a `PK` key, checked
    against both endpoints before it is stored, as CLAUDE.md requires of any

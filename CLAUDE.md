@@ -572,7 +572,10 @@ inert while the backtest continues to honour them.
   claims. Every Jev switch is seeded off, no lane is wired into the tick,
   nothing in the API or the UI reads the ledger, and nothing enqueues the
   probe yet. The client is tested against the real SDK and a fake TypeSafe
-  server over real HTTP, as is one call end to end into the ledger, but no
-  request has yet been sent to TypeSafe. A key exists, as the
-  `TYPESAFE_API_KEY` repository secret, and the next live step is dispatching
-  `jev-check.yml` once phase B is on the default branch.
+  server over real HTTP, as is one call end to end into the ledger. The key
+  has been proven against TypeSafe itself: on 2026-09-26 `jev-check.yml` found
+  the `TYPESAFE_API_KEY` secret accepted by TypeSafe's host, the listing naming
+  only the aliases `jev-latest` and `jev-preview`, and the connectivity probe
+  answered by `jev-1.13.0` in 201 ms — `true` at p=0.99, as expected. That is
+  the only traffic so far: the check records nothing, and the programme has
+  made no call, since nothing enqueues the probe and every Jev switch is off.
