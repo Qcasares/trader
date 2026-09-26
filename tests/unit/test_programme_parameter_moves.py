@@ -80,6 +80,22 @@ def test_an_integer_moves_by_at_least_one() -> None:
     assert nudged["min_history"] == 2
 
 
+def test_an_integer_moves_down_by_at_least_one() -> None:
+    """
+    top_n 2 of two symbols may not go up, and 2 / 1.2 rounds back to 2: moved
+    by at least one it goes to 1, where rounding alone would hold it.
+    """
+    model = get_strategy_class("cross_sectional_momentum").params_model
+    params = {
+        **_defaults("cross_sectional_momentum"),
+        "symbols": ["SPY", "EFA"],
+        "top_n": 2,
+    }
+    nudged, moves = _neighbouring_params(model, params)
+    assert moves["top_n"] == "down"
+    assert nudged["top_n"] == 1
+
+
 def test_a_rule_across_parameters_is_honoured() -> None:
     """
     ``top_n`` may not exceed the universe. With three symbols and ``top_n`` of
@@ -131,10 +147,12 @@ def test_only_numbers_move_and_never_a_boolean() -> None:
         assert nudged[key] == params[key]
 
 
-def test_each_step_sees_the_steps_before_it() -> None:
+def test_a_step_a_rule_refuses_upward_goes_down() -> None:
     """
     fast 10 → 12 is refused beside slow 12, so fast moves down to 8; then slow
-    moves up to 14, which the ordering allows.
+    moves up to 14, which the ordering allows. (Each of those is also legal
+    against the original configuration, so this does not show that a step is
+    judged with the earlier ones in place: the budget test below does.)
     """
     nudged, moves = _neighbouring_params(_Ordered, {"fast": 10, "slow": 12})
     assert moves == {"fast": "down", "slow": "up"}
@@ -236,6 +254,21 @@ def test_an_integer_at_its_ceiling_keeps_the_points_below_it() -> None:
     assert _grid_around(model, params)["lookback_sessions"] == [700, 1000]
 
 
+def test_the_grid_is_judged_against_the_candidates_own_configuration() -> None:
+    """
+    top_n 5 fits the default universe and not this candidate's four symbols.
+    Judged against the defaults, the grid would keep it, and the whole-grid
+    check would then refuse the study on every pass.
+    """
+    model = get_strategy_class("cross_sectional_momentum").params_model
+    params = {
+        **_defaults("cross_sectional_momentum"),
+        "symbols": ["SPY", "EFA", "EEM", "IEF"],
+        "top_n": 4,
+    }
+    assert _grid_around(model, params)["top_n"] == [2, 4]
+
+
 def test_an_integer_at_its_floor_keeps_the_points_above_it() -> None:
     model = get_strategy_class("time_series_momentum").params_model
     params = {**_defaults("time_series_momentum"), "lookback_sessions": 2}
@@ -255,6 +288,20 @@ class _Budget(BaseModel):
         if self.fast + self.slow > 25:
             raise ValueError("fast + slow may not exceed 25")
         return self
+
+
+def test_each_step_is_judged_with_the_steps_before_it() -> None:
+    """
+    fast 10 → 12 fits the budget beside slow 12 (24). slow 12 → 14 then does
+    not, beside the moved fast (26), so slow moves down. Judged against the
+    original configuration instead, slow 14 beside fast 10 would pass (24),
+    and the neighbourhood {12, 14} would be one the schema refuses — rejected
+    at build, on every pass.
+    """
+    nudged, moves = _neighbouring_params(_Budget, {"fast": 10, "slow": 12})
+    assert moves == {"fast": "up", "slow": "down"}
+    assert nudged == {"fast": 12, "slow": 10}
+    _Budget.model_validate(nudged)
 
 
 def test_a_combination_refused_whole_is_found() -> None:
