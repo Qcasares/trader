@@ -326,7 +326,7 @@ take every way of choosing half as in-sample, and record how often the
 in-sample winner lands in the bottom half out of sample. Near 0.5 means the
 selection procedure is a coin toss dressed as research. The walk-forward job
 computes it — one extra backtest per candidate against the `folds x candidates`
-it already runs — and gate 1 → 2 refuses a *measured* value above 0.35.
+it already runs — and gate 2 → 3 refuses a *measured* value above 0.35.
 
 The word "measured" is doing real work there. A single-candidate study has no
 selection to overfit, so the statistic is undefined, and refusing on an

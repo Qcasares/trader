@@ -54,6 +54,7 @@ from datetime import date
 from typing import Any
 
 import asyncpg
+from pydantic import BaseModel, ValidationError
 
 from src.core import calendar
 from src.db.repos import backtests as backtest_repo
@@ -75,7 +76,7 @@ from src.programme.gates import (
     replication_agrees,
 )
 from src.programme.models import ModelSettings
-from src.strategies import build_strategy, get_strategy_class
+from src.strategies import build_strategy, get_strategy_class, refused_grid_point
 
 logger = logging.getLogger(__name__)
 
@@ -715,23 +716,60 @@ async def _enqueue_shadow(
             )
 
 
-def _neighbouring_params(params: dict[str, Any]) -> dict[str, Any]:
+def _neighbouring_params(
+    params_model: type[BaseModel], params: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, str]]:
     """
-    Nudge every numeric parameter by a fixed factor.
+    Move every numeric parameter one step, as far as the strategy allows.
+
+    Up by :data:`NEIGHBOURHOOD_FACTOR`; down by it where the strategy's own
+    schema refuses up; held where it allows neither. A concentration cap of
+    1.0 is already at its ceiling, and 1.2 of it is a configuration the
+    strategy will not run — nudged up regardless, as it once was, the
+    experiment was refused and the gate that asks for it could never pass at
+    the default cap. An integer moves by at least one, since 1.2 of 1 rounds
+    back to 1. Each step is validated against the whole schema with every
+    earlier step in place, so a rule across parameters (``top_n`` within the
+    universe) holds as well as each field's own bounds.
 
     Deterministic rather than random: a neighbourhood test that samples
     differently on each run cannot be replicated, and replication is a
     criterion two gates later.
+
+    A step is the one the value's type and the schema allow; whether it is
+    large enough to matter is the strategy's own property. ``buy_and_hold``'s
+    only number is a history guard, so its neighbourhood is one session of
+    guard away from the configuration and its result nearly the same — as it
+    should be for a strategy with nothing to tune, and not evidence that it is
+    stable in anything. (It once moved nothing at all: 1.2 of 1 rounds to 1.)
+
+    Returns the parameters and how each numeric one moved: ``"up"``,
+    ``"down"`` or ``"held"``.
     """
     out = dict(params)
+    moves: dict[str, str] = {}
     for key, value in params.items():
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        if isinstance(value, int):
-            out[key] = max(1, int(round(value * NEIGHBOURHOOD_FACTOR)))
-        elif isinstance(value, float):
-            out[key] = value * NEIGHBOURHOOD_FACTOR
-    return out
+        moves[key] = "held"
+        for direction in ("up", "down"):
+            stepped = _stepped(value, up=direction == "up")
+            if stepped == value:
+                continue
+            trial = {**out, key: stepped}
+            if _accepts(params_model, trial):
+                out, moves[key] = trial, direction
+                break
+    return out, moves
+
+
+def _stepped(value: int | float, *, up: bool) -> int | float:
+    """``value`` one neighbourhood step up or down; an integer by at least one."""
+    if isinstance(value, int):
+        if up:
+            return max(round(value * NEIGHBOURHOOD_FACTOR), value + 1)
+        return min(round(value / NEIGHBOURHOOD_FACTOR), value - 1)
+    return value * NEIGHBOURHOOD_FACTOR if up else value / NEIGHBOURHOOD_FACTOR
 
 
 async def _enqueue_backtest(
@@ -751,11 +789,40 @@ async def _enqueue_backtest(
     params = dict(candidate["params"])
     stress = 1.0
     seed: int | None = None
+    #: Said on the note that names the experiment, so it is read beside it.
+    queued_detail: dict[str, Any] = {}
 
     if kind == "cost_stress":
         stress = STRESS_MULTIPLIER
     elif kind == "parameter_neighbourhood":
-        params = _neighbouring_params(params)
+        try:
+            params_model = get_strategy_class(strategy_name).params_model
+            # Refused as it stands, every step would be refused too, and the
+            # rejection below would blame the schema's bounds for it.
+            params_model.model_validate(params)
+        except Exception as exc:  # noqa: BLE001
+            report.note(
+                "experiment_rejected",
+                candidate=candidate["id"],
+                kind=kind,
+                error=str(exc),
+            )
+            return
+        params, moves = _neighbouring_params(params_model, params)
+        if all(move == "held" for move in moves.values()):
+            # A neighbourhood that is the configuration itself would pass as
+            # evidence of stability while testing nothing.
+            report.note(
+                "experiment_rejected",
+                candidate=candidate["id"],
+                kind=kind,
+                error=(
+                    "no numeric parameter the strategy's schema lets move, so "
+                    "its neighbourhood is the configuration itself"
+                ),
+            )
+            return
+        queued_detail["moves"] = moves
     elif kind == "benchmark":
         strategy_name = "buy_and_hold"
         params = {"symbols": list(candidate["universe"])}
@@ -823,6 +890,7 @@ async def _enqueue_backtest(
         kind=kind,
         experiment=experiment["ref"],
         strategy=strategy_name,
+        **queued_detail,
     )
 
 
@@ -900,6 +968,35 @@ async def _enqueue_walkforward(
         )
         return
 
+    # The grid first, since it needs no row: a study the worker can only fail
+    # is refused whether or not there is a backtest yet to attach it to.
+    params = dict(candidate["params"])
+    try:
+        params_model = get_strategy_class(candidate["strategy_name"]).params_model
+        params_model.model_validate(params)
+    except Exception as exc:  # noqa: BLE001
+        report.note("walkforward_refused", candidate=candidate["id"], reason=str(exc))
+        return
+    grid = _grid_around(params_model, params)
+    if not grid:
+        report.note(
+            "walkforward_refused",
+            candidate=candidate["id"],
+            reason="no numeric parameter to vary",
+        )
+        return
+    refused = refused_grid_point(params_model, params, grid)
+    if refused is not None:
+        report.note(
+            "walkforward_refused",
+            candidate=candidate["id"],
+            reason=(
+                f"the strategy refuses the grid point {refused}, which the study "
+                "would build and fail on"
+            ),
+        )
+        return
+
     backtest = await conn.fetchrow(
         """
         SELECT b.id FROM experiments e JOIN backtest_runs b ON b.id = e.backtest_run_id
@@ -913,16 +1010,6 @@ async def _enqueue_walkforward(
             "walkforward_deferred",
             candidate=candidate["id"],
             reason="no succeeded backtest to study",
-        )
-        return
-
-    params = dict(candidate["params"])
-    grid = _grid_around(params)
-    if not grid:
-        report.note(
-            "walkforward_refused",
-            candidate=candidate["id"],
-            reason="no numeric parameter to vary",
         )
         return
 
@@ -967,19 +1054,46 @@ async def _enqueue_walkforward(
     )
 
 
-def _grid_around(params: dict[str, Any]) -> dict[str, list[Any]]:
-    """Three points around each numeric parameter, for the study to choose from."""
+def _grid_around(
+    params_model: type[BaseModel], params: dict[str, Any]
+) -> dict[str, list[Any]]:
+    """
+    Up to three points around each numeric parameter, for the study to choose
+    from: those of them the strategy's own schema accepts.
+
+    The study builds every point in turn and fails at the first the strategy
+    refuses, and a failed study is queued again on the next pass, so gate
+    2 → 3, which asks for a robust one, could never pass. 1.3 of a
+    concentration cap at its ceiling of 1.0 is such a point. At the default
+    cap this sat behind the neighbourhood's own refusal, which stopped
+    candidates at gate 1 → 2 first — fixed alone, that would have walked them
+    into this — and it already caught a configuration that survived 1.2 and
+    not 1.3: an SMA period of 800, or a cap of 0.8. Each point is checked
+    with the rest of the configuration as it stands; the configuration's own
+    value is always a point, so no axis is left empty.
+    """
     grid: dict[str, list[Any]] = {}
     for key, value in params.items():
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         if isinstance(value, int):
-            grid[key] = sorted(
-                {max(1, int(value * 0.7)), value, int(value * 1.3)}
-            )
-        elif isinstance(value, float):
-            grid[key] = sorted({value * 0.7, value, value * 1.3})
+            points = {max(1, int(value * 0.7)), value, int(value * 1.3)}
+        else:
+            points = {value * 0.7, value, value * 1.3}
+        grid[key] = sorted(
+            p
+            for p in points
+            if p == value or _accepts(params_model, {**params, key: p})
+        )
     return grid
+
+
+def _accepts(params_model: type[BaseModel], params: dict[str, Any]) -> bool:
+    try:
+        params_model.model_validate(params)
+    except ValidationError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

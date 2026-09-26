@@ -1529,6 +1529,53 @@ class TestWalkForwardIsRequiredToDeploy:
         assert queued["is_robust"] is None
         assert queued["degradation"] is None
 
+    def test_a_walkforward_with_a_point_the_strategy_refuses_is_refused(
+        self, client, seeded, dsn
+    ) -> None:
+        """
+        Queued, the study would build that point and fail there, after every
+        backtest before it had run. Refused up front, the point named, and no
+        study written.
+        """
+
+        async def studies() -> int:
+            conn = await asyncpg.connect(dsn)
+            try:
+                return await conn.fetchval("SELECT COUNT(*) FROM walkforward_runs")
+            finally:
+                await conn.close()
+
+        before = asyncio.run(studies())
+        response = client.post(
+            f"/api/v1/backtests/{seeded['run_id']}/walkforward",
+            json={"param_grid": {"max_weight_per_asset": [0.7, 1.0, 1.3]}},
+        )
+        assert response.status_code == 422
+        assert "'max_weight_per_asset': 1.3" in response.json()["detail"]
+        assert asyncio.run(studies()) == before
+
+    def test_a_walkforward_grid_past_the_cap_is_refused(
+        self, client, seeded
+    ) -> None:
+        """
+        Checked point by point before it is queued, a grid of millions would
+        hold the event loop, the kill switch's endpoint among the rest.
+        """
+        from src.api.routers.backtests import MAX_GRID_POINTS
+
+        side = int(MAX_GRID_POINTS**0.5) + 1
+        response = client.post(
+            f"/api/v1/backtests/{seeded['run_id']}/walkforward",
+            json={
+                "param_grid": {
+                    "sma_period": list(range(10, 10 + side)),
+                    "max_weight_per_asset": [0.1 + i / (2 * side) for i in range(side)],
+                }
+            },
+        )
+        assert response.status_code == 422
+        assert f"more than {MAX_GRID_POINTS}" in response.text
+
     def test_a_walkforward_on_synthetic_data_is_refused(
         self, client, dsn
     ) -> None:

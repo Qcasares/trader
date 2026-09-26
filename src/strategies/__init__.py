@@ -21,6 +21,7 @@ from src.strategies.registry import (  # noqa: F401
     describe_all,
     get_strategy_class,
     list_strategies,
+    refused_grid_point,
     register,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "describe_all",
     "get_strategy_class",
     "list_strategies",
+    "refused_grid_point",
     "register",
 ]

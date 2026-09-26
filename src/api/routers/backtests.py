@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from datetime import date
 
@@ -30,7 +31,12 @@ from src.api.schemas import (
 from src.core.calendar import bounds as calendar_bounds
 from src.db.repos import backtests as repo
 from src.db.repos import jobs as job_repo
-from src.strategies import build_strategy, get_strategy_class, list_strategies
+from src.strategies import (
+    build_strategy,
+    get_strategy_class,
+    list_strategies,
+    refused_grid_point,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/backtests", tags=["backtests"])
@@ -188,6 +194,14 @@ def _shape(row: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+#: The most points a walk-forward grid may have. The study runs a backtest per
+#: point on every fold, so a grid past this would run for days; and the route
+#: checks every point against the strategy's schema before it queues, which
+#: for a grid of millions would hold the event loop — every endpoint, the kill
+#: switch among them — while it did.
+MAX_GRID_POINTS = 1000
+
+
 class WalkForwardRequest(BaseModel):
     """
     A walk-forward study over a parameter grid.
@@ -208,6 +222,12 @@ class WalkForwardRequest(BaseModel):
         for name, options in value.items():
             if not options:
                 raise ValueError(f"{name} has no candidate values")
+        points = math.prod(len(options) for options in value.values())
+        if points > MAX_GRID_POINTS:
+            raise ValueError(
+                f"the grid has {points} points; a study runs a backtest for "
+                f"each on every fold, and more than {MAX_GRID_POINTS} is refused"
+            )
         return value
 
 
@@ -235,6 +255,22 @@ async def create_walkforward(
     params = run["params"]
     if isinstance(params, str):
         params = json.loads(params)
+
+    # The study builds every point of the grid and fails at the first the
+    # strategy refuses, after every backtest before it has run. Refused here
+    # instead, with the point named, and nothing written.
+    try:
+        params_model = get_strategy_class(run["strategy_name"]).params_model
+    except KeyError as exc:
+        raise HTTPException(422, str(exc)) from None
+    refused = refused_grid_point(params_model, params, body.param_grid)
+    if refused is not None:
+        raise HTTPException(
+            422,
+            f"the strategy refuses the grid point {refused}"
+            if refused
+            else "the strategy refuses this backtest's own parameters",
+        )
 
     wf_id = uuid.uuid4()
     await conn.execute(

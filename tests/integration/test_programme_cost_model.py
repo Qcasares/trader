@@ -16,6 +16,12 @@ functions a pass calls, against real Postgres; read back from the rows and
 through the API, which is where the page reads them. That the recorded values
 are the ones the worker applies is ``tests/unit/test_cost_model_record.py``.
 
+The candidate here once had to be given a concentration cap of 0.5, because at
+the default of 1.0 the neighbourhood run and the walk-forward grid each moved
+the cap to a value the strategy refuses. The last two classes hold both, from
+the default, through the same entry points; the unit half is
+``tests/unit/test_programme_parameter_moves.py``.
+
     TEST_DATABASE_URL=postgresql://localhost/trader_test \
         pytest tests/integration/test_programme_cost_model.py
 """
@@ -119,11 +125,12 @@ def _candidate(authed) -> str:
     """
     A candidate on real-data terms, so the walk-forward is not refused.
 
-    Its concentration cap is set below one because the neighbourhood run
-    nudges every numeric parameter by 1.2, and a cap of 1.0 becomes 1.2, which
-    the strategy refuses: at the default cap the programme cannot queue that
-    experiment at all. That is a defect of its own, reported rather than fixed
-    here; this file is about what a queued run records.
+    Its concentration cap is left at the default of 1.0, its ceiling. The
+    neighbourhood run once nudged every numeric parameter up by 1.2, which the
+    strategy refuses at that cap, so the programme could not queue the
+    experiment at all and this candidate had to be given a cap of 0.5. The
+    neighbourhood now moves a parameter at its ceiling down, and every kind is
+    queued from the defaults.
     """
     hypothesis = authed.post(
         "/api/v1/programme/hypotheses",
@@ -134,7 +141,7 @@ def _candidate(authed) -> str:
         json={
             "hypothesis_ref": hypothesis["ref"],
             "strategy": "asset_class_trend_following",
-            "params": {"sma_period": 150, "max_weight_per_asset": 0.5},
+            "params": {"sma_period": 150},
             "start_session": "2010-01-04",
             "end_session": "2015-12-31",
             "data_source": "yfinance",
@@ -295,3 +302,107 @@ class TestAStoredCostModelIsComplete:
 
         before, after = _run(_with_conn(go))
         assert after == before
+
+
+class TestTheNeighbourhoodIsAlwaysAMove:
+    def test_the_default_cap_is_moved_down_and_the_run_queued(self, authed) -> None:
+        """The defect this file once worked around, from the shipped entry."""
+        from src.programme import repo, tick
+
+        candidate_id = _candidate(authed)
+
+        async def go(conn):
+            candidate = await repo.get_candidate(conn, candidate_id)
+            report = tick.TickReport()
+            await tick._enqueue_backtest(
+                conn, candidate, "parameter_neighbourhood", report
+            )
+            (queued,) = [
+                a for a in report.actions if a["action"] == "experiment_queued"
+            ]
+            await _unqueue(conn, queued["experiment"])
+            params = await conn.fetchval(
+                "SELECT r.params FROM experiments e "
+                "JOIN backtest_runs r ON r.id = e.backtest_run_id WHERE e.ref = $1",
+                queued["experiment"],
+            )
+            # Which way each moved is said on the note naming the experiment.
+            return queued["moves"], json.loads(params)
+
+        moves, params = _run(_with_conn(go))
+        assert moves == {"sma_period": "up", "max_weight_per_asset": "down"}
+        assert params["sma_period"] == 180
+        assert params["max_weight_per_asset"] == pytest.approx(1 / 1.2)
+
+    def test_a_neighbourhood_that_moves_nothing_is_refused(
+        self, authed, monkeypatch
+    ) -> None:
+        """
+        A neighbourhood equal to the configuration would read as evidence of
+        stability while testing nothing, so no experiment is recorded for it.
+        """
+        from src.programme import repo, tick
+
+        monkeypatch.setattr(
+            tick,
+            "_neighbouring_params",
+            lambda model, params: (dict(params), {"sma_period": "held"}),
+        )
+        candidate_id = _candidate(authed)
+
+        async def go(conn):
+            candidate = await repo.get_candidate(conn, candidate_id)
+            before = await conn.fetchval("SELECT COUNT(*) FROM experiments")
+            report = tick.TickReport()
+            await tick._enqueue_backtest(
+                conn, candidate, "parameter_neighbourhood", report
+            )
+            after = await conn.fetchval("SELECT COUNT(*) FROM experiments")
+            return report.actions, before, after
+
+        actions, before, after = _run(_with_conn(go))
+        (rejected,) = [a for a in actions if a["action"] == "experiment_rejected"]
+        assert "configuration itself" in rejected["error"]
+        assert after == before
+
+
+class TestTheWalkforwardGridIsOneTheStudyCanBuild:
+    def test_the_default_cap_is_studied_below_its_ceiling(self, authed) -> None:
+        """
+        What the worker builds, from the row it reads: every combination the
+        study expands, through ``build_strategy``, as ``_run_segment`` does.
+        At the default cap the grid once held 1.3, and the study failed at it.
+        """
+        from src.engine.walkforward import expand_grid
+        from src.programme import repo, tick
+        from src.strategies import build_strategy
+
+        candidate_id = _candidate(authed)
+        rows = _enqueue(candidate_id, "backtest")
+
+        async def go(conn):
+            await conn.execute(
+                "UPDATE backtest_runs SET status = 'succeeded' WHERE id = $1",
+                uuid.UUID(rows["run_id"]),
+            )
+            candidate = await repo.get_candidate(conn, candidate_id)
+            report = tick.TickReport()
+            await tick._enqueue_walkforward(conn, candidate, report)
+            (queued,) = [
+                a for a in report.actions if a["action"] == "walkforward_queued"
+            ]
+            await _unqueue(conn, queued["experiment"])
+            return await conn.fetchrow(
+                "SELECT w.strategy_name, w.params, w.param_grid FROM experiments e "
+                "JOIN walkforward_runs w ON w.id = e.walkforward_run_id "
+                "WHERE e.ref = $1",
+                queued["experiment"],
+            )
+
+        study = _run(_with_conn(go))
+        params = json.loads(study["params"])
+        grid = json.loads(study["param_grid"])
+        assert params["max_weight_per_asset"] == 1.0
+        assert grid["max_weight_per_asset"] == pytest.approx([0.7, 1.0])
+        for combination in expand_grid(grid):
+            build_strategy(study["strategy_name"], {**params, **combination})
