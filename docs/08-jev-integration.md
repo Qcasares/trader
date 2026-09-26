@@ -608,7 +608,10 @@ below are named without one.
 | Direct decisions | `decision.regime` v1: a Choice over `risk_on`, `neutral`, `risk_off`, `insufficient_evidence` | Only `jev_features` descriptors: internal provenance, which no outsider can write to, so the prompt-injection route recorded as C-1 in `docs/02-security-audit.md` stays closed | Feed `jev_regime_allocator`, a pure strategy with a fixed universe and fixed weight vectors declared in code; the pack hash and threshold are its parameters | Act on a missing, invalid, argmax-mismatched or below-threshold answer: each means **hold** |
 
 A code baseline twin — the same descriptors through a fixed rule — runs beside
-the allocator. The honest expected edge is zero until forward measurement says
+the allocator. The rule lives in code, beside the allocator, and never in the
+question: `decision.regime`'s options describe the regimes, so the paired
+difference compares a judgement with a rule rather than a rule with a noisy
+copy of itself. The honest expected edge is zero until forward measurement says
 otherwise. For the decision lane the threshold is a strategy parameter chosen
 on forward-collected data only, and it counts as a trial in the deflated
 Sharpe.
@@ -637,7 +640,8 @@ What must hold before it can land, and which of it exists:
 | `jev_client` and `jev_lane` are runner-only, and `from src.programme import x` is read as importing `x` | Built, Phase A |
 | The closure is walked from every protected package and every entry point, resolving packages, relative imports, function-level imports and star imports through `__all__` | Built, Phase A |
 | The decision path and `src/worker` may not load `src.programme` at all | Built, Phase A |
-| A decision-lane question set takes internal provenance only, and its state holds enumerated labels and nothing that can carry a date, a ticker or free text | Built, Phase B |
+| A decision-lane question set takes internal provenance only, and its state is Literal labels, booleans and nested models, with no computed field or serializer | Built, Phase B |
+| Nothing in a decision-lane state names a date or a ticker | Review only. The rule reads shapes, not meanings: `spy`, `d20200316` or a date split into small ordinals passes it, and `test_jev_questions.py::TestTheDecisionStateIsEnumerated::test_the_rule_reads_shapes_not_meanings` pins that. A machine control — a golden vocabulary per decision-lane state — is needed before phase F |
 | A signal carries the lane, provenance and pack of the request its answer came from, and only a valid answer to a canonical request is `measured` (`jev_signals_rest_on_their_answer`) | Built, Phase B |
 | Outside the programme, only `signals.py` may name a Jev table | Built in phase B: `tests/unit/test_jev_table_boundaries.py::test_only_the_signals_reader_names_a_jev_table_outside_the_programme` (no module outside `src/programme` names one until `signals.py` arrives in F) |
 | `jev_lane` is the only writer of `jev_signals`; `client.py`, `author.py`, `panel.py` and `tick.py` never name it | Built in phase B: `test_jev_table_boundaries.py::test_only_the_lane_writes_signals` and `::test_the_model_runners_never_name_the_signals` (no writer exists yet; the first arrives in C) |
@@ -1047,8 +1051,18 @@ render the windows and bucket edges `jev_features` computes with exactly, so a
 band moved from 1% to 1.2% changes the words: changing a character, an
 option's position or a definition fails the build until the version is bumped.
 Every Choice carries exactly one escape option, last, with at least two
-options besides it; the regime's escape is described as descriptors pointing
-in different directions, the state in which an allocator should hold. A
+options besides it. The regime's options say what each regime means and name,
+by path, the fields that bear on it — never the labels a rule would test. A
+rule the state fully determines belongs in code, as TypeSafe's own guidance
+has it; it is the baseline twin's, and a question that spelled it out would
+leave Jev only a table to misread, so the forward comparison would measure
+reading errors and call them an edge. The escape is the complement of a clear
+fit — mixed or weak evidence — and gives no example, since any example is one
+a regime could also claim. The review that found this found the first wording
+did both: its criteria were a lookup table, and its escape's example and
+catch-all each overlapped a regime. No request had been sent, so v1 was
+reworded in place; the released hashes, kept apart from the words in the
+test, now make the next change a version bump. A
 decision-lane state model may hold only Literal labels, booleans and models
 built from them, and neither a computed field nor a serializer, each of which
 sends what no annotation shows. `QuestionSet.dump_state` takes exactly the
@@ -1294,7 +1308,8 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
     `score` agrees with its own probabilities. And on a ten-level Score,
     rounding each probability to the observed 0.01 grid can move the sum by up
     to 0.05 on its own, past the 0.02 tolerance; measure one before
-    registering it.
+    registering it. `test_jev_questions.py::test_no_score_set_is_registered_before_its_consistency_check`
+    fails the build the day a Score set is registered without the check.
 21. **The validator's note has no column.** `Validation.problem` — why a
     response was refused whole, which unasked answers were ignored, whether
     the usage could be read — goes to the log and nowhere else. Each answer's

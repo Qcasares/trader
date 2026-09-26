@@ -163,12 +163,14 @@ class JevCall:
     came back without the header, and ``http_status`` is what tells the two
     apart.
 
-    ``raw_body`` is the body as it arrived, read as UTF-8 whatever the response
-    declared, because JSON is UTF-8 (RFC 8259) and because the validator is
-    handed exactly this text. Where the bytes are not text Postgres can store —
-    a byte that is not UTF-8, or a NUL — the byte becomes U+FFFD, which marks
-    where. An empty body is ``""``: a response that said nothing, which is not
-    the same as no response.
+    ``wire_body`` is the body exactly as it arrived, bytes, and it is what the
+    validator is handed: strict UTF-8 and strict JSON are rules about those
+    bytes, and a body repaired first would pass them. ``raw_body`` is the same
+    body in the form the ledger stores, read as UTF-8 whatever the response
+    declared, because JSON is UTF-8 (RFC 8259); where the bytes are not text
+    Postgres can store — a byte that is not UTF-8, or a NUL — the byte becomes
+    U+FFFD, which marks where. An empty body is ``b""`` and ``""``: a response
+    that said nothing, which is not the same as no response.
 
     ``latency_ms`` runs from the moment the first attempt was sent to the moment
     the call finished, retry and backoff included, and is ``None`` when nothing
@@ -192,6 +194,7 @@ class JevCall:
     error_kind: str | None
     input_tokens: int | None
     output_tokens: int | None
+    wire_body: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +239,12 @@ class RateLimiter:
     token window to empty and then goes alone. The catalogue's size limits
     make that impossible for anything the lanes send; the rule is here so that
     such a request is late rather than stuck forever.
+
+    Admission is not first-come-first-served: each waiter re-checks on its own,
+    so under contention a larger request can be passed over by smaller ones for
+    as long as they keep coming. Nothing contends today — the programme asks one
+    job at a time (docs/08 open item 17) and the key check runs in its own
+    process — and a lane that asks concurrently needs a queue here first.
     """
 
     REQUEST_WINDOW_SECONDS = 60.0
@@ -477,6 +486,7 @@ def _answered(result: Any, latency_ms: int | None) -> JevCall:
         error_kind=None,
         input_tokens=_count(result.usage.input_tokens),
         output_tokens=_count(result.usage.output_tokens),
+        wire_body=bytes(response.content),
     )
 
 
@@ -505,6 +515,7 @@ def _failed(
         error_kind=kind,
         input_tokens=None,
         output_tokens=None,
+        wire_body=None if response is None else bytes(response.content),
     )
 
 

@@ -17,8 +17,9 @@ What must not be able to happen quietly:
   module's own rule: by walking the declared fields, and by dumping every state
   there is and comparing what would be sent with what was given;
 * the regime question asks with a negation, names a field the state does not
-  have, or describes its escape as anything but the answer for conflicting
-  descriptors.
+  have, spells out a rule over the labels in place of what each regime means,
+  or gives its escape a condition of its own instead of the complement of a
+  clear fit.
 """
 
 from __future__ import annotations
@@ -314,7 +315,68 @@ def _execute_variant(monkeypatch: pytest.MonkeyPatch, source: str) -> types.Modu
     return variant
 
 
+#: Every released version's pack hash, kept as history apart from the words it
+#: pins. A version bump appends a row; no row is ever edited or removed.
+#: ``GOLDEN_PACK_HASHES`` in the module holds the current versions only and
+#: sits beside the words, so re-recording it is exactly the edit a developer
+#: makes when a hash test fails. Changing a released version's words therefore
+#: also takes an edit to this table's history, which a reviewer sees for what it
+#: is: answers to the old words and the new would pool under one version.
+RELEASED_PACK_HASHES: dict[tuple[str, int], str] = {
+    ("probe.connectivity", 1): (
+        "5d5d091e936ae7b0a2006d2d2a92f90c7a08b0bbe55453550ef2c08c2370560e"
+    ),
+    ("decision.regime", 1): (
+        "5a773b26917236fd8cf0174dfde9cc9fe81d0af4027a3eb0a2261f54dc6acff9"
+    ),
+}
+
+
+def _release_problems(module: types.ModuleType) -> list[str]:
+    """How the registered sets in ``module`` differ from what was released."""
+    problems: list[str] = []
+    for question_set in module.REGISTRY.values():
+        key = (question_set.name, question_set.version)
+        released = RELEASED_PACK_HASHES.get(key)
+        if released is None:
+            problems.append(f"{key} is not in RELEASED_PACK_HASHES: append it")
+            continue
+        if question_set.pack_hash != released:
+            problems.append(
+                f"{key} hashes to {question_set.pack_hash}, but was released as "
+                f"{released}: a released version's words are frozen, so bump "
+                "the version and append a row"
+            )
+        if module.GOLDEN_PACK_HASHES.get(key) != released:
+            problems.append(f"{key}'s golden disagrees with its release")
+        newest = max(v for (n, v) in RELEASED_PACK_HASHES if n == question_set.name)
+        if question_set.version != newest:
+            problems.append(f"{key} is registered, but v{newest} was released")
+    return problems
+
+
 class TestTheGoldenHashes:
+    def test_every_registered_set_is_its_released_words(self) -> None:
+        assert _release_problems(jq) == []
+
+    def test_rewording_a_released_version_is_refused_with_its_golden_redone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The edit a developer makes when a hash test fails: new words, and the
+        golden re-recorded to match. The module's own table agrees with itself
+        afterwards; the release history does not.
+        """
+        source = MODULE.read_text(encoding="utf-8")
+        question = "Which market regime do these descriptors show?"
+        assert source.count(question) == 1
+        reworded = question.replace("show?", "indicate?")
+        variant = _execute_variant(monkeypatch, source.replace(question, reworded))
+        key = ("decision.regime", 1)
+        variant.GOLDEN_PACK_HASHES[key] = variant.DECISION_REGIME.pack_hash
+        assert variant.DECISION_REGIME.pack_hash != RELEASED_PACK_HASHES[key]
+        assert any("words are frozen" in p for p in _release_problems(variant))
+
     def test_every_registered_set_has_a_golden_and_every_golden_a_set(self) -> None:
         """
         Both directions. A set without a golden is one whose words nobody
@@ -1054,6 +1116,31 @@ class TestTheDecisionStateIsEnumerated:
     def test_every_regime_label_is_a_lowercase_word_or_a_small_ordinal(self) -> None:
         assert _unlabelled_values(jq.RegimeState) == []
 
+    def test_the_rule_reads_shapes_not_meanings(self) -> None:
+        """
+        What the rule passes and CLAUDE.md says it passes: a ticker or a date
+        spelled as a lowercase label, and a date split into small ordinals.
+        Meaning is a reviewer's control. Pinned so that tightening the rule
+        fails here and takes the claim beside it along.
+        """
+
+        class Strict(BaseModel):
+            model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+        class LowercaseTicker(Strict):
+            ticker: Literal["spy", "ief"]
+
+        class LowercaseDate(Strict):
+            as_of: Literal["d20200316", "march_2020"]
+
+        class DateInOrdinals(Strict):
+            day: Literal[1, 2, 3, 16]
+            month: Literal[1, 2, 3]
+            year: Literal[19, 20, 21]
+
+        for model in (LowercaseTicker, LowercaseDate, DateInOrdinals):
+            assert jq.state_model_problem(model, "decision") is None, model
+
     def test_the_label_check_bites(self) -> None:
         """A Literal is not enough: a Literal of tickers is still tickers."""
         assert _unlabelled_values(_RegimeWithATicker) != []
@@ -1521,13 +1608,55 @@ class TestTheRegimeQuestionIsWrittenPlainly:
         for label in _state_labels():
             assert f'"{label}"' in instructions, label
 
-    def test_the_escape_is_the_answer_for_conflicting_descriptors(self) -> None:
+    def test_the_escape_is_the_complement_of_a_clear_fit(self) -> None:
+        """
+        Jev reads an escape literally, so one that gave an example or named a
+        pattern would overlap whichever regime shows that pattern too: money
+        moving into bonds while equities fall is both "descriptors pointing
+        different ways" and the definition of risk_off. The escape speaks of
+        the regimes above and of the evidence, and names no field and no label.
+        """
         escape = REGIME.escape_options["regime"]
         assert escape == "insufficient_evidence"
-        text = _regime_question()["criteria"][escape]
-        assert "conflict" in text.lower()
-        assert "Choose this option whenever the descriptors point in different" in (
-            text
+        criteria = _regime_question()["criteria"]
+        text = criteria[escape]
+        assert "conflict" in text and "direction" not in text, text
+        # Each regime by name: "the options above" is the indirection the
+        # model is weak with.
+        for option in criteria:
+            if option != escape:
+                assert option in text, (option, text)
+        assert _backticked(text) == [], text
+        assert re.findall(r'"([^"]*)"', text) == [], text
+
+    def test_the_options_are_defined_by_meaning_not_by_a_lookup(self) -> None:
+        """
+        A criterion listing the labels each field must hold is a rule the state
+        fully determines, and a rule belongs in code: it is phase G's baseline
+        twin, and Jev asked to apply it has nothing to judge — only a table to
+        misread, so the forward comparison would measure its reading errors. A
+        regime says what it means and which fields bear on it, and quotes no
+        label and names no quintile.
+        """
+        criteria = _regime_question()["criteria"]
+        escape = REGIME.escape_options["regime"]
+        for option, text in criteria.items():
+            if option == escape:
+                continue
+            assert re.findall(r'"([^"]*)"', text) == [], (option, text)
+            assert not re.search(r"\b[1-5]\b", text), (option, text)
+            assert _backticked(text), f"{option} names no field"
+
+    @pytest.mark.parametrize(
+        "criterion",
+        [
+            'Risk is on: `equities.trend` is "above" and `equities.momentum` is "up".',
+            "Risk is on: `equities.volatility_quintile` is 1, 2 or 3.",
+        ],
+    )
+    def test_the_lookup_check_bites(self, criterion: str) -> None:
+        assert re.findall(r'"([^"]*)"', criterion) or re.search(
+            r"\b[1-5]\b", criterion
         )
 
     def test_the_question_names_no_date_and_no_ticker(self) -> None:
@@ -1574,3 +1703,23 @@ def test_the_api_importable_modules_load_no_client_and_no_io() -> None:
         check=True,
     )
     assert result.stdout.strip() == "[]", result.stdout
+
+
+def test_no_score_set_is_registered_before_its_consistency_check() -> None:
+    """
+    The validator checks a Score's range and its distribution, and not whether
+    ``score`` agrees with its own probabilities or ``legend`` with the levels
+    asked (docs/08 open item 20). No Score set is registered, so nothing reads
+    a Score yet. The first one must bring that check with it, its tolerance
+    measured from real answers rather than guessed; this fails until it does.
+    """
+    scores = [
+        (question_set.name, key)
+        for question_set in jq.REGISTRY.values()
+        for key, question in question_set.questions
+        if question["type"] == "score"
+    ]
+    assert scores == [], (
+        f"{scores} are Score questions. Build the score-consistency and legend "
+        "checks in jev_validate first (docs/08 open item 20), then remove this."
+    )

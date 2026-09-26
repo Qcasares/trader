@@ -77,6 +77,7 @@ class TestTheContract:
             "error_kind",
             "input_tokens",
             "output_tokens",
+            "wire_body",
         ]
 
     def test_a_call_cannot_be_edited_after_the_fact(self) -> None:

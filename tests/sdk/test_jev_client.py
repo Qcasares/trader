@@ -280,6 +280,7 @@ class TestASuccessIsRecordedAsItArrived:
             error_kind=None,
             input_tokens=41,
             output_tokens=1,
+            wire_body=body,
         )
         assert isinstance(call.latency_ms, int)
         assert call.latency_ms >= 0
@@ -478,6 +479,7 @@ class TestEveryFailureIsClassedWithItsEvidence:
             error_kind=kind,
             input_tokens=None,
             output_tokens=None,
+            wire_body=body,
         )
         assert isinstance(call.latency_ms, int)
 
@@ -562,6 +564,27 @@ class TestEveryFailureIsClassedWithItsEvidence:
 
         assert call.raw_body == stored
         assert call.error_kind == "content_block"
+
+    @pytest.mark.parametrize(
+        "tail",
+        [b', "note": "caf\xe9"}', b', "note": "a\x00b"}'],
+        ids=["latin-1", "raw-nul"],
+    )
+    async def test_the_wire_bytes_are_kept_beside_their_storable_form(
+        self, server: FakeTypeSafe, transport: Redirect, tail: bytes
+    ) -> None:
+        """The validator reads what arrived; the ledger stores what it can."""
+        body = probe_body()[:-1] + tail
+        server.script(reply(body))
+
+        call = await ask_probe(transport)
+
+        assert call.wire_body == body
+        assert call.raw_body is not None and "\ufffd" in call.raw_body
+        validation = jev_validate.validate_body(
+            call.wire_body, PROBE.as_request_questions(), MODEL
+        )
+        assert validation.status == "invalid"
 
     async def test_a_refused_connection_leaves_no_evidence(
         self, server: FakeTypeSafe, transport: Redirect

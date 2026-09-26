@@ -1013,10 +1013,20 @@ def _ci_job_offenders(path: Path) -> list[str]:
     return offenders
 
 
+#: A trigger beneath ``on:``: its key, quoted or not, with or without an
+#: inline value (``push: {branches: [main]}``, ``push: ~``).
+_TRIGGER = re.compile(r"(?P<q>[\"']?)(?P<key>[A-Za-z_][\w-]*)(?P=q)\s*:(?:\s.*)?")
+
+
 def _triggers(top: str) -> set[str]:
     """
     The events a workflow runs on, read from its ``on:``: inline
     (``on: push``, ``on: [push, pull_request]``) or as the keys beneath it.
+
+    Fails closed: an entry at the triggers' depth that the reader cannot parse
+    is kept verbatim, so a spelling it does not know reads as one more event
+    rather than as none. Dropping it once let ``push: {branches: [main]}``
+    beside ``workflow_dispatch:`` pass as dispatch alone.
     """
     lines = top.splitlines()
     for number, line in enumerate(lines):
@@ -1036,9 +1046,11 @@ def _triggers(top: str) -> set[str]:
             if depth == 0:
                 break
             indent = depth if indent is None else indent
-            key = _KEY.fullmatch(_bare(following).strip())
-            if depth == indent and key:
-                events.add(key["key"])
+            if depth != indent:
+                continue
+            entry = _bare(following).strip()
+            key = _TRIGGER.fullmatch(entry)
+            events.add(key["key"] if key else entry)
         return events
     return set()
 
@@ -2113,6 +2125,10 @@ def test_the_job_reader_agrees_with_yaml() -> None:
                 )
             )
             assert (_token_problem(block, top) is not None) is writes, where
+        # YAML 1.1 reads a bare `on` as True.
+        on = document.get("on", document.get(True))
+        events = {on} if isinstance(on, str) else set(on)
+        assert _triggers(top) == events, _label(path)
 
 
 # ---------------------------------------------------------------------------
@@ -3055,6 +3071,37 @@ _JEV_CHECK = (
             lambda t: t.replace("on:\n  workflow_dispatch:\n", "on: [push]\n"),
             "not dispatch alone",
             id="on-push",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n  push: {branches: [main]}\n",
+            ),
+            "not dispatch alone",
+            id="push-in-flow-style",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n  schedule: [{cron: '17 * * * *'}]\n",
+            ),
+            "not dispatch alone",
+            id="schedule-in-flow-style",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "  workflow_dispatch:\n",
+                "  workflow_dispatch:\n  \"schedule\":\n    - cron: '0 * * * *'\n",
+            ),
+            "not dispatch alone",
+            id="a-quoted-schedule",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "  workflow_dispatch:\n", "  workflow_dispatch:\n  push: ~\n"
+            ),
+            "not dispatch alone",
+            id="push-with-a-null-value",
         ),
         pytest.param(
             lambda t: t.replace("      contents: read", "      contents: write"),

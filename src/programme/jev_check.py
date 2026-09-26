@@ -137,8 +137,8 @@ async def check(api_key: str) -> CheckReport:
     else:
         report.say(f"models listed for this key: {_names(listing.names)}")
         report.say(
-            f"the pin {pin} is proven by the probe below, not by the listing: "
-            "TypeSafe lists the aliases only, and accepts a versioned id unlisted"
+            f"the pin {pin} is proven by the probe below, not by the listing, "
+            "which names the moving aliases and need not name a versioned id"
         )
 
     question_set = jev_questions.PROBE_CONNECTIVITY
@@ -156,7 +156,7 @@ async def check(api_key: str) -> CheckReport:
     # Judged exactly as the lane judges a call: a 2xx with a body is read by the
     # validator whatever the SDK raised over it, and anything else answered
     # nothing.
-    if not (_is_2xx(call.http_status) and call.raw_body is not None):
+    if not (_is_2xx(call.http_status) and call.wire_body is not None):
         failed = f"the probe failed: {call.error_kind} ({call.error_class})"
         if call.error_kind in UNDECIDED_KINDS:
             return report.end(
@@ -171,7 +171,7 @@ async def check(api_key: str) -> CheckReport:
             "the validator's verdict regardless, and so does this"
         )
 
-    validation = jev_validate.validate_body(call.raw_body, questions, pin)
+    validation = jev_validate.validate_body(call.wire_body, questions, pin)
     answered = validation.model_answered
     if answered is not None and not _MODEL_NAME.fullmatch(answered):
         answered = "(not a model name)"

@@ -343,6 +343,53 @@ class TestAFailureIsARowWithTheEvidenceItHad:
         assert row["raw_body"] == raw.decode()
         assert (row["input_tokens"], row["output_tokens"]) == (None, None)
 
+    @pytest.mark.parametrize(
+        ("damaged", "state"),
+        [
+            pytest.param(
+                lambda body: body[:-1] + b', "note": "caf\xe9"}',
+                ("near", 4, "deep", "up"),
+                id="a-latin-1-byte-in-a-field-nobody-reads",
+            ),
+            pytest.param(
+                lambda body: body[:-1] + b', "note": "a\x00b"}',
+                ("near", 5, "deep", "up"),
+                id="a-raw-nul-inside-a-string",
+            ),
+            pytest.param(
+                lambda body: body.replace(b'"risk_off"', b'"risk_\xe9off"', 1),
+                ("near", 4, "severe", "up"),
+                id="a-latin-1-byte-in-the-answer",
+            ),
+        ],
+    )
+    async def test_bytes_that_are_not_json_are_judged_as_they_arrived(
+        self,
+        conn: asyncpg.Connection,
+        server: FakeTypeSafe,
+        transport: Redirect,
+        damaged: Any,
+        state: tuple[str, int, str, str],
+    ) -> None:
+        """
+        JSON is UTF-8 and holds no raw control characters. A body breaking
+        either is repaired for the ledger, and judged repaired it became a
+        canonical answer, replayed for good, to a response that was not JSON.
+        """
+        raw = damaged(_regime_body())
+        server.script(_reply(raw))
+
+        first = await _ask(conn, transport, _state(*state))
+        again = await _ask(conn, transport, _state(*state))
+
+        assert first.status == "invalid", first
+        assert all(a.invalid_reason == "unparseable" for a in first.answers.values())
+        row = await jev_repo.get_request(conn, first.request_row_id)
+        assert row is not None and row["status"] == "invalid"
+        assert "\ufffd" in row["raw_body"], "the stored body marks where it was damaged"
+        assert again.replayed is False, "an invalid answer was replayed"
+        assert len(transport.sent) == 2
+
     async def test_an_answer_that_fails_a_rule_is_recorded_as_not_measured(
         self, conn: asyncpg.Connection, server: FakeTypeSafe, transport: Redirect
     ) -> None:

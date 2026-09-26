@@ -35,6 +35,7 @@ from typing import Any
 
 import asyncpg
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from src.programme import (
     flags,
@@ -268,7 +269,12 @@ def _call(
     error_kind: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    wire: bytes | None = None,
 ) -> Any:
+    """A call as the client returns it: ``wire`` the bytes, ``body`` the text."""
+    if wire is None and body is not None:
+        # A lone surrogate stands for bytes that were not UTF-8.
+        wire = body.encode("utf-8", "surrogatepass")
     return jev_client.JevCall(
         http_status=status,
         raw_body=body,
@@ -278,6 +284,7 @@ def _call(
         error_kind=error_kind,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        wire_body=wire,
     )
 
 
@@ -492,6 +499,77 @@ class TestTheArgumentsAreCheckedFirst:
         with pytest.raises(ValueError, match=field):
             await _ask(rig, **{field: value})
         _nothing_happened(rig)
+
+
+class _Excerpt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    excerpt: str
+    tags: dict[str, str] = {}
+
+
+_RESEARCH = jev_questions.QuestionSet(
+    name="research.unstorable",
+    version=1,
+    lane="research",
+    provenance="web",
+    questions=(
+        ("relevant", {"type": "noul", "instructions": "Is `excerpt` relevant?"}),
+    ),
+    state_model=_Excerpt,
+    purpose="test only: a set whose state can carry text",
+)
+
+
+class TestWhatTheLedgerCannotStoreIsNeverSent:
+    """
+    A call is recorded after it is made, so a request whose row could not be
+    written must be refused before it is sent: it would be billed, counted by
+    no budget, and sent again on every retry. Checked with the arguments, so a
+    lane that builds one is found while Jev is off.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _registered(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert jev_questions.question_set_problem(_RESEARCH) is None
+        monkeypatch.setitem(jev_questions.REGISTRY, _RESEARCH.name, _RESEARCH)
+
+    @pytest.mark.parametrize("jev_on", [False, True])
+    @pytest.mark.parametrize("field", ["subject_type", "subject_id"])
+    @pytest.mark.parametrize("value", ["doc\x001", "doc\ud8001"])
+    async def test_a_subject_it_cannot_store(
+        self, rig: Rig, jev_on: bool, field: str, value: str
+    ) -> None:
+        rig.conn.rows[flags.JEV_ENABLED] = "true" if jev_on else "false"
+        with pytest.raises(ValueError, match=field):
+            await _ask(rig, **{field: value})
+        assert rig.conn.asked == [], "a switch was read before the subject"
+        _nothing_happened(rig)
+
+    @pytest.mark.parametrize("jev_on", [False, True])
+    @pytest.mark.parametrize(
+        "state",
+        [
+            _Excerpt(excerpt="page\x00more"),
+            _Excerpt(excerpt="ok", tags={"k\x00": "v"}),
+            _Excerpt(excerpt="ok", tags={"k": "v\x00"}),
+        ],
+    )
+    async def test_a_state_it_cannot_store(
+        self, rig: Rig, jev_on: bool, state: _Excerpt
+    ) -> None:
+        rig.conn.rows[flags.JEV_ENABLED] = "true" if jev_on else "false"
+        rig.conn.rows[f"{flags.JEV_AREA_PREFIX}research"] = "true"
+        with pytest.raises(ValueError, match="state"):
+            await _ask(rig, _RESEARCH, state, subject_type="doc", subject_id="1")
+        assert rig.conn.asked == [], "a switch was read before the state"
+        _nothing_happened(rig)
+
+    async def test_storable_text_is_sent(self, rig: Rig) -> None:
+        rig.conn.rows[f"{flags.JEV_AREA_PREFIX}research"] = "true"
+        state = _Excerpt(excerpt="caf\u00e9 \u2713 \\u0000 literal", tags={"a": "b"})
+        result = await _ask(rig, _RESEARCH, state, subject_type="doc", subject_id="1")
+        assert result.status == "ok"
+        assert len(rig.client.calls) == 1
 
 
 # ---------------------------------------------------------------------------

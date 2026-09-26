@@ -457,6 +457,12 @@ def _checked(
     for name, value in (("subject_type", subject_type), ("subject_id", subject_id)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be non-empty text, got {value!r}")
+        if _UNSTORABLE.search(value):
+            raise ValueError(
+                f"{name} holds a NUL or a lone surrogate, which the ledger cannot "
+                "store; a call is recorded after it is made, so a request whose "
+                "row could not be written is never sent"
+            )
     if not isinstance(as_of, datetime):
         raise TypeError(f"as_of must be a datetime, got {as_of!r}")
     if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -467,7 +473,30 @@ def _checked(
     # TypeError unless the state is exactly the set's state model; and what
     # would be sent is read back through that model, so it cannot carry a
     # value the model's fields forbid.
-    return question_set.dump_state(state)
+    sent_state = question_set.dump_state(state)
+    if _holds_unstorable(sent_state):
+        # jsonb refuses \u0000. Neither the text nor its path is named: the
+        # state goes to no log, and an error's text reaches the jobs page.
+        raise ValueError(
+            "the state holds a NUL or a lone surrogate, which the ledger cannot "
+            "store; a call is recorded after it is made, so a request whose row "
+            "could not be written is never sent"
+        )
+    return sent_state
+
+
+def _holds_unstorable(value: Any) -> bool:
+    """Whether any key or text anywhere in ``value`` is text Postgres refuses."""
+    if isinstance(value, str):
+        return _UNSTORABLE.search(value) is not None
+    if isinstance(value, Mapping):
+        return any(
+            _holds_unstorable(key) or _holds_unstorable(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_holds_unstorable(item) for item in value)
+    return False
 
 
 async def _switched_on(conn: asyncpg.Connection, question_set: QuestionSet) -> bool:
@@ -501,18 +530,20 @@ def _judged(
 
     Only a 2xx with a body is judged, whether or not the SDK raised over it
     (see the module docstring); anything else is an ``error`` and answered
-    nothing.
+    nothing. The validator reads the bytes as they arrived, not the stored
+    text: a body that is not UTF-8, or holds a raw NUL, is repaired for the
+    ledger, and judged repaired it would become a canonical answer for good.
     """
     status = call.http_status
     answered = (
         isinstance(status, int)
         and not isinstance(status, bool)
         and 200 <= status <= 299
-        and call.raw_body is not None
+        and call.wire_body is not None
     )
     if not answered:
         return "error", None
-    validation = jev_validate.validate_body(call.raw_body, questions, model)
+    validation = jev_validate.validate_body(call.wire_body, questions, model)
     return validation.status, validation
 
 

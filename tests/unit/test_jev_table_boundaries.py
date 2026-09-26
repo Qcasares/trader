@@ -23,9 +23,14 @@ an import scan cannot see: a query is a string, and a module that never imports
   the cascade ends at Jev.
 
 The scan reads string literals, f-string parts included, because that is where
-SQL lives; a table named in an identifier or a comment is not a query. Each
-scanner is also run over synthetic sources that must trip it, so a scanner
-that quietly finds nothing fails its own test first.
+SQL lives; a table named in an identifier or a comment is not a query. A
+literal that is the signals table's name and nothing else counts as a write,
+because asyncpg's bulk writers take the table as a bare argument and build the
+SQL inside the driver. It reads ``src/`` and the protected processes' entry
+points outside it — ``api/``, ``scripts/`` and ``tests/e2e/broker_check.py`` —
+the trees ``test_import_boundaries`` walks. Each scanner is also run over
+synthetic sources that must trip it, so a scanner that quietly finds nothing
+fails its own test first.
 """
 
 from __future__ import annotations
@@ -39,6 +44,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 PROGRAMME = SRC / "programme"
+
+#: What the scans read: the trees and entry points that
+#: ``test_import_boundaries`` walks as protected processes, since a query in the
+#: API's Vercel entry point or in a script a workflow runs with the database
+#: credential reads the ledger as surely as one in ``src/``.
+SCANNED_TREES = (SRC, ROOT / "api", ROOT / "scripts")
+SCANNED_ENTRY_POINTS = (ROOT / "tests" / "e2e" / "broker_check.py",)
 
 #: Every table migration 0012 created for Jev.
 JEV_TABLES = (
@@ -64,6 +76,13 @@ MODEL_RUNNERS = tuple(
 )
 
 _TABLE = re.compile(r"\b(" + "|".join(JEV_TABLES) + r")\b")
+
+#: A string that is the signals table's name and nothing else. asyncpg's bulk
+#: writers take the table as a bare argument and build the SQL inside the
+#: driver — ``copy_records_to_table("jev_signals", ...)``, ``copy_to_table`` —
+#: and a constant interpolated into an f-string is the same string, so outside
+#: the writer the name alone is read as a write.
+_SIGNALS_NAME = re.compile(r'^\s*(?:"?\w+"?\.)?"?jev_signals"?\s*$', re.IGNORECASE)
 _SIGNAL_WRITE = re.compile(
     r"\b(?:insert\s+into|update|delete\s+from|copy|truncate(?:\s+table)?|merge\s+into)"
     r"\s+(?:only\s+)?(?:\"?\w+\"?\.)?\"?jev_signals\"?(?![\w])",
@@ -96,15 +115,21 @@ def _tables_named(source: str) -> list[str]:
 
 
 def _signal_writes(source: str) -> list[str]:
-    return [
-        f"line {line}: {match.group(0)}"
-        for line, text in _strings(source)
-        for match in _SIGNAL_WRITE.finditer(text)
-    ]
+    found = []
+    for line, text in _strings(source):
+        found += [f"line {line}: {m.group(0)}" for m in _SIGNAL_WRITE.finditer(text)]
+        if _SIGNALS_NAME.match(text):
+            found.append(f"line {line}: the table's name, as a bulk write takes it")
+    return found
 
 
 def _python_files(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+def _scanned() -> list[Path]:
+    files = [path for tree in SCANNED_TREES for path in _python_files(tree)]
+    return files + [path for path in SCANNED_ENTRY_POINTS if path.is_file()]
 
 
 def _label(path: Path) -> str:
@@ -119,7 +144,7 @@ def _label(path: Path) -> str:
 def test_only_the_signals_reader_names_a_jev_table_outside_the_programme() -> None:
     offenders = [
         f"{_label(path)} {named}"
-        for path in _python_files(SRC)
+        for path in _scanned()
         if PROGRAMME not in path.parents and path != SIGNALS_READER
         for named in _tables_named(path.read_text(encoding="utf-8"))
     ]
@@ -133,7 +158,7 @@ def test_only_the_signals_reader_names_a_jev_table_outside_the_programme() -> No
 def test_only_the_lane_writes_signals() -> None:
     offenders = [
         f"{_label(path)} {write}"
-        for path in _python_files(SRC)
+        for path in _scanned()
         if path != SIGNALS_WRITER
         for write in _signal_writes(path.read_text(encoding="utf-8"))
     ]
@@ -151,6 +176,18 @@ def test_the_model_runners_never_name_the_signals() -> None:
             "model client must not be able to write, or even query, a signal: "
             "on the signal path the cascade ends at Jev."
         )
+
+
+def test_the_scans_read_the_entry_points_too() -> None:
+    """The protected processes' entry points outside ``src/`` are read."""
+    scanned = set(_scanned())
+    for path in (
+        ROOT / "api" / "index.py",
+        ROOT / "scripts" / "deployment_status.py",
+        ROOT / "tests" / "e2e" / "broker_check.py",
+        SRC / "db" / "migrate_cli.py",
+    ):
+        assert path in scanned, _label(path)
 
 
 def test_the_scans_read_the_tree_they_claim() -> None:
@@ -208,8 +245,13 @@ def test_the_table_scan_ignores_what_is_not_a_query(source: str) -> None:
         'await conn.execute("UPDATE jev_signals SET value = $1")',
         'await conn.execute(f"DELETE FROM jev_signals WHERE session = {s}")',
         'await conn.execute("TRUNCATE TABLE jev_signals")',
-        'await conn.copy_records_to_table("x", records=r); q = "COPY jev_signals"',
+        'q = "COPY jev_signals FROM STDIN"',
         "await conn.execute('INSERT INTO \"jev_signals\" VALUES ($1)')",
+        'await conn.copy_records_to_table("jev_signals", records=r)',
+        'await conn.copy_records_to_table(table_name="jev_signals", records=r)',
+        'await conn.copy_to_table("jev_signals", source=f, schema_name="public")',
+        'T = "jev_signals"\nawait conn.execute(f"INSERT INTO {T} VALUES ($1)")',
+        'await conn.copy_records_to_table("public.jev_signals", records=r)',
     ],
 )
 def test_the_write_scan_finds_each_spelling(source: str) -> None:
@@ -222,6 +264,7 @@ def test_the_write_scan_finds_each_spelling(source: str) -> None:
         'await conn.fetch("SELECT * FROM jev_signals")',
         'await conn.execute("INSERT INTO jev_signals_audit VALUES ($1)")',
         'await conn.execute("UPDATE jev_answers SET valid = false")',
+        'await conn.copy_records_to_table("jev_signals_audit", records=r)',
     ],
 )
 def test_the_write_scan_ignores_what_does_not_write_signals(source: str) -> None:

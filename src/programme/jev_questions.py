@@ -47,8 +47,11 @@ The decision lane's state is enumerated, and nothing else. No dates, no
 sessions, no tickers, no free text and no exact figures: the model holds world
 knowledge with no disclosed cutoff, and a date, a ticker or a precise return is
 a fingerprint of the day it describes, which lets a model recall what happened
-next instead of judging what it was shown. :func:`state_model_problem` refuses
-a decision-lane state model that could carry any of them, at registration.
+next instead of judging what it was shown. :func:`state_model_problem` refuses,
+at registration, the shapes that can carry any of them: free text, numbers,
+dates, containers, and Literal values that do not look like labels. What a
+label means is a reviewer's control, not the rule's: a ticker or a date spelled
+as a lowercase label passes it.
 
 The API may import this module to show the catalogue of questions. It holds no
 client and names no host, so it can.
@@ -552,11 +555,14 @@ def state_model_problem(state_model: object, lane: str) -> str | None:
     are refused, because each can carry what an enumeration cannot, and so are
     computed fields and serializers, which send what no field declares. In the
     decision lane every Literal value must also look like a label — a lowercase
-    word, or a small integer — so an enumeration of dates or tickers is refused
-    too.
+    word, or a small integer — so the usual spellings of a date or a ticker
+    (``2020-03-16``, ``SPY``, ``2020``) are refused too.
 
-    It reads shapes, not meanings. A ticker spelled as a lowercase word is a
-    label to it, and a reviewer is the control for that.
+    It reads shapes, not meanings. A ticker or a date spelled as a lowercase
+    label (``spy``, ``d20200316``), or a date split into small ordinals (a
+    ``day``, a ``month`` and a ``year`` field), is a label to it, and a reviewer
+    is the control for that. ``tests/unit/test_jev_questions.py`` pins what it
+    passes, so tightening the rule means updating the claim beside it.
     """
     if not (isinstance(state_model, type) and issubclass(state_model, BaseModel)):
         return f"the state model must be a pydantic model class, got {state_model!r}"
@@ -678,37 +684,39 @@ _REGIME_INSTRUCTIONS = (
     'way) or "down".'
 )
 
-#: The regimes, in their frozen order, escape last. Each regime names every
-#: descriptor it depends on by path, and no two of them can hold at once:
-#: risk_on and neutral disagree on equities' trend or momentum, and risk_off
-#: needs a drawdown the other two exclude. So a state fits one regime or none,
-#: and a state that fits none is one whose descriptors pull apart. The escape
-#: is described as exactly that, because that is the state in which an
-#: allocator should hold.
+#: The regimes, in their frozen order, escape last. Each says what its regime
+#: means and names, by path, the fields that bear on it; none lists the labels
+#: those fields must hold. A rule the state fully determines belongs in code:
+#: TypeSafe's own guidance keeps known rules and lookups there, and a question
+#: that spelled one out would leave Jev nothing to judge, only a table to
+#: misread. That rule is the baseline twin phase G runs beside the allocator
+#: (docs/08, "Lanes"), so the forward measurement compares a judgement with a
+#: rule, not a rule with a noisy copy of itself. The escape is the complement
+#: of a clear fit — mixed or weak evidence — and gives no example, because Jev
+#: reads an example literally and one of the regimes could claim any example.
 _REGIME_CRITERIA: dict[str, str] = {
     "risk_on": (
-        'Investors are taking on risk: `equities.trend` is "above", '
-        '`equities.momentum` is "up", `equities.drawdown` is "none" or '
-        '"shallow", `equities.volatility_quintile` is 1, 2 or 3, and '
-        '`commodities.momentum` is "up" or "flat".'
+        "Investors are taking on risk: `equities.trend` and `equities.momentum` "
+        "show prices rising, `equities.drawdown` and "
+        "`equities.volatility_quintile` show small losses and calm trading, and "
+        "`commodities.momentum` shows firm demand."
     ),
     "neutral": (
-        "The market is calm and moving sideways: `equities.trend` is "
-        '"near" or `equities.momentum` is "flat", `equities.drawdown` is '
-        '"none" or "shallow", and `equities.volatility_quintile` is 2, 3 or 4.'
+        "Investors are holding steady: `equities.trend` and `equities.momentum` "
+        "show prices moving sideways, and `equities.drawdown` and "
+        "`equities.volatility_quintile` show modest losses and ordinary swings."
     ),
     "risk_off": (
-        'Investors are seeking safety: `equities.trend` is "below", '
-        '`equities.momentum` is "down", `equities.drawdown` is "deep" or '
-        '"severe", `equities.volatility_quintile` is 4 or 5, and '
-        '`bonds.momentum` is "up" or "flat".'
+        "Investors are seeking safety: `equities.trend` and `equities.momentum` "
+        "show prices falling, `equities.drawdown` and "
+        "`equities.volatility_quintile` show heavy losses and turbulent trading, "
+        "and `bonds.momentum` shows money moving into bonds."
     ),
     "insufficient_evidence": (
-        "The descriptors conflict: some fit one regime and others fit another. "
-        'For example, `equities.trend` is "above" while `equities.drawdown` is '
-        '"deep", or `equities.momentum` and `bonds.momentum` are both "down". '
-        "Choose this option whenever the descriptors point in different "
-        "directions."
+        "The evidence is mixed: the descriptors fit two of risk_on, neutral and "
+        "risk_off about equally well, or fit each of them only weakly. Choose "
+        "this option whenever the descriptors conflict about which regime they "
+        "show."
     ),
 }
 
@@ -787,7 +795,7 @@ GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
         "5d5d091e936ae7b0a2006d2d2a92f90c7a08b0bbe55453550ef2c08c2370560e"
     ),
     ("decision.regime", 1): (
-        "7b79d2419f7fdd25bdd1c6ce4442820d1a6e57a94b67d26787a37aaaf04eb52e"
+        "5a773b26917236fd8cf0174dfde9cc9fe81d0af4027a3eb0a2261f54dc6acff9"
     ),
 }
 

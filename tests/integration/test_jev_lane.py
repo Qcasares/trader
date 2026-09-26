@@ -214,6 +214,8 @@ def _call(status: int | None, body: str | None, **fields: Any) -> Any:
         "error_kind": None,
         "input_tokens": 212 if status == 200 else None,
         "output_tokens": 0 if status == 200 else None,
+        # The bytes as they arrived, which is what the validator reads.
+        "wire_body": None if body is None else body.encode("utf-8"),
     }
     values.update(fields)
     return jev_client.JevCall(**values)

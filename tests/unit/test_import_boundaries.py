@@ -76,9 +76,10 @@ FORBIDDEN_PREFIXES = (
     "nltk",
     "torch",
     # TypeSafe AI's System One. ``typesafe_sdk`` is the official client, and
-    # it will be imported in exactly one place, ``src/programme/jev_client.py``,
-    # which the process boundary already puts out of reach of everything this
-    # list protects. ``typesafe_ai``, ``typesafe`` and ``jev`` are the names a
+    # it is imported in exactly one place, ``src/programme/jev_client.py``
+    # (``test_only_the_jev_client_imports_the_typesafe_sdk``), which the
+    # process boundary already puts out of reach of everything this list
+    # protects. ``typesafe_ai``, ``typesafe`` and ``jev`` are the names a
     # lookalike or a typosquat would use. ``cooksafe`` is not a lookalike: it
     # is TypeSafe's own cookbook helper, published from ``typesafe-ai/CookSafe``,
     # and it is refused because it is a TypeSafe client helper, which is
