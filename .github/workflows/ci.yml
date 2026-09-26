@@ -116,6 +116,19 @@ jobs:
       - name: Import boundaries
         run: pytest tests/unit/test_import_boundaries.py -q
 
+      # The mechanical half of the web design system (web/DESIGN.md §13 (a)):
+      # tokens equal to the stylesheet, no colour or value outside the
+      # allow-lists, every rule's status equal to its decision-log row, and the
+      # honesty rules as the frontend's source can keep or break them. Named
+      # for the same reason as the steps above: a UI change that breaks one
+      # should say which in the checks list.
+      - name: Design system
+        run: >-
+          pytest -q tests/unit/test_design_tokens.py
+          tests/unit/test_web_components.py
+          tests/unit/test_web_formatting.py
+          tests/unit/test_fill_count_contract.py
+
       - name: Unit tests
         run: pytest tests/unit -q
 

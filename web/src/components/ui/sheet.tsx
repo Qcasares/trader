@@ -28,6 +28,25 @@ function SheetPortal({
   return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />
 }
 
+/*
+ * Changed from stock, and logged in web/DESIGN.md (K-8):
+ *
+ * - **No enter or exit animation.** The overlay's fade and the panel's slide
+ *   (`animate-in`, `fade-*`, `slide-*`, and the 300/500ms durations they would
+ *   have run for) come from `tw-animate-css`, which this project never
+ *   installed: they compiled to nothing, and the sheet has always appeared at
+ *   once. Removed rather than made to work — 500ms is twice the ceiling the
+ *   product's motion rule sets, motion here reports a change and nothing else,
+ *   and whether anything should slide is the owner's call (Q-17).
+ * - **The close button is a real target with the one focus indicator.** Stock
+ *   draws a `:focus` ring (not `:focus-visible`, so a click showed it too) and
+ *   hides the outline; it now takes the accent outline from `globals.css`
+ *   (owner decision OD-3, A-4), at full opacity while focused, since the
+ *   button's resting 70% would fade the outline with it. It is 32px square
+ *   rather than the bare 16px icon, which the legacy button padding used to
+ *   pad out by accident.
+ */
+
 function SheetOverlay({
   className,
   ...props
@@ -35,10 +54,7 @@ function SheetOverlay({
   return (
     <SheetPrimitive.Overlay
       data-slot="sheet-overlay"
-      className={cn(
-        "fixed inset-0 z-50 bg-black/50 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
-        className
-      )}
+      className={cn("fixed inset-0 z-50 bg-black/50", className)}
       {...props}
     />
   )
@@ -60,23 +76,24 @@ function SheetContent({
       <SheetPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition ease-in-out data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:animate-in data-[state=open]:duration-500",
+          "fixed z-50 flex flex-col gap-4 bg-background shadow-lg",
           side === "right" &&
-            "inset-y-0 right-0 h-full w-3/4 border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",
+            "inset-y-0 right-0 h-full w-3/4 border-l sm:max-w-sm",
           side === "left" &&
-            "inset-y-0 left-0 h-full w-3/4 border-r data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left sm:max-w-sm",
-          side === "top" &&
-            "inset-x-0 top-0 h-auto border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top",
-          side === "bottom" &&
-            "inset-x-0 bottom-0 h-auto border-t data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom",
+            "inset-y-0 left-0 h-full w-3/4 border-r sm:max-w-sm",
+          side === "top" && "inset-x-0 top-0 h-auto border-b",
+          side === "bottom" && "inset-x-0 bottom-0 h-auto border-t",
           className
         )}
         {...props}
       >
         {children}
         {showCloseButton && (
-          <SheetPrimitive.Close className="absolute top-4 right-4 rounded-xs opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none data-[state=open]:bg-secondary">
-            <XIcon className="size-4" />
+          <SheetPrimitive.Close
+            data-slot="sheet-close"
+            className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-sm opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100 disabled:pointer-events-none data-[state=open]:bg-secondary"
+          >
+            <XIcon aria-hidden="true" className="size-4" />
             <span className="sr-only">Close</span>
           </SheetPrimitive.Close>
         )}

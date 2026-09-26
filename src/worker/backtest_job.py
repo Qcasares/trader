@@ -117,13 +117,18 @@ def _execute(run: dict[str, Any]) -> dict[str, Any]:
     panel = PricePanel.from_bars(bars_to_rows(bars))
     trading_sessions = nyse_sessions(start, end)
 
-    cost = run["cost_model"] or {}
+    # Through the function ``create_run`` stored the row with, and with no
+    # fallback of its own: a default typed here would be a second answer to
+    # what the run's costs were, and the one the row does not record. A row
+    # written before the cost model was stored complete gets the values it
+    # always did.
+    cost = repo.complete_cost_model(run["cost_model"])
     clock = SimClock(trading_sessions)
     broker = SimulatedBroker(
         initial_cash=Decimal(str(run["initial_cash"])),
         cost_model=CostModel(
-            slippage_bps=float(cost.get("slippage_bps", 5.0)),
-            stress_multiplier=float(cost.get("stress_multiplier", 1.0)),
+            slippage_bps=float(cost["slippage_bps"]),
+            stress_multiplier=float(cost["stress_multiplier"]),
         ),
         clock=clock,
     )
@@ -133,8 +138,8 @@ def _execute(run: dict[str, Any]) -> dict[str, Any]:
         clock,
         DriverConfig(
             constraints=RebalanceConstraints(
-                min_trade_usd=Decimal(str(cost.get("min_trade_usd", 25.0))),
-                max_weight_per_asset=float(cost.get("max_weight_per_asset", 1.0)),
+                min_trade_usd=Decimal(str(cost["min_trade_usd"])),
+                max_weight_per_asset=float(cost["max_weight_per_asset"]),
             ),
             run_ref=str(run["id"])[:8],
         ),
@@ -154,7 +159,7 @@ def _execute(run: dict[str, Any]) -> dict[str, Any]:
     metrics = metrics_from_records(
         records,
         effective_start=effective_start,
-        cost_stress_multiplier=float(cost.get("stress_multiplier", 1.0)),
+        cost_stress_multiplier=float(cost["stress_multiplier"]),
     )
 
     equity_rows = [

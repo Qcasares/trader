@@ -28,6 +28,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { ApiError, api, type Experiment } from "@/lib/api";
+import { Absent } from "@/components/Absent";
 import { Skeleton } from "@/components/Skeleton";
 import { StatusBadge, type Status } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -55,8 +56,18 @@ const HEADLINE: [string, string][] = [
   ["n_sessions", "Sessions"],
 ];
 
-function show(value: unknown): string {
-  if (value === null || value === undefined) return "—";
+/**
+ * An outcome figure as the engine stored it.
+ *
+ * Not scaled to a percentage, on purpose: the preregistered criteria above are
+ * written in the engine's own units ("max_drawdown > -0.35"), and the outcome
+ * exists to be read against them, so both stay in one unit. A key the engine
+ * wrote as null was never computed, and says so rather than borrowing a dash.
+ */
+function show(value: unknown): React.ReactNode {
+  if (value === null || value === undefined) {
+    return <Absent kind="not-measured" />;
+  }
   if (typeof value === "boolean") return value ? "yes" : "no";
   if (typeof value === "number") return String(Number(value.toFixed(4)));
   if (typeof value === "object") return JSON.stringify(value);
@@ -180,19 +191,33 @@ export default function ExperimentPage({
               <dt>Code commit</dt>
               <dd className="mono">
                 {experiment.code_commit || (
-                  <span className="text-ink-muted">
-                    not recorded — the deployment did not supply one
-                  </span>
+                  <Absent
+                    kind="missing"
+                    reason="the deployment did not supply one"
+                  />
                 )}
               </dd>
             </div>
             <div className="assumption-row">
               <dt>Seed</dt>
-              <dd className="mono">{show(experiment.seed)}</dd>
+              <dd className="mono">
+                {/* Null for every kind but a replication. Shown as an absence
+                    rather than a dash, because this record exists so that a
+                    missing input is visible (migrations/0007_programme.sql). */}
+                {experiment.seed === null ? (
+                  <Absent kind="no-data" />
+                ) : (
+                  String(experiment.seed)
+                )}
+              </dd>
             </div>
             <div className="assumption-row">
               <dt>Universe</dt>
-              <dd className="mono">{experiment.universe.join(", ") || "—"}</dd>
+              <dd className="mono">
+                {experiment.universe.join(", ") || (
+                  <Absent kind="missing" reason="a run cannot be repeated without it" />
+                )}
+              </dd>
             </div>
             <div className="assumption-row">
               <dt>Dataset manifest</dt>
@@ -215,9 +240,9 @@ export default function ExperimentPage({
                   </Link>
                 ) : null}
                 {experiment.walkforward_run_id ? " walk-forward study" : null}
-                {!experiment.backtest_run_id && !experiment.walkforward_run_id
-                  ? "—"
-                  : null}
+                {!experiment.backtest_run_id && !experiment.walkforward_run_id ? (
+                  <Absent kind="no-data" />
+                ) : null}
               </dd>
             </div>
           </dl>

@@ -26,6 +26,12 @@
  *   qty, price, notional and commission are never null on a recorded fill,
  *   so no column here needs the "no data" treatment the orders/portfolio
  *   tables do.
+ *
+ * The count in the Fills title is the run's total, `metrics.n_fills`, and
+ * never the length of the list: `/orders` is a page the API caps (500 unless
+ * asked), so a title built from the list claimed "Fills (500)" beside a
+ * metric grid saying 779. Only the 200 rows the table shows are fetched, and
+ * the table says it is a slice of the total whenever it is one.
  */
 
 import { use, useCallback, useEffect, useState } from "react";
@@ -36,16 +42,23 @@ import { MetricsPanel } from "@/components/MetricsPanel";
 import {
   ApiError,
   api,
-  fmtUsd,
   type BacktestOrder,
   type BacktestRun,
   type EquityPoint,
 } from "@/lib/api";
+import { fmtUsd } from "@/lib/format";
+import { Absent } from "@/components/Absent";
 import { Skeleton } from "@/components/Skeleton";
 import { DataTable } from "@/components/DataTable";
 import { StatusBadge, jobStatus } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+/**
+ * How many of the most recent fills the table shows. Also what is fetched: the
+ * rows past it were only ever discarded, and the total comes from the run.
+ */
+const FILLS_SHOWN = 200;
 
 export default function BacktestDetailPage({
   params,
@@ -65,7 +78,7 @@ export default function BacktestDetailPage({
       if (fetched.status === "succeeded") {
         const [curve, fills] = await Promise.all([
           api.equity(id),
-          api.orders(id),
+          api.orders(id, FILLS_SHOWN),
         ]);
         setEquity(curve);
         setOrders(fills);
@@ -168,11 +181,14 @@ export default function BacktestDetailPage({
 
           <Card className="mt-3">
             <CardHeader>
-              <CardTitle>Fills ({orders.length})</CardTitle>
+              <CardTitle>
+                Fills (
+                {run.metrics.n_fills ?? <Absent kind="not-measured" />})
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <DataTable
-                rows={orders.slice(0, 200).map((order, index) => ({
+                rows={orders.map((order, index) => ({
                   ...order,
                   // `DataTable.getRowId` takes one argument, and fills have no
                   // natural id — two legs of the same rebalance can otherwise
@@ -254,11 +270,20 @@ export default function BacktestDetailPage({
                   },
                 ]}
               />
-              {orders.length > 200 && (
-                <p className="mt-2 mb-0 text-sm text-ink-muted">
-                  Showing the 200 most recent of {orders.length}.
-                </p>
-              )}
+              {run.metrics.n_fills == null
+                ? // No total to be a slice of, but a full page is still a cap.
+                  orders.length >= FILLS_SHOWN && (
+                    <p className="mt-2 mb-0 text-sm text-ink-muted">
+                      Showing the {orders.length} most recent; the run did not
+                      record its total.
+                    </p>
+                  )
+                : orders.length < run.metrics.n_fills && (
+                    <p className="mt-2 mb-0 text-sm text-ink-muted">
+                      Showing the {orders.length} most recent of{" "}
+                      {run.metrics.n_fills}.
+                    </p>
+                  )}
             </CardContent>
           </Card>
         </>

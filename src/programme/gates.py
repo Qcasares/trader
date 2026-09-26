@@ -25,12 +25,14 @@ criterion is unmet the only route forward is to produce the missing row.
 Synthetic data
 ~~~~~~~~~~~~~~
 Synthetic evidence carries a candidate through the research stages and is
-refused at gate 2 -> 3. The reason is stated plainly in CLAUDE.md: no result in
-this repository is a real backtest, because the equity data hosts are blocked
-by this environment's egress policy. Requiring real prices at gate 1 -> 2 would
-make the pipeline unexercisable, and an unexercisable pipeline is not a safer
-one — it is an untested one. The refusal sits at the gate before anything
-operates, which is where the API already refuses synthetic data for
+refused at gate 2 -> 3 (CLAUDE.md, "Synthetic prices cannot reach operation").
+The permission dates from when no equity data host was reachable from this
+environment: requiring real prices at gate 1 -> 2 would have made the pipeline
+unexercisable, and an unexercisable pipeline is not a safer one — it is an
+untested one. That egress block has since lifted, and both implemented
+strategies have been measured on real prices (CLAUDE.md, "Known
+limitations"); the rule is unchanged. The refusal sits at the gate before
+anything operates, which is where the API already refuses synthetic data for
 walk-forward studies and deployments.
 """
 
@@ -417,8 +419,16 @@ def evaluate(facts: CandidateFacts) -> GateResult:
 
     Stages this slice cannot evidence return a single unmet criterion naming
     the missing capability, rather than an empty list or an exception. An
-    operator reading the UI should see *why* a candidate is parked, and
-    "shadow-mode operation is not built yet" is a better answer than silence.
+    operator reading the UI should see *why* a candidate is parked, and "broker
+    paper trading against a live account ... is not built" is a better answer
+    than silence.
+
+    Which stages those are is ``_GATES`` and ``_MISSING_CAPABILITY`` below, as
+    CLAUDE.md's "Known limitations" describes: shadow mode is built — the gate
+    out of stage 3, ``_gate_shadow_to_paper``, judges the sessions it recorded
+    — and it is the gates out of stages 4 to 8 that are not. This docstring's
+    example was once "shadow-mode operation is not built yet", the claim the
+    /programme page also made until it was corrected.
     """
     from_stage = facts.stage
     to_stage = min(from_stage + 1, 8)

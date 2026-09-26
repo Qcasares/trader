@@ -5,10 +5,10 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 /**
- * The stock shadcn variants, plus the three this system actually runs on.
+ * The stock shadcn variants, plus the ones this system actually runs on.
  *
- * `settled` / `unknown` / `blocked` are not decoration and they are not
- * interchangeable with `default` / `secondary` / `destructive`:
+ * `settled` / `caution` / `unknown` / `blocked` are not decoration and they
+ * are not interchangeable with `default` / `secondary` / `destructive`:
  *
  * - **Every one carries a glyph as well as a hue**, so the colour could be
  *   removed entirely without losing the information. This interface is
@@ -32,9 +32,25 @@ import { cn } from "@/lib/utils"
  * Tinting each pill with its own hue made the 4.5:1 contrast target and the
  * lightness-separation target mutually unsatisfiable on dark — see the palette
  * note in `globals.css`.
+ *
+ * - **`caution` is `unknown`'s amber under another glyph**: measured, not met
+ *   yet, and not an alarm — a gate still waiting on evidence somebody can go
+ *   and produce. It is what the legacy `.pill-warn` drew, and it shares the
+ *   amber the way `.pill-warn` shared `.pill-unknown`'s, so the ▲ against the
+ *   ? is what keeps "not yet" and "not measured" apart without colour.
+ *
+ * - **`stopped` is the one exception, on purpose**: an amber plate carrying
+ *   dark ink, for a safety switch that is off. The owner reserved red for
+ *   live money reachable (web/DESIGN.md OD-2), and a halted kill switch is the
+ *   safe state, so it must be prominent without being alarming — and it must
+ *   never be mistaken for `unknown`, which is the same amber as *text* on the
+ *   neutral chip. A filled chip and an outlined one differ in greyscale too.
+ *
+ * No focus ring: a badge is never focusable, and the one focus indicator
+ * lives in `globals.css` (OD-3).
  */
 const badgeVariants = cva(
-  "inline-flex w-fit shrink-0 items-center justify-center gap-1.5 overflow-hidden rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 [&>svg]:pointer-events-none [&>svg]:size-3",
+  "inline-flex w-fit shrink-0 items-center justify-center gap-1.5 overflow-hidden rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-[color,box-shadow] [&>svg]:pointer-events-none [&>svg]:size-3",
   {
     variants: {
       variant: {
@@ -50,7 +66,7 @@ const badgeVariants = cva(
         link: "border-transparent text-primary underline-offset-4 [a&]:hover:underline",
 
         /*
-         * The glyph for these three is attached in `globals.css`, keyed off the
+         * The glyph for each of these is attached in `globals.css`, keyed off the
          * `data-variant` this component already sets. It is not a Tailwind
          * `before:content-[…]` utility because the glyph needs the two-value
          * form — `content: "✓" / ""` — whose second half is the alternative
@@ -59,10 +75,14 @@ const badgeVariants = cva(
          * the status out twice, once as a symbol nobody asked for.
          */
         settled: "border-settled/40 bg-panel-2 text-settled",
+        /** Measured and not met yet: a gate waiting on evidence. */
+        caution: "border-unknown/40 bg-panel-2 text-unknown",
         unknown: "border-unknown/40 bg-panel-2 text-unknown",
         blocked: "border-blocked/40 bg-panel-2 text-blocked",
         /** A state that is real, reported, and simply not interesting. */
         mute: "border-line bg-panel-2 text-ink-muted",
+        /** A safety switch that is off: known, safe, and not to be missed. */
+        stopped: "border-stopped bg-stopped font-semibold text-stopped-ink",
       },
     },
     defaultVariants: {

@@ -1,0 +1,1253 @@
+{
+  "$description": "Machine mirror of web/src/app/globals.css: its :root block, its prefers-color-scheme: light block and its @theme inline block (lines 43-139, 141-164 and 202-260 at commit 0ec084f). DTCG Format/Color 2025.10. Source of truth: globals.css (0ec084f:DESIGN.md:6-7 says so, and the runtime reads only CSS). This file is kept equal to it by tests/unit/test_design_tokens.py, which re-derives every value from the stylesheet on every run and fails naming the token that differs. Edit globals.css first, then this file. $value holds the unconditional :root value (the dark palette); the light palette is in $extensions['com.github.qcasares.trader'].light because the 2025.10 format module has no modes (its Resolver module splits themes into separate files; see web/DESIGN.md D-TOK-2). hex is the clipped sRGB fallback, the value Chromium paints. Descriptions quote stated intent with its source and label observations as such; line citations and observations are as of commit 0ec084f, and '0ec084f:DESIGN.md:N' is the former root DESIGN.md, kept as web/REFERENCE.md Appendix A. The rules, and their status, live in web/DESIGN.md. Not held here: values Tailwind 4.3.3 supplies by default and globals.css does not declare - the sm/md/lg breakpoints (40/48/64rem), --spacing 0.25rem, the text-xs/sm/base line-heights and the 150ms default transition (web/DESIGN.md L-2, T-7, M-1, D-TOK-6; web/REFERENCE.md Q-31).",
+  "color": {
+    "$type": "color",
+    "surface": {
+      "$description": "Surfaces. globals.css:44-47 groups these as 'surfaces': graphite with a small chroma toward the accent's hue.",
+      "bg": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.178,
+            0.011,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#0e1116"
+        },
+        "$description": "Page background (body, globals.css:299; 0ec084f:DESIGN.md:35 'Page'). Observed: the dark value converts to #0e1116, the hex globals.css:16 names as the retired Primer value (REFERENCE.md Q-3).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--bg",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.977,
+                0.003,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#f6f7f9"
+            }
+          }
+        }
+      },
+      "panel": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.221,
+            0.013,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#171b21"
+        },
+        "$description": "Raised surface: cards, sidebar, phone header, sheet, metric cells (0ec084f:DESIGN.md:36 'Cards, top bar'; ui/card.tsx:22, AppShell.tsx:53, :68). Tailwind: bg-card, bg-popover, bg-panel.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--panel",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                1,
+                0,
+                0
+              ],
+              "alpha": 1,
+              "hex": "#ffffff"
+            }
+          }
+        }
+      },
+      "panel-2": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.262,
+            0.015,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#20252c"
+        },
+        "$description": "Inset and hover surface: status chips (StatusBadge, the one chip since owner decision OD-3), active nav item, legacy inputs, row hover, skip link (0ec084f:DESIGN.md:37 'Inputs, pills, row hover'). Tailwind: bg-secondary, bg-muted, bg-accent and bg-panel-2 all resolve here (globals.css:212-217, :227).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--panel-2",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.958,
+                0.004,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#eff1f4"
+            }
+          }
+        }
+      },
+      "border": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.322,
+            0.016,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#2e343c"
+        },
+        "$description": "Hairline: legacy cards, table rows, metric-grid gaps, sidebar edge, separators (0ec084f:DESIGN.md:38 'Hairlines'). Tailwind: border-border, border-line. The card's edge (owner decision OD-3; web/DESIGN.md C-8a). A bare Tailwind `border` does NOT use it; it falls back to currentColor, which is how every shadcn Card was outlined in the text colour at 0ec084f (web/REFERENCE.md 2.5; DESIGN.md C-8).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--border",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.885,
+                0.006,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#d6d9dd"
+            }
+          }
+        }
+      },
+      "border-strong": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.412,
+            0.018,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#444c55"
+        },
+        "$description": "Control boundary and table-head rule: legacy buttons, th bottom rule, skip link; shadcn Input/Select border via --color-input (0ec084f:DESIGN.md:39 'Buttons, table head rule'; globals.css:221).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--border-strong",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.8,
+                0.01,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#b9bec4"
+            }
+          }
+        }
+      }
+    },
+    "ink": {
+      "$description": "Ink. globals.css:54-57.",
+      "text": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.955,
+            0.004,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#eef0f3"
+        },
+        "$description": "Body text (0ec084f:DESIGN.md:45). Tailwind: text-ink, text-foreground.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--text",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.24,
+                0.014,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#1b2026"
+            }
+          }
+        }
+      },
+      "muted": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.723,
+            0.013,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#a0a6ae"
+        },
+        "$description": "Secondary prose, labels, placeholders (0ec084f:DESIGN.md:46); held at L 0.72 to clear 4.5:1 on bg and panel (globals.css:55-57). Tailwind: text-ink-muted (product code), text-muted-foreground (components/ui).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--muted",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.487,
+                0.016,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#5a6069"
+            }
+          }
+        }
+      },
+      "faint": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.645,
+            0.012,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#898e95"
+        },
+        "$description": "De-emphasis that is still read: unreachable lifecycle stages, nav group headings (0ec084f:DESIGN.md:47-50; AppNav.tsx:110). Tailwind: text-ink-faint.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--faint",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.528,
+                0.014,
+                255
+              ],
+              "alpha": 1,
+              "hex": "#666c73"
+            }
+          }
+        }
+      }
+    },
+    "accent": {
+      "$description": "Accent. Stated intent, not a rule (DESIGN.md holds the rules): 'Primary action, current selection, focus. Nothing decorative, and never more than a tenth of the surface' (globals.css:62-65).",
+      "accent": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.74,
+            0.093,
+            232
+          ],
+          "alpha": 1,
+          "hex": "#6ab5dc"
+        },
+        "$description": "Primary action fill, selection, focus outline, links (globals.css:62-66, :315, :752). The 2px outline in this colour at 2px offset is the one focus indicator on every control (owner decision OD-3; web/DESIGN.md A-4). Tailwind: bg-primary and ring inside components/ui; border-l-brand in product code (AppNav.tsx:129); bg-brand and text-brand exist and were unused at 0ec084f. NOT shadcn's `accent`, which is panel-2 here (globals.css:183-189).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--accent",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.52,
+                0.11,
+                232
+              ],
+              "alpha": 1,
+              "hex": "#00739d"
+            }
+          }
+        }
+      },
+      "accent-ink": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.185,
+            0.02,
+            232
+          ],
+          "alpha": 1,
+          "hex": "#09141a"
+        },
+        "$description": "Text on an accent fill (primary button); shadcn primary-foreground (globals.css:211). Also, as shipped, destructive-foreground (globals.css:219).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--accent-ink",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.995,
+                0.004,
+                232
+              ],
+              "alpha": 1,
+              "hex": "#fbfeff"
+            }
+          }
+        }
+      },
+      "accent-dim": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.56,
+            0.07,
+            232
+          ],
+          "alpha": 1,
+          "hex": "#477c97"
+        },
+        "$description": "Legacy primary hover fill (globals.css:631). Tailwind: bg-brand-dim (unused).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--accent-dim",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.66,
+                0.08,
+                232
+              ],
+              "alpha": 1,
+              "hex": "#5d9bbb"
+            }
+          }
+        }
+      }
+    },
+    "signal": {
+      "$description": "Signal. Stated intent, not a rule: 'Ordered by how much attention each deserves'; attention carried by chroma, lightness held apart for colour-blind reading (globals.css:70-87); rendered only where there is a state to report (0ec084f:DESIGN.md:19-20).",
+      "blocked": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.725,
+            0.185,
+            30
+          ],
+          "alpha": 1,
+          "hex": "#ff705c"
+        },
+        "$description": "Refused or failed - the loudest (globals.css `--blocked`). On a safety control it means one thing: live money reachable, an open live-order gate (owner decision OD-2; web/DESIGN.md C-12, Q-33); a halted kill switch is --stopped, not this. shadcn destructive aliases here. Glyph U+2715.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--blocked",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.404,
+                0.19,
+                30
+              ],
+              "alpha": 1,
+              "hex": "#950000"
+            }
+          }
+        }
+      },
+      "unknown": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.8,
+            0.14,
+            78
+          ],
+          "alpha": 1,
+          "hex": "#efb146"
+        },
+        "$description": "Not measured, indeterminate (globals.css `--unknown`); also marks model-authored content (AiBadge, through StatusBadge). Never a stopped switch: that is --stopped, a plate, where this is text on the neutral chip (web/DESIGN.md C-4r, C-12r). Glyph '?'. It also draws `caution`, a promotion gate not yet passed, under the glyph U+25B2, so the glyph tells 'not yet' from 'not measured' (web/DESIGN.md C-5). The only colour token whose hue differs between themes (78 dark, 70 light).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--unknown",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.464,
+                0.13,
+                70
+              ],
+              "alpha": 1,
+              "hex": "#854800"
+            }
+          }
+        }
+      },
+      "settled": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.66,
+            0.072,
+            158
+          ],
+          "alpha": 1,
+          "hex": "#6ca081"
+        },
+        "$description": "Met, passed, alive - the quietest (globals.css:90). Glyph U+2713 (globals.css:270, :697).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--settled",
+            "light": {
+              "colorSpace": "oklch",
+              "components": [
+                0.524,
+                0.075,
+                158
+              ],
+              "alpha": 1,
+              "hex": "#427759"
+            }
+          }
+        }
+      },
+      "stopped": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.8,
+            0.14,
+            78
+          ],
+          "alpha": 1,
+          "hex": "#efb146"
+        },
+        "$description": "A safety switch that is off: the fill of StatusBadge's `stopped` state, which /system gives a halted kill switch (owner decision OD-2; web/DESIGN.md C-12, C-12r; globals.css `--stopped`). An amber plate carrying --stopped-ink, never amber text on the neutral chip, so it cannot read as --unknown's 'not measured'; the same hue family on purpose. One value in both schemes: light --unknown is darkened for text and reads brown as a fill. Glyph U+25A0. Ink on plate 9.79:1; plate against --panel 9.09:1 dark, 1.90:1 light (a hue boundary, which is why the word and glyph carry the state).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--stopped"
+          }
+        }
+      },
+      "stopped-ink": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.185,
+            0.02,
+            78
+          ],
+          "alpha": 1,
+          "hex": "#181208"
+        },
+        "$description": "Text and glyph on a --stopped plate, in both schemes (globals.css `--stopped-ink`); 9.79:1 on the plate. Tinted toward the plate's hue as --accent-ink is toward the accent's.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--stopped-ink"
+          }
+        }
+      }
+    }
+  },
+  "type": {
+    "family": {
+      "$type": "fontFamily",
+      "sans": {
+        "$value": [
+          "ui-sans-serif",
+          "system-ui",
+          "-apple-system",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif"
+        ],
+        "$description": "Everything but figures (globals.css:92-97). System stack; no web font is loaded, so the rendered face depends on the host (DejaVu Sans on the capture VM).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--sans"
+          }
+        }
+      },
+      "mono": {
+        "$value": [
+          "ui-monospace",
+          "SF Mono",
+          "JetBrains Mono",
+          "Menlo",
+          "Consolas",
+          "monospace"
+        ],
+        "$description": "Stated: figures (0ec084f:DESIGN.md:103), and the .num and .mono cells that opt in (globals.css:636-643). As shipped also every input, select and status badge (globals.css:584; StatusBadge.tsx:39) and assumption-row sentences (globals.css:549).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--mono"
+          }
+        }
+      }
+    },
+    "size": {
+      "$type": "dimension",
+      "$description": "Stated intent: fixed rem, never clamp() (globals.css:99-102); ratio about 1.2 (0ec084f:DESIGN.md:122-123). Line-heights are not tokens (DESIGN.md T-7).",
+      "t-xs": {
+        "$value": {
+          "value": 0.6875,
+          "unit": "rem"
+        },
+        "$description": "11px. Uppercase labels, metric keys, chips, table heads (globals.css:103; 0ec084f:DESIGN.md:114). Tailwind: text-xs.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-xs"
+          }
+        }
+      },
+      "t-sm": {
+        "$value": {
+          "value": 0.75,
+          "unit": "rem"
+        },
+        "$description": "12px. Stated: table cells, dense metadata (globals.css:104; 0ec084f:DESIGN.md:115). Observed, not stated: shadcn buttons, labels and desktop inputs render at this size (ui/button.tsx:8, ui/label.tsx:16, ui/input.tsx:11), although 0ec084f:DESIGN.md:116 gives inputs and buttons 13px (REFERENCE.md Q-29). Tailwind: text-sm - 12px here, not Tailwind's 14px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-sm"
+          }
+        }
+      },
+      "t-base": {
+        "$value": {
+          "value": 0.8125,
+          "unit": "rem"
+        },
+        "$description": "13px. Stated: secondary prose (globals.css:105); secondary prose, inputs, buttons (0ec084f:DESIGN.md:116). Observed: banners, legacy inputs and buttons, phone-width shadcn inputs. Tailwind: text-base - 13px here, not 16px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-base"
+          }
+        }
+      },
+      "t-body": {
+        "$value": {
+          "value": 0.875,
+          "unit": "rem"
+        },
+        "$description": "14px. Body (globals.css:106, :302). Tailwind: text-body.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-body"
+          }
+        }
+      },
+      "t-md": {
+        "$value": {
+          "value": 1,
+          "unit": "rem"
+        },
+        "$description": "16px. h3, metric values (globals.css:107, :399, :519). Tailwind: text-md.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-md"
+          }
+        }
+      },
+      "t-lg": {
+        "$value": {
+          "value": 1.1875,
+          "unit": "rem"
+        },
+        "$description": "19px. h2; h1 at 640px and below (globals.css:108, :397, :883). Tailwind: text-lg (never used as a utility).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-lg"
+          }
+        }
+      },
+      "t-xl": {
+        "$value": {
+          "value": 1.4375,
+          "unit": "rem"
+        },
+        "$description": "23px. h1 (globals.css:109, :395). Tailwind: text-xl (never used as a utility).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--t-xl"
+          }
+        }
+      }
+    }
+  },
+  "rhythm": {
+    "space": {
+      "$type": "dimension",
+      "$description": "A 4px base (globals.css:111-112). Not bridged into Tailwind: Tailwind's own step is --spacing 0.25rem, so gap-3 = 12px = --s-3 but gap-5 = 20px, which is no --s-* step (REFERENCE.md 4.1).",
+      "s-1": {
+        "$value": {
+          "value": 4,
+          "unit": "px"
+        },
+        "$description": "4px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-1"
+          }
+        }
+      },
+      "s-2": {
+        "$value": {
+          "value": 8,
+          "unit": "px"
+        },
+        "$description": "8px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-2"
+          }
+        }
+      },
+      "s-3": {
+        "$value": {
+          "value": 12,
+          "unit": "px"
+        },
+        "$description": "12px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-3"
+          }
+        }
+      },
+      "s-4": {
+        "$value": {
+          "value": 16,
+          "unit": "px"
+        },
+        "$description": "16px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-4"
+          }
+        }
+      },
+      "s-5": {
+        "$value": {
+          "value": 24,
+          "unit": "px"
+        },
+        "$description": "24px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-5"
+          }
+        }
+      },
+      "s-6": {
+        "$value": {
+          "value": 32,
+          "unit": "px"
+        },
+        "$description": "32px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-6"
+          }
+        }
+      },
+      "s-7": {
+        "$value": {
+          "value": 48,
+          "unit": "px"
+        },
+        "$description": "48px.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--s-7"
+          }
+        }
+      }
+    },
+    "radius": {
+      "$type": "dimension",
+      "radius": {
+        "$value": {
+          "value": 6,
+          "unit": "px"
+        },
+        "$description": "Containers and shadcn controls: Card, Button, Input, banner, metric grid (globals.css:121, :455, :480, :511). Tailwind: rounded-md and rounded-lg (both 6px).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--radius"
+          }
+        }
+      },
+      "radius-sm": {
+        "$value": {
+          "value": 4,
+          "unit": "px"
+        },
+        "$description": "Small interactive items: nav rows, sort buttons, legacy controls, skip link, focus outline (globals.css:122, :317, :387, :582, :606). Tailwind: rounded-sm.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--radius-sm"
+          }
+        }
+      }
+    }
+  },
+  "motion": {
+    "easing": {
+      "$type": "cubicBezier",
+      "ease": {
+        "$value": [
+          0.16,
+          1,
+          0.3,
+          1
+        ],
+        "$description": "Stated intent: exponential ease-out only, no bounce, no elastic (globals.css:125-127).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--ease"
+          }
+        }
+      }
+    },
+    "duration": {
+      "$type": "duration",
+      "$description": "150-250ms stated (globals.css:124-127); tokens are 140 and 200ms. Not bridged into Tailwind, whose transitions use 150ms (REFERENCE.md 6.6).",
+      "fast": {
+        "$value": {
+          "value": 140,
+          "unit": "ms"
+        },
+        "$description": "Hover, focus and colour transitions in the legacy sheet (globals.css:129).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--fast"
+          }
+        }
+      },
+      "base": {
+        "$value": {
+          "value": 200,
+          "unit": "ms"
+        },
+        "$description": "The value-changed mark, .changed (globals.css:130, :783), which nothing applies.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--base"
+          }
+        }
+      }
+    }
+  },
+  "depth": {
+    "z": {
+      "$type": "number",
+      "$description": "'Named, ordered, and complete. Never an arbitrary 999' (globals.css:132-133). Not bridged into Tailwind; components use z-50.",
+      "z-sticky": {
+        "$value": 100,
+        "$description": "Sticky bars (globals.css:134). Used only by .topbar, which is never rendered.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--z-sticky"
+          }
+        }
+      },
+      "z-dropdown": {
+        "$value": 200,
+        "$description": "Menus and popovers, by its name; globals.css:135 declares only the value. 0 uses; components use z-50.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--z-dropdown"
+          }
+        }
+      },
+      "z-backdrop": {
+        "$value": 300,
+        "$description": "Overlay scrims, by its name; globals.css:136 declares only the value. 0 uses; the sheet overlay uses z-50.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--z-backdrop"
+          }
+        }
+      },
+      "z-modal": {
+        "$value": 400,
+        "$description": "Dialogs and sheets, by its name; globals.css:137 declares only the value. 0 uses.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--z-modal"
+          }
+        }
+      },
+      "z-toast": {
+        "$value": 500,
+        "$description": "Toasts; the skip link (globals.css:138, :382).",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--z-toast"
+          }
+        }
+      }
+    }
+  },
+  "utility": {
+    "$description": "Tailwind v4 names from the @theme inline block. Compiled into the utilities at build time; they do not exist as custom properties at runtime (evidence_screens.md 2.2). Product code uses the product names (bg-panel, text-ink-muted, border-line, border-l-brand); the shadcn names (primary, muted, accent, card, destructive) belong to components/ui (evidence_code.md 1.3).",
+    "color": {
+      "$type": "color",
+      "background": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-background",
+            "css": "var(--bg)"
+          }
+        },
+        "$value": "{color.surface.bg}"
+      },
+      "foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-foreground",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "card": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-card",
+            "css": "var(--panel)"
+          }
+        },
+        "$value": "{color.surface.panel}"
+      },
+      "card-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-card-foreground",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "popover": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-popover",
+            "css": "var(--panel)"
+          }
+        },
+        "$value": "{color.surface.panel}"
+      },
+      "popover-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-popover-foreground",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "primary": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-primary",
+            "css": "var(--accent)"
+          }
+        },
+        "$value": "{color.accent.accent}"
+      },
+      "primary-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-primary-foreground",
+            "css": "var(--accent-ink)"
+          }
+        },
+        "$value": "{color.accent.accent-ink}"
+      },
+      "secondary": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-secondary",
+            "css": "var(--panel-2)"
+          }
+        },
+        "$value": "{color.surface.panel-2}"
+      },
+      "secondary-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-secondary-foreground",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "muted": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-muted",
+            "css": "var(--panel-2)"
+          }
+        },
+        "$value": "{color.surface.panel-2}"
+      },
+      "muted-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-muted-foreground",
+            "css": "var(--muted)"
+          }
+        },
+        "$value": "{color.ink.muted}"
+      },
+      "accent": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-accent",
+            "css": "var(--panel-2)"
+          }
+        },
+        "$value": "{color.surface.panel-2}"
+      },
+      "accent-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-accent-foreground",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "destructive": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-destructive",
+            "css": "var(--blocked)"
+          }
+        },
+        "$value": "{color.signal.blocked}"
+      },
+      "destructive-foreground": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-destructive-foreground",
+            "css": "var(--accent-ink)"
+          }
+        },
+        "$value": "{color.accent.accent-ink}",
+        "$description": "As declared. The destructive Button does not use it: it sets text-white (components/ui/button.tsx:14)."
+      },
+      "border": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-border",
+            "css": "var(--border)"
+          }
+        },
+        "$value": "{color.surface.border}"
+      },
+      "input": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-input",
+            "css": "var(--border-strong)"
+          }
+        },
+        "$value": "{color.surface.border-strong}"
+      },
+      "ring": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-ring",
+            "css": "var(--accent)"
+          }
+        },
+        "$value": "{color.accent.accent}"
+      },
+      "bg": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-bg",
+            "css": "var(--bg)"
+          }
+        },
+        "$value": "{color.surface.bg}"
+      },
+      "panel": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-panel",
+            "css": "var(--panel)"
+          }
+        },
+        "$value": "{color.surface.panel}"
+      },
+      "panel-2": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-panel-2",
+            "css": "var(--panel-2)"
+          }
+        },
+        "$value": "{color.surface.panel-2}"
+      },
+      "line": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-line",
+            "css": "var(--border)"
+          }
+        },
+        "$value": "{color.surface.border}"
+      },
+      "line-strong": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-line-strong",
+            "css": "var(--border-strong)"
+          }
+        },
+        "$value": "{color.surface.border-strong}"
+      },
+      "ink": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-ink",
+            "css": "var(--text)"
+          }
+        },
+        "$value": "{color.ink.text}"
+      },
+      "ink-muted": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-ink-muted",
+            "css": "var(--muted)"
+          }
+        },
+        "$value": "{color.ink.muted}"
+      },
+      "ink-faint": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-ink-faint",
+            "css": "var(--faint)"
+          }
+        },
+        "$value": "{color.ink.faint}"
+      },
+      "brand": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-brand",
+            "css": "var(--accent)"
+          }
+        },
+        "$value": "{color.accent.accent}"
+      },
+      "brand-ink": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-brand-ink",
+            "css": "var(--accent-ink)"
+          }
+        },
+        "$value": "{color.accent.accent-ink}"
+      },
+      "brand-dim": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-brand-dim",
+            "css": "var(--accent-dim)"
+          }
+        },
+        "$value": "{color.accent.accent-dim}"
+      },
+      "blocked": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-blocked",
+            "css": "var(--blocked)"
+          }
+        },
+        "$value": "{color.signal.blocked}"
+      },
+      "unknown": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-unknown",
+            "css": "var(--unknown)"
+          }
+        },
+        "$value": "{color.signal.unknown}"
+      },
+      "settled": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-settled",
+            "css": "var(--settled)"
+          }
+        },
+        "$value": "{color.signal.settled}"
+      },
+      "stopped": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-stopped",
+            "css": "var(--stopped)"
+          }
+        },
+        "$value": "{color.signal.stopped}"
+      },
+      "stopped-ink": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-stopped-ink",
+            "css": "var(--stopped-ink)"
+          }
+        },
+        "$value": "{color.signal.stopped-ink}"
+      }
+    },
+    "font": {
+      "$type": "fontFamily",
+      "sans": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--font-sans",
+            "css": "var(--sans)"
+          }
+        },
+        "$value": "{type.family.sans}"
+      },
+      "mono": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--font-mono",
+            "css": "var(--mono)"
+          }
+        },
+        "$value": "{type.family.mono}"
+      }
+    },
+    "text": {
+      "$type": "dimension",
+      "xs": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-xs",
+            "css": "var(--t-xs)"
+          }
+        },
+        "$value": "{type.size.t-xs}"
+      },
+      "sm": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-sm",
+            "css": "var(--t-sm)"
+          }
+        },
+        "$value": "{type.size.t-sm}"
+      },
+      "base": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-base",
+            "css": "var(--t-base)"
+          }
+        },
+        "$value": "{type.size.t-base}"
+      },
+      "body": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-body",
+            "css": "var(--t-body)"
+          }
+        },
+        "$value": "{type.size.t-body}"
+      },
+      "md": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-md",
+            "css": "var(--t-md)"
+          }
+        },
+        "$value": "{type.size.t-md}"
+      },
+      "lg": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-lg",
+            "css": "var(--t-lg)"
+          }
+        },
+        "$value": "{type.size.t-lg}"
+      },
+      "xl": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--text-xl",
+            "css": "var(--t-xl)"
+          }
+        },
+        "$value": "{type.size.t-xl}"
+      }
+    },
+    "radius": {
+      "$type": "dimension",
+      "sm": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--radius-sm",
+            "css": "var(--radius-sm)"
+          }
+        },
+        "$value": "{rhythm.radius.radius-sm}",
+        "$description": "Declared as var(--radius-sm), a self-reference inside @theme (globals.css:254); it resolves to the :root 4px only because unlayered declarations beat layered ones (evidence_code.md 1.3)."
+      },
+      "md": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--radius-md",
+            "css": "var(--radius)"
+          }
+        },
+        "$value": "{rhythm.radius.radius}",
+        "$description": "rounded-md and rounded-lg are both 6px (globals.css:255-256)."
+      },
+      "lg": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--radius-lg",
+            "css": "var(--radius)"
+          }
+        },
+        "$value": "{rhythm.radius.radius}",
+        "$description": "rounded-md and rounded-lg are both 6px (globals.css:255-256)."
+      },
+      "xl": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--radius-xl",
+            "css": "calc(var(--radius) * 1.5)"
+          }
+        },
+        "$value": {
+          "value": 9,
+          "unit": "px"
+        },
+        "$description": "calc(var(--radius) * 1.5): resolved here because DTCG 2025.10 has no arithmetic."
+      }
+    },
+    "ease": {
+      "$type": "cubicBezier",
+      "out-quint": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--ease-out-quint",
+            "css": "var(--ease)"
+          }
+        },
+        "$value": "{motion.easing.ease}"
+      }
+    }
+  }
+}

@@ -26,7 +26,13 @@ import { Menu } from "lucide-react";
 import { AppNav } from "@/components/AppNav";
 import { SessionControls } from "@/components/SessionControls";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 
 function Brand() {
   return (
@@ -73,9 +79,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
           </SheetTrigger>
           <SheetContent side="left" className="w-60 bg-panel px-2 py-3">
+            {/* The title is the wordmark at body size, one line. It used to be
+                caught by the legacy `h2` rule and set at 19px, which wrapped
+                "Systematic Trading" onto two lines beside the close button. */}
             <SheetTitle className="px-2">
               <Brand />
             </SheetTitle>
+            {/* A dialog says what it is for, not only what it is called; this
+                one had no description, and a screen reader opening it heard
+                the wordmark and nothing else (web/DESIGN.md A-8). */}
+            <SheetDescription className="sr-only">
+              Every section of the application.
+            </SheetDescription>
             {/* Closing on navigate: a sheet that stays open over the page you
                 just asked for hides the thing you were trying to reach. */}
             <div className="mt-4">

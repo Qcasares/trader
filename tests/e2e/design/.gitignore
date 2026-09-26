@@ -1,0 +1,3 @@
+# axe-core, installed by `npm ci --prefix tests/e2e/design`. The lockfile pins it;
+# the installed copy is reproducible from that and is never committed.
+node_modules/

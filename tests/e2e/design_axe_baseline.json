@@ -1,0 +1,3 @@
+{
+ "$comment": "Known axe-core 4.13.0 violations per capture, rule ids only, each value naming the web/DESIGN.md rule it breaks. Empty: generated at 0ec084f from the evidence run (design/axe_results/, evidence_screens.md 6.1) it held 24 captures and six rules; the adopting change fixed them all, and its own run of 2026-09-26 (60 captures, the seeded data with E2E_IDS pinned) found no violation. tests/e2e/design_axe.py fails on any rule not listed for a capture and names every listed rule that no longer fires, so this file only shrinks; an entry added later needs the rule it breaks, and a row in web/DESIGN.md section 12."
+}
