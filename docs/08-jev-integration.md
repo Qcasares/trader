@@ -3,7 +3,7 @@
 Specification and record of wiring TypeSafe AI's Jev into the AI programme.
 Owner: Quentin Casares. Phase A of eight is built; phases B to H are not. No
 Jev code exists in this repository, nothing here imports TypeSafe's SDK, and no
-request has ever been sent to TypeSafe from it. Last revised 25 September 2026.
+request has ever been sent to TypeSafe from it. Last revised 26 September 2026.
 
 ## What this is
 
@@ -110,9 +110,12 @@ three failed on details, and the corrections are applied throughout this
 document:
 
 - **Errors.** Not every SDK error carries a request id. Connection and
-  timeout errors carry none, because there was no HTTP response.
-- **Gateways.** The gateways do not cap context below the direct API, and
-  OpenRouter's "floating" snapshot is an inference, not an observation.
+  timeout errors carry none, because there was no HTTP response, and an HTTP
+  error's is None when the response lacks the request-id header.
+- **Gateways.** Vercel does not cap context below the direct API: it and
+  DigitalOcean state the same two limits. OpenRouter and Cloudflare list
+  32,000 tokens without saying which limit that is. OpenRouter's "floating"
+  snapshot is an inference, not an observation.
 - **Calibration.** The independent figures quoted were selective and partly
   overstated. The ranges below are the corrected ones.
 
@@ -228,10 +231,13 @@ stored with its reason and consumed as not measured, never as 0.**
 | Malformed 200 | | `TypeSafeAPIResponseValidationError` | Invalid |
 | A 403 whose body is not JSON | 403 | `TypeSafePermissionDeniedError` | The document is quarantined as a possible content block. A precaution: it rests on one unverified third-party report, and the verification found no primary evidence for it |
 
-The request id comes from the `x-typesafe-request-id` response header. Only
-`TypeSafeAPIError` and its subclasses carry `.request_id`, so the stored
-`vendor_request_id` is NULL whenever there was no HTTP response, and NULL means
-exactly that.
+The request id comes from the `x-typesafe-request-id` response header. Among
+the SDK's errors only `TypeSafeAPIError` and its subclasses carry
+`.request_id`, and theirs is None when the header is absent. So a NULL
+`vendor_request_id` means only that no request id came back: either there was
+no HTTP response, or there was one without the header, which the non-JSON 403
+in the table above plausibly would be. The HTTP status is stored beside it,
+NULL only when there was no response, and that is what tells the two apart.
 
 Rate limits are 250,000 tokens a second and 1,200 requests a minute, which the
 docs say "can change without notice". A client-side token bucket keeps under
@@ -358,10 +364,13 @@ Cloudflare, LiteLLM and DigitalOcean document Jev on their own pages.
 | Cloudflare Workers AI, `typesafe/jev` | No. Its input schema has no model field |
 
 Three routes can pin, and two of them put someone else between this system and
-TypeSafe: another contracting party, another data path, another hop. The
-gateways state the same 32k state-plus-longest-question limit as the direct
-API, and none is shown enforcing a lower total, so they buy nothing here. The
-design uses the direct API alone.
+TypeSafe: another contracting party, another data path, another hop. On
+context, Vercel and DigitalOcean state the direct API's two limits, 64k in
+total and 32k for state plus the longest question. OpenRouter and Cloudflare
+list 32,000 tokens without saying whether that is a total or the same
+sub-limit, though OpenRouter's "the state you send plus the questions" reads
+like a total. None is shown offering more than the direct API, so they buy
+nothing here. The design uses the direct API alone.
 
 ### 9. Lookalike domains and packages
 
@@ -373,8 +382,9 @@ domains below were registered one to five days after it:
 - **Resellers with their own endpoints and billing**, which put a third party
   in the data path and the payment path: `jevtypesafeai.com`, `jev-api.com`
   (which tells coding agents to install its own SKILL.md and set
-  `JEV_API_KEY`), `thejevai.com` (selling a "Jev-Omni" model that does not
-  exist), `jevmodel.org` and `jev-ai.pro`.
+  `JEV_API_KEY`), `thejevai.com` (selling "Jev-Omni" under the Jev name,
+  which its own page discloses is a third party's model built on Gemma 4 12B,
+  not TypeSafe's), `jevmodel.org` and `jev-ai.pro`.
 - **Sites inviting a user to paste a real TypeSafe key:** `jev.works` and
   `jev.guru`, tied to a GitHub organisation called `TypeSafeAI`. A second
   lookalike organisation is `jev-ai`.
@@ -390,9 +400,13 @@ domains below were registered one to five days after it:
 
 TypeSafe itself has published no warning. Phase A enforces the rest (see below):
 the only TypeSafe distribution permitted is `typesafe-sdk`, from PyPI; nothing
-points pip at another index; no npm package claims to be TypeSafe's; the
-lookalike hosts appear in nothing that ships; and `JEV_API_KEY` is named in no
-product file.
+points pip at another index; no npm package presenting itself as TypeSafe's is
+installed, the official `@typesafe-ai/sdk` included, because the frontend holds
+no model client; none of the eight lookalike hosts above is named, as a host or
+as a subdomain of one, in `src/`, `web/src/` or the files that install, build
+and deploy them; and `JEV_API_KEY` is named in no product file. A host added to
+this section is one the scan must read, or
+`test_every_host_the_doc_names_is_scanned` fails.
 
 ### 10. What this repository lacked
 
@@ -491,7 +505,7 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 
 | Table | Holds |
 |---|---|
-| `jev_requests` | Append-only. The request hash (sha256 of the canonical `{model, state, questions}`, option order preserved), the state hash, question set and version, lane, provenance, subject, `as_of`, the state and questions sent; the model requested and the model that answered; the vendor request id (NULL when there was no HTTP response), the HTTP status, `status` of `ok`, `invalid`, `error` or `refused_budget`, the error class, the raw body, tokens and latency; `requested_at`, and `available_at` set to `NOW()` by a trigger. A partial unique index on the request hash where the status is `ok` and the lane is not the probe lane |
+| `jev_requests` | Append-only. The request hash (sha256 of the canonical `{model, state, questions}`, option order preserved), the state hash, question set and version, lane, provenance, subject, `as_of`, the state and questions sent; the model requested and the model that answered; the vendor request id (NULL when none came back, whether there was no HTTP response or one without the header), the HTTP status (NULL only when there was no response, which is what tells those apart), `status` of `ok`, `invalid`, `error` or `refused_budget`, the error class, the raw body, tokens and latency; `requested_at`, and `available_at` set to `NOW()` by a trigger. A partial unique index on the request hash where the status is `ok` and the lane is not the probe lane |
 | `jev_answers` | One row per question: `noul`, `choice`, `score`, `probabilities`, `confidence` (NULL for a Noul), our own argmax and margin, `valid` and `invalid_reason` |
 | `web_documents` | Append-only snapshots with a content hash and a one-way `quarantined` flag |
 | `jev_signals` | Frozen by a trigger. Keyed `(signal, symbol, session)`, with status, the answer, lane, provenance, `available_at`, and a generated `backfilled` column: liveness is derived by the database, never written by the caller |
@@ -553,10 +567,11 @@ What must hold before it can land, and which of it exists:
 
 | Enforcement | Built, or the phase that brings it |
 |---|---|
-| The TypeSafe names (`typesafe_sdk`, `typesafe`, `typesafe_ai`, `httpx2`, `jev`, `cooksafe`) are forbidden imports for every protected package, matched on whole dotted segments | Built, Phase A |
-| `api.typesafe.ai` and `/v1/systemone` may be spelled only in `jev_catalogue.py` and `jev_client.py`, across `src/` and `web/src/` | Built, Phase A |
+| The TypeSafe names (`typesafe_sdk`, `typesafe`, `typesafe_ai`, `jev`, `cooksafe`) are forbidden imports for every protected package, matched on whole dotted segments. `httpx2`, the SDK's transport, is not: it is a general HTTP client like the `aiohttp` the worker already holds, and the host scan below is the control on HTTP | Built, Phase A |
+| `api.typesafe.ai` and `/v1/systemone` may be spelled only in `jev_catalogue.py` and `jev_client.py`, across `src/`, `web/src/`, `api/`, `scripts/` and every entry point | Built, Phase A |
+| No model vendor's API host is spelled in any module a protected process loads, nor in `web/src`; TypeSafe's is allowed only in the same two files | Built, Phase A |
 | `jev_client` and `jev_lane` are runner-only, and `from src.programme import x` is read as importing `x` | Built, Phase A |
-| The closure is walked from every protected package, resolving packages, relative imports and function-level imports | Built, Phase A |
+| The closure is walked from every protected package and every entry point, resolving packages, relative imports, function-level imports and star imports through `__all__` | Built, Phase A |
 | The decision path and `src/worker` may not load `src.programme` at all | Built, Phase A |
 | Outside the programme, only `signals.py` may name a Jev table | Phase B, extended in F |
 | `jev_lane` is the only writer of `jev_signals`; `client.py`, `author.py`, `panel.py` and `tick.py` never name it | Phase B |
@@ -677,18 +692,45 @@ leaves a stand-in `jev_pass` job queued with its attempts untouched.
 import graph of `src/`. The scanner reads `from a import b` as `a` and `a.b` —
 the old check compared the module alone, so `from src.programme import tick`
 went straight through it — reads `import a, b` as two imports, resolves relative
-imports, finds imports inside functions, and reads a literal
-`import_module("x")`; a computed name is refused outright. The graph follows
-package `__init__` files, and walks `api/index.py` and the two scripts that
-build the API in-process as part of `api`. Every closure check now walks from
-every protected package. The forbidden names are matched on whole dotted
-segments, and gain the TypeSafe names and the other model SDKs; `RUNNER_ONLY`
-gains `panel`, `jev_client` and `jev_lane`; the decision path and the worker may
-load nothing from `src/programme`; the endpoint may be spelled only in the two
-Jev modules; and the no-tools rule applies to every module that imports an SDK,
-so `jev_client.py` is covered the day it is written. Every scanner is tested
-against synthetic sources that must trip it before it is trusted with the real
-tree.
+imports, and finds imports inside functions. A loader called directly with
+literal arguments is read as the import it performs: `import_module("x")`,
+`__import__` with its fromlist, `pkgutil.resolve_name`, `pydoc.locate`, and
+uvicorn's `import_from_string` (uvicorn is installed in the API and the
+worker). A star import is read through the package's literal `__all__`. The
+loaders it knows are refused wherever they cannot be read: a computed name or
+fromlist, a loader aliased or stored rather than called, `getattr` on a loader
+module, `runpy` and the spec and path loaders, `exec`, `eval` and `compile`,
+and a star import through an `__all__` that is not a literal. That reads
+spellings; it is not a sandbox. A loader it does not know — a third-party
+helper, `mock.patch` with a dotted target, unpickling — still loads by a name
+it never sees, and a reviewer is the control for those.
+
+The graph follows package `__init__` files and walks the modules outside `src/`
+that run as a protected process: `api/index.py` and the two scripts that build
+the API in-process as part of `api`; `tests/e2e/broker_check.py`, which drives
+the Alpaca adapter with the broker keys, and `src/db/migrate_cli.py` as part of
+the worker. That list is read back off the workflows rather than trusted:
+`test_every_credentialed_workflow_command_is_walked` requires every `python`
+command in a workflow holding a venue key or the production database to be
+walked, the programme's own excepted because the reverse boundary binds it.
+`broker_check` was once missing, and an `import anthropic` in it passed every
+test. Every closure check now walks from every protected package. The
+forbidden names are matched on whole dotted segments, and gain the TypeSafe
+names and the other model SDKs; `RUNNER_ONLY` gains `panel`, `jev_client` and
+`jev_lane`; the decision path and the worker may load nothing from
+`src/programme`; and the no-tools rule applies to every module that imports an
+SDK, so `jev_client.py` is covered the day it is written.
+
+An import is not the only route to a model. `aiohttp` reaches any vendor given
+a URL, and the API holds `SECRETS_KEY`, which decrypts the stored model key.
+So the TypeSafe endpoint may be spelled only in the two Jev modules, across
+`src/`, `web/src/`, `api/`, `scripts/` and every entry point, and
+`test_nothing_that_can_move_money_names_a_model_vendor_host` refuses the API
+hosts of the model vendors and routers in any module a protected process
+loads, in any other file in a protected package, and anywhere in `web/src`.
+The hosts are a list, matched as substrings: the scan closes the likely
+spellings, not every one. Every scanner is tested against synthetic sources that
+must trip it before it is trusted with the real tree.
 
 **A model SDK is installed only where it may be imported.**
 `tests/unit/test_dependency_boundaries.py` is new. It reads requirements as pip
@@ -699,26 +741,65 @@ Vercel installs from it), installed only by `Dockerfile.programme`, built only
 by the `programme` compose service and installed only by `programme.yml`:
 `worker.yml` is not a test harness but the worker itself, holding the broker
 keys. The only TypeSafe distribution permitted is exactly `typesafe-sdk`, in
-the programme file, from PyPI. Nothing may change where pip or uv fetch from, in
-any spelling. No npm package, in a manifest or a lockfile, may claim to be
-TypeSafe's, and the lookalike hosts appear in nothing that ships.
+the programme file, from PyPI; `cooksafe`, TypeSafe's own cookbook helper, is
+refused with the rest, because the programme may hold the SDK and nothing
+beside it. `httpx2`, the SDK's transport, is not a model SDK: it is a general
+HTTP client, starlette's TestClient already asks for it, and
+`test_test_tooling_may_install_httpx2` keeps that migration open. Nothing may
+change where pip or uv fetch from, in any spelling. No npm package, in a
+manifest or a lockfile, may present itself as TypeSafe's, the official
+`@typesafe-ai/sdk` included, because the frontend holds no model client. None
+of the eight lookalike hosts in fact 9 is named, as a host or a subdomain of
+one, in `src/`, `web/src/` or the files that install, build and deploy them.
+The scan once read three of the eight while this document claimed all of them;
+`test_every_host_the_doc_names_is_scanned` now holds the list to fact 9.
 
-**No process holds both a venue key and a model key.** Every compose service is
-handed the whole `.env`, so which process holds which key is decided by
-blanking. The worker now also blanks `TYPESAFE_API_KEY`; the API blanks both
-model keys; and the programme blanks `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` and
-`BANKR_API_KEY`, because a venue key needs no import to use.
+**Neither the worker nor the programme holds both a venue key and a model
+key.** Compose hands `.env` to a service in one of two ways: `${NAME}`
+interpolation passes one value, and `env_file: .env` passes the whole file.
+Only the API, the worker and the programme load the whole file, so which of
+them holds which key is decided by blanking. The worker now also blanks
+`TYPESAFE_API_KEY`; the API blanks both model keys; and the programme blanks
+`ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` and `BANKR_API_KEY`, because a venue key
+needs no import to use. The database loaded the whole file as well, blanked
+nothing and was missing from the compose header's table, so the postgres server
+held both venue keys, both model keys and `SECRETS_KEY` at once. It is now
+passed `POSTGRES_USER`, `POSTGRES_DB` and `POSTGRES_PASSWORD` by name and
+nothing else, and `web` loads no key file.
 `tests/unit/test_secret_isolation.py` asserts both directions against compose
 and the workflows. It requires a blank to be `""` (a bare `NAME:` passes the
 shell's value through), derives the broker key names from `src/config.py` rather
 than trusting a list, refuses a model-key read from the environment outside
 `src/programme`, and refuses `JEV_API_KEY` in any product file.
+`TestEveryComposeServiceIsAccountedFor` reads the services from the file
+rather than naming three, allows the shared file to those three alone, refuses
+any key's name in another service, and renders the file through
+`docker compose config` with a sentinel for every key to check what each
+container actually receives; that last test is skipped where compose is not
+installed. The API is the exception the heading leaves out: it holds the broker
+keys beside `SECRETS_KEY` (open item 6).
 
 **A panel that did not finish holds the promotion.** Once the panel could
 sit, one role could still fail inside the per-role `except` and the pass promote
 as if it had been heard. `_convene` returns the roles that were due and did not
 report; `_advance` withholds the promotion, naming them, and only they are asked
-again next pass. A panel never convened holds nothing.
+again next pass. The hold outlasts the key: a panel that has heard some of its
+roles and then loses its key or its model settings keeps holding until both are
+back, or until an operator confirms the promotion, which re-evaluates the gate
+but does not ask whether the panel finished. Only a stage with no view on
+record reads as a panel never convened, and that holds nothing (open item 13).
+
+A role's view and its findings are one write. Written separately, a failure
+between them — a clash on `findings.ref` when two runners overlap, a dropped
+connection — left the role on record as heard and its objection nowhere, and
+the next pass promoted past a veto that had been raised and lost.
+`tick._record_view` writes both in one transaction, a savepoint inside a
+caller's. A write that fails is caught per role, noted as
+`assessment_unrecorded`, and holds the promotion like any other unheard role.
+`tests/unit/test_programme_convene.py::TestAViewAndItsFindingsAreOneWrite`
+drives the two passes, and
+`tests/integration/test_programme_panel_atomicity.py` forces the clash on real
+Postgres, on its own connection and inside a caller's transaction.
 
 **The worker trades only the operator's rows.** `_enabled_deployments` and the
 maintenance jobs' selection require `owner_id = 'default'` as well as
@@ -734,9 +815,10 @@ the rest are outside its scope.
 
 1. ~~**A panel that errors does not block a promotion.**~~ *Resolved in
    Phase A.* `_convene` now returns the roles that were due and did not report,
-   and `_advance` withholds the promotion until they have. A panel never
-   convened (no key, unusable settings) still holds nothing, as the module
-   intends. `test_programme_convene.py::TestAPanelThatDidNotFinishHoldsThePromotion`.
+   and `_advance` withholds the promotion until they have, with a key or
+   without one. A stage with no view on record and no key or usable settings
+   still holds nothing, as the module intends; item 13 is the one case that
+   rule misreads. `test_programme_convene.py::TestAPanelThatDidNotFinishHoldsThePromotion`.
 2. ~~**The worker trusts status alone.**~~ *Resolved in Phase A.*
    `live_job._enabled_deployments` and `maintenance_jobs._enabled_deployment_rows`
    also require `owner_id = 'default'`, so a programme row enabled by any path
@@ -754,9 +836,10 @@ the rest are outside its scope.
    evidence could change between the check and the switch. The window is small.
 6. **The API holds the broker keys beside `SECRETS_KEY`,** the venue-plus-vault
    combination the workflow rule forbids, because `/system/status` reports
-   `broker_configured` from them. Having the worker report it — on its
-   heartbeat, say — would let the API blank the pair and the no-both rule extend
-   to compose.
+   `broker_configured` from them. `SECRETS_KEY` decrypts the stored model key,
+   so the API is the one process that can hold a venue key and a model key
+   together. Having the worker report it — on its heartbeat, say — would let
+   the API blank the pair and the no-both rule extend to compose.
 7. **`live_job` calls `broker.submit(intent, client_order_id=coid)`,** which only
    `AlpacaBroker` accepts; the `BrokerAdapter` protocol and `SimulatedBroker` do
    not. It works in production, and a test that injected a `SimulatedBroker`
@@ -771,6 +854,26 @@ the rest are outside its scope.
     and `main` only.~~ *Resolved:* it now lists `panel`, `jev_client` and
     `jev_lane` as `RUNNER_ONLY` does. The rule's substance changes in phase F,
     with the amendment.
+12. **The compose stack connects to its database as a superuser.** The
+    API, the worker and the programme connect as `trader`, which the postgres
+    image creates as a superuser, and a superuser's `COPY ... FROM PROGRAM`
+    runs a shell command in the database container, under its environment.
+    While that container loaded the whole `.env`, a key the worker or the
+    programme blanks was one SQL statement away. It now holds only the
+    `POSTGRES_*` variables, whose password the caller already has, so the
+    route reaches no key; but the route is open, and anything later added to
+    that container's environment is on it. Connecting as a role without
+    superuser closes it, and touches the migrations and the deployment.
+    Production is not on this route: it connects through `DATABASE_URL` to
+    Neon, which grants no role superuser.
+13. **A panel in which every role failed reads as never convened once the key
+    is gone.** The hold rests on `role_assessments`, and a pass in which every
+    role's call or write failed leaves no row there, only `assessment_failed`
+    or `assessment_unrecorded` in the run's actions. If the key or the model
+    settings then go away, the stage reads as never convened, and the next pass
+    may promote. Holding on the run's actions would make the runner depend on
+    whether an earlier pass finished writing its report; a row recording that
+    the panel was summoned needs a migration.
 
 ## Inputs needed from the operator
 

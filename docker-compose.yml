@@ -31,35 +31,59 @@
 # Secrets
 # ~~~~~~~
 # No credential is written in this file — not even a placeholder or a default.
-# Every service reads them from `.env`, which is gitignored. That keeps
-# password-shaped literals out of version control entirely, and it removes the
-# weak-default failure where `docker compose up` without configuration would
-# quietly start a database with a guessable password.
+# They live in `.env`, which is gitignored. That keeps password-shaped literals
+# out of version control entirely, and it removes the weak-default failure where
+# `docker compose up` without configuration would quietly start a database with
+# a guessable password.
 #
 #   cp .env.example .env
 #   # fill in POSTGRES_PASSWORD, SESSION_SECRET, ADMIN_PASSWORD_HASH
 #   docker compose up --build
 #   docker compose run --rm api python -m src.db.migrate_cli
 #
-# One shared file means every service is handed every key, so which process
-# holds which is decided below, by blanking, and not by what `.env` contains:
+# `.env` reaches a service in one of two ways, and they are not alike. A
+# `${NAME}` below is interpolated by compose and passes that one value.
+# `env_file: .env` passes the whole file, so a service that loads it is handed
+# every key, and which of those processes holds which is decided below, by
+# blanking, and not by what `.env` contains:
 #
 #   worker     holds the broker keys    blanks SECRETS_KEY and the model keys
 #   programme  holds the model keys     blanks the broker keys
 #   api        holds SECRETS_KEY        blanks the model keys, and still holds
 #                                       the broker keys; its block says why
+#   db         holds POSTGRES_PASSWORD  loads no env_file at all, and is passed
+#                                       its three variables by name; its block
+#                                       says why
+#   web        holds no key             loads no env_file
 #
-# tests/unit/test_secret_isolation.py asserts each of those against this file.
+# tests/unit/test_secret_isolation.py asserts each of those against this file,
+# including that no service outside the first three loads the shared file.
 
 services:
   db:
     image: postgres:16-alpine
-    # POSTGRES_PASSWORD is supplied by .env, never written here.
-    env_file:
-      - .env
+    # No `env_file: .env` here, unlike the three services below, and on purpose.
+    #
+    # The image needs three variables, and they are passed by name. The shared
+    # file would have passed everything else in it too: both venue keys, both
+    # model keys and SECRETS_KEY, in one environment, in a process that uses
+    # none of them. It was loaded here until the header's table was checked
+    # against every service rather than the three it named.
+    #
+    # Nor is this container's environment private to it. Every service that
+    # connects does so as `trader`, which this image creates as a superuser,
+    # and a superuser's `COPY ... FROM PROGRAM` runs a shell command under the
+    # server's environment. With the whole file loaded here, a key the worker
+    # or the programme blanks was one SQL statement away from it. Now the only
+    # secret it can read here is the password it connected with. Connecting as
+    # a role without superuser would close the route itself; that touches the
+    # migrations and the deployment, and has not been done.
     environment:
       POSTGRES_USER: trader
       POSTGRES_DB: trader
+      # Interpolated from .env — this file holds no literal value. Left empty,
+      # the image refuses to initialise rather than start without a password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:

@@ -18,11 +18,19 @@ a GitHub runner with the broker credentials. Any of them could have installed
 
 The second concern is supply chain. TypeSafe AI's official Python SDK is
 ``typesafe-sdk`` on PyPI, and lookalikes exist under names a hurried reader
-would accept: ``typesafe-ai`` on PyPI, an npm package called ``typesafe-sdk``
-that TypeSafe did not publish, ``cooksafe``. The real SDK will be installed
-into the one process that holds a model credential, which makes it the most
-valuable name in this repository to typosquat. So the name is pinned exactly,
-the index is PyPI's, and the hosts a lookalike would serve from appear nowhere.
+would accept: ``typesafe-ai`` on PyPI, a third party's shim, and an npm
+package called ``typesafe-sdk`` that TypeSafe did not publish. The real SDK
+will be installed into the one process that holds a model credential, which
+makes it the most valuable name in this repository to typosquat. So the name
+is pinned exactly, the index is PyPI's, and the hosts a lookalike serves from
+appear nowhere.
+
+Not every refused name is a lookalike. ``cooksafe`` is TypeSafe's own cookbook
+helper, published from ``typesafe-ai/CookSafe``, and ``@typesafe-ai/sdk`` is
+TypeSafe's own npm SDK. Both are refused regardless: the deployable sets and
+the frontend must hold no TypeSafe client code at all, genuine or not, and the
+programme — the one process allowed a client — is allowed the SDK and nothing
+beside it. ``cooksafe`` names no licence on PyPI and its source is private.
 
 The files are parsed rather than grepped — requirement names to PEP 508 and
 PEP 503, ``-r`` includes followed, ``pip install`` lines read from Dockerfiles
@@ -67,8 +75,17 @@ SKIPPED_DIRECTORIES = frozenset(
 #:
 #: The distribution-name twin of ``FORBIDDEN_PREFIXES`` in the import test:
 #: what may not be imported by the API and the worker should not be installed
-#: in their images either. ``httpx2`` is here because it is ``typesafe-sdk``'s
-#: transport.
+#: in their images either.
+#:
+#: ``httpx2`` is deliberately absent, although it is ``typesafe-sdk``'s
+#: transport. It is a general-purpose HTTP client, like the ``aiohttp`` the
+#: worker already holds for the Alpaca adapter, and starlette's TestClient now
+#: warns, wherever it is imported without it, that ``httpx`` is deprecated and
+#: ``httpx2`` wanted instead. Listing it here would refuse that migration in
+#: requirements-dev.txt and ``ci.yml`` while refusing no model: an HTTP client
+#: is not a model client until it is pointed at a vendor, and pointing one is
+#: what ``test_nothing_that_can_move_money_names_a_model_vendor_host`` in the
+#: import test catches.
 MODEL_SDKS = frozenset(
     {
         "anthropic",
@@ -78,7 +95,6 @@ MODEL_SDKS = frozenset(
         "nltk",
         "typesafe-sdk",
         "typesafe-ai",
-        "httpx2",
         "cooksafe",
         "litellm",
         "langchain",
@@ -117,8 +133,28 @@ SOURCE_VARIABLES = (
 )
 SOURCE_CONFIG_FILES = frozenset({"pip.conf", "pip.ini", "uv.toml"})
 
-#: Hosts only a lookalike would serve from.
-LOOKALIKE_HOSTS = ("jevtypesafeai", "jev-api.com", "pypi.typesafe.ai")
+#: Every lookalike host docs/08-jev-integration.md names in fact 9: the
+#: resellers that put a third party in the data path and the payment path, the
+#: two sites that invite a user to paste a real TypeSafe key, and the index a
+#: third party claims once served the SDK. The doc says none of them appears in
+#: anything that ships, and ``test_every_host_the_doc_names_is_scanned`` holds
+#: this list to the doc, because the two drifted apart once already.
+LOOKALIKE_HOSTS = (
+    "jevtypesafeai.com",
+    "jev-api.com",
+    "thejevai.com",
+    "jevmodel.org",
+    "jev-ai.pro",
+    "jev.works",
+    "jev.guru",
+    "pypi.typesafe.ai",
+)
+
+#: Hostnames fact 9 names that are not lookalikes: TypeSafe's own domain, and
+#: the historic, unrelated Typesafe Inc.
+NOT_LOOKALIKES = frozenset({"typesafe.ai", "typesafe.com"})
+
+LOOKALIKE_DOC = ROOT / "docs" / "08-jev-integration.md"
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +448,11 @@ def _claims_to_be_typesafe(name: str) -> bool:
     """
     Whether a package name presents itself as TypeSafe AI's.
 
+    Genuine or not: ``cooksafe`` and ``@typesafe-ai/sdk`` are TypeSafe's own
+    and answer yes. The question is whether a name carries TypeSafe client
+    code, and the callers refuse every one but ``typesafe-sdk`` in the
+    programme's file.
+
     Deliberately not a substring test on ``typesafe``: ``typesafety`` on PyPI
     and ``typesafe-i18n`` on npm are real, unrelated libraries, and a rule that
     fires on them gets switched off.
@@ -437,9 +478,92 @@ def _claims_to_be_typesafe(name: str) -> bool:
     )
 
 
+def _installs_a_model_sdk(line: Line) -> bool:
+    """Whether a requirement names a model SDK or anything presenting as TypeSafe's.
+
+    The one predicate every "no model SDK here" rule below applies, so that the
+    synthetic test which proves test tooling may install ``httpx2`` exercises
+    the same judgement the rules over the real files make.
+    """
+    name = line.name
+    return name is not None and (name in MODEL_SDKS or _claims_to_be_typesafe(name))
+
+
+def _deployable_offenders(path: Path) -> list[str]:
+    """What a deployable requirements file, or one it includes, must not install."""
+    entries = _read(path)
+    offenders = [
+        f"{e.where}: {e.line.name}" for e in entries if _installs_a_model_sdk(e.line)
+    ]
+    offenders += [
+        f"{e.where}: includes {e.line.value}"
+        for e in entries
+        if e.line.option in _INCLUDES
+        and Path(e.line.value or "").name == PROGRAMME_REQUIREMENTS.name
+    ]
+    return offenders
+
+
+def _workflow_offenders(path: Path) -> list[str]:
+    """What a workflow other than programme.yml installs that it must not."""
+    offenders = [
+        f"{e.where}: {e.line.name}"
+        for e in _installed_by(path)
+        if _installs_a_model_sdk(e.line)
+    ]
+    if PROGRAMME_REQUIREMENTS.name in _uncommented(path.read_text(encoding="utf-8")):
+        offenders.append(f"{_label(path)} names {PROGRAMME_REQUIREMENTS.name}")
+    return offenders
+
+
+#: A character that continues a hostname label. Beside a match it means the
+#: text names some other host: ``notjev.works``, ``jev.worksheet``.
+_HOST_CHARACTER = "[a-z0-9_-]"
+
+
+def _host_pattern(host: str) -> re.Pattern[bytes]:
+    """``host`` or a subdomain of it, but not the middle of a longer name."""
+    c = _HOST_CHARACTER
+    return re.compile(rf"(?<!{c}){re.escape(host)}(?!{c}|\.{c})".encode())
+
+
+_LOOKALIKE_PATTERNS = {host: _host_pattern(host) for host in LOOKALIKE_HOSTS}
+
+#: Brand tokens distinctive enough to match as plain substrings, under any
+#: domain. ``jevtypesafeai`` names no word and no legitimate host, so matching
+#: it anywhere costs no false positives and catches the same operator's site
+#: moved to ``.net`` or ``.io`` — which the hostname list alone would not.
+LOOKALIKE_TOKENS = ("jevtypesafeai",)
+
+
 def _lookalike_hosts(data: bytes) -> list[str]:
+    """
+    Every lookalike host the bytes name, as itself or as any subdomain of it.
+
+    Matched as a hostname, not a substring. Several of these are short enough
+    to sit inside ordinary words — ``jev.works`` is the start of
+    ``jev.worksheet`` — and a scan that fires on those gets switched off. So
+    ``https://jev.works/key``, ``api.jev.works`` and ``key@jev.works`` name the
+    site; ``notjev.works`` and ``jev.works.example`` are other domains.
+    """
     lowered = data.lower()
-    return [host for host in LOOKALIKE_HOSTS if host.encode() in lowered]
+    hosts = [
+        host for host, pattern in _LOOKALIKE_PATTERNS.items() if pattern.search(lowered)
+    ]
+    tokens = [token for token in LOOKALIKE_TOKENS if token.encode() in lowered]
+    return hosts + tokens
+
+
+def _hosts_the_doc_names(path: Path) -> set[str]:
+    """Every hostname in fact 9 of docs/08, the section the scan answers to."""
+    text = path.read_text(encoding="utf-8")
+    section = re.search(r"^### 9\. Lookalike.*?(?=^#{1,3} |\Z)", text, re.S | re.M)
+    assert section, f"{_label(path)} has no '### 9. Lookalike' section"
+    return {
+        token.lower()
+        for token in re.findall(r"`([^`\s]+)`", section[0])
+        if re.fullmatch(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}", token)
+    }
 
 
 def _npm_names(path: Path) -> set[str]:
@@ -723,6 +847,9 @@ def test_the_compose_reader_separates_services() -> None:
         ("typesafe", True),
         ("@typesafe/sdk", True),
         ("@typesafe-ai/client", True),
+        # TypeSafe's own npm SDK and cookbook helper: genuine, and still
+        # TypeSafe client code.
+        ("@typesafe-ai/sdk", True),
         ("cooksafe", True),
         ("jev-sdk", True),
         ("systemone-client", True),
@@ -744,12 +871,56 @@ def test_the_typesafe_name_rule(name: str, claims: bool) -> None:
             ["pypi.typesafe.ai"],
         ),
         ("BASE = 'https://jev-api.com/v1'", ["jev-api.com"]),
+        (
+            "https://JevTypeSafeAI.com/api/v1/decide",
+            ["jevtypesafeai.com", "jevtypesafeai"],
+        ),
+        ("https://jevtypesafeai.net/api/v1/decide", ["jevtypesafeai"]),
+        ("https://api.JevTypeSafeAI.io", ["jevtypesafeai"]),
         ("https://JevTypeSafeAI.example", ["jevtypesafeai"]),
+        ("https://thejevai.com/v1", ["thejevai.com"]),
+        ("https://jevmodel.org", ["jevmodel.org"]),
+        ("https://jev-ai.pro/pricing", ["jev-ai.pro"]),
+        ('base_url="https://jev.guru"', ["jev.guru"]),
+        ("https://jev.works/key", ["jev.works"]),
+        ("https://JEV.WORKS:443/", ["jev.works"]),
+        ("api.jev.works", ["jev.works"]),
+        ("support@jev.guru", ["jev.guru"]),
+        ("Paste your key at jev.works.", ["jev.works"]),
+        ("jev.guru, then jev.works", ["jev.works", "jev.guru"]),
+        # TypeSafe's own API, and hosts that merely begin or end the same way.
         ("https://api.typesafe.ai", []),
+        ("see jev.worksheet", []),
+        ("https://notjev.works", []),
+        ("https://jev.works.example", []),
+        ("jev.gurus", []),
+        ("https://my-jev-api.com", []),
+        ("https://jev-api.community", []),
+        ("https://jev-ai.promo", []),
     ],
 )
 def test_the_lookalike_host_scan(text: str, expected: list[str]) -> None:
     assert _lookalike_hosts(text.encode()) == expected
+
+
+def test_the_doc_reader_finds_the_hosts_in_fact_9(tmp_path: Path) -> None:
+    """The reader behind the next test, on a section shaped like the real one."""
+    doc = tmp_path / "08.md"
+    doc.write_text(
+        "### 8. Before\n`before.example.com`\n"
+        "### 9. Lookalike domains and packages\n"
+        "Official: `typesafe.ai` and its `api.` subdomain; PyPI `typesafe-sdk`;\n"
+        "npm `@typesafe-ai/sdk`. Resellers: `Jev-API.com`, and `jev.works`.\n"
+        "Set `JEV_API_KEY`, never `pypi.typesafe.ai`.\n"
+        "### 10. After\n`after.example.com`\n",
+        encoding="utf-8",
+    )
+    assert _hosts_the_doc_names(doc) == {
+        "typesafe.ai",
+        "jev-api.com",
+        "jev.works",
+        "pypi.typesafe.ai",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +969,7 @@ def test_a_model_sdk_is_declared_only_by_the_programme_requirements() -> None:
         for entry in _read(path, follow=False)
     ] + _pyproject_entries()
     offenders = [
-        f"{e.where}: {e.line.name}" for e in entries if e.line.name in MODEL_SDKS
+        f"{e.where}: {e.line.name}" for e in entries if _installs_a_model_sdk(e.line)
     ]
     assert not offenders, (
         "a model SDK is declared outside requirements-programme.txt:\n"
@@ -814,20 +985,52 @@ def test_the_deployable_sets_install_no_model_sdk(filename: str) -> None:
     reached the programme's file, the SDK would be in every process on the
     machine without either file naming it.
     """
-    entries = _read(ROOT / filename)
-    offenders = [
-        f"{e.where}: {e.line.name}"
-        for e in entries
-        if e.line.name in MODEL_SDKS
-        or (e.line.name and _claims_to_be_typesafe(e.line.name))
-    ]
-    offenders += [
-        f"{e.where}: includes {e.line.value}"
-        for e in entries
-        if e.line.option in _INCLUDES
-        and Path(e.line.value or "").name == PROGRAMME_REQUIREMENTS.name
-    ]
+    offenders = _deployable_offenders(ROOT / filename)
     assert not offenders, f"{filename} installs a model SDK:\n" + "\n".join(offenders)
+
+
+def test_test_tooling_may_install_httpx2(tmp_path: Path) -> None:
+    """
+    starlette's TestClient warns, wherever it is imported without ``httpx2``,
+    that ``httpx`` is deprecated there and ``httpx2`` wanted instead. Following
+    that instruction — in requirements-dev.txt and in ``ci.yml``'s ``pip
+    install pytest pytest-asyncio httpx`` — once failed three of the rules in
+    this file, because ``httpx2`` was listed as a model SDK for being
+    ``typesafe-sdk``'s transport. It is a general HTTP client; when starlette
+    drops the fallback, that edit is the only fix, and the rules must take it.
+
+    So the migration is made to copies of the real files and put through the
+    same rules, beside a control that the SDK itself is still refused.
+    """
+    for source in ROOT.glob("requirements*.txt"):
+        (tmp_path / source.name).write_text(
+            source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    dev = tmp_path / "requirements-dev.txt"
+    text = dev.read_text(encoding="utf-8")
+    # Made to the copy while the real file still declares httpx; once the real
+    # file has migrated there is nothing to rewrite, and the same rules are put
+    # to it as it stands. Either way the file under test declares httpx2.
+    migrated = re.sub(r"(?m)^httpx\b(?!2)[^\n]*", "httpx2", text)
+    dev.write_text(migrated, encoding="utf-8")
+    assert "httpx2" in {e.line.name for e in _read(dev)}, "the reader missed it"
+    assert _deployable_offenders(dev) == []
+    assert not _installs_a_model_sdk(Line(name="httpx2"))
+
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "      - run: |\n"
+        "          pip install -r requirements.txt\n"
+        "          pip install pytest pytest-asyncio httpx2\n",
+        encoding="utf-8",
+    )
+    assert "httpx2" in {e.line.name for e in _installed_by(workflow)}
+    assert _workflow_offenders(workflow) == []
+
+    dev.write_text(migrated + "typesafe-sdk\n", encoding="utf-8")
+    assert [o.rpartition(": ")[2] for o in _deployable_offenders(dev)] == [
+        "typesafe-sdk"
+    ]
 
 
 def test_typesafe_is_only_ever_its_official_sdk() -> None:
@@ -920,7 +1123,7 @@ def test_only_the_programme_image_installs_the_programme_set() -> None:
         offenders += [
             f"{e.where}: {e.line.name}"
             for e in _installed_by(path)
-            if e.line.name in MODEL_SDKS
+            if _installs_a_model_sdk(e.line)
         ]
         text = _uncommented(path.read_text(encoding="utf-8"))
         if PROGRAMME_REQUIREMENTS.name in text:
@@ -961,19 +1164,12 @@ def test_only_the_programme_workflow_installs_a_model_sdk() -> None:
     true or not. Read off the directory rather than a list, as
     ``test_secret_isolation`` does, so a new workflow is covered on arrival.
     """
-    offenders: list[str] = []
-    for path in _workflows():
-        if path.resolve() == PROGRAMME_WORKFLOW.resolve():
-            continue
-        offenders += [
-            f"{e.where}: {e.line.name}"
-            for e in _installed_by(path)
-            if e.line.name in MODEL_SDKS
-            or (e.line.name and _claims_to_be_typesafe(e.line.name))
-        ]
-        text = _uncommented(path.read_text(encoding="utf-8"))
-        if PROGRAMME_REQUIREMENTS.name in text:
-            offenders.append(f"{_label(path)} names {PROGRAMME_REQUIREMENTS.name}")
+    offenders = [
+        offender
+        for path in _workflows()
+        if path.resolve() != PROGRAMME_WORKFLOW.resolve()
+        for offender in _workflow_offenders(path)
+    ]
     assert not offenders, (
         "a workflow other than programme.yml installs a model SDK:\n"
         + "\n".join(offenders)
@@ -982,11 +1178,13 @@ def test_only_the_programme_workflow_installs_a_model_sdk() -> None:
 
 def test_no_npm_package_claims_to_be_typesafe() -> None:
     """
-    TypeSafe publishes no npm package; the ``typesafe-sdk`` on npm is not
-    theirs. The frontend has no business holding a model client in any case —
-    a call from the browser needs the key in the browser — so any package
-    presenting itself as TypeSafe's, in a manifest or anywhere in a lockfile,
-    is refused.
+    TypeSafe does publish an npm package, ``@typesafe-ai/sdk``, and it is
+    refused with the rest. The frontend must hold no model client — a call
+    from the browser needs the key in the browser — so every name presenting
+    itself as TypeSafe's is refused, the official one included, in a manifest
+    or anywhere in a lockfile. The one a hurried ``npm i`` reaches for is
+    worse: the unscoped ``typesafe-sdk`` on npm borrows the official *PyPI*
+    name and is a third party's empty placeholder.
     """
     manifests = _repository_files(
         lambda p: p.name in {"package.json", "package-lock.json"}, tests=True
@@ -999,6 +1197,23 @@ def test_no_npm_package_claims_to_be_typesafe() -> None:
         if _claims_to_be_typesafe(name)
     ]
     assert not offenders, "\n".join(offenders)
+
+
+def test_every_host_the_doc_names_is_scanned() -> None:
+    """
+    docs/08 fact 9 lists the lookalike hosts and says Phase A keeps every one
+    of them out of anything that ships. The scan once read three of the eight,
+    so ``base_url="https://jev.guru"`` — one of the two sites that ask for a
+    real key — passed it while the doc said otherwise. A host added to the doc
+    is now a host this file must scan, or this test names it.
+    """
+    named = _hosts_the_doc_names(LOOKALIKE_DOC)
+    assert {"jev.works", "pypi.typesafe.ai"} <= named, named
+    unscanned = sorted(named - NOT_LOOKALIKES - set(LOOKALIKE_HOSTS))
+    assert not unscanned, (
+        f"{_label(LOOKALIKE_DOC)} fact 9 names hosts LOOKALIKE_HOSTS does not "
+        f"scan for: {unscanned}"
+    )
 
 
 def test_no_lookalike_host_appears_in_anything_that_ships() -> None:

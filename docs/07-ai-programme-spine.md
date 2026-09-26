@@ -255,8 +255,10 @@ of `open`, and the API endpoint that stamps that prefix is the only code that
 produces one. Without this the arrangement is theatre: a role free to retract
 its own blocking finding has not vetoed anything.
 
-**Three things must agree before the runner promotes.** The gate passes,
-`requires_human` is false, and the stage is within `programme_max_auto_stage`.
+**Four things must agree before the runner promotes.** The gate passes,
+`requires_human` is false, the stage is within `programme_max_auto_stage`, and
+every role the convened panel was due to hear has reported (added in phase A of
+the Jev integration; see `docs/08-jev-integration.md`).
 That ceiling is a database row read fail-closed to zero, clamped in code below
 `FIRST_HUMAN_GATED_STAGE` on the way out rather than on the way in — so the
 stored value never masquerades as the effective one, and setting it to 8 cannot

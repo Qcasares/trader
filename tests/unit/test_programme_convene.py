@@ -21,17 +21,34 @@ The database is faked at the reads ``_convene`` makes before asking anyone, and
 its two writes are captured. The real-Postgres version, which also proves the
 finding blocks the promotion in the same pass, is
 ``tests/integration/test_programme.py::TestThePanelSitsBeforeThePromotion``.
+
+Where a test needs the panel to *remember* — a second pass, a role heard on an
+earlier one, a write that must roll back — the fake is ``_LedgerConn``, which
+keeps the rows across passes and undoes a transaction that raised. The rollback
+itself, which only Postgres can prove, is
+``tests/integration/test_programme_panel_atomicity.py``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from datetime import date
 from typing import Any
 
+import asyncpg
 import pytest
 
 from src.programme import models, panel, repo, tick
-from src.programme.gates import Criterion, GateResult
+from src.programme.gates import (
+    MIN_BARS_PER_SYMBOL,
+    REQUIRED_CARD_FIELDS,
+    CandidateFacts,
+    Criterion,
+    FindingFact,
+    GateResult,
+    evaluate,
+)
 from src.programme.roles import (
     Assessment,
     ProposedFinding,
@@ -73,13 +90,99 @@ class _FreshCandidateConn:
     change this fake should be told about, so it is not silently absorbed.
     """
 
-    async def fetchval(self, query: str, *args: Any) -> int:
-        assert "role_assessments" in query, query
-        return 0
-
     async def fetch(self, query: str, *args: Any) -> list[Any]:
         assert "role_assessments" in query or "experiments" in query, query
         return []
+
+    def transaction(self) -> contextlib.AbstractAsyncContextManager[None]:
+        """
+        Nothing is written through this fake — the ``written`` fixture
+        captures the writes — so there is nothing here for a rollback to undo.
+        """
+        return contextlib.nullcontext()
+
+
+class _Transaction:
+    """
+    ``conn.transaction()`` as Postgres keeps it: what the block wrote stays if
+    the block exits cleanly and is gone if it raised.
+    """
+
+    def __init__(self, conn: _LedgerConn) -> None:
+        self._conn = conn
+        self._marks = (0, 0)
+
+    async def __aenter__(self) -> None:
+        self._marks = (len(self._conn.assessments), len(self._conn.findings))
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None:
+            del self._conn.assessments[self._marks[0] :]
+            del self._conn.findings[self._marks[1] :]
+        return False
+
+
+class _LedgerConn:
+    """
+    One stage-0 candidate's panel rows, kept across passes as the database
+    keeps them.
+
+    The two repo writes land here (see the ``ledger`` fixture), ``fetch``
+    answers from what has been kept, and ``transaction()`` rolls a block back
+    when it raises. The last part is the point. The defect these tests pin was
+    a view committed without its findings, and a fake that could not roll back
+    could not tell the fix from the bug.
+
+    ``facts`` is what ``repo.load_facts`` would assemble: a candidate whose
+    gate passes on everything but the findings, so the real ``evaluate`` —
+    veto included — decides, rather than a stub that would pass regardless.
+    """
+
+    def __init__(self, heard: tuple[str, ...] = ()) -> None:
+        self.assessments: list[dict[str, Any]] = [
+            {"role": key, "stage": STAGE, "verdict": "support"} for key in heard
+        ]
+        self.findings: list[dict[str, Any]] = []
+        #: Makes the next finding write fail as a clash on ``findings.ref``
+        #: does when two runners overlap.
+        self.refuse_findings = False
+
+    async def fetch(self, query: str, *args: Any) -> list[Any]:
+        if "role_assessments" in query:
+            return [{"role": key} for key in self.heard()]
+        assert "experiments" in query, query
+        return []
+
+    def transaction(self) -> _Transaction:
+        return _Transaction(self)
+
+    def heard(self) -> set[str]:
+        return {row["role"] for row in self.assessments}
+
+    def facts(self) -> CandidateFacts:
+        return CandidateFacts(
+            stage=STAGE,
+            status="active",
+            params={"symbols": ["SPY"]},
+            universe=("SPY",),
+            start_session=date(2010, 1, 4),
+            end_session=date(2020, 12, 31),
+            data_source="yfinance",
+            evidence_is_synthetic=False,
+            hypothesis_ref="H-0001",
+            hypothesis_owner="programme",
+            hypothesis_card={name: "stated" for name in REQUIRED_CARD_FIELDS},
+            universe_coverage={"SPY": MIN_BARS_PER_SYMBOL},
+            findings=tuple(
+                FindingFact(
+                    ref=row["ref"],
+                    raised_by=row["raised_by"],
+                    severity=row["severity"],
+                    title=row["title"],
+                )
+                for row in self.findings
+            ),
+        )
 
 
 def _candidate() -> dict[str, Any]:
@@ -136,6 +239,26 @@ def written(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[dict[str, Any]]]:
     monkeypatch.setattr(repo, "record_assessment", record_assessment)
     monkeypatch.setattr(repo, "raise_finding", raise_finding)
     return rows
+
+
+@pytest.fixture
+def ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route the two writes into the ``_LedgerConn`` they are made on."""
+
+    async def record_assessment(conn: _LedgerConn, **kwargs: Any) -> None:
+        conn.assessments.append(kwargs)
+
+    async def raise_finding(conn: _LedgerConn, **kwargs: Any) -> dict[str, Any]:
+        if conn.refuse_findings:
+            raise asyncpg.exceptions.UniqueViolationError(
+                'duplicate key value violates unique constraint "findings_ref_key"'
+            )
+        ref = f"F-{len(conn.findings) + 1:04d}"
+        conn.findings.append({"ref": ref, **kwargs})
+        return {"id": str(uuid.uuid4()), "ref": ref}
+
+    monkeypatch.setattr(repo, "record_assessment", record_assessment)
+    monkeypatch.setattr(repo, "raise_finding", raise_finding)
 
 
 def _asked(
@@ -262,14 +385,22 @@ class TestThePanelSits:
 
 
 class _Advanced:
-    """What ``_advance`` wrote, with the database faked at its repo calls."""
+    """
+    What ``_advance`` wrote, with the database faked at its repo calls.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    The gate is a stub that always passes unless ``real_gate`` is set, in which
+    case the real ``evaluate`` judges ``_LedgerConn.facts()`` — so a finding
+    the panel opened blocks exactly as it would in production.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, *, real_gate: bool = False
+    ) -> None:
         self.gates: list[bool] = []
         self.promoted_to: list[int] = []
 
         async def load_facts(conn: Any, candidate_id: str) -> object:
-            return object()
+            return conn.facts() if real_gate else object()
 
         async def record_gate(
             conn: Any, candidate_id: str, result: GateResult, promoted: bool = False
@@ -287,7 +418,8 @@ class _Advanced:
         monkeypatch.setattr(repo, "record_gate", record_gate)
         monkeypatch.setattr(repo, "promote", promote)
         monkeypatch.setattr(repo, "record_decision", record_decision)
-        monkeypatch.setattr(tick, "evaluate", lambda facts: GATE)
+        if not real_gate:
+            monkeypatch.setattr(tick, "evaluate", lambda facts: GATE)
 
 
 class TestAPanelThatDidNotFinishHoldsThePromotion:
@@ -325,6 +457,7 @@ class TestAPanelThatDidNotFinishHoldsThePromotion:
         assert advanced.gates == [False]
         (held,) = _actions(report, "promotion_withheld")
         assert "data_engineering" in held["reason"]
+        assert "asked again next pass" in held["reason"]
 
     async def test_a_full_panel_lets_the_gate_decide(
         self, monkeypatch: pytest.MonkeyPatch, written: dict[str, list]
@@ -362,3 +495,142 @@ class TestAPanelThatDidNotFinishHoldsThePromotion:
 
         assert advanced.promoted_to == [STAGE + 1]
         assert _actions(report, "promotion_withheld") == []
+
+    @pytest.mark.parametrize(
+        ("api_key", "settings"),
+        [(None, SETTINGS), (API_KEY, None), (None, None)],
+        ids=["no_key", "no_settings", "neither"],
+    )
+    async def test_a_panel_that_sat_in_part_holds_after_the_key_is_gone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ledger: None,
+        api_key: str | None,
+        settings: models.ModelSettings | None,
+    ) -> None:
+        """
+        Convened, unfinished, and now unable to finish is still unfinished.
+
+        The data engineer fails on a pass that had a key, and the next pass
+        has none. ``_convene`` used to return before reading a row whenever the
+        key or the settings were missing, so that second pass looked exactly
+        like a panel never convened and promoted past the one veto role at
+        this stage that had not reported: withheld on one pass and released on
+        the next by nothing more than the key going away.
+        """
+        conn = _LedgerConn()
+        candidate = _candidate()
+
+        async def assess(role: Role, *args: Any) -> Assessment:
+            if role.key == "data_engineering":
+                raise TimeoutError("the model did not answer")
+            return _support()
+
+        monkeypatch.setattr(panel, "assess", assess)
+        advanced = _Advanced(monkeypatch)
+
+        await tick._advance(conn, candidate, tick.TickReport(), 1, API_KEY, SETTINGS)
+        assert advanced.promoted_to == []
+        assert conn.heard() == {role.key for role in roles_for_stage(STAGE)} - {
+            "data_engineering"
+        }
+
+        async def unreachable(role: Role, *args: Any) -> Assessment:
+            raise AssertionError("without a key and settings no role may be asked")
+
+        monkeypatch.setattr(panel, "assess", unreachable)
+        report = tick.TickReport()
+
+        await tick._advance(conn, candidate, report, 1, api_key, settings)
+
+        assert advanced.promoted_to == []
+        assert advanced.gates == [False, False]
+        (held,) = _actions(report, "promotion_withheld")
+        assert "data_engineering" in held["reason"]
+        # The retry the key case promises cannot happen here, and the note
+        # says so rather than repeating a promise on every pass.
+        assert "cannot be asked" in held["reason"]
+        assert "asked again next pass" not in held["reason"]
+
+    async def test_a_panel_that_sat_in_full_holds_nothing_without_a_key(
+        self, monkeypatch: pytest.MonkeyPatch, ledger: None
+    ) -> None:
+        """
+        The other direction for the case above: views on record are not
+        themselves a hold. A hold that fired whenever there was no key and any
+        row existed would also have passed it.
+        """
+        conn = _LedgerConn(heard=tuple(role.key for role in roles_for_stage(STAGE)))
+
+        async def assess(role: Role, *args: Any) -> Assessment:
+            raise AssertionError("no key, so no role may be asked")
+
+        monkeypatch.setattr(panel, "assess", assess)
+        advanced = _Advanced(monkeypatch)
+        report = tick.TickReport()
+
+        await tick._advance(conn, _candidate(), report, 1, None, None)
+
+        assert advanced.promoted_to == [STAGE + 1]
+        assert _actions(report, "promotion_withheld") == []
+
+
+class TestAViewAndItsFindingsAreOneWrite:
+    """
+    A role counts as heard once its view is on record, and a heard role is
+    never asked again — so its view must never be on record without its
+    findings.
+
+    They were separate statements. A failure between them — a clash on
+    ``findings.ref``, whose next value is ``COUNT(*) + 1`` and collides when
+    two runners overlap — left the data engineer heard and its critical finding
+    nowhere. The next pass did not ask it, the gate found nothing blocking, and
+    the candidate was promoted past a veto that had been raised and lost.
+    """
+
+    async def test_a_finding_that_fails_to_write_takes_its_view_with_it(
+        self, monkeypatch: pytest.MonkeyPatch, ledger: None
+    ) -> None:
+        conn = _LedgerConn()
+        candidate = _candidate()
+        assert evaluate(conn.facts()).passed, "the control: no finding, a pass"
+
+        asked = _asked(monkeypatch, {"data_engineering": _veto()})
+        advanced = _Advanced(monkeypatch, real_gate=True)
+
+        # Pass one: the veto role objects, and its finding cannot be written.
+        conn.refuse_findings = True
+        first = tick.TickReport()
+        await tick._advance(conn, candidate, first, 1, API_KEY, SETTINGS)
+
+        assert conn.findings == []
+        assert "data_engineering" not in conn.heard(), "rolled back with it"
+        assert conn.heard() == {role.key for role in roles_for_stage(STAGE)} - {
+            "data_engineering"
+        }, "and the roles after it are still heard"
+        assert advanced.promoted_to == []
+        (held,) = _actions(first, "promotion_withheld")
+        assert "data_engineering" in held["reason"]
+        (unrecorded,) = _actions(first, "assessment_unrecorded")
+        assert unrecorded["role"] == "data_engineering"
+        assert "findings_ref_key" in unrecorded["error"]
+        # The action list reports only what the ledger kept.
+        recorded = [a["role"] for a in _actions(first, "assessment_recorded")]
+        assert "data_engineering" not in recorded
+        assert _actions(first, "finding_raised") == []
+
+        # Pass two: the write goes through. Only the role that was lost is
+        # asked, and its finding blocks the promotion the gate would have made.
+        conn.refuse_findings = False
+        asked.clear()
+        second = tick.TickReport()
+        await tick._advance(conn, candidate, second, 1, API_KEY, SETTINGS)
+
+        assert asked == ["data_engineering"]
+        assert [(f["raised_by"], f["severity"]) for f in conn.findings] == [
+            ("data_engineering", "critical")
+        ]
+        (raised,) = _actions(second, "finding_raised")
+        assert raised["blocks"] is True
+        assert advanced.promoted_to == []
+        assert advanced.gates == [False, False]

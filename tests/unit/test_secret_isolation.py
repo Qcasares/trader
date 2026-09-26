@@ -1,7 +1,10 @@
 """
 test_secret_isolation.py
 ------------------------
-That no process holds both the keys to a venue and the keys to a model.
+That neither the worker nor the programme holds both the keys to a venue and
+the keys to a model. (The API is the exception today: it holds the broker keys
+beside SECRETS_KEY for ``broker_configured`` — docs/08-jev-integration.md, open
+item 6.)
 
 The vault moves the model API key out of one process's environment and into a
 table every process can read. Encryption is what makes that acceptable, and the
@@ -29,8 +32,12 @@ not the same thing as the worker not getting the key.
 from __future__ import annotations
 
 import ast
+import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -43,7 +50,8 @@ SECRETS_KEY = "SECRETS_KEY"
 
 #: Model credentials. Each can legitimately sit in `.env`, because the programme
 #: reads the vault first and its environment second, so each is a variable the
-#: shared env_file hands to every compose service unless that service blanks it.
+#: shared env_file hands to every service that loads it (api, worker, programme)
+#: unless that service blanks it.
 #:
 #: TYPESAFE_API_KEY is the Jev credential. It is listed before the integration
 #: that reads it lands, so the process boundary exists before the key does
@@ -211,9 +219,10 @@ class TestTheWorkerCannotDecryptASecret:
         """
         Explicitly emptied, not merely absent.
 
-        Every service shares `env_file: .env`, so leaving a key unstated in the
-        worker's own `environment:` inherits whatever the operator put in the
-        shared file. Absence is not isolation here; only the override is.
+        The worker loads `env_file: .env`, as the api and the programme do, so
+        leaving a key unstated in its own `environment:` inherits whatever the
+        operator put in the shared file. Absence is not isolation here; only the
+        override is.
 
         SECRETS_KEY is what decrypts the vault. The model keys are belt and
         braces, and cheap: even with the vault in place a deployment may set
@@ -222,9 +231,9 @@ class TestTheWorkerCannotDecryptASecret:
         """
         assert _blanks("worker", name), (
             f"the worker must blank {name} in its own environment block. It "
-            "shares env_file: .env with every other service, so without the "
-            "override it inherits a way to a model credential — and it is the "
-            "one process that submits orders."
+            "loads the shared env_file: .env, so without the override it "
+            "inherits a way to a model credential — and it is the one process "
+            "that submits orders."
         )
 
     @pytest.mark.parametrize("service", ["api", "programme"])
@@ -374,6 +383,284 @@ class TestTheProgrammeCannotReachAVenue:
         assert set(REFERENCE_VENUE_KEYS) <= _env_reads(SRC / "bankr_client.py"), (
             "src/bankr_client.py no longer reads BANKR_API_KEY; update "
             "REFERENCE_VENUE_KEYS and the blank in docker-compose.yml together"
+        )
+
+
+#: Every key the classes above are about.
+_ALL_KEYS = (*VENUE_KEYS, SECRETS_KEY, *MODEL_KEYS)
+
+#: The services that load the shared `.env` whole, and what each must blank out
+#: of it: the table in docker-compose.yml's header, inverted. A service not
+#: named here loads no env_file, and may hold none of ``_ALL_KEYS``.
+_SHARED_FILE_SERVICES = {
+    "worker": frozenset({SECRETS_KEY, *MODEL_KEYS}),
+    "programme": frozenset(VENUE_KEYS),
+    "api": frozenset(MODEL_KEYS),
+}
+
+#: What compose would load instead of docker-compose.yml, or merge over it,
+#: were any of them present beside it.
+_OTHER_COMPOSE_FILES = (
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "compose.override.yaml",
+    "compose.override.yml",
+    "docker-compose.override.yaml",
+    "docker-compose.override.yml",
+)
+
+
+def _uncommented(text: str) -> str:
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _compose_services() -> dict[str, str]:
+    """
+    Every service docker-compose.yml defines, by name, read off the file.
+
+    The classes above name the services they are about, which is right for a
+    rule about the worker and wrong for a rule about every service. Named
+    lists are how the database came to hold the whole shared file — both venue
+    keys, both model keys and SECRETS_KEY in one environment — while every test
+    here passed: nothing had been told it existed.
+    """
+    text = COMPOSE.read_text(encoding="utf-8")
+    # The section ends at the next top-level key, not at the next column-0
+    # line, so a comment written flush left does not cut the scan short.
+    section = re.search(r"^services:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", text, re.S | re.M)
+    assert section, "docker-compose.yml has no top-level services: key"
+    names = re.findall(r"^  ([A-Za-z0-9][\w.-]*):$", section.group(1), re.M)
+    return {name: _service_block(name) for name in names}
+
+
+def _loads_env_file(block: str) -> bool:
+    return bool(re.search(r"^[ \t]+env_file[ \t]*:", _uncommented(block), re.M))
+
+
+def _docker_compose() -> list[str] | None:
+    """The `docker compose` command, if this machine has one that answers."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return None
+    try:
+        probe = subprocess.run(
+            [docker, "compose", "version"],
+            capture_output=True,
+            env=_compose_env(),
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return [docker, "compose"] if probe.returncode == 0 else None
+
+
+def _compose_env() -> dict[str, str]:
+    """
+    Just enough environment for docker to find itself, and nothing else.
+
+    Compose lets the calling shell override `.env` during interpolation and
+    fills an `environment:` entry written without a value straight from it, so
+    a key exported in the shell that runs this test would otherwise render into
+    a service and be blamed on the file. So would a stray COMPOSE_FILE or
+    COMPOSE_PROFILES.
+    """
+    keep = ("PATH", "HOME", "DOCKER_CONFIG")
+    return {name: os.environ[name] for name in keep if name in os.environ}
+
+
+class TestEveryComposeServiceIsAccountedFor:
+    """
+    The header's table, checked against every service rather than three.
+
+    The blanks above are checked on the three services the table named. The
+    database loaded the shared `.env` as well, blanked nothing, and was not in
+    the table — so the postgres server held both venue keys, both model keys
+    and SECRETS_KEY at once. Nor did that stay inside its container: every
+    service connects as `trader`, which the postgres image makes a superuser,
+    and a superuser's `COPY ... FROM PROGRAM 'printenv ALPACA_SECRET_KEY'` reads
+    the server's environment. Each blank the worker and the programme make was
+    one SQL statement from undone.
+
+    So the rule here is about the shared file, not about a list of names: only
+    the services that blank what they must not hold may load it, and every other
+    service is passed what it needs by name.
+    """
+
+    def test_the_enumeration_finds_every_service(self) -> None:
+        """
+        Guards the guard. A scan that stopped short of a service would find no
+        env_file in it, and pass it.
+        """
+        services = _compose_services()
+        # A floor, not the scope. The scope is whatever the file defines.
+        floor = {"db", "api", "worker", "programme", "web"}
+        assert floor <= set(services), sorted(services)
+        whole = _uncommented(COMPOSE.read_text(encoding="utf-8"))
+        # A service needs an image or a build, and nothing else in this file
+        # has either. One the blocks do not account for is a service the scan
+        # missed; an env_file they do not account for is worse.
+        for key in ("image", "build", "env_file"):
+            pattern = rf"^[ \t]+{key}[ \t]*:"
+            in_file = len(re.findall(pattern, whole, re.M))
+            in_blocks = sum(
+                len(re.findall(pattern, _uncommented(block), re.M))
+                for block in services.values()
+            )
+            assert in_file == in_blocks, (
+                f"docker-compose.yml has {in_file} `{key}:` lines and the "
+                f"services found, {sorted(services)}, hold {in_blocks}. A "
+                "service is defined in a shape this scan cannot parse; teach it "
+                "the shape rather than loosening the count."
+            )
+        runs_something = re.compile(r"^[ \t]+(?:image|build)[ \t]*:", re.M)
+        for name, block in services.items():
+            assert runs_something.search(_uncommented(block)), (
+                f"{name!r} has neither image nor build, so it is not a service "
+                "and the scan has misread the file"
+            )
+        # What a text scan cannot follow is refused rather than half-read: a
+        # service that extends another, merges an anchor or is included from
+        # another file acquires keys from text that is not under its own name.
+        assert not re.search(r"^\s*extends\s*:|<<\s*:|^include\s*:", whole, re.M), (
+            "docker-compose.yml uses extends, a merge key or include; the "
+            "services' environments are no longer all written in their own blocks"
+        )
+        # Compose prefers compose.yaml to this file and merges an override
+        # onto it, so either would make everything here a check on a file that
+        # is not the one that runs.
+        present = [name for name in _OTHER_COMPOSE_FILES if (ROOT / name).exists()]
+        assert not present, (
+            f"{present} beside docker-compose.yml. Compose loads it instead of, "
+            "or on top of, the file these tests read."
+        )
+
+    def test_only_the_services_that_blank_load_the_shared_file(self) -> None:
+        loaders = {
+            name
+            for name, block in _compose_services().items()
+            if _loads_env_file(block)
+        }
+        assert loaders <= set(_SHARED_FILE_SERVICES), (
+            f"{sorted(loaders - set(_SHARED_FILE_SERVICES))} load env_file: .env. "
+            "That hands the service every key in the file: both venue keys, "
+            "both model keys and SECRETS_KEY. Pass what it needs by name with "
+            "${NAME} interpolation instead, or, if it genuinely needs the "
+            "whole file, add it to the table in the compose header and decide "
+            "there what it must blank."
+        )
+
+    def test_no_other_service_names_a_key(self) -> None:
+        """
+        Without env_file, the only way a key reaches a service is by name in
+        its own block — `NAME: ${NAME}`, or `- NAME` passed through from the
+        shell. A service outside the three has no use for one, so any mention
+        is refused, a blank included: it would be noise at best.
+        """
+        others = {
+            name: _uncommented(block)
+            for name, block in _compose_services().items()
+            if name not in _SHARED_FILE_SERVICES
+        }
+        assert "db" in others, sorted(others)
+        offenders = [
+            f"{service} names {key}"
+            for service, block in others.items()
+            for key in _ALL_KEYS
+            if re.search(rf"\b{key}\b", block)
+        ]
+        assert not offenders, (
+            f"{offenders}. The database in particular is reachable by every "
+            "service as a superuser, and a superuser can read its environment "
+            "with COPY ... FROM PROGRAM; a key there is a key in every process."
+        )
+
+    def test_the_database_is_still_given_its_password(self) -> None:
+        """
+        The other direction. Dropping env_file from the database without passing
+        POSTGRES_PASSWORD by name would pass every prohibition above and leave a
+        fresh volume that refuses to initialise. And it must be interpolation,
+        not a value: a literal is a committed credential, and `:-default` is a
+        guessable one.
+        """
+        assert re.search(
+            r"^\s+POSTGRES_PASSWORD:\s*\$\{POSTGRES_PASSWORD(?::?\?[^}]*)?\}\s*$",
+            _service_block("db"),
+            re.M,
+        ), (
+            "the db service must be passed POSTGRES_PASSWORD as "
+            "${POSTGRES_PASSWORD}, interpolated from .env"
+        )
+
+    def test_the_rendered_file_agrees(self, tmp_path: pathlib.Path) -> None:
+        """
+        Every assertion in this file reads text, and compose is what decides
+        what a container actually receives. This asks compose: render the
+        shipped file with every key set in `.env`, and check which service ends
+        up holding which.
+
+        Skipped where docker compose is not installed. The text checks above
+        still run there; this is the second opinion, not the only one.
+        """
+        compose = _docker_compose()
+        if compose is None:
+            pytest.skip("docker compose is not installed")
+        shutil.copy(COMPOSE, tmp_path / "docker-compose.yml")
+        sentinels = {key: f"sentinel-{key.lower()}" for key in _ALL_KEYS}
+        (tmp_path / ".env").write_text(
+            "".join(f"{key}={value}\n" for key, value in sentinels.items())
+            + "POSTGRES_PASSWORD=sentinel-postgres\n",
+            encoding="utf-8",
+        )
+        base = [
+            *compose,
+            "-f",
+            str(tmp_path / "docker-compose.yml"),
+            "-p",
+            "secret-isolation",
+        ]
+
+        def run(*args: str) -> str:
+            done = subprocess.run(
+                [*base, *args],
+                capture_output=True,
+                text=True,
+                env=_compose_env(),
+                timeout=60,
+            )
+            assert done.returncode == 0, done.stderr
+            return done.stdout
+
+        profiles = run("config", "--profiles").split()
+        flags = [flag for profile in profiles for flag in ("--profile", profile)]
+        services = json.loads(run(*flags, "config", "--format", "json"))["services"]
+        assert set(services) == set(_compose_services()), (
+            f"compose renders {sorted(services)} and the text scan found "
+            f"{sorted(_compose_services())}"
+        )
+
+        held = {
+            name: {key for key in _ALL_KEYS if (s.get("environment") or {}).get(key)}
+            for name, s in services.items()
+        }
+        # Guards the guard: were `.env` never read, nothing would hold anything
+        # and every service would pass.
+        assert set(BROKER_KEYS) <= held["worker"], held["worker"]
+        assert set(MODEL_KEYS) <= held["programme"], held["programme"]
+        assert services["db"]["environment"].get("POSTGRES_PASSWORD") == (
+            "sentinel-postgres"
+        ), services["db"]["environment"]
+
+        offenders = {
+            name: sorted(keys & _SHARED_FILE_SERVICES.get(name, frozenset(_ALL_KEYS)))
+            for name, keys in held.items()
+        }
+        offenders = {name: keys for name, keys in offenders.items() if keys}
+        assert not offenders, (
+            f"rendered by compose, these services hold keys the header's table "
+            f"says they must not: {offenders}"
         )
 
 

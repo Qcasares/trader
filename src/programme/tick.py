@@ -28,13 +28,19 @@ and records that it skipped the other two, which is the right degradation: the
 governance machinery is the part that must keep working. The panel's absence
 never *unblocks* anything, because a finding it already raised stays open. A
 panel that *was* convened and did not finish is not absence, though: it holds
-the promotion until the roles that failed have spoken.
+the promotion until the roles that failed have spoken. It goes on holding it if
+the key or the model settings then go away, because a panel that has heard
+some of its roles and can no longer reach the rest has still not finished; the
+hold lasts until a key and usable settings are both back, or an operator
+confirms the promotion. Only a stage at which no role's view was ever recorded
+counts as a panel never convened.
 
-Three independent things must agree before this promotes a candidate: the gate
-passes, ``requires_human`` is false, and the stage is within the autonomy
-ceiling. The ceiling is a database row read fail-closed to zero and clamped in
-code below ``FIRST_HUMAN_GATED_STAGE``, so raising it cannot authorise a model
-to move capital however it is set.
+Four independent things must agree before this promotes a candidate: the gate
+passes, ``requires_human`` is false, the stage is within the autonomy ceiling,
+and no role the convened panel was due to hear failed to report. The ceiling is
+a database row read fail-closed to zero and clamped in code below
+``FIRST_HUMAN_GATED_STAGE``, so raising it cannot authorise a model to move
+capital however it is set.
 """
 
 from __future__ import annotations
@@ -354,8 +360,9 @@ async def _advance(
     # Promoting past it would be the defect the specialist panel once had in
     # full — every role failing inside the one-role-is-not-the-panel `except`
     # while the gate promoted regardless — reduced to one role at a time. A
-    # panel that was never convened (no key, unusable settings) is a different
-    # case and deliberately does not hold anything: see the module docstring.
+    # panel that never sat at this stage (no key, unusable settings, and no
+    # view on record) is a different case and deliberately holds nothing: see
+    # the module docstring.
     within_ceiling = result.to_stage <= ceiling
     promoted = (
         result.passed and not result.requires_human and within_ceiling and not unheard
@@ -375,8 +382,19 @@ async def _advance(
         return
 
     if result.passed and not result.requires_human and unheard:
-        # Only the roles that did not speak are asked again next pass, so the
-        # retry costs what failed and no more.
+        # Only the roles that did not speak are asked again, so the retry costs
+        # what failed and no more. Without a key or usable settings nobody can
+        # be asked at all, and the note says so rather than promising a retry
+        # that cannot happen: an operator reading "asked again next pass" on
+        # every pass would reasonably conclude the runner was stuck.
+        if api_key and settings is not None:
+            retry = "those roles are asked again next pass"
+        else:
+            retry = (
+                "with no API key or no usable model settings they cannot be "
+                "asked, so the hold persists until a key and usable settings "
+                "are both back, or an operator confirms the promotion"
+            )
         report.note(
             "promotion_withheld",
             candidate=candidate["id"],
@@ -384,8 +402,7 @@ async def _advance(
             reason=(
                 "the panel did not finish sitting: "
                 f"{', '.join(unheard)} did not report. A review that did not "
-                "happen cannot clear a promotion; those roles are asked again "
-                "next pass"
+                f"happen cannot clear a promotion; {retry}"
             ),
         )
         return
@@ -439,31 +456,37 @@ async def _convene(
     Findings are opened, never closed. The only close path is an operator
     endpoint, and the schema refuses any other.
 
-    Returns the roles that were due to speak this pass and did not. Empty means
-    either that the panel sat in full or that it was never convened (no key or
-    no usable settings) — the two cases ``_advance`` must treat differently
-    from a panel that was summoned and failed to finish.
-    """
-    if not api_key or settings is None:
-        return []
+    Returns the roles that were due to speak at this stage and have not. Empty
+    means either that the panel has sat in full or that it never sat at all —
+    no view on record at this stage, and no key or no usable settings to start
+    it with. ``_advance`` must treat both differently from a panel that was
+    summoned and failed to finish.
 
+    A panel that has heard some of its roles and has since lost its key or its
+    settings is the unfinished kind, not the never-convened kind, so the roles
+    still missing are returned although nobody can ask them. The hold that
+    follows lasts until a key and usable settings are both back, or an
+    operator confirms the promotion. Releasing it instead would let the first
+    pass without a key promote past a veto role that failed to report on the
+    pass before.
+
+    The one case this cannot tell apart is a panel that sat and heard nobody,
+    because every role failed: no row says it convened, so once the key is gone
+    it reads as never convened and holds nothing. The failures are in the run's
+    action list, which is a log rather than state; holding on it would make the
+    runner's behaviour depend on whether an earlier pass finished writing its
+    report.
+    """
     stage_roles = roles.roles_for_stage(candidate["stage"])
     if not stage_roles:
         return []
 
-    # Convened once per stage, not once per tick. The evidence a role reasons
-    # about changes when an experiment completes, and an hourly re-run of the
-    # same panel over the same rows would spend money to produce the same
-    # paragraph and bury the pass in noise.
-    already = await conn.fetchval(
-        "SELECT COUNT(DISTINCT role) FROM role_assessments "
-        "WHERE candidate_id = $1 AND stage = $2",
-        uuid.UUID(candidate["id"]),
-        candidate["stage"],
-    )
-    if int(already or 0) >= len(stage_roles):
-        return []
-
+    # A role is heard when its view is on record at this stage, which is the
+    # one fact every pass can read back. That also makes the panel convene once
+    # per stage rather than once per tick: the evidence a role reasons about
+    # changes when an experiment completes, and an hourly re-run of the same
+    # panel over the same rows would spend money to produce the same paragraph
+    # and bury the pass in noise.
     seen = {
         r["role"]
         for r in await conn.fetch(
@@ -473,16 +496,21 @@ async def _convene(
             candidate["stage"],
         )
     }
+    due = [role for role in stage_roles if role.key not in seen]
+    if not due:
+        return []
+
+    if not api_key or settings is None:
+        if len(due) == len(stage_roles):
+            return []
+        return [role.key for role in due]
+
     candidate_view = dict(candidate)
-    candidate_view["experiments"] = await repo.list_experiments(
-        conn, candidate["id"]
-    )
+    candidate_view["experiments"] = await repo.list_experiments(conn, candidate["id"])
     brief = roles.facts_brief(candidate_view, result.as_dict())
 
     failed: list[str] = []
-    for role in stage_roles:
-        if role.key in seen:
-            continue
+    for role in due:
         try:
             assessment = await specialist_panel.assess(role, api_key, settings, brief)
         except Exception as exc:  # noqa: BLE001 - one role is not the panel
@@ -490,16 +518,34 @@ async def _convene(
             failed.append(role.key)
             continue
 
-        await repo.record_assessment(
-            conn,
-            candidate_id=candidate["id"],
-            role=role.key,
-            verdict=assessment.verdict,
-            summary=assessment.summary,
-            stage=candidate["stage"],
-            model=settings.model,
-            evidence={"gate": result.as_dict()},
-        )
+        # A write that fails is caught here, per role, like a reply that
+        # failed, rather than left to abort the pass. Both would withhold this
+        # promotion, but an exception withholds it only for as long as nothing
+        # between here and `repo.promote` catches it; this way the hold rests
+        # on the same `unheard` list as every other unfinished panel. The roles
+        # after this one are also still heard, so a second veto role's finding
+        # opens on this pass rather than the next.
+        try:
+            refs = await _record_view(
+                conn, candidate, role, assessment, result, settings.model
+            )
+        except Exception as exc:  # noqa: BLE001 - nor is one role's write
+            logger.exception(
+                "the view of %s on candidate %s could not be recorded",
+                role.key,
+                candidate["id"],
+            )
+            report.note(
+                "assessment_unrecorded",
+                candidate=candidate["id"],
+                role=role.key,
+                error=str(exc),
+            )
+            failed.append(role.key)
+            continue
+
+        # Noted only after the transaction has committed, so the run's action
+        # list never reports a view or a finding the ledger does not hold.
         report.note(
             "assessment_recorded",
             candidate=candidate["id"],
@@ -508,7 +554,57 @@ async def _convene(
             findings=len(assessment.findings),
             blocking=roles.blocking_count(assessment, role),
         )
+        for proposed, ref in zip(assessment.findings, refs, strict=True):
+            report.note(
+                "finding_raised",
+                finding=ref,
+                role=role.key,
+                severity=proposed.severity,
+                blocks=role.holds_veto
+                and proposed.severity in gates.BLOCKING_SEVERITIES,
+            )
 
+    return failed
+
+
+async def _record_view(
+    conn: asyncpg.Connection,
+    candidate: dict[str, Any],
+    role: roles.Role,
+    assessment: roles.Assessment,
+    result: Any,
+    model: str,
+) -> list[str]:
+    """
+    Write one role's view and every finding it raised, or none of them.
+
+    ``_convene`` counts a role as heard once its ``role_assessments`` row
+    exists, and never asks a heard role again. Written as separate statements,
+    a failure between the view and its findings — a clash on ``findings.ref``
+    when two runners overlap, a dropped connection, a cancelled runner — left
+    the role on record as heard and its objection nowhere. The next pass
+    skipped it, found nothing blocking, and promoted past a veto that had been
+    raised and lost. In one transaction the row means what ``_convene`` reads
+    it to mean: a failure takes the view back with its findings, the role stays
+    unheard, and it is asked again.
+
+    Inside a caller's transaction this is a savepoint, which is also what is
+    wanted: this role's writes go and the caller's survive.
+
+    Returns the references of the findings opened, in the order raised.
+    """
+    refs: list[str] = []
+    async with conn.transaction():
+        await repo.record_assessment(
+            conn,
+            candidate_id=candidate["id"],
+            role=role.key,
+            verdict=assessment.verdict,
+            summary=assessment.summary,
+            stage=candidate["stage"],
+            model=model,
+            evidence={"gate": result.as_dict()},
+        )
         for proposed in assessment.findings:
             finding = await repo.raise_finding(
                 conn,
@@ -519,16 +615,8 @@ async def _convene(
                 detail=proposed.detail,
                 remediation=proposed.remediation,
             )
-            report.note(
-                "finding_raised",
-                finding=finding["ref"],
-                role=role.key,
-                severity=proposed.severity,
-                blocks=role.holds_veto
-                and proposed.severity in gates.BLOCKING_SEVERITIES,
-            )
-
-    return failed
+            refs.append(finding["ref"])
+    return refs
 
 
 async def _enqueue_missing_evidence(
