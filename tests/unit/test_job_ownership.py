@@ -43,7 +43,7 @@ from src.db.repos import secrets as secret_repo
 from src.engine.scheduler import JobKind, plan_session
 from src.programme import flags
 from src.programme import main as programme_main
-from src.programme.main import JEV_HANDLERS, Programme
+from src.programme.main import JEV_HANDLERS, JobFailedError, Programme
 from src.worker.main import HANDLERS, SCHEDULED_KINDS
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -465,6 +465,25 @@ class TestTheProgrammeClaimsOnlyItsOwnKinds:
         assert queue.completed == [(job.id, {"status": "ok", "request_id": 7})]
         assert queue.failed == []
 
+    @pytest.mark.parametrize("retry", [True, False])
+    async def test_a_handlers_verdict_fails_the_job_as_it_says(
+        self, monkeypatch: pytest.MonkeyPatch, retry: bool
+    ) -> None:
+        """A job whose work came to nothing is failed, never completed."""
+
+        async def refused(conn, payload, api_key):
+            raise JobFailedError("the probe failed: auth (request 9)", retry=retry)
+
+        monkeypatch.setitem(JEV_HANDLERS, "jev_probe", refused)
+        job = _job()
+        queue = _Queue(job)
+        programme = _programme(monkeypatch, queue, _on())
+
+        assert await programme._drain_jev() is True
+
+        assert queue.completed == []
+        assert queue.failed == [(job.id, "the probe failed: auth (request 9)", retry)]
+
     async def test_a_switch_turned_off_mid_drain_stops_the_next_claim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -619,3 +638,88 @@ def test_the_programme_claims_as_itself() -> None:
     assert ast.unparse(claim.args[1]) == "PROGRAMME_WORKER_ID"
     kinds = [k for k in claim.keywords if k.arg == "kinds"]
     assert [ast.unparse(k.value) for k in kinds] == ["list(JEV_HANDLERS)"]
+
+
+# ---------------------------------------------------------------------------
+# The probe's verdict is its job's
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("result", "error", "retry"),
+    [
+        ({"status": "ok", "as_expected": True, "request_id": 1}, None, False),
+        (
+            {"status": "ok", "as_expected": False, "request_id": 1},
+            "answered, but not as expected (request 1)",
+            False,
+        ),
+        (
+            {"status": "ok", "as_expected": None, "request_id": 1},
+            "not measured (request 1)",
+            False,
+        ),
+        (
+            {"status": "invalid", "as_expected": None, "request_id": 2},
+            "failed validation (request 2)",
+            False,
+        ),
+        *[
+            (
+                {"status": "error", "error_kind": kind, "request_id": 3},
+                f"the probe failed: {kind} (request 3)",
+                kind in ("connection", "timeout", "rate_limited", "server"),
+            )
+            for kind in (
+                "auth",
+                "content_block",
+                "invalid_request",
+                "rate_limited",
+                "server",
+                "timeout",
+                "connection",
+                "response_shape",
+                "client",
+            )
+        ],
+        ({"status": "disabled"}, "switched off while the job ran", True),
+        ({"status": "no_key"}, "no TypeSafe key is set", False),
+        ({"status": "refused_budget"}, "request budget is spent", False),
+        ({"status": "refused_model"}, "not a usable pin", False),
+        ({"status": "refused_limits"}, "over the size limits", False),
+        ({"status": "surprising"}, "came to 'surprising'", False),
+    ],
+)
+def test_every_probe_outcome_but_the_expected_answer_fails_the_job(
+    result: dict[str, Any], error: str | None, retry: bool
+) -> None:
+    from src.programme.jev_client import ERROR_KINDS
+    from src.programme.main import PROBE_RETRIED_KINDS, probe_verdict
+
+    assert PROBE_RETRIED_KINDS <= set(ERROR_KINDS)
+    found, again = probe_verdict(result)
+    if error is None:
+        assert found is None
+    else:
+        assert found is not None and error in found, found
+    assert again is retry
+
+
+def test_shutdown_waits_for_a_jev_call_and_not_for_the_kill() -> None:
+    """
+    Long enough for one call to finish — the client's whole retry budget and
+    one more attempt — and short enough that the process is not killed first
+    by programme.yml's ``--kill-after`` or compose's ``stop_grace_period``.
+    """
+    import re
+
+    from src.programme import jev_client
+    from src.programme.main import JEV_SHUTDOWN_GRACE_SECONDS
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    one_call = jev_client.RETRY_BUDGET_SECONDS + jev_client.REQUEST_TIMEOUT_SECONDS
+    workflow = (root / ".github/workflows/programme.yml").read_text("utf-8")
+    compose = (root / "docker-compose.yml").read_text("utf-8")
+    (kill_after,) = re.findall(r"--kill-after=(\d+)", workflow)
+    (grace,) = re.findall(r"stop_grace_period:\s*(\d+)s", compose)
+    assert one_call < JEV_SHUTDOWN_GRACE_SECONDS < min(int(kill_after), int(grace))

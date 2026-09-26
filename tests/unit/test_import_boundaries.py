@@ -166,8 +166,12 @@ ENTRY_POINTS: Mapping[str, tuple[str, ...]] = {
 #: The secrets that let a process move money. The venue keys place an order
 #: directly. The production database is on the list because it is enough by
 #: itself: ``bootstrap-deployment.yml`` holds nothing else, and it enables a
-#: deployment and releases the kill switch.
-MONEY_MOVING_SECRETS = re.compile(r"\bsecrets\.(?:ALPACA_\w+|BANKR_\w+|DATABASE_URL\b)")
+#: deployment and releases the kill switch. Read as GitHub reads an expression:
+#: context and property names in any case, by dot or by index.
+MONEY_MOVING_SECRETS = re.compile(
+    r"\bsecrets\s*(?:\.\s*|\[\s*['\"])(?:ALPACA_\w+|BANKR_\w+|DATABASE_URL\b)",
+    re.IGNORECASE,
+)
 
 #: Commands the workflow scan must find, so that it cannot pass by finding none.
 KNOWN_CREDENTIALED_COMMANDS = frozenset(
@@ -1428,6 +1432,10 @@ def test_every_entry_point_still_exists() -> None:
         ("ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}", True),
         ("BANKR_API_KEY: ${{ secrets.BANKR_API_KEY }}", True),
         ("DATABASE_URL: ${{ secrets.DATABASE_URL }}", True),
+        ("DATABASE_URL: ${{ Secrets.DATABASE_URL }}", True),
+        ("KEY: ${{ SECRETS.alpaca_secret_key }}", True),
+        ("KEY: ${{ secrets['ALPACA_SECRET_KEY'] }}", True),
+        ('KEY: ${{ secrets [ "BANKR_API_KEY" ] }}', True),
         ("ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}", False),
         ("E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}", False),
         ('ALPACA_PAPER: "true"', False),
@@ -2186,3 +2194,57 @@ def test_core_does_not_depend_on_execution_or_engine() -> None:
     assert not offenders, "core must not depend on engine/execution:\n" + "\n".join(
         offenders
     )
+
+
+# ---------------------------------------------------------------------------
+# One importer of TypeSafe's SDK
+# ---------------------------------------------------------------------------
+
+#: The one module that may import TypeSafe's SDK. Everything the client does to
+#: the SDK — the host and the model passed rather than read from the
+#: environment, the capped retry, the silenced logger, redirects refused, the
+#: key handed over only as ``api_key=`` — is done in that module, so a second
+#: importer would hold the SDK with none of it. The process boundary keeps the
+#: SDK out of the API and the worker; this keeps it to one file inside the
+#: programme, which the boundary alone does not.
+SDK_IMPORTER = "src.programme.jev_client"
+
+
+def _sdk_importers(graph: ImportGraph) -> set[str]:
+    return {
+        module
+        for module, names in graph.names.items()
+        if any(_matches(name, ("typesafe_sdk",)) for name in names)
+    }
+
+
+def test_only_the_jev_client_imports_the_typesafe_sdk() -> None:
+    importers = _sdk_importers(_real_graph())
+    assert importers == {SDK_IMPORTER}, (
+        "typesafe_sdk is imported outside src/programme/jev_client.py, where "
+        "none of the client's safeguards apply: "
+        + ", ".join(sorted(importers - {SDK_IMPORTER}))
+        if importers - {SDK_IMPORTER}
+        else f"the scan no longer finds the client's own import: {importers}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import typesafe_sdk",
+        "async def ask():\n    import typesafe_sdk",
+        "from typesafe_sdk import AsyncTypeSafeClient",
+        "from typesafe_sdk.aio import client",
+        "import importlib\nsdk = importlib.import_module('typesafe_sdk')",
+        "sdk = __import__('typesafe_sdk')",
+    ],
+)
+def test_the_sdk_importer_scan_finds_each_spelling(source: str) -> None:
+    graph = _build_graph(
+        {
+            "src.programme.tick": (source, False),
+            SDK_IMPORTER: ("import typesafe_sdk", False),
+        }
+    )
+    assert _sdk_importers(graph) == {"src.programme.tick", SDK_IMPORTER}

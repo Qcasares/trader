@@ -391,11 +391,13 @@ async def list_models(
     """
     Ask the vendor which models ``api_key`` may use, once.
 
-    The check that settles whether a key is TypeSafe's and whether the pin is
-    offered to it, before a single question is asked with it. It spends no
-    tokens. Built exactly as :func:`ask` builds its client — the host passed,
-    the pin passed, the logger silenced, one retry, no redirects — because a
-    key is as exposed by a listing as by a question.
+    The check that settles whether TypeSafe's own host accepts a key, before a
+    single question is asked with it. It spends no tokens. It does not settle
+    the pin: the vendor lists the moving aliases only and accepts a versioned
+    id unlisted, so only an answer naming the pin proves it. Built exactly as
+    :func:`ask` builds its client — the host passed, the pin passed, the logger
+    silenced, one retry, no redirects — because a key is as exposed by a
+    listing as by a question.
 
     Raises ``TypeError`` for a key that is not text, before the SDK is
     imported, and nothing for anything the vendor or the network does.

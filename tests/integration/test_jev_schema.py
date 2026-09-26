@@ -30,8 +30,9 @@ import os
 import re
 import shutil
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -95,6 +96,15 @@ REFUSED = ("refused_budget", "refused_limits", "refused_model")
 #: after anyone reading this.
 PAST = datetime(2000, 1, 3, tzinfo=UTC)
 FUTURE = datetime(2100, 1, 4, tzinfo=UTC)
+
+#: Where the decision a signal serves is taken, and so the day its cutoff is on.
+EXCHANGE = ZoneInfo("America/New_York")
+
+
+def _cutoff(session: date, at: time = time(17)) -> datetime:
+    """A decision cutoff on ``session``'s own day: by default, as the worker
+    decides, an hour after an ordinary close."""
+    return datetime.combine(session, at, tzinfo=EXCHANGE)
 
 #: The switches migration 0012 seeds, and the value each must start with.
 SEEDED_SWITCHES = {
@@ -347,9 +357,9 @@ def _signal_for(
         "provenance": request["provenance"],
         "pack_hash": request["pack_hash"],
         "model": request["model_answered"],
-        "decision_cutoff": FUTURE,
     }
     row.update(overrides)
+    row.setdefault("decision_cutoff", _cutoff(row["session"]))
     return row
 
 
@@ -641,7 +651,7 @@ class TestBackfilledIsDerivedNotWritten:
         self, conn: asyncpg.Connection
     ) -> None:
         stored = await _insert(
-            conn, "jev_signals", await _signal_row(conn, decision_cutoff=FUTURE)
+            conn, "jev_signals", await _signal_row(conn, session=FUTURE.date())
         )
         assert stored["backfilled"] is False
 
@@ -649,7 +659,8 @@ class TestBackfilledIsDerivedNotWritten:
         self, conn: asyncpg.Connection
     ) -> None:
         cutoff = await _clock(conn) - timedelta(hours=1)
-        row = await _signal_row(conn, decision_cutoff=cutoff)
+        session = cutoff.astimezone(EXCHANGE).date()
+        row = await _signal_row(conn, session=session, decision_cutoff=cutoff)
         # The date an honest-looking backfill would claim: a day before the
         # cutoff, when the decision could have used it.
         row["available_at"] = cutoff - timedelta(days=1)
@@ -662,10 +673,47 @@ class TestBackfilledIsDerivedNotWritten:
     async def test_backfilled_cannot_be_written_by_anyone(
         self, conn: asyncpg.Connection
     ) -> None:
-        row = await _signal_row(conn, decision_cutoff=PAST)
+        row = await _signal_row(conn, session=PAST.date())
         row["backfilled"] = False
         with pytest.raises(asyncpg.GeneratedAlwaysError):
             await _insert(conn, "jev_signals", row)
+
+    @pytest.mark.parametrize(
+        "cutoff",
+        (
+            _cutoff(date(2026, 9, 25), time(0)) - timedelta(microseconds=1),
+            _cutoff(date(2026, 9, 26), time(0)),
+            FUTURE,
+            PAST,
+        ),
+        ids=("the-day-before", "the-day-after", "far-future", "far-past"),
+    )
+    async def test_the_cutoff_is_on_its_sessions_day_and_nowhere_else(
+        self, conn: asyncpg.Connection, cutoff: datetime
+    ) -> None:
+        """
+        A cutoff the writer could set anywhere would let the writer choose
+        liveness: a signal written years late, given a cutoff later still,
+        would read as live.
+        """
+        row = await _signal_row(conn, session=date(2026, 9, 25), decision_cutoff=cutoff)
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            await _insert(conn, "jev_signals", row)
+        assert refused.value.constraint_name == "jev_signals_cutoff_is_on_its_session"
+
+    @pytest.mark.parametrize(
+        "at",
+        (time(0), time(9, 30), time(17), time(23, 59, 59, 999999)),
+        ids=("midnight", "the-open", "the-decision", "the-last-instant"),
+    )
+    async def test_any_moment_of_the_sessions_day_in_new_york_will_do(
+        self, conn: asyncpg.Connection, at: time
+    ) -> None:
+        session = date(2026, 3, 9)  # the day after the clocks change
+        cutoff = _cutoff(session, at)
+        row = await _signal_row(conn, session=session, decision_cutoff=cutoff)
+        stored = await _insert(conn, "jev_signals", row)
+        assert stored["decision_cutoff"] == cutoff
 
 
 # ---------------------------------------------------------------------------
@@ -1313,6 +1361,30 @@ class TestSignals:
         )
         assert (stored["status"], stored["value"]) == (status, None)
 
+    @pytest.mark.parametrize("answered", (True, False), ids=("answer", "no-answer"))
+    @pytest.mark.parametrize("status", ("abstain", "invalid", "missing"))
+    async def test_and_carry_none(
+        self, conn: asyncpg.Connection, status: str, answered: bool
+    ) -> None:
+        """
+        A value beside a status that is not a measurement is a number a careless
+        reader takes for one, and with no answer behind it no origin check
+        would ever have seen it.
+        """
+        request, answer = await _exchange(
+            conn, answer={"valid": False, "invalid_reason": "x"}
+        )
+        row = _signal_for(
+            request,
+            answer,
+            status=status,
+            value="0",
+            answer_id=answer["id"] if answered else None,
+        )
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            await _insert(conn, "jev_signals", row)
+        assert refused.value.constraint_name == "jev_signals_value_means_measured"
+
     @pytest.mark.parametrize(
         ("column", "value", "constraint"),
         (
@@ -1380,7 +1452,8 @@ class TestASignalRestsOnItsAnswer:
         claimed: dict[str, Any],
     ) -> None:
         request, answer = await _exchange(conn, request=asked)
-        row = _signal_for(request, answer, status=status, **claimed)
+        value = answer["choice"] if status == "measured" else None
+        row = _signal_for(request, answer, status=status, value=value, **claimed)
         with pytest.raises(
             asyncpg.RaiseError, match="carries the lane, provenance and pack"
         ):
@@ -1419,6 +1492,47 @@ class TestASignalRestsOnItsAnswer:
             asyncpg.RaiseError, match="only a valid answer to a canonical request"
         ):
             await _insert(conn, "jev_signals", row)
+        assert await _count(conn, "jev_signals", "signal = $1", row["signal"]) == 0
+
+    async def test_an_answer_committed_mid_statement_is_refused_not_waved_through(
+        self, dsn: str, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The origin check reads the answer as the row is inserted; the foreign
+        key checks it at the end of the statement, with a later snapshot. An
+        answer another transaction commits in between must not pass the key
+        having passed no check of its origin: a web answer recorded as an
+        internal signal is the very route the check exists to close.
+        """
+        other = await asyncpg.connect(dsn)
+        try:
+            writing = other.transaction()
+            await writing.start()
+            request, answer = await _exchange(
+                other,
+                request={"lane": "research", "provenance": "web", "status": "invalid"},
+                answer={"valid": False, "invalid_reason": "x"},
+            )
+            row = _signal_for(
+                request, answer, lane="decision", provenance="internal"
+            )
+            columns = ", ".join(row)
+            params = ", ".join(f"${i + 1}" for i in range(len(row)))
+            # One statement that holds its end back for a second: long enough
+            # for the other transaction to commit between the two checks.
+            racing = asyncio.ensure_future(
+                conn.execute(
+                    f"WITH s AS (INSERT INTO jev_signals ({columns}) "
+                    f"VALUES ({params}) RETURNING 1) SELECT pg_sleep(1) FROM s",
+                    *row.values(),
+                )
+            )
+            await asyncio.sleep(0.3)
+            await writing.commit()
+            with pytest.raises(asyncpg.ForeignKeyViolationError, match="not visible"):
+                await racing
+        finally:
+            await other.close()
         assert await _count(conn, "jev_signals", "signal = $1", row["signal"]) == 0
 
     async def test_an_answer_that_is_not_a_measurement_is_recorded_as_one_not_made(

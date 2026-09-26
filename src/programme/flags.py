@@ -219,8 +219,9 @@ JEV_MODEL = "jev_model"
 #: :data:`jev_catalogue.AREAS`. Seeded ``false``.
 JEV_AREA_PREFIX = "jev_area_"
 
-#: How many requests the programme may send TypeSafe in a UTC day. Seeded
-#: ``500``.
+#: How many calls the programme may make to TypeSafe in a UTC day, each at
+#: most two HTTP requests, since the client retries a transient failure once.
+#: Seeded ``500``.
 JEV_DAILY_REQUEST_BUDGET = "jev_daily_request_budget"
 
 #: The largest state, in estimated tokens, one request may carry. Seeded
@@ -384,8 +385,10 @@ async def _count(
 
 async def jev_daily_request_budget(conn: asyncpg.Connection) -> int:
     """
-    How many requests the programme may send TypeSafe in a UTC day, where zero
-    means none.
+    How many calls the programme may make to TypeSafe in a UTC day, where zero
+    means none. A call is one ledger row and at most two HTTP requests, the
+    client retrying a transient failure once, so the vendor may see up to
+    twice this many.
 
     Zero on a database error, a missing row, and anything the catalogue
     refuses: a boolean (``True`` is an int in Python and is not a count), a

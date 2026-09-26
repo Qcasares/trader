@@ -43,6 +43,7 @@ pytest.importorskip("asyncpg")
 import asyncpg  # noqa: E402
 
 from src import crypto  # noqa: E402
+from src.config import get_settings  # noqa: E402
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import flags as flag_repo  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
@@ -732,6 +733,177 @@ class TestTheProgrammeLoop:
         finally:
             await secret_repo.clear_secret(conn, secret_repo.TYPESAFE_API_KEY)
         assert [call["api_key"] for call in client.calls] == ["vault-key"]
+
+    @pytest.mark.parametrize(
+        ("reply", "status", "error"),
+        [
+            pytest.param(
+                lambda **kw: _call(
+                    401,
+                    '{"detail":"no"}',
+                    error_class="TypeSafeAuthenticationError",
+                    error_kind="auth",
+                ),
+                "failed",
+                "the probe failed: auth",
+                id="a-refused-key",
+            ),
+            pytest.param(
+                lambda **kw: _call(
+                    422,
+                    '{"detail":[]}',
+                    error_class="TypeSafeUnprocessableEntityError",
+                    error_kind="invalid_request",
+                ),
+                "failed",
+                "the probe failed: invalid_request",
+                id="a-refused-request",
+            ),
+            pytest.param(
+                lambda **kw: _call(
+                    503,
+                    '{"error":"busy"}',
+                    error_class="TypeSafeInternalServerError",
+                    error_kind="server",
+                ),
+                "queued",
+                "the probe failed: server",
+                id="a-vendor-fault-is-retried",
+            ),
+            pytest.param(
+                lambda **kw: _call(
+                    200,
+                    _body({"about_the_sun": {"type": "noul", "noul": 0.03}}),
+                ),
+                "failed",
+                "not as expected",
+                id="the-wrong-answer",
+            ),
+            pytest.param(
+                lambda **kw: _call(200, _body({}, model="jev-latest")),
+                "failed",
+                "failed validation",
+                id="an-invalid-answer",
+            ),
+        ],
+    )
+    async def test_a_probe_that_proved_nothing_fails_its_job(
+        self,
+        conn: asyncpg.Connection,
+        dsn: str,
+        client: _Client,
+        reply: Callable[..., Any],
+        status: str,
+        error: str,
+    ) -> None:
+        """
+        The probe's verdict is the job's status. Recorded as ``succeeded`` with
+        the reason in a result column nothing shows, a refused key would read
+        as a working one on the jobs page and in the daily report.
+        """
+        client.respond = reply
+        job_id = await job_repo.enqueue(conn, "jev_probe")
+
+        assert await _drain(dsn) is True
+
+        job = await _job(conn, job_id)
+        assert job["status"] == status
+        assert job["attempts"] == 1
+        assert error in job["error"], job["error"]
+        assert KEY not in job["error"]
+
+    async def test_a_probe_with_no_key_fails_its_job_and_asks_nothing(
+        self, conn: asyncpg.Connection, dsn: str, client: _Client
+    ) -> None:
+        job_id = await job_repo.enqueue(conn, "jev_probe")
+
+        assert await _drain(dsn, typesafe_key=None) is True
+
+        job = await _job(conn, job_id)
+        assert (job["status"], job["attempts"]) == ("failed", 1)
+        assert "no TypeSafe key" in job["error"]
+        assert client.calls == []
+
+    async def _started(
+        self, monkeypatch: pytest.MonkeyPatch, dsn: str
+    ) -> tuple[Programme, asyncio.Task[None]]:
+        """
+        ``Programme.start`` as shipped, with the tick loop held idle: this is
+        about what runs beside the tick, and a tick on this database would do
+        work of its own.
+        """
+        monkeypatch.setenv("DATABASE_URL", dsn)
+        get_settings.cache_clear()
+        programme = Programme(dsn, api_key=None, secrets_key="", typesafe_key=KEY)
+
+        async def idle(self: Programme) -> None:
+            await self._stopping.wait()
+
+        monkeypatch.setattr(Programme, "_loop", idle)
+        return programme, asyncio.create_task(programme.start())
+
+    async def test_start_runs_the_jev_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        conn: asyncpg.Connection,
+        dsn: str,
+        client: _Client,
+    ) -> None:
+        """
+        Every other test here drives the loop directly. This one starts the
+        process: a start() that forgot the loop would leave the probe queued
+        for ever, with nothing anywhere saying so.
+        """
+        job_id = await job_repo.enqueue(conn, "jev_probe")
+        programme, running = await self._started(monkeypatch, dsn)
+        try:
+            for _ in range(200):
+                if (await _job(conn, job_id))["status"] == "succeeded":
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            programme.stop()
+            await asyncio.wait_for(running, timeout=10)
+            get_settings.cache_clear()
+        assert (await _job(conn, job_id))["status"] == "succeeded"
+
+    async def test_shutdown_lets_a_call_in_flight_finish_and_be_recorded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        conn: asyncpg.Connection,
+        dsn: str,
+        client: _Client,
+    ) -> None:
+        """
+        A call already sent has been billed, and the lane records every call it
+        makes. Cancelled mid-call by the routine SIGTERM, the call left no row,
+        was never counted against the budget, and was asked again once the
+        job's lease lapsed.
+        """
+        sent = asyncio.Event()
+
+        async def slow(**kwargs: Any) -> Any:
+            sent.set()
+            await asyncio.sleep(0.5)
+            return _clean(**kwargs)
+
+        client.respond = slow
+        job_id = await job_repo.enqueue(conn, "jev_probe")
+        mark = await _watermark(conn)
+        programme, running = await self._started(monkeypatch, dsn)
+        try:
+            await asyncio.wait_for(sent.wait(), timeout=10)
+            programme.stop()
+            await asyncio.wait_for(running, timeout=10)
+        finally:
+            programme.stop()
+            get_settings.cache_clear()
+
+        assert len(client.calls) == 1
+        (row,) = await _rows_since(conn, mark)
+        assert row["status"] == "ok"
+        job = await _job(conn, job_id)
+        assert (job["status"], job["attempts"]) == ("succeeded", 1)
 
     async def test_a_failing_pass_fails_the_job_for_a_retry(
         self, conn: asyncpg.Connection, dsn: str, client: _Client

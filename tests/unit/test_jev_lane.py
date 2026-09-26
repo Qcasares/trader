@@ -1496,9 +1496,28 @@ class TestRunProbe:
 # The transport is a test seam
 # ---------------------------------------------------------------------------
 
-#: The callables a transport could be handed to on its way to the SDK.
-_SEAM_CALLEES = frozenset({"ask", "run_probe"})
 _LANE = "src/programme/jev_lane.py"
+_CLIENT = "src/programme/jev_client.py"
+_CHECK = "src/programme/jev_check.py"
+
+
+def _functions_taking_a_transport(relative: str) -> frozenset[str]:
+    tree = ast.parse((ROOT / relative).read_text("utf-8"))
+    return frozenset(
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(a.arg == "transport" for a in node.args.args + node.args.kwonlyargs)
+    )
+
+
+#: The callables a transport could be handed to on its way to the SDK: every
+#: function the client or the lane defines that takes one, read from their
+#: source, so a new one is covered the day it is written rather than the day
+#: somebody remembers to list it.
+_SEAM_CALLEES = _functions_taking_a_transport(_CLIENT) | _functions_taking_a_transport(
+    _LANE
+)
 
 
 def _transport_handoffs(relative: str, source: str) -> list[str]:
@@ -1538,10 +1557,17 @@ class TestTheTransportIsATestSeam:
             ("src/programme/tick.py", "jev_lane.ask(conn, transport=transport)", True),
             ("src/programme/main.py", "jev_lane.run_probe(conn, api_key)", False),
             ("src/programme/x.py", "client.system_one(s, q, transport=t)", False),
+            (_CHECK, "jev_client.list_models(api_key=k, transport=t)", True),
+            (_CHECK, "list_models(api_key=k, transport=None)", True),
+            (_CHECK, "jev_client.list_models(api_key=k)", False),
         ],
     )
     def test_the_scan(self, relative: str, source: str, offends: bool) -> None:
         assert bool(_transport_handoffs(relative, source)) is offends
+
+    def test_every_function_that_takes_one_is_watched(self) -> None:
+        """Guards the guard: the list is read from the source, and finds these."""
+        assert {"ask", "list_models", "run_probe"} <= _SEAM_CALLEES
 
     def test_nothing_in_src_hands_one_over(self) -> None:
         offenders = []
@@ -1570,6 +1596,79 @@ class TestTheTransportIsATestSeam:
         transport = [k for k in call.keywords if k.arg == "transport"]
         assert len(transport) == 1 and isinstance(transport[0].value, ast.Name)
         assert transport[0].value.id == "transport"
+
+
+# ---------------------------------------------------------------------------
+# The two roads to the client
+# ---------------------------------------------------------------------------
+
+#: The modules that may import ``jev_client``: the lane, which every lane of
+#: the programme asks through — gated, budgeted, recorded — and the operator's
+#: key check, which is dispatch-only and records nothing on purpose.
+_ROADS = frozenset({_LANE, _CHECK})
+
+
+def _imports_the_client(relative: str, source: str) -> list[str]:
+    """Every import in ``source`` that reaches ``src.programme.jev_client``."""
+    package = ".".join(pathlib.PurePosixPath(relative).with_suffix("").parts[:-1])
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parent = package.split(".")[: len(package.split(".")) - node.level + 1]
+                base = ".".join([*parent, base] if base else parent)
+            names = [base] + [f"{base}.{alias.name}" for alias in node.names]
+        else:
+            continue
+        if any(
+            name == "src.programme.jev_client"
+            or name.startswith("src.programme.jev_client.")
+            for name in names
+        ):
+            found.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+    return found
+
+
+class TestTheOnlyRoadsToTheClient:
+    @pytest.mark.parametrize(
+        "relative, source, offends",
+        [
+            ("src/programme/tick.py", "from src.programme import jev_client", True),
+            ("src/programme/tick.py", "import src.programme.jev_client as c", True),
+            ("src/programme/tick.py", "from src.programme.jev_client import ask", True),
+            ("src/programme/tick.py", "from . import jev_client", True),
+            ("src/programme/tick.py", "from .jev_client import list_models", True),
+            ("src/programme/tick.py", "def f():\n    from . import jev_client", True),
+            ("src/programme/tick.py", "from src.programme import jev_lane", False),
+            ("src/programme/tick.py", "from src.programme import jev_catalogue", False),
+            ("src/api/x.py", "from src.programme import jev_client_notes", False),
+        ],
+    )
+    def test_the_scan(self, relative: str, source: str, offends: bool) -> None:
+        assert bool(_imports_the_client(relative, source)) is offends
+
+    def test_only_the_lane_and_the_check_import_the_client(self) -> None:
+        offenders = []
+        importers = set()
+        for path in sorted(SRC.rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+            if relative == _CLIENT:
+                continue
+            found = _imports_the_client(relative, path.read_text("utf-8"))
+            if found:
+                importers.add(relative)
+            if relative not in _ROADS:
+                offenders += found
+        assert not offenders, (
+            "a module other than the lane and the key check imports jev_client. "
+            "Every lane asks through jev_lane.ask, which gates, budgets and "
+            "records the call; a second road would do none of that:\n"
+            + "\n".join(offenders)
+        )
+        assert importers == _ROADS, importers
 
 
 # ---------------------------------------------------------------------------

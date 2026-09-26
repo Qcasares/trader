@@ -10,10 +10,11 @@
 #
 # Why it is a separate workflow from the worker
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Not tidiness. This is the only workflow in the repository that installs the
-# model SDKs, `anthropic` and `typesafe-sdk`, beside a credential. (CI's
-# `programme sdk` job installs the same lock to test the Jev client, and may
-# only because it holds no secret at all.) `src/api` and `src/worker` are
+# Not tidiness. This is the only long-running workflow that installs the model
+# SDKs, `anthropic` and `typesafe-sdk`, beside a credential. (CI's `programme
+# sdk` job installs the same lock to test the Jev client, and may only because
+# it holds no secret at all; `jev-check.yml` installs it by dispatch with the
+# TypeSafe key alone.) `src/api` and `src/worker` are
 # forbidden from importing an LLM client by
 # `tests/unit/test_import_boundaries.py`, and `src/programme` is forbidden from
 # importing anything that can submit an order. Running both in one job would
@@ -113,6 +114,8 @@ jobs:
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
           # the tick in flight, records it on its `programme_runs` row and
           # closes the pool. A killed tick would leave a row stuck 'running'.
+          # A Jev job in flight is given 35 s to finish and be recorded, inside
+          # the 60 s `--kill-after` allows.
           timeout --signal=TERM --kill-after=60 20700 python -m src.programme.main
           code=$?
           # 124 is `timeout` stopping a healthy process, which is how every

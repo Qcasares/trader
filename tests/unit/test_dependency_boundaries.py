@@ -611,13 +611,15 @@ def _resolved_for(header: str) -> str | None:
 #: A mapping key alone on its line, which is how every job id here is written.
 _KEY = re.compile(r"(?P<key>[A-Za-z_][\w-]*)\s*:")
 
-#: A GitHub Actions expression, ``${{ ... }}``.
-_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
-
 #: What, inside an expression, hands a job a credential: the secrets context in
 #: any spelling (``secrets.NAME``, ``secrets['NAME']``, ``toJSON(secrets)``),
-#: or the job's own token.
-_CREDENTIAL = re.compile(r"\bsecrets\b|\bgithub\.token\b")
+#: or the job's own token. In any case, because GitHub reads context and
+#: property names without it: ``Secrets.NAME`` and ``SECRETS.name`` are the
+#: same secret.
+_CREDENTIAL = re.compile(
+    r"\bsecrets\b|\bgithub\s*(?:\.\s*token\b|\[\s*['\"]token['\"]\s*\])",
+    re.IGNORECASE,
+)
 
 #: ``secrets: inherit`` or a ``secrets:`` mapping, handing a called workflow
 #: every secret or some, with no expression to show for it.
@@ -743,6 +745,31 @@ def _token_problem(job: str, top: str) -> str | None:
     return f"can write ({', '.join(writes)})" if writes else None
 
 
+def _expressions(text: str) -> list[str]:
+    """
+    Every GitHub Actions expression in ``text``, ``${{ ... }}``, read as GitHub
+    reads one: a ``}}`` inside a single-quoted string does not close it, so
+    ``${{ format('}}', secrets.X) }}`` is one expression and not a short one
+    followed by text. An expression left open runs to the end of the text.
+    """
+    found: list[str] = []
+    start = text.find("${{")
+    while start != -1:
+        at, quoted = start + 3, False
+        while at < len(text):
+            if text[at] == "'":
+                if quoted and text.startswith("''", at):
+                    at += 2
+                    continue
+                quoted = not quoted
+            elif not quoted and text.startswith("}}", at):
+                break
+            at += 1
+        found.append(text[start + 3 : at])
+        start = text.find("${{", at + 2)
+    return found
+
+
 def _credentials(job: str, top: str) -> list[str]:
     """
     Every credential a job is handed, by its own text or by the workflow's.
@@ -756,7 +783,7 @@ def _credentials(job: str, top: str) -> list[str]:
     for text in (job, top):
         found += [
             f"${{{{ {expression.strip()} }}}}"
-            for expression in _EXPRESSION.findall(text)
+            for expression in _expressions(text)
             if _CREDENTIAL.search(expression)
         ]
         found += [
@@ -1212,6 +1239,16 @@ def _programme_install_problems(path: Path) -> list[str]:
     problems: list[str] = []
     for tokens in _pip_installs(path.read_text(encoding="utf-8")):
         lines = _install_lines(tokens)
+        # Named on the command line, a model SDK skips the lock: whatever
+        # version the index serves, unhashed. Refused in every file, the lock's
+        # own installers included, because the exemptions elsewhere exist to let
+        # the lock through and nothing else — typesafe-sdk 0.7.0, which echoes
+        # the key, or a name TypeSafe never published, installed beside it.
+        problems += [
+            f"{label} installs {line.name} by name, not through the lock"
+            for line in lines
+            if _installs_a_model_sdk(line)
+        ]
         included = {Path(ln.value or "").name for ln in lines if ln.option in _INCLUDES}
         if PROGRAMME_REQUIREMENTS.name in included:
             problems.append(
@@ -1223,7 +1260,34 @@ def _programme_install_problems(path: Path) -> list[str]:
             problems.append(f"{label} installs the lock without --require-hashes")
         if Line(option="--only-binary", value=":all:") not in lines:
             problems.append(f"{label} installs the lock without --only-binary :all:")
+        else:
+            # pip applies format control in order, so a later `--no-binary x`
+            # or `--only-binary :none:` undoes `:all:` for what it names, and
+            # the lock carries typesafe-sdk's sdist digest: the sdist would pass
+            # the hash check and fetch its build backend unchecked.
+            problems += [
+                f"{label} installs the lock with {ln.option} {ln.value or ''}".rstrip()
+                + ", which lets pip build an sdist"
+                for ln in lines
+                if _is_format_control(ln.option)
+                and ln != Line(option="--only-binary", value=":all:")
+            ]
     return problems
+
+
+#: The two options pip applies, in order, to choose between a wheel and an
+#: sdist. optparse takes any unambiguous prefix of either (``--no-bi``,
+#: ``--only``), so a prefix is read as the option it abbreviates.
+_FORMAT_CONTROL = ("--no-binary", "--only-binary")
+
+
+def _is_format_control(option: str | None) -> bool:
+    return (
+        option is not None
+        and len(option) > 2
+        and option.startswith("--")
+        and any(name.startswith(option) for name in _FORMAT_CONTROL)
+    )
 
 
 def _installing_pythons(path: Path) -> list[str]:
@@ -2167,6 +2231,32 @@ def _with(job: str, before: str, added: str) -> str:
             _ci(
                 _with(
                     _SDK_JOB,
+                    "    steps:",
+                    "    env:\n"
+                    "      A: ${{ Secrets.DATABASE_URL }}\n"
+                    "      B: ${{ SECRETS.alpaca_secret_key }}\n"
+                    "      C: ${{ GitHub.Token }}\n",
+                )
+            ),
+            ["Secrets.DATABASE_URL", "SECRETS.alpaca_secret_key", "GitHub.Token"],
+            id="any-case-since-github-reads-names-without-it",
+        ),
+        pytest.param(
+            _ci(
+                _with(
+                    _SDK_JOB,
+                    "    steps:",
+                    "    env:\n"
+                    "      K: ${{ format('}}{0}', secrets.ALPACA_KEY_ID) }}\n",
+                )
+            ),
+            ["secrets.ALPACA_KEY_ID"],
+            id="a-closing-brace-inside-a-string",
+        ),
+        pytest.param(
+            _ci(
+                _with(
+                    _SDK_JOB,
                     "      - run: pip install pytest",
                     "          # ${{ secrets.IN_A_SHELL_COMMENT }}\n",
                 )
@@ -2352,6 +2442,51 @@ def test_the_programme_set_is_refused_wherever_the_programme_is_not(
             ["x installs requirements-programme.txt, not the lock"],
         ),
         ("RUN pip install -r requirements.txt\n", []),
+        (
+            f"RUN {_LOCK_INSTALL} --no-binary typesafe-sdk\n",
+            [
+                "x installs the lock with --no-binary typesafe-sdk, "
+                "which lets pip build an sdist"
+            ],
+        ),
+        (
+            "RUN pip install --require-hashes --only-binary :all: "
+            "--no-binary=:all: -r requirements-programme.lock\n",
+            [
+                "x installs the lock with --no-binary :all:, "
+                "which lets pip build an sdist"
+            ],
+        ),
+        (
+            "RUN pip install --require-hashes --only-binary :all: "
+            "--only-binary :none: -r requirements-programme.lock\n",
+            [
+                "x installs the lock with --only-binary :none:, "
+                "which lets pip build an sdist"
+            ],
+        ),
+        (
+            "RUN pip install --require-hashes --only-binary :all: "
+            "--no-bi=typesafe-sdk -r requirements-programme.lock\n",
+            [
+                "x installs the lock with --no-bi typesafe-sdk, "
+                "which lets pip build an sdist"
+            ],
+        ),
+        (
+            f"RUN {_LOCK_INSTALL}\nRUN pip install typesafe-ai\n",
+            ["x installs typesafe-ai by name, not through the lock"],
+        ),
+        (
+            f"RUN pip install typesafe-sdk==0.7.0\nRUN {_LOCK_INSTALL}\n",
+            ["x installs typesafe-sdk by name, not through the lock"],
+        ),
+        (
+            "RUN pip install --require-hashes --only-binary :all: anthropic "
+            "-r requirements-programme.lock\n",
+            ["x installs anthropic by name, not through the lock"],
+        ),
+        ("RUN pip install pytest httpx2\n", []),
     ],
 )
 def test_the_programme_set_is_installed_only_as_the_lock_hash_checked(
@@ -2771,7 +2906,10 @@ def test_only_the_programme_workflow_installs_a_model_sdk() -> None:
     ``test_secret_isolation`` does, so a new workflow is covered on arrival.
 
     ``ci.yml`` is the one other workflow allowed an SDK, in one job, and is
-    read job by job in the test below rather than whole here.
+    read job by job in the test below rather than whole here. ``jev-check.yml``
+    is held to its own rule. All three take the SDKs only through the
+    hash-checked lock: ``_programme_install_problems``, which reads every
+    Dockerfile and workflow, refuses a model SDK named on any ``pip install``.
     """
     exempt = {
         PROGRAMME_WORKFLOW.resolve(),
@@ -2863,6 +3001,42 @@ _JEV_CHECK = (
             ),
             "secrets.ALPACA_KEY_ID",
             id="a-venue-key",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "          TYPESAFE_API_KEY:",
+                "          DATABASE_URL: ${{ Secrets.DATABASE_URL }}\n"
+                "          TYPESAFE_API_KEY:",
+            ),
+            "Secrets.DATABASE_URL",
+            id="the-database-in-another-case",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "          TYPESAFE_API_KEY:",
+                "          K: ${{ SECRETS['ALPACA_SECRET_KEY'] }}\n"
+                "          TYPESAFE_API_KEY:",
+            ),
+            "SECRETS['ALPACA_SECRET_KEY']",
+            id="a-venue-key-by-index-in-capitals",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "          TYPESAFE_API_KEY:",
+                "          ALL: ${{ toJSON(Secrets) }}\n"
+                "          TYPESAFE_API_KEY:",
+            ),
+            "toJSON(Secrets)",
+            id="every-secret-at-once",
+        ),
+        pytest.param(
+            lambda t: t.replace(
+                "          TYPESAFE_API_KEY:",
+                "          K: ${{ format('}}{0}', secrets.BANKR_API_KEY) }}\n"
+                "          TYPESAFE_API_KEY:",
+            ),
+            "secrets.BANKR_API_KEY",
+            id="a-closing-brace-inside-a-string",
         ),
         pytest.param(
             lambda t: t.replace("    steps:", "    secrets: inherit\n    steps:", 1),

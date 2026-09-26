@@ -601,6 +601,10 @@ class TestTheRequestIsNeverRewritten:
 # ---------------------------------------------------------------------------
 
 SEAM_MODULE = "src.programme.jev_client"
+#: The client function every scan must find a seam on. The seams themselves are
+#: every function the client defines with a ``transport`` parameter — ``ask``
+#: and ``list_models`` today — read from its source, so one added later is
+#: watched from the day it is written.
 SEAM_FUNCTION = "ask"
 SEAM_PARAMETER = "transport"
 
@@ -767,31 +771,43 @@ def _seam_scan(
     modules: Mapping[str, _Module],
 ) -> tuple[list[str], dict[tuple[str, str], _Param]]:
     """
-    Every place in ``modules`` that could hand ``jev_client.ask`` a transport,
-    and every seam followed to find them.
+    Every place in ``modules`` that could hand the client a transport, and
+    every seam followed to find them.
 
-    A seam is a function whose transport parameter reaches the client: the
-    client's ``ask`` to begin with, then every function that forwards its own
-    ``None``-defaulting parameter into a seam, and so on until nothing new is
-    found. A call to a seam may leave the transport out, pass ``None``, or
-    forward the caller's own parameter; anything else is an offence. So is
-    spreading ``*args`` or ``**kwargs`` into a seam, which hides what it
-    passes, and naming the client's ``ask`` other than to call it, or fetching
-    it with ``getattr``: either way the call that receives it cannot be read.
+    A seam is a function whose transport parameter reaches the client: each
+    client function that takes one to begin with, then every function that
+    forwards its own ``None``-defaulting parameter into a seam, and so on until
+    nothing new is found. A call to a seam may leave the transport out, pass
+    ``None``, or forward the caller's own parameter; anything else is an
+    offence. So is spreading ``*args`` or ``**kwargs`` into a seam, which hides
+    what it passes, and naming one of the client's seams other than to call
+    it, or fetching it with ``getattr``: either way the call that receives it
+    cannot be read.
     """
     offences: set[str] = set()
     client = modules.get(SEAM_MODULE)
-    root = client.functions.get(SEAM_FUNCTION) if client else None
-    if root is None:
+    if client is None or SEAM_FUNCTION not in client.functions:
         return [f"{SEAM_MODULE}.{SEAM_FUNCTION} is not defined"], {}
-    position, default = _parameters(root).get(SEAM_PARAMETER, (0, None))
-    if position is not None or not _is_none(default) or _rebinds(root, SEAM_PARAMETER):
-        offences.add(
-            f"{SEAM_MODULE}.{SEAM_FUNCTION} must take {SEAM_PARAMETER} as a "
-            "keyword-only parameter defaulting to None, and never rebind it"
-        )
+    roots = {
+        (SEAM_MODULE, name): fn
+        for name, fn in client.functions.items()
+        if SEAM_PARAMETER in _parameters(fn)
+    }
+    if (SEAM_MODULE, SEAM_FUNCTION) not in roots:
+        roots[(SEAM_MODULE, SEAM_FUNCTION)] = client.functions[SEAM_FUNCTION]
+    for (_, name), root in roots.items():
+        position, default = _parameters(root).get(SEAM_PARAMETER, (0, None))
+        if (
+            position is not None
+            or not _is_none(default)
+            or _rebinds(root, SEAM_PARAMETER)
+        ):
+            offences.add(
+                f"{SEAM_MODULE}.{name} must take {SEAM_PARAMETER} as a "
+                "keyword-only parameter defaulting to None, and never rebind it"
+            )
 
-    seams = {(SEAM_MODULE, SEAM_FUNCTION): _Param(SEAM_PARAMETER, None)}
+    seams = {target: _Param(SEAM_PARAMETER, None) for target in roots}
     grown = True
     while grown:
         grown = False
@@ -824,28 +840,33 @@ def _seam_scan(
                     seams[forwarded[0]] = forwarded[1]
                     grown = True
 
+    names = {name for _, name in roots}
     for module in modules.values():
         for node in ast.walk(module.tree):
-            if _fetches_the_client_by_name(module, node):
+            if _fetches_the_client_by_name(module, node, names):
                 offences.add(
-                    f"{module.path}:{node.lineno}: reaches jev_client.ask through "
+                    f"{module.path}:{node.lineno}: reaches the client through "
                     "getattr, so the transport it is given cannot be read"
                 )
             if not isinstance(node, (ast.Name, ast.Attribute)):
                 continue
-            if _target(module.dotted(node), modules) != (SEAM_MODULE, SEAM_FUNCTION):
+            target = _target(module.dotted(node), modules)
+            if target not in roots:
                 continue
             parent = module.parents.get(node)
             if not (isinstance(parent, ast.Call) and parent.func is node):
                 offences.add(
-                    f"{module.path}:{node.lineno}: names jev_client.ask other than "
-                    "to call it, so the transport it is given cannot be read"
+                    f"{module.path}:{node.lineno}: names jev_client.{target[1]} "
+                    "other than to call it, so the transport it is given cannot "
+                    "be read"
                 )
     return sorted(offences), seams
 
 
-def _fetches_the_client_by_name(module: _Module, node: ast.AST) -> bool:
-    """Whether ``node`` is ``getattr(<the client module>, "ask", ...)``."""
+def _fetches_the_client_by_name(
+    module: _Module, node: ast.AST, names: set[str]
+) -> bool:
+    """Whether ``node`` is ``getattr(<the client module>, "<a seam>", ...)``."""
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -853,7 +874,7 @@ def _fetches_the_client_by_name(module: _Module, node: ast.AST) -> bool:
         and len(node.args) >= 2
         and module.dotted(node.args[0]) == SEAM_MODULE
         and isinstance(node.args[1], ast.Constant)
-        and node.args[1].value == SEAM_FUNCTION
+        and node.args[1].value in names
     )
 
 
@@ -880,6 +901,7 @@ def _tree(root: Path) -> dict[str, _Module]:
 #: A stand-in for the client, shaped as the real one is.
 CLIENT_STUB = (
     "async def ask(*, api_key, model, state, questions, transport=None):\n    ...\n"
+    "async def list_models(*, api_key, transport=None):\n    ...\n"
 )
 
 
@@ -902,10 +924,25 @@ class TestNothingInSrcHandsTheClientATransport:
         offences, seams = _seam_scan(modules)
         followed = ", ".join(sorted(".".join(seam) for seam in seams))
         assert not offences, (
-            "Production code can hand jev_client.ask a transport. It is a test "
+            "Production code can hand the Jev client a transport. It is a test "
             "seam: a transport decides where the state and the key are sent. "
             f"Seams followed: {followed}.\n" + "\n".join(offences)
         )
+        # Guards the guard: both functions that send the key are watched.
+        assert {(SEAM_MODULE, "ask"), (SEAM_MODULE, "list_models")} <= set(seams)
+
+    def test_a_transport_handed_to_the_listing_is_found(self) -> None:
+        source = """
+        import httpx2
+        from src.programme import jev_client
+
+        async def check(api_key):
+            return await jev_client.list_models(
+                api_key=api_key, transport=httpx2.AsyncHTTPTransport()
+            )
+        """
+        [offence] = _offences(src__programme__jev_check=source)
+        assert offence.startswith("src/programme/jev_check.py:6:"), offence
 
     @pytest.mark.parametrize(
         ("imports", "callee"),

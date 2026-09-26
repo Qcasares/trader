@@ -94,6 +94,13 @@ JEV_LEASE_REFRESH_SECONDS = 60.0
 #: lease, and one spare so a slow acquire is never the thing a pass waits on.
 POOL_MAX_SIZE = 5
 
+#: How long shutdown waits for a Jev job already running before cancelling it.
+#: Above one call's own bound — the client's retry budget plus one attempt's
+#: timeout, 30 s — and inside the 60 s both programme.yml's `--kill-after` and
+#: compose's `stop_grace_period` allow before the process is killed.
+#: ``tests/unit/test_job_ownership.py`` holds it between the two.
+JEV_SHUTDOWN_GRACE_SECONDS = 35.0
+
 #: A Jev job's handler: the connection, the job's payload, and the TypeSafe key
 #: resolved for this job, which may be absent. What it returns is recorded as
 #: the job's result.
@@ -102,11 +109,73 @@ JevHandler = Callable[
 ]
 
 
+class JobFailedError(Exception):
+    """
+    A handler's verdict that its job failed, and whether asking again could
+    change it.
+
+    Raised rather than returned, so that a job whose work came to nothing is
+    never recorded as ``succeeded`` with its reason buried in a result nobody
+    reads. The jobs page shows status and error; this puts the verdict in both.
+    """
+
+    def __init__(self, error: str, *, retry: bool) -> None:
+        super().__init__(error)
+        self.error = error
+        self.retry = retry
+
+
+#: The failed calls another attempt could change: no response, a rate limit or
+#: a vendor fault. A refused key, a refused request or an unreadable answer will
+#: be refused again.
+PROBE_RETRIED_KINDS = frozenset({"connection", "timeout", "rate_limited", "server"})
+
+#: Why each outcome that made no call made none.
+_PROBE_NOT_ASKED = {
+    "disabled": "Jev was switched off while the job ran",
+    "no_key": "no TypeSafe key is set (System > Configuration, or TYPESAFE_API_KEY)",
+    "refused_budget": "today's request budget is spent",
+    "refused_model": "the model setting is not a usable pin",
+    "refused_limits": "the request is over the size limits",
+}
+
+
+def probe_verdict(result: dict[str, Any]) -> tuple[str | None, bool]:
+    """
+    ``(None, False)`` for a probe that proved the path — an answer, valid, and
+    the one the probe knows — and otherwise the job's error and whether to try
+    again. A switch turned off mid-job waits for the switch.
+    """
+    status = result.get("status")
+    if status == "ok" and result.get("as_expected") is True:
+        return None, False
+    row = result.get("request_id")
+    where = "" if row is None else f" (request {row})"
+    if status == "ok":
+        if result.get("as_expected") is False:
+            return f"the probe was answered, but not as expected{where}", False
+        return f"the probe's answer was not measured{where}", False
+    if status == "invalid":
+        return f"the probe's answer failed validation{where}", False
+    if status == "error":
+        kind = result.get("error_kind")
+        return f"the probe failed: {kind}{where}", kind in PROBE_RETRIED_KINDS
+    reason = _PROBE_NOT_ASKED.get(str(status), f"it came to {status!r}")
+    return f"the probe was not asked: {reason}", status == "disabled"
+
+
 async def _jev_probe(
     conn: asyncpg.Connection, payload: dict[str, Any], api_key: str | None
 ) -> dict[str, Any]:
-    """The connectivity probe. It takes nothing from its payload."""
-    return await jev_lane.run_probe(conn, api_key)
+    """
+    The connectivity probe. It takes nothing from its payload, and succeeds
+    only when it proved the path; anything short of that fails the job.
+    """
+    result = await jev_lane.run_probe(conn, api_key)
+    error, retry = probe_verdict(result)
+    if error is not None:
+        raise JobFailedError(error, retry=retry)
+    return result
 
 
 #: The dispatch table, and also the claim filter: this process claims exactly
@@ -155,12 +224,22 @@ class Programme:
         try:
             await self._loop()
         finally:
+            # Set whether the tick loop returned or raised: the Jev loop claims
+            # nothing once it is.
+            self._stopping.set()
             heartbeat.cancel()
-            jev.cancel()
-            # Waited for before the pool closes, so a Jev job cancelled
-            # mid-handler has handed its connection back first. Its row stays
-            # `running` until the lease lapses and the worker's sweep requeues
-            # it.
+            # A Jev job already running is let finish. Its call has been sent
+            # and billed, and the lane records every call it makes; cancelled
+            # mid-call, it would leave no row for a call that was made, and the
+            # job would be asked again once its lease lapsed. The loop exits by
+            # itself after the job in hand. Only one still running when the
+            # grace ends is cancelled, and its row then stays `running` until
+            # the lease lapses and the worker's sweep requeues it.
+            _, running = await asyncio.wait({jev}, timeout=JEV_SHUTDOWN_GRACE_SECONDS)
+            for task in running:
+                task.cancel()
+            # Waited for before the pool closes, so a cancelled job has handed
+            # its connection back first.
             await asyncio.gather(heartbeat, jev, return_exceptions=True)
             await self._record_shutdown()
             if self._pool is not None:
@@ -331,6 +410,10 @@ class Programme:
             result = await handler(conn, job.payload, api_key)
             await job_repo.complete(conn, job.id, result)
             logger.info("Job %s (%s) succeeded", job.id, job.kind)
+        except JobFailedError as failed:
+            error = _without_secret(failed.error, api_key)
+            status = await job_repo.fail(conn, job.id, error, retry=failed.retry)
+            logger.warning("Job %s (%s) -> %s: %s", job.id, job.kind, status, error)
         except Exception as exc:  # noqa: BLE001 - recorded, then the loop continues
             # The job's error is shown on the jobs page. Whatever raised, the
             # key is not part of what it said: SDK releases before 0.7.1 could

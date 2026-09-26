@@ -180,6 +180,10 @@ services:
       context: .
       dockerfile: Dockerfile.programme
     command: python -m src.programme.main
+    # A Jev call in flight at shutdown is let finish and recorded
+    # (JEV_SHUTDOWN_GRACE_SECONDS, 35 s). Docker's default of 10 s would kill
+    # the process first.
+    stop_grace_period: 60s
     env_file:
       - .env
     environment:

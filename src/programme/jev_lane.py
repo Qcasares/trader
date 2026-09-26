@@ -1,14 +1,15 @@
 """
 jev_lane.py
 -----------
-The one road from the programme to TypeSafe AI's Jev: gate, pin, hash, look
-up, call once, validate, write.
+The programme's one road to TypeSafe AI's Jev: gate, pin, hash, look up, call
+once, validate, write. The only other road is ``jev_check``, the operator's
+key check, by dispatch and recording nothing; ``tests/unit/test_jev_lane.py``
+holds ``jev_client`` to those two importers.
 
 Runner-only: it calls ``jev_client``, which holds TypeSafe's SDK, and
 ``tests/unit/test_import_boundaries.py`` keeps both out of every process that
-can move money, the API included. Everything that asks Jev anything asks it
-through :func:`ask`, so the rules below are applied once rather than remembered
-by every lane.
+can move money, the API included. Every lane asks Jev through :func:`ask`, so
+the rules below are applied once rather than remembered by every lane.
 
 Record once, replay forever
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -164,7 +165,8 @@ class AskResult:
     ``valid`` first, and an answer that is not valid is not measured, whatever
     else it holds. ``replayed`` says the answer came from the ledger and no
     call was made. ``error_kind`` is the client's classification of a call
-    that failed.
+    that failed, and ``None`` on a replay, which made no call; the canonical
+    row keeps whatever the SDK said of the call that made it.
     """
 
     status: AskStatus
@@ -400,10 +402,12 @@ async def run_probe(
     before any area is switched on, which is why the probe answers to
     ``jev_enabled`` alone.
 
-    Returns the job's result, which the jobs page shows: the status, the row,
-    each answer as recorded, and ``as_expected`` — ``None`` unless every answer
-    the probe knows is valid, since an answer that was not measured neither
-    agrees nor disagrees with anything.
+    Returns what the probe found: the status, the row, each answer as
+    recorded, and ``as_expected`` — ``None`` unless every answer the probe
+    knows is valid, since an answer that was not measured neither agrees nor
+    disagrees with anything. The ``jev_probe`` job succeeds on nothing less
+    than an expected answer; every other outcome fails it, with the reason as
+    its error (``main.probe_verdict``), which is what the jobs page shows.
     """
     question_set = jev_questions.PROBE_CONNECTIVITY
     result = await ask(
@@ -575,8 +579,10 @@ def _answer_from(
     A recorded answer as the validator first returned it.
 
     The probabilities come back from a ``jsonb`` column, which keeps keys in an
-    order of its own, so they are put back in the order asked: a replay reads
-    the same way round as the answer it replays.
+    order of its own, so they are put back in the order asked: a replay of an
+    answer keyed by the options reads the same way round as the answer it
+    replays. One keyed otherwise was not measured, and the vendor's order is in
+    the row's ``raw_body``.
     """
     values = {name: row[name] for name in jev_repo.ANSWER_FIELDS}
     values["probabilities"] = _in_asked_order(values["probabilities"], question)

@@ -4,8 +4,10 @@ Specification and record of wiring TypeSafe AI's Jev into the AI programme.
 Owner: Quentin Casares. Phases A and B of eight are built; C to H are not.
 Phase B's code is dark: every Jev switch is seeded off, no lane is wired into
 the programme's tick, and nothing enqueues the one job that could make a call.
-No request has ever been sent to TypeSafe from this repository, because no key
-exists. Last revised 26 September 2026.
+A TypeSafe key exists, as the `TYPESAFE_API_KEY` repository secret set on 26
+September 2026, but no request has yet been sent to TypeSafe from this
+repository: the dispatch-only key check, `jev-check.yml`, is the first thing
+that will use it. Last revised 26 September 2026.
 
 ## What this is
 
@@ -494,7 +496,7 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state |
 | `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
-| `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), stops if the key is refused or the pin is not offered, then asks the connectivity probe once through `jev_client.ask` and judges the answer with `jev_validate` against `PROBE_EXPECTED`. Records nothing and prints no secret; exit 0 pass, 1 fail, 2 no key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
+| `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
 | `jev_lane.py` | Runner-only. One ask of one question set: check the arguments, gate, pin, hash, look up, and unless the answer is on record, key, budget, size, call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
 | `web_ingest.py` | Phase C. An allow-listed `aiohttp` fetcher: the paperswithbacktest README on GitHub and the SEC EDGAR RSS feed. Stores excerpts only, strips markup and URLs, caps lengths |
 
@@ -502,7 +504,9 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 
 - `src/db/repos/signals.py` is the **only** reader of `jev_signals` outside the
   programme. Its filter is fixed: `lane='decision' AND provenance='internal' AND
-  available_at <= decision_cutoff(session)`, plus a fail-closed area switch.
+  status='measured' AND available_at <= decision_cutoff(session)`, the cutoff
+  computed from the calendar rather than read from the row, plus a fail-closed
+  area switch.
 - `src/core/panel.py` gains an optional signals channel, sliced as of the
   session like the prices. `src/strategies/base.py` gains
   `required_signals: ClassVar = ()`.
@@ -550,7 +554,7 @@ exception, `web_documents` allowing one change, below.
 | `jev_requests` | Every question put to Jev, and every refusal to put one. The request hash (sha256 of the canonical `{model, state, questions}`, state keys sorted, question and option order preserved), the state hash, question set, version and pack hash, lane, provenance, subject, `as_of`, the state and questions sent (`questions` as `json`, since `jsonb` would reorder the options inside the hash); the model requested and the model that answered; the vendor request id (NULL when none came back, whether there was no HTTP response or one without the header), the HTTP status (NULL only when there was no response, which is what tells those apart), `status` of `ok`, `invalid`, `error`, `refused_budget`, `refused_limits` or `refused_model`, the error class and kind, the raw body, tokens and latency; `requested_at`, and `available_at` set by a trigger to `clock_timestamp()`, the moment of the insert. The partial unique index `jev_requests_canonical` on the request hash where the status is `ok` and the lane is not the probe lane, and CHECKs holding the rest of the row to its status |
 | `jev_answers` | One row per question asked, valid or not: `noul`, `choice`, `score`, `probabilities`, `confidence` (NULL for a Noul), our own argmax and margin, `valid` and `invalid_reason`. A valid row carries its value, argmax and margin and no reason, and a valid Choice is its own argmax |
 | `web_documents` | Snapshots, one per source and content hash. The one change allowed is `quarantined` from false to true, with a reason, the rest of the row unchanged |
-| `jev_signals` | Frozen. Keyed `(signal, symbol, session)`, with status, the answer, lane, provenance, pack hash, model, the decision cutoff, `available_at`, and a generated `backfilled` column: liveness is derived by the database, never written by the caller. A trigger holds the lane, provenance and pack to the request the signal's answer came from, and a `measured` signal to a valid answer to a canonical request from the model it names |
+| `jev_signals` | Frozen. Keyed `(signal, symbol, session)`, with status, the answer, lane, provenance, pack hash, model, the decision cutoff, `available_at`, and a generated `backfilled` column: liveness is derived from the database's stamp and a cutoff held to the session's own day in New York, so no writer sets it and none can move the cutoff off that day. `measured` and a value go together, both ways. A trigger holds the lane, provenance and pack to the request the signal's answer came from, and a `measured` signal to a valid answer to a canonical request from the model it names; an answer not yet visible to the inserting transaction is refused there rather than left to the foreign key, which checks later with a newer snapshot |
 | `jev_labels` | `labelled_by` is `operator:<name>` or `source:<dataset>@<sha>`, neither part empty; one label per labeller per item |
 | `jev_evaluations` | Per question set, question and model: the dataset and its hash; n and n per class; accuracy with Wilson bounds; Brier score with a bootstrap interval; calibration bins; the threshold and its coverage; baseline accuracy; flip rate; `possibly_in_training`, which must be stated; the code commit. Every measurement is nullable, NULL meaning not measured |
 
@@ -902,7 +906,11 @@ and two in Phase B; the rest are still open.
    and since Phase B that includes the TypeSafe key, so the API is the one
    process that can hold a venue key and a model key together. Having the
    worker report it — on its heartbeat, say — would let the API blank the pair
-   and the no-both rule extend to compose.
+   and the no-both rule extend to compose. Until then, holding is as far as it
+   goes: `test_secret_isolation.py::test_only_the_programme_decrypts_a_stored_secret`
+   keeps every call that decrypts a stored secret inside `src/programme`, so a
+   "check the key" button in the API, the natural next step, fails the build
+   rather than turning the API into a second road to a vendor.
 7. **`live_job` calls `broker.submit(intent, client_order_id=coid)`,** which only
    `AlpacaBroker` accepts; the `BrokerAdapter` protocol and `SimulatedBroker` do
    not. It works in production, and a test that injected a `SimulatedBroker`
@@ -923,8 +931,8 @@ and two in Phase B; the rest are still open.
 11. ~~**Safety rule 5's text** named the runner as `tick`, `author`, `client`
     and `main` only.~~ *Resolved:* it now lists `panel`, `jev_client` and
     `jev_lane` as `RUNNER_ONLY` does. The rule's substance changes in phase F,
-    with the amendment. Its "the future" before `jev_client` and `jev_lane`
-    went stale when phase B built them, and is left for that change.
+    with the amendment. Phase B removed the "the future" it carried before
+    `jev_client` and `jev_lane`, which went stale when phase B built them.
 12. **The compose stack connects to its database as a superuser.** The
     API, the worker and the programme connect as `trader`, which the postgres
     image creates as a superuser, and a superuser's `COPY ... FROM PROGRAM`
@@ -952,8 +960,9 @@ Everything needed to make one real, recorded, validated call, and nothing
 switched on. Every Jev switch is seeded off; no lane is wired into `tick`,
 `author` or `panel`; nothing in `src/api` or `web/src` reads the ledger; and
 the one job the programme can now run, `jev_probe`, has no producer outside
-the tests. The worker is untouched. No call has been made, because no key
-exists.
+the tests. The worker is untouched. No call has been made: the key exists as a
+repository secret, and the dispatch-only key check is the first thing that will
+use it.
 
 **Record once, replay forever, in the lane and in the schema.** Jev is not
 deterministic (fact 1), so an answer is an event that happened once, not a
@@ -986,8 +995,10 @@ compared whole through `to_jsonb`, so that a column a later migration adds is
 protected without anyone listing it. `available_at` on `jev_requests` and
 `jev_signals` is overwritten on insert with `clock_timestamp()` — the moment of
 the insert, not `now()`, the start of a transaction a writer could hold open
-across a decision cutoff — and `jev_signals.backfilled` is generated from it,
-so whether a signal was live is written by nobody. The daily budget and the
+across a decision cutoff — and `jev_signals.backfilled` is generated from it
+and from a cutoff `jev_signals_cutoff_is_on_its_session` holds to the session's
+own day in New York, so nobody writes whether a signal was live. The daily
+budget and the
 status summary count from UTC midnight by that stamp, not by the caller's
 `requested_at`. `test_jev_schema.py::TestTheLedgerIsAppendOnly`,
 `::TestQuarantineIsOneWay`, `::TestAvailabilityIsStampedByTheDatabase` and
@@ -1136,9 +1147,13 @@ told to log at DEBUG logs nothing (`TestNothingReachesALog`).
 holds the source to naming no `extra_body`, `extra_headers` or `response_model`
 (`TestTheRequestIsNeverRewritten`), the limiter to its windows
 (`TestTheRateLimiter`), and every call site in `src/` to passing no transport
-(`TestNothingInSrcHandsTheClientATransport`).
+(`TestNothingInSrcHandsTheClientATransport`, rooted at every client function
+that takes one, `ask` and `list_models` among them).
 
-**The lane.** `jev_lane.ask` is the one road to Jev, and each early return
+**The lane.** `jev_lane.ask` is the programme's one road to Jev — the only
+other is `jev_check`, the operator's, by dispatch, recording nothing, and
+`test_jev_lane.py::TestTheOnlyRoadsToTheClient` holds the client to those two
+importers — and each early return
 writes exactly what it should. The arguments are checked first, before any
 switch is read, so a caller's mistake shows while Jev is off: the set must be
 the registered one, the state exactly its model, the subject non-blank and
@@ -1160,7 +1175,11 @@ missing `usage` block. Anything else is an `error`. The validator's note, which
 has no column, is logged; the state and the body never are. `run_probe` asks
 `probe.connectivity` as a probe and reports each answer beside
 `PROBE_EXPECTED`, with `as_expected` `None` unless every answer it knows was
-measured. `tests/unit/test_jev_lane.py` drives every branch against a fake
+measured. The `jev_probe` job succeeds on nothing less than an expected answer:
+every other outcome fails it with the reason as its error, which is what the
+jobs page and the daily report read (`main.probe_verdict`), retried only where
+another attempt could change it — no response, a rate limit, a vendor fault, or
+a switch turned off mid-job. `tests/unit/test_jev_lane.py` drives every branch against a fake
 client and a fake ledger that applies the migration's checks, reading the
 switches through the shipped readers; `tests/integration/test_jev_lane.py`
 repeats the paths that write, on real Postgres (`TestOneAskIsOneRecord`,
@@ -1179,7 +1198,10 @@ tick's: two independent switches, both required, neither derived from the other
 job waits with its attempts untouched. A running job's lease is extended every
 60 seconds on a connection of its own, which closes open item 9; a handler that
 raises fails its job for a retry, the key replaced by `[redacted]` in the
-error; a kind with no handler is refused without retry. `test_job_ownership.py`
+error, and one that raises `JobFailedError` fails it as that verdict says; a
+kind with no handler is refused without retry. At shutdown a job already
+running is given 35 seconds to finish, so a call that was sent is recorded
+rather than abandoned mid-flight and asked again when its lease lapses. `test_job_ownership.py`
 holds the two dispatch tables disjoint and every kind enqueued anywhere in
 `src/` to exactly one owner, and refuses an `INSERT INTO jobs` in `src/`
 anywhere but `job_repo`, since the scan reads `enqueue` calls
@@ -1294,8 +1316,10 @@ Inputs, not approvals.
    probe, which needs `programme_enabled` and `jev_enabled` on and a
    `jev_probe` job in the queue (open item 18). The key itself is checked
    first, by hand, with the dispatch-only `jev-check.yml`, which records
-   nothing. The operator set the repository secret on 2026-09-26. Until the key exists, phases A to G are built and tested
-   against fakes, and no live call is made.
+   nothing. The operator set the repository secret on 2026-09-26, and the next
+   step is to dispatch `jev-check.yml` once it is on the default branch. Phases
+   A to G are built and tested against fakes regardless, and the programme
+   makes no live call until a probe is enqueued with both switches on.
 2. **A replacement Alpaca paper key** for the revoked one.
 3. **For phase H, a second Alpaca paper account's key**: a `PK` key, checked
    against both endpoints before it is stored, as CLAUDE.md requires of any

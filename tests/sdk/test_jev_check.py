@@ -70,7 +70,7 @@ def answered(body: bytes) -> Reply:
 
 
 async def run_check(
-    monkeypatch: pytest.MonkeyPatch, transport: Redirect
+    monkeypatch: pytest.MonkeyPatch, transport: Redirect, key: str = KEY
 ) -> jev_check.CheckReport:
     """
     ``jev_check.check`` against the fake vendor.
@@ -82,7 +82,7 @@ async def run_check(
         jev_client, "list_models", partial(jev_client.list_models, transport=transport)
     )
     monkeypatch.setattr(jev_client, "ask", partial(jev_client.ask, transport=transport))
-    return await jev_check.check(KEY)
+    return await jev_check.check(key)
 
 
 class TestTheListingGoesToTypeSafe:
@@ -179,21 +179,58 @@ class TestTheListingGoesToTypeSafe:
 
 
 class TestTheCheck:
-    async def test_a_working_key_passes(
+    async def test_a_working_key_passes_on_the_listing_the_vendor_really_sends(
         self,
         monkeypatch: pytest.MonkeyPatch,
         server: FakeTypeSafe,
         transport: Redirect,
     ) -> None:
-        server.script(listed("jev-1.12.0", PIN), answered(probe_body()))
+        """
+        TypeSafe lists the moving aliases only, and accepts the versioned pin
+        unlisted (docs/08, "Models and versions"). A check that looked for the
+        pin in the listing would fail every working key.
+        """
+        server.script(listed("jev-latest", "jev-preview"), answered(probe_body()))
+
+        report = await run_check(monkeypatch, transport)
+
+        assert report.passed, report.lines
+        assert report.exit_code == jev_check.OK
+        assert [s.url for s in transport.sent] == [MODELS_URL, SYSTEM_ONE_URL]
+        assert json.loads(transport.sent[1].body)["model"] == PIN
+        assert report.lines[-1] == "PASS"
+        assert any("as expected" in line for line in report.lines)
+
+    @pytest.mark.parametrize(
+        "names",
+        [(), ("jev-latest",), ("jev-1.12.0", PIN)],
+        ids=["none", "alias", "pin"],
+    )
+    async def test_the_listing_never_decides_the_pin(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        server: FakeTypeSafe,
+        transport: Redirect,
+        names: tuple[str, ...],
+    ) -> None:
+        server.script(listed(*names), answered(probe_body()))
 
         report = await run_check(monkeypatch, transport)
 
         assert report.passed, report.lines
         assert [s.url for s in transport.sent] == [MODELS_URL, SYSTEM_ONE_URL]
-        assert json.loads(transport.sent[1].body)["model"] == PIN
-        assert report.lines[-1] == "PASS"
-        assert any("as expected" in line for line in report.lines)
+
+    async def test_the_pin_is_proven_by_the_answer(
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
+    ) -> None:
+        """An answer from any model but the pin fails, whatever was listed."""
+        server.script(listed(PIN), answered(probe_body(model="jev-1.14.0")))
+
+        report = await run_check(monkeypatch, transport)
+
+        assert not report.passed
+        assert report.exit_code == jev_check.FAILED
+        assert any("model_mismatch" in line for line in report.lines)
 
     async def test_a_refused_key_stops_before_a_question_is_asked(
         self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
@@ -203,19 +240,67 @@ class TestTheCheck:
         report = await run_check(monkeypatch, transport)
 
         assert not report.passed
+        assert report.exit_code == jev_check.FAILED
         assert [s.url for s in transport.sent] == [MODELS_URL]
         assert any("console.typesafe.ai" in line for line in report.lines)
 
-    async def test_a_pin_the_account_is_not_offered_stops_before_a_question(
+    async def test_no_response_is_no_verdict_rather_than_a_refused_key(
         self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
-        server.script(listed("jev-1.12.0"))
+        """A network failure says nothing about the key, and must not claim to."""
+        transport.routes.extend([Route(port=closed_port()), Route(port=closed_port())])
 
         report = await run_check(monkeypatch, transport)
 
-        assert not report.passed
-        assert [s.url for s in transport.sent] == [MODELS_URL]
-        assert any(f"pinned model {PIN}" in line for line in report.lines)
+        assert report.verdict == "no_verdict"
+        assert report.exit_code == jev_check.NO_VERDICT
+        assert not any("refused" in line for line in report.lines), report.lines
+        assert report.lines[-1] == "NO VERDICT"
+
+    @pytest.mark.parametrize("status", [429, 503, 529])
+    async def test_a_vendor_that_could_not_answer_is_no_verdict(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        server: FakeTypeSafe,
+        transport: Redirect,
+        status: int,
+    ) -> None:
+        server.script(Reply(status=status, body=b'{"error":"busy"}', headers=JSON))
+
+        report = await run_check(monkeypatch, transport)
+
+        assert report.exit_code == jev_check.NO_VERDICT, report.lines
+        assert {s.url for s in transport.sent} == {MODELS_URL}
+
+    async def test_a_probe_the_vendor_could_not_answer_is_no_verdict(
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
+    ) -> None:
+        server.script(
+            listed("jev-latest"),
+            Reply(status=503, body=b'{"error":"overloaded"}', headers=JSON),
+        )
+
+        report = await run_check(monkeypatch, transport)
+
+        assert report.exit_code == jev_check.NO_VERDICT, report.lines
+        assert any("server" in line for line in report.lines)
+
+    async def test_the_answer_is_judged_as_the_lane_judges_it(
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
+    ) -> None:
+        """
+        A 2xx the SDK could not read goes to the validator, as it does in the
+        lane, and passes on its content; the SDK's objection is printed beside.
+        """
+        body = json.loads(probe_body())
+        del body["usage"]
+        server.script(listed("jev-latest"), answered(json.dumps(body).encode()))
+
+        report = await run_check(monkeypatch, transport)
+
+        assert report.passed, report.lines
+        assert any("response_shape" in line for line in report.lines)
+        assert any("as expected" in line for line in report.lines)
 
     async def test_the_wrong_answer_fails(
         self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
@@ -225,6 +310,7 @@ class TestTheCheck:
         report = await run_check(monkeypatch, transport)
 
         assert not report.passed
+        assert report.exit_code == jev_check.FAILED
         assert report.lines[-1] == "FAIL"
         assert any("expected true" in line for line in report.lines)
 
@@ -238,7 +324,7 @@ class TestTheCheck:
         assert not report.passed
         assert any("not measured" in line for line in report.lines)
 
-    async def test_a_failed_probe_fails(
+    async def test_a_refused_probe_fails(
         self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(
@@ -249,6 +335,7 @@ class TestTheCheck:
         report = await run_check(monkeypatch, transport)
 
         assert not report.passed
+        assert report.exit_code == jev_check.FAILED
         assert any("invalid_request" in line for line in report.lines)
 
     @pytest.mark.parametrize(
@@ -259,6 +346,14 @@ class TestTheCheck:
                 (Reply(status=401, body=KEY.encode(), headers=JSON),), id="refused"
             ),
             pytest.param((listed(PIN), answered(b"not json")), id="garbled"),
+            pytest.param((listed(PIN, KEY), answered(probe_body())), id="listed"),
+            pytest.param(
+                (listed(PIN), answered(probe_body(model=KEY))), id="model-field"
+            ),
+            pytest.param(
+                (listed(PIN), answered(probe_body(answers={KEY: {"type": "noul"}}))),
+                id="answer-key",
+            ),
         ],
     )
     async def test_the_key_is_never_printed(
@@ -272,3 +367,21 @@ class TestTheCheck:
         server.script(*replies)
         report = await run_check(monkeypatch, transport)
         assert KEY not in "\n".join(report.lines)
+
+    async def test_no_run_of_a_long_key_is_printed_either(
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
+    ) -> None:
+        """
+        The validator quotes a vendor's string truncated, and a truncated key is
+        a prefix no log masks. Every run of it long enough to matter is withheld.
+        """
+        long_key = "sk-test-" + "7f3a9c1e5b" * 8
+        server.script(listed(PIN), answered(probe_body(model=long_key)))
+
+        report = await run_check(monkeypatch, transport, key=long_key)
+
+        printed = "\n".join(report.lines)
+        assert not any(
+            long_key[i : i + jev_check.MIN_WITHHELD] in printed
+            for i in range(len(long_key) - jev_check.MIN_WITHHELD + 1)
+        ), printed

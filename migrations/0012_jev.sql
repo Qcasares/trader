@@ -46,10 +46,14 @@
 -- transaction commits, which is later again, so even this is a lower bound.
 --
 -- `jev_signals.backfilled` is generated from that stamp and the decision
--- cutoff, so whether a signal was live is derived by the database and written
--- by nobody. Postgres computes a generated column after the BEFORE triggers
--- have run, which is what makes it read the stamp rather than the value the
--- caller offered.
+-- cutoff, so nobody writes whether a signal was live. The cutoff is the
+-- writer's, but only within its session's own day in New York, where the
+-- decision it serves is taken: a cutoff the writer could set anywhere would let
+-- the writer choose liveness by choosing the cutoff. Within that day it is
+-- still a claim, so the phase F loader compares the stamp with the calendar's
+-- cutoff for the session rather than trusting the stored one. Postgres
+-- computes a generated column after the BEFORE triggers have run, which is
+-- what makes it read the stamp rather than the value the caller offered.
 --
 -- One operational consequence: a data-only logical restore fires the stamp and
 -- rewrites every `available_at` to the moment of the restore. Restore data with
@@ -143,10 +147,12 @@
 -- unreadable value or a database error reads as off, and a model the catalogue
 -- refuses means no call. The master switch and every area start off. The model
 -- is pinned to `jev-1.13.0` and never an alias such as `jev-latest`, whose
--- answers can change with nothing here changing. The budget of 500 requests a
--- day bounds a runaway loop rather than a bill: at the $0.042 per million input
--- tokens published when this was written, 500 requests would cost about $1.18
--- even if every one reached the 56,000-token ceiling this repository allows.
+-- answers can change with nothing here changing. The budget of 500 calls a day
+-- bounds a runaway loop rather than a bill: each call is at most two requests,
+-- the client retrying a transient failure once, and at the $0.042 per million
+-- input tokens published when this was written, 1,000 requests would cost about
+-- $2.35 even if every one reached the 56,000-token ceiling this repository
+-- allows.
 -- The state ceiling of 8,000 tokens sits far below the vendor's 32,000 for
 -- state plus the longest question, so an oversized state is refused here rather
 -- than sent. Hypotheses and findings go as titles only until an operator
@@ -427,8 +433,9 @@ CREATE TABLE IF NOT EXISTS jev_signals (
     signal          TEXT NOT NULL,
     symbol          TEXT NOT NULL,
     session         DATE NOT NULL,
-    -- `measured` is the only status that carries a value. The others are why
-    -- there is none, and each is read as not measured, never as a default.
+    -- `measured` is the only status that carries a value, and every
+    -- measurement carries one. The others are why there is none, and each is
+    -- read as not measured, never as a default.
     status          TEXT NOT NULL,
     value           TEXT,
     answer_id       BIGINT REFERENCES jev_answers(id),
@@ -439,7 +446,7 @@ CREATE TABLE IF NOT EXISTS jev_signals (
     pack_hash       TEXT NOT NULL,
     model           TEXT NOT NULL,
     -- The latest moment the signal could have been known and still used by the
-    -- decision for `session`.
+    -- decision for `session`: on the session's day in New York.
     decision_cutoff TIMESTAMPTZ NOT NULL,
     -- Overwritten on insert by jev_stamp_available_at().
     available_at    TIMESTAMPTZ NOT NULL,
@@ -458,6 +465,18 @@ CREATE TABLE IF NOT EXISTS jev_signals (
         CHECK (provenance IN ('web', 'internal', 'operator')),
     CONSTRAINT jev_signals_measured_has_its_answer CHECK (
         status <> 'measured' OR (value IS NOT NULL AND answer_id IS NOT NULL)
+    ),
+    -- Both directions, as jev_answers_reason_means_invalid holds them: a value
+    -- beside any other status would be an unmeasured signal carrying a number
+    -- a careless reader takes for one, and with no answer behind it no origin
+    -- check ever sees it.
+    CONSTRAINT jev_signals_value_means_measured CHECK (
+        (status = 'measured') = (value IS NOT NULL)
+    ),
+    CONSTRAINT jev_signals_cutoff_is_on_its_session CHECK (
+        decision_cutoff >= (session::timestamp AT TIME ZONE 'America/New_York')
+        AND decision_cutoff
+            < ((session + 1)::timestamp AT TIME ZONE 'America/New_York')
     )
 );
 
@@ -481,8 +500,13 @@ BEGIN
       JOIN jev_requests r ON r.id = a.request_id
      WHERE a.id = NEW.answer_id;
     IF NOT FOUND THEN
-        -- The foreign key reports a missing answer in its own words.
-        RETURN NEW;
+        -- Refused here rather than left to the foreign key. The key checks at
+        -- the end of the statement, with a later snapshot than this one, so an
+        -- answer committed in between would pass it having passed no check of
+        -- its origin at all. Raised as the violation the key would report.
+        RAISE EXCEPTION 'jev_signals: answer % is not visible to this transaction', NEW.answer_id
+            USING ERRCODE = 'foreign_key_violation',
+                  HINT = 'Record the answer, and commit it, before the signal that rests on it.';
     END IF;
 
     IF NEW.lane IS DISTINCT FROM origin.lane

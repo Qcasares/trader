@@ -718,7 +718,8 @@ class TestTheSameSeparationWhereTheseActuallyRun:
         # ALPACA_OAUTH_TOKEN would pass the parametrised test and still hand
         # the model's process a way to the venue.
         text = self.PROGRAMME.read_text(encoding="utf-8")
-        found = re.findall(r"secrets\.((?:ALPACA|APCA)\w*)", text)
+        pattern = _secret_reference(r"(?:ALPACA|APCA)\w*")
+        found = [m.group(0) for m in re.finditer(pattern, text, re.I)]
         assert not found, f"programme.yml is passed venue secrets {found}"
 
     def test_the_programme_job_carries_the_decryption_key(self) -> None:
@@ -737,6 +738,35 @@ class TestTheSameSeparationWhereTheseActuallyRun:
             "credential an operator sets from the UI is stored and never read, "
             "and the runner silently falls back to the environment."
         )
+
+
+def _secret_reference(name: str) -> str:
+    """
+    A pattern for a workflow expression handing a job the secret ``name``.
+
+    Matched with ``re.I``, as GitHub reads an expression: ``secrets.NAME``,
+    ``Secrets.NAME`` and ``SECRETS.name`` are one secret, and so is
+    ``secrets['NAME']``. The name is the group, for a caller that lists them.
+    """
+    return rf"\bsecrets\s*(?:\.\s*({name})\b|\[\s*['\"]({name})['\"]\s*\])"
+
+
+@pytest.mark.parametrize(
+    ("text", "held"),
+    [
+        ("K: ${{ secrets.ALPACA_KEY_ID }}", True),
+        ("K: ${{ Secrets.ALPACA_KEY_ID }}", True),
+        ("K: ${{ SECRETS.alpaca_key_id }}", True),
+        ("K: ${{ secrets['ALPACA_KEY_ID'] }}", True),
+        ('K: ${{ secrets[ "ALPACA_KEY_ID" ] }}', True),
+        ("K: ${{ secrets.ALPACA_KEY_ID_OLD }}", False),
+        ("# ALPACA_KEY_ID is not held here", False),
+    ],
+)
+def test_a_secret_is_recognised_in_every_spelling_github_reads(
+    text: str, held: bool
+) -> None:
+    assert bool(re.search(_secret_reference("ALPACA_KEY_ID"), text, re.I)) is held
 
 
 class TestTheRuleAndNotJustTheTwoFilesItWasWrittenAgainst:
@@ -768,13 +798,13 @@ class TestTheRuleAndNotJustTheTwoFilesItWasWrittenAgainst:
             # holding it. What puts a value in the process is a `secrets.`
             # reference, so that is what is matched.
             holds_broker = any(
-                re.search(rf"secrets\.{marker}\b", text)
+                re.search(_secret_reference(marker), text, re.I)
                 for marker in self.BROKER_MARKERS
             )
             holds_vault = [
                 marker
                 for marker in self.VAULT_MARKERS
-                if re.search(rf"secrets\.{marker}\b", text)
+                if re.search(_secret_reference(marker), text, re.I)
             ]
             if holds_broker and holds_vault:
                 offenders.append(f"{path.name} also carries {holds_vault}")
@@ -859,3 +889,139 @@ class TestTheLookalikeNameIsNeverUsed:
             "TYPESAFE_API_KEY; the other name belongs to a lookalike reseller, "
             "and a key stored under it is a key for someone else's service."
         )
+
+
+# ---------------------------------------------------------------------------
+# Only the programme decrypts a stored secret
+# ---------------------------------------------------------------------------
+
+#: The two ways to a stored credential in plaintext, by module: the vault's
+#: reader, and the cipher beneath it.
+_DECRYPTING = {"src.db.repos.secrets": "get", "src.crypto": "decrypt"}
+
+#: Where decrypting is allowed: the programme, which is what the vault stores
+#: model keys for, and the two modules that define it.
+_MAY_DECRYPT = ("src/programme/", "src/db/repos/secrets.py", "src/crypto.py")
+
+
+def _decrypts(relative: str, source: str) -> list[str]:
+    """
+    Every reach in ``source`` for a stored secret in plaintext: a call or a
+    reference to the vault's ``get`` or to ``crypto.decrypt``, under any import
+    spelling, relative ones included, or either module fetched from by
+    ``getattr``.
+    """
+    package = ".".join(pathlib.PurePosixPath(relative).with_suffix("").parts[:-1])
+    tree = ast.parse(source)
+    bound: dict[str, str] = {}
+    offences: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _DECRYPTING:
+                    bound[alias.asname or alias.name] = alias.name
+                elif alias.asname is None and any(
+                    module.startswith(alias.name + ".") for module in _DECRYPTING
+                ):
+                    bound[alias.name.split(".")[0]] = alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".")
+                parts = parts[: len(parts) - node.level + 1]
+                base = ".".join([*parts, base] if base else parts)
+            for alias in node.names:
+                full = f"{base}.{alias.name}"
+                if full in _DECRYPTING:
+                    bound[alias.asname or alias.name] = full
+                elif base in _DECRYPTING and alias.name in (_DECRYPTING[base], "*"):
+                    offences.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            dotted = ast.unparse(node.value)
+            head, _, rest = dotted.partition(".")
+            module = bound.get(dotted) or (
+                f"{bound[head]}.{rest}" if head in bound and rest else None
+            )
+            if module in _DECRYPTING and node.attr == _DECRYPTING[module]:
+                offences.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and node.args
+            and (
+                bound.get(ast.unparse(node.args[0])) in _DECRYPTING
+                or ast.unparse(node.args[0]) in _DECRYPTING
+            )
+        ):
+            offences.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+    return offences
+
+
+def _decrypting_files() -> list[pathlib.Path]:
+    """Everything a protected process loads or runs, and the programme."""
+    files = [
+        path
+        for tree in ("src", "api", "scripts")
+        for path in sorted((ROOT / tree).rglob("*.py"))
+        if "__pycache__" not in path.parts
+    ]
+    return [*files, ROOT / "tests" / "e2e" / "broker_check.py"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.db.repos import secrets as secret_repo\n"
+        "k = secret_repo.get(conn, secret_repo.TYPESAFE_API_KEY, key)\n",
+        "from src.db.repos import secrets\nk = secrets.get(c, n, key)\n",
+        "import src.db.repos.secrets as s\nk = s.get(c, n, key)\n",
+        "import src.db.repos.secrets\nk = src.db.repos.secrets.get(c, n, key)\n",
+        "from src.db.repos.secrets import get as fetch\n",
+        "from ...db.repos import secrets\nk = secrets.get(c, n, key)\n",
+        "from src.db.repos.secrets import *\n",
+        "from src import crypto\np = crypto.decrypt(t, key)\n",
+        "from src.crypto import decrypt\n",
+        "from src.db.repos import secrets as r\nf = getattr(r, 'g' + 'et')\n",
+    ],
+)
+def test_the_decrypt_scan_trips_on_every_spelling(source: str) -> None:
+    assert _decrypts("src/api/routers/system.py", source), source
+
+
+def test_the_decrypt_scan_leaves_storing_and_describing_alone() -> None:
+    source = (
+        "from src import crypto\n"
+        "from src.db.repos import secrets as secret_repo\n"
+        "crypto.key_problem(k); crypto.encrypt(p, k)\n"
+        "secret_repo.describe(c, n); secret_repo.set_secret(c, n, p, k, a)\n"
+        "flags.get(x); cache.get(y)\n"
+    )
+    assert _decrypts("src/api/routers/system.py", source) == []
+
+
+def test_only_the_programme_decrypts_a_stored_secret() -> None:
+    """
+    The API holds ``SECRETS_KEY`` beside the broker keys (docs/08 open item 6)
+    and, since phase B, loads the catalogue that names TypeSafe's host, because
+    the configuration form validates the pin. Holding the means to decrypt is
+    one step from using them; this keeps that step in the programme, whatever
+    spelling of a vendor's URL a future "check the key" button would build.
+    """
+    offenders: list[str] = []
+    allowed_reads: list[str] = []
+    for path in _decrypting_files():
+        relative = path.relative_to(ROOT).as_posix()
+        found = _decrypts(relative, path.read_text(encoding="utf-8"))
+        if relative.startswith(_MAY_DECRYPT):
+            allowed_reads += found
+        else:
+            offenders += found
+    # Guards the guard: the programme's own vault reads are visible to it.
+    assert any(r.startswith("src/programme/main.py") for r in allowed_reads), (
+        allowed_reads
+    )
+    assert not offenders, (
+        "a stored secret is decrypted outside src/programme:\n" + "\n".join(offenders)
+    )
