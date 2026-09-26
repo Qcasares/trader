@@ -559,7 +559,7 @@ inert while the backtest continues to honour them.
   exercised by unit tests against fabricated replies and by nothing else. The
   gates, the reconciliation and the promotions do not need the model and are
   tested end to end against real Postgres.
-- **Jev is built dark, and has never been called.** TypeSafe AI's System One
+- **Jev is built dark, and only the key check has called it.** TypeSafe AI's System One
   model is to categorise research and operations, record signals, and — on
   paper only, and only once the proposed Rule 5 amendment is in force — make
   direct decisions. `docs/08-jev-integration.md` is the plan, the verified
