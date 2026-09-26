@@ -78,7 +78,7 @@ predicting the live system, which is worse than the bug being fixed.
    the permission; without it the separation is a convention that one import
    would end. `src/api` may read the programme's rows (`repo`, `flags`,
    `gates`) and may not import its runner (`tick`, `author`, `client`, `main`,
-   `panel`, and the future `jev_client` and `jev_lane`), which would drag an
+   `panel`, `jev_client` and `jev_lane`), which would drag an
    SDK into the process that commands the worker.
 
    An amendment admitting typed Jev answers to a paper-only order path is
@@ -160,9 +160,21 @@ cd web && npm run dev                        # Next.js frontend
 # read at all. The API key stays in the environment: it is a credential, and it
 # belongs to the one process permitted to hold a model client.
 
-# The programme's dependencies. Deliberately a third file: `anthropic` must not
-# be installed alongside the broker credentials.
-pip install -r requirements-programme.txt
+# The programme's dependencies. Deliberately a third file: the model SDKs,
+# `anthropic` and `typesafe-sdk`, must not be installed alongside the broker
+# credentials. The .txt is what a person edits; what is installed — by the
+# image, programme.yml, CI and a developer alike — is its hash-locked closure,
+# wheels only.
+pip install --require-hashes --only-binary :all: -r requirements-programme.lock
+
+# After editing requirements-programme.txt or requirements.txt, regenerate the
+# lock from the repository root with uv from a throwaway virtualenv (uv is a
+# tool, not a dependency of anything here), and commit both files. uv keeps
+# every existing pin that still satisfies the source; --upgrade moves them all.
+python -m venv /tmp/uv && /tmp/uv/bin/pip install uv
+/tmp/uv/bin/uv pip compile requirements-programme.txt --generate-hashes \
+    --python-version 3.11 --python-platform x86_64-manylinux_2_28 \
+    -o requirements-programme.lock
 
 # Backend stack (db, api, worker) — the frontend deploys to Vercel
 docker compose up --build
@@ -177,6 +189,21 @@ TEST_DATABASE_URL=postgresql://localhost/trader_test \
     pytest tests/ -q                                     # includes integration
 pytest tests/unit/test_parity.py -q                      # the important one
 ruff check src/ tests/
+
+# The Jev client against the real TypeSafe SDK, a fake TypeSafe server over
+# real HTTP, and one call end to end into the ledger. Needs the programme's
+# lock installed (above) plus `pip install pytest pytest-asyncio`; the
+# end-to-end module also needs TEST_DATABASE_URL. Without the SDK every module
+# skips itself and pytest exits 5, having collected nothing, so CI's `programme
+# sdk` job, which runs exactly this, fails rather than pass on nothing.
+pytest tests/sdk -m sdk -q
+
+# Does the TypeSafe key work? Lists the models the key may use (no tokens),
+# asks the connectivity probe once through the shipped client, judges the
+# answer as the lane would, records nothing and prints no secret. Needs the
+# lock installed. `jev-check.yml` runs it by dispatch with the repository
+# secret, holding that key and nothing else.
+TYPESAFE_API_KEY=… python -m src.programme.jev_check
 
 # Browser journey — needs the whole stack running, so it is not in CI
 .venv/bin/python tests/e2e/test_browser_journey.py
@@ -201,23 +228,33 @@ Both commands above lint and run everything. The only `ruff` exclusion left is
 `src/bankr_client.py` and its test — a reference file no strategy imports,
 where reformatting buys nothing and risks breaking the reference.
 
-`anthropic` is deliberately absent from `requirements.txt` and
-`requirements-dev.txt`. The engine must run, and be testable, without an LLM
-SDK anywhere near it; `src/llm/commentary.py` and `src/programme/client.py`
-both import it lazily and degrade rather than fail without it.
+`anthropic` and TypeSafe's `typesafe-sdk` are deliberately absent from
+`requirements.txt` and `requirements-dev.txt`. The engine must run, and be
+testable, without an LLM SDK anywhere near it; `src/llm/commentary.py` and
+`src/programme/client.py` both import `anthropic` lazily and degrade rather
+than fail without it, and `src/programme/jev_client.py` imports `typesafe_sdk`
+lazily, so it loads anywhere and only a call needs the SDK.
 
-It lives in `requirements-programme.txt`, installed only by the programme
-process and by `Dockerfile.programme`. Two images rather than one, so the
-boundary holds at runtime as well as in review: the worker container, which
-holds the broker credentials, could not import an LLM client if its code tried.
-The whole unit suite therefore runs on `requirements-dev.txt` alone — every
-gate, validator and parser in `src/programme` is testable with no SDK present.
+They live in `requirements-programme.txt`, whose hash-locked closure,
+`requirements-programme.lock`, is installed only by the programme process, by
+`Dockerfile.programme` and by CI's `programme sdk` job. Two images rather than
+one, so the boundary holds at runtime as well as in review: the worker
+container, which holds the broker credentials, could not import an LLM client
+if its code tried. The whole unit suite therefore runs on
+`requirements-dev.txt` alone — every gate, validator and parser in
+`src/programme` is testable with no SDK present.
 
 `.github/workflows/ci.yml` runs ruff, the unit suite and the integration suite
 against a real Postgres on every pull request, installing only
-`requirements.txt`. Parity and the import boundaries get their own named
-steps: when they break, the failure should say so in the checks list rather
-than hide in a wall of dots.
+`requirements.txt` in the job that runs them. A second job, `programme sdk`,
+installs the programme's lock to run `tests/sdk`: the one CI job holding a
+model SDK, allowed it because it holds no secret and its token can only read.
+`jev-check.yml` is the only other workflow besides `programme.yml` that
+installs it: dispatch only, one job, a read-only token, and the TypeSafe key as
+its one secret (`test_dependency_boundaries.py::test_the_jev_check_holds_the_model_key_and_nothing_else`).
+Parity and the import boundaries get their own named steps: when they break,
+the failure should say so in the checks list rather than hide in a wall of
+dots.
 
 ## Architecture
 
@@ -250,7 +287,7 @@ than hide in a wall of dots.
 | `src/api/` | FastAPI control plane |
 | `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
-| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` is everything the model may write and what happens to it first; `roles.py` is the twelve specialists as vocabulary and `panel.py` is the one function that asks a model to speak as one; `flags.py` holds the fail-closed switches and settings; `models.py` is the provider/model/effort catalogue; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either |
+| `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` is everything the model may write and what happens to it first; `roles.py` is the twelve specialists as vocabulary and `panel.py` is the one function that asks a model to speak as one; `flags.py` holds the fail-closed switches and settings, Jev's among them; `models.py` is the provider/model/effort catalogue; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either. For Jev: `jev_catalogue.py` is the pin, the limits and the vocabulary, pure and API-importable; `jev_questions.py` the versioned, golden-hashed question sets and their enumerated state models; `jev_features.py` turns prices into the decision lane's point-in-time state; `jev_validate.py` judges a raw response strictly and never raises; `jev_repo.py` is the ledger's queries, SDK-free; `jev_client.py` is the only importer of `typesafe_sdk`; `jev_lane.py` is the one road to Jev — gate, pin, hash, replay or call once, validate, record; and `main.py` runs Jev's jobs beside the tick |
 | `web/` | Next.js frontend |
 
 ### Structural guarantees
@@ -305,11 +342,32 @@ Each is enforced by a test, not by discipline:
 | Shadow lives in the worker, and the test says why | `src/programme` may not import `live_job`, so the programme enqueues `shadow_decision` and the worker runs it. `test_shadow_mode_lives_in_the_worker_because_of_that_boundary` fails if someone moves it, and explains the fix is to move it back |
 | The API cannot reach a model client *transitively* | Every check in `test_import_boundaries.py` used to read one module's own imports, which is enough for a direct `import anthropic` and not enough for an indirect one. `test_the_programme_modules_the_api_imports_hold_no_client` walks the closure, and found a real hole: `src/api` imports `roles` for the role vocabulary, and `roles` imported `client`. `assess` now lives in `panel.py`, which nothing in `src/api` imports |
 | Nothing that can move money imports a model client, loads the runner, or names a model vendor's host | `test_import_boundaries.py` builds one import graph of `src/` — `from a import b` read as `a.b` (the old check compared the module alone, so `from src.programme import tick` passed it), relative and function-level imports resolved, package `__init__`s followed, a star import read through a literal `__all__` — and walks the closure from **every** protected package, not only `src/api`, and from the entry points outside `src/`: `api/index.py` and the two scripts that build the API, as `api`; `tests/e2e/broker_check.py` and `src/db/migrate_cli.py`, as the worker. `broker_check`, which places orders, was once missing, so `test_every_credentialed_workflow_command_is_walked` now checks the list against every workflow holding `secrets.ALPACA_*`, `secrets.BANKR_*` or `secrets.DATABASE_URL`, the programme's own command excepted because the reverse boundary binds it. `FORBIDDEN_PREFIXES`, matched on whole dotted segments, adds the TypeSafe names (`typesafe_sdk`, `typesafe`, `typesafe_ai`, `jev`, and `cooksafe`, TypeSafe's own cookbook helper) and the other model SDKs; `httpx2`, the SDK's transport, is deliberately absent, being a general HTTP client like `aiohttp`. `RUNNER_ONLY` adds `panel`, `jev_client` and `jev_lane`. `test_the_order_path_cannot_reach_the_programme_at_all` keeps the decision path and the worker out of `src/programme` entirely. `test_nothing_guarded_imports_by_a_computed_name` reads a direct loader call with literal arguments — `import_module`, `__import__` with its fromlist, `resolve_name`, `pydoc.locate`, uvicorn's `import_from_string` — as the import it is, and refuses the rest: a computed name or fromlist, an aliased or stored loader, `getattr` on a loader module, `runpy`, the spec and path loaders, `exec`/`eval`/`compile`, and a star import through a non-literal `__all__` (`test_a_star_import_is_read_through_all_or_refused`). It reads spellings; it is not a sandbox — a loader it does not know (`mock.patch` with a dotted target, unpickling) is a reviewer's to catch. And because `aiohttp` reaches a model with no import to catch, `test_only_the_jev_modules_spell_the_typesafe_endpoint` keeps `api.typesafe.ai` out of every file but two across `src/`, `web/src/`, `api/`, `scripts/` and the entry points, and `test_nothing_that_can_move_money_names_a_model_vendor_host` refuses a list of vendors' and routers' API hosts in every module a protected process loads and anywhere in `web/src`. The list closes the likely spellings, not every one |
-| A model SDK is installed only where it may be imported | `test_dependency_boundaries.py` reads requirements as pip does, includes followed, plus the Dockerfiles, compose and workflows: a model SDK is declared only in `requirements-programme.txt`, installed only by `Dockerfile.programme`, built only by the `programme` service and installed only by `programme.yml` — `worker.yml` *is* the worker, with the broker keys. The one TypeSafe name allowed is `typesafe-sdk`, from PyPI. `cooksafe` and npm's `@typesafe-ai/sdk` are TypeSafe's own and refused anyway: the programme may hold the SDK and nothing beside it, and the frontend holds no model client. `httpx2` is not a model SDK, and `test_test_tooling_may_install_httpx2` keeps starlette's migration to it open. Nothing redirects pip or uv to another index. None of the eight lookalike hosts docs/08 fact 9 names appears, as a host or a subdomain, in `src/`, `web/src/` or the files that install, build and deploy them; the scan once read three of the eight, and `test_every_host_the_doc_names_is_scanned` now holds it to the doc |
+| A model SDK is installed only where it may be imported | `test_dependency_boundaries.py` reads requirements as pip does, includes followed, plus the Dockerfiles, compose and workflows: a model SDK is declared only in `requirements-programme.txt` and its lock, installed only by `Dockerfile.programme`, built only by the `programme` service and installed only by `programme.yml` — `worker.yml` *is* the worker, with the broker keys — and by one CI job. `ci.yml` is read job by job, because each job has its own runner: `programme sdk` may install the lock because it references no secret, its token can only read, and it runs nothing but `-m sdk` tests, a marker pyproject.toml registers (`test_ci_holds_a_model_sdk_only_in_a_job_that_holds_nothing_else`, proved on synthetic workflows first by `test_ci_refuses_a_model_sdk_beside_anything_else`; `test_the_marker_ci_selects_is_registered`), and the job running the unit suite may install no SDK at all, which is what keeps "testable with no SDK present" checked (`test_the_unit_suite_runs_where_no_model_sdk_is_installed`). The job reader is checked against PyYAML's, which also proves every workflow parses (`test_the_job_reader_agrees_with_yaml`). The one TypeSafe name allowed is `typesafe-sdk`, from PyPI. `cooksafe` and npm's `@typesafe-ai/sdk` are TypeSafe's own and refused anyway: the programme may hold the SDK and nothing beside it, and the frontend holds no model client. `httpx2` is not a model SDK, and `test_test_tooling_may_install_httpx2` keeps starlette's migration to it open. Nothing redirects pip or uv to another index. None of the eight lookalike hosts docs/08 fact 9 names appears, as a host or a subdomain, in `src/`, `web/src/` or the files that install, build and deploy them; the scan once read three of the eight, and `test_every_host_the_doc_names_is_scanned` now holds it to the doc |
+| The programme installs exactly the tree that was checked | `requirements-programme.lock` is the closure of `requirements-programme.txt`, every package pinned to one version and every file to a sha256, and everything that builds, deploys or tests the programme installs it with `--require-hashes --only-binary :all:` — wheels only, because pip does not hash-check what it fetches to build an sdist. `typesafe-sdk` is exactly 0.7.1 — 0.5.7, 0.6.0 and 0.7.0 echo a malformed key into an error — and exactly the two files of it whose attestation was checked; its dependencies, attested by nobody, are locked with it. `test_dependency_boundaries.py::test_the_lock_pins_every_file_it_installs`, `::test_typesafe_sdk_is_the_release_whose_provenance_was_checked`, `::test_the_lock_covers_what_the_programme_declares`, `::test_the_jev_client_imports_only_what_the_programme_declares`, `::test_the_lock_was_resolved_for_the_python_that_installs_it`, `::test_the_programme_set_is_installed_as_the_lock_hash_checked` and `::test_the_programme_set_is_refused_wherever_the_programme_is_not` |
 | An effort level the model rejects is refused, not sent | Effort is a per-model capability — Haiku 4.5 has none and sending one is a 400 on *every* subsequent pass. `src/programme/models.py` carries the supported levels per model, `client.ask_json` omits `output_config` entirely where there are none, and the same `settings_problem` runs at the form and at the row |
 | Unusable model settings mean no model call | `flags.model_settings` returns `None` on a missing row, an unreadable value or one the catalogue refuses, and `run_tick` treats that as "reconcile, evaluate and promote, but call nothing". Falling back to a default would spend at a vendor under a configuration nobody chose and write the result into the ledger as though somebody had |
 | A model client is never handed a tool | `test_the_model_client_passes_no_tools` refuses the strings `tools` and `tool_choice` anywhere in `client.py` — keyword *or* dict key, since the request is assembled as a dict so `output_config` can be omitted. `test_model_request.py` asserts the same at the wire |
-| Neither the worker nor the programme holds both a venue key and a model key | Only the API, the worker and the programme load `env_file: .env`, so between them possession is decided by blanking. The worker blanks `SECRETS_KEY`, `ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY`; the API both model keys; the programme `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` and `BANKR_API_KEY`, because a venue key needs no import to use. `db` loads no `env_file` — it once held every key at once — and is passed `POSTGRES_USER`, `POSTGRES_DB` and `POSTGRES_PASSWORD` by name; `web` loads none. `test_secret_isolation.py` asserts both directions against compose and the workflows, takes the broker key names from `src/config.py` rather than a list, counts only `""` as a blank (a bare `NAME:` passes the shell's value through), refuses a model key read from the environment outside `src/programme`, and refuses the reseller's `JEV_API_KEY` anywhere in product files. `TestEveryComposeServiceIsAccountedFor` reads the services from the file rather than naming three, allows the shared file to those three alone, refuses a key's name in any other service, and renders the file through `docker compose config` with a sentinel for every key to check what each container receives (skipped where compose is absent). Not the API: it holds the broker keys beside `SECRETS_KEY`, which decrypts the stored model key, for `broker_configured` — docs/08 open item 6. And every compose service that connects does so as a superuser, whose `COPY ... FROM PROGRAM` reaches the database container's environment — open item 12 |
+| Neither the worker nor the programme holds both a venue key and a model key | Only the API, the worker and the programme load `env_file: .env`, so between them possession is decided by blanking. The worker blanks `SECRETS_KEY`, `ANTHROPIC_API_KEY` and `TYPESAFE_API_KEY`; the API both model keys; the programme `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` and `BANKR_API_KEY`, because a venue key needs no import to use. `db` loads no `env_file` — it once held every key at once — and is passed `POSTGRES_USER`, `POSTGRES_DB` and `POSTGRES_PASSWORD` by name; `web` loads none. `test_secret_isolation.py` asserts both directions against compose and the workflows, takes the broker key names from `src/config.py` rather than a list, counts only `""` as a blank (a bare `NAME:` passes the shell's value through), refuses a model key read from the environment outside `src/programme`, and refuses the reseller's `JEV_API_KEY` anywhere in product files. `TestEveryComposeServiceIsAccountedFor` reads the services from the file rather than naming three, allows the shared file to those three alone, refuses a key's name in any other service, and renders the file through `docker compose config` with a sentinel for every key to check what each container receives (skipped where compose is absent). Not the API: it holds the broker keys beside `SECRETS_KEY`, which decrypts the stored model keys, for `broker_configured` — docs/08 open item 6. And every compose service that connects does so as a superuser, whose `COPY ... FROM PROGRAM` reaches the database container's environment — open item 12 |
+| A Jev answer is recorded once and replayed forever | Jev is not deterministic, so a second call would not check the first: it would be a second answer with an equal claim to be right. `jev_lane.ask` hashes the pinned model, the state with its keys sorted and the questions in the order asked, and looks the hash up before it sends anything; the partial unique index `jev_requests_canonical` admits one `ok` row per hash outside the probe lane, and the writer that loses a race for it replays the winner. A probe always asks and is never replayed. `test_jev_schema.py::TestTheCanonicalAnswerIsRecordedOnce`, `test_jev_repo.py::TestTheCanonicalRace`, `tests/unit/test_jev_lane.py::TestARecordedAnswerIsReplayed`, `::TestTheRaceForTheCanonicalAnswer` and `::TestAProbeAlwaysAsks`, and `tests/sdk/test_jev_lane_over_http.py::TestOneCallEndToEnd`, where the second ask makes no HTTP request at all |
+| The Jev ledger cannot be tidied | All six Jev tables refuse UPDATE, DELETE and TRUNCATE with an exception — not the silent no-op `hypotheses` uses, because a caller editing an answer is rewriting what the model said and should hear so at once — and TRUNCATE by a statement trigger, which a row trigger never sees. `web_documents` allows one change, a quarantine from false to true with a reason, the rest of the row compared whole through `to_jsonb`. `test_jev_schema.py::TestTheLedgerIsAppendOnly` and `::TestQuarantineIsOneWay` read each row back after the refusal |
+| When a Jev row became readable is the database's to say | `available_at` on `jev_requests` and `jev_signals` is overwritten on insert with `clock_timestamp()`, whatever the writer offers — not `now()`, which a transaction held open across a decision cutoff would date too early — and `jev_signals.backfilled` is generated from it, so liveness is written by nobody. The daily budget counts from UTC midnight by the stamp, not by the caller's `requested_at`. A data-only restore therefore needs `--disable-triggers`. `test_jev_schema.py::TestAvailabilityIsStampedByTheDatabase` and `::TestBackfilledIsDerivedNotWritten`; `test_jev_repo.py::TestRequestsToday` |
+| A Jev request row carries only the response it got | CHECKs hold each row to its status: `ok` and `invalid` carry a 2xx and the body they were validated from, `IS NOT NULL` spelled out because a CHECK that evaluates to NULL passes; an `ok` row was answered by the model it asked; a refused row got no response; and nothing a response carries — body, request id, answering model — is stored without an HTTP status, which keeps exception text, and any key an SDK before 0.7.1 echoed into one, out of `raw_body`. A request and its answers are one write, a savepoint inside a caller's transaction, and `questions` is `json`, not `jsonb`, so a stored row recomputes its own hash. `test_jev_schema.py::TestARowCarriesOnlyTheResponseItGot`, `test_jev_repo.py::TestAnExchangeIsOneWrite` and `::TestRecordRequest::test_the_stored_request_recomputes_its_own_hash` |
+| A Jev response is judged from its raw body, and judging never raises | The SDK's parse reads `NaN`, keeps the last of a repeated name and defaults `answers` to `{}`, so `jev_validate.validate_body` parses the body itself as strict JSON and applies docs/08 fact 3: the pinned model, checked against the catalogue as well as compared; each question judged on its own answer; probabilities keyed exactly and summing to 1 ± 0.02 as the decimals written; the argmax recomputed. It returns a verdict for anything, because a call that was billed must be recorded, and a defect in the module itself refuses every answer as `validator_error`. `test_jev_validate.py::TestNothingRaisesOnAnyInput` judges 4,000 seeded bodies against an independently written copy of the rules; `::TestAResponseThatIsNotJSONIsRefusedWhole` |
+| An invalid Jev answer is not measured, and a valid one is a measurement | An invalid answer is recorded with its reason and read downstream as not measured, never as 0. A Choice that is not its own argmax — SDK issue #15, the vendor's `choice` 0.01 below another option — is an abstention, and `true` is not 1. The schema holds the other side: a valid row carries its value, argmax and margin and no reason, and a valid Choice is its own argmax, so a validator that stopped refusing #15 still could not write one. `test_jev_validate.py::TestAChoice::test_a_choice_that_is_not_the_most_probable_is_an_abstention` and `::TestANoul::test_true_is_not_1`; `test_jev_schema.py::TestAValidAnswerIsAMeasurement` |
+| A signal's origin is its answer's, not its writer's claim | From phase F the decision path's loader is to trust `provenance = 'internal'`, and a provenance a writer could simply claim would reopen the prompt-injection route that filter closes. The trigger `jev_signals_rest_on_their_answer` requires a signal's lane, provenance and pack hash to be its request's, and a `measured` signal to rest on a valid answer to an `ok`, non-probe request from the model it names; a mismatch raises. `test_jev_schema.py::TestASignalRestsOnItsAnswer` |
+| Only one reader and one writer touch the signals | SQL is a string, so no import scan sees it: a module that never imports `jev_repo` can still query `jev_answers` or write `jev_signals` through the connection it already holds. Outside `src/programme` only `src/db/repos/signals.py` (phase F) may name a Jev table, so the decision path has one reader with one fixed filter; only `jev_lane` may write `jev_signals`; and `client`, `author`, `panel` and `tick`, which hold a generative model, never name it. String literals and f-string parts are scanned, each scanner proved against sources that must trip it. `tests/unit/test_jev_table_boundaries.py` |
+| Evidence remembers the model signals it used, and a forward experiment is paper | `candidates.evidence_uses_model_signals` cannot be cleared once set, by trigger, where `evidence_is_synthetic` is sticky only by convention; the five signal-provenance columns on `backtest_runs` and `walkforward_runs` are all NULL or all set, since half a provenance says nothing; and `deployments_forward_experiment_is_paper` makes a `forward_experiment` paper-only and never owner `default`, so relaxing it takes a migration. `test_jev_schema.py::TestModelSignalEvidenceIsSticky`, `::TestRunsRecordTheSignalsTheyUsed` and `::TestAForwardExperimentIsPaperAndNeverTheOperatorsBook` |
+| A Jev question's words cannot change under its version | A threshold is per set, per question and per model, so answers to old words pooled with answers to new ones describe a question nobody asks. Every registered set has a golden pack hash — its name, version, lane, provenance and questions in order, never key-sorted, since option order is part of what the model reads — and the regime set's instructions render the windows and bucket edges `jev_features` computes with exactly, so moving a band from 1% to 1.2% changes the hash. Every Choice carries exactly one escape option, last. `test_jev_questions.py::TestTheGoldenHashes` and `::TestEveryChoiceCarriesAnEscape` |
+| The decision lane's state cannot carry a date | Jev holds world knowledge with no disclosed cutoff, and a date, a ticker or an exact figure lets it recall what happened next instead of judging what it was shown. A decision-lane state model may hold only Literal labels, booleans and models built from them, and no computed field or serializer; `QuestionSet.dump_state` takes exactly the registered model, because a subclass passes `isinstance` and can add a computed `as_of`; and `jev_features.regime_state` reads `adj_close` through `PricePanel.at(session)` and returns `None`, never a partial state. `test_jev_questions.py::TestTheDecisionStateIsEnumerated` and `::TestDumpingAState`; `test_jev_features.py::TestNoLookAhead`, `::TestMissingIsNone` and `::TestEachWindowIsExactlyAsLongAsDefined` |
+| Jev is pinned, and an alias is refused | `jev-latest` answers with whatever TypeSafe released last, and every threshold is per model. `jev_catalogue.model_problem` accepts only a versioned id in `KNOWN_MODELS`, refusing the aliases by name in any case or spacing; `flags.jev_model` returns only what it accepts, with no default; the client refuses anything else before the SDK is imported; the validator refuses a response naming another model; and an `ok` row's answering model is its requested one. `test_jev_catalogue.py::TestTheModelIsPinned`, `test_jev_flags.py::TestTheModelIsPinned`, `test_jev_validate.py::TestTheAnswersMustComeFromThePinnedModel` |
+| The Jev switches fail closed | Seeded off by migration 0012 and read through `flags.py` with `programme_enabled`'s broad `except`. A switch is on only for a stored JSON `true`; an area needs the master switch and its own, and a name that is not an area is off with no row read; the budget and the state limit read 0, no request, on any failure and on anything the catalogue's `settings_problem` refuses — above its ceiling included, rather than clamped, since a spend control that corrects itself upward is one nobody can reason about. `test_jev_flags.py::TestEveryReaderFailsClosed`, `::TestEverySwitchIsOnOnlyForJsonTrue`, `::TestTheAreaSwitches`, `::TestTheCountsFailClosedToZero` and `::TestTheReadersReadTheSeededKeys`; on Postgres, `test_jev_schema.py::TestTheSwitchesAreSeededOff::test_they_read_as_off_through_the_shipped_readers` |
+| Jev off, no model or no key: nothing written, nothing sent | `jev_lane.ask` checks its arguments before any switch, then the switches, the pin, the ledger, the key, the budget and the size. A switch off, no usable model, an answer on record and no key write no row: standing states, a model nobody can name, and an answer already there. Over the daily budget or the size limit writes a `refused_budget` or `refused_limits` row and sends nothing. `tests/unit/test_jev_lane.py::TestTheArgumentsAreCheckedFirst`, `::TestSwitchedOffWritesNothing`, `::TestNoUsableModelWritesNothing`, `::TestNoKeyWritesNothing`, `::TestTheBudget` and `::TestTheSizeLimit`; `tests/integration/test_jev_lane.py::TestNothingIsWrittenWithoutARequest` and `::TestARefusalIsRecordedAndSendsNothing` |
+| The Jev request that leaves is the request that was hashed | The SDK resolves `TYPESAFE_BASE_URL` with no host check and falls back to `TYPESAFE_DEFAULT_MODEL` and then `jev-latest`. `jev_client` passes the catalogue's base URL, the pin and the key on every call, never names `extra_body`, `extra_headers` or `response_model`, and builds the SDK's `httpx2` client itself, with redirects refused. `tests/sdk/test_jev_client.py::TestWhatLeavesIsWhatWasHashed` records the original URL through a redirecting transport with all three variables set elsewhere, and `test_jev_client_offline.py::TestTheRequestIsNeverRewritten` reads the source. `transport` is a test seam production never passes: `test_jev_client_offline.py::TestNothingInSrcHandsTheClientATransport::test_production_code_never_passes_one` and `tests/unit/test_jev_lane.py::TestTheTransportIsATestSeam` |
+| Jev's evidence is what came off the wire | The SDK hands its errors a body it has already parsed and accepts `NaN` in a 200, so a response hook keeps the final attempt's response exactly as it arrived. `raw_body` is those bytes as UTF-8, an undecodable byte or a NUL marked by U+FFFD; the request id is the header's, `None` when absent; every failure returns a `JevCall` classed by `error_kind`, a 403 `auth` with a JSON body and `content_block` without. A 2xx the SDK refused is still judged by the validator, its objection kept in `error_class` and `error_kind`. `tests/sdk/test_jev_client.py::TestASuccessIsRecordedAsItArrived` and `::TestEveryFailureIsClassedWithItsEvidence`; `tests/unit/test_jev_lane.py::TestA2xxTheSDKCouldNotReadIsJudgedByTheValidator`; and `tests/sdk/test_jev_lane_over_http.py::TestAFailureIsARowWithTheEvidenceItHad`, which follows each case into a ledger row |
+| A Jev call is billed at most twice, and waits on nobody's say-so | The SDK's default makes three attempts at a POST with no idempotency key, and honours `Retry-After` uncapped. Here: one retry, for 429, 500, 502, 503, 504 and 529, a failed connection or a timeout, inside 20 s, each attempt timed out at 10 s, `Retry-After` not deferred to; and a sliding window beneath the vendor's limits admits every attempt, retries included. `tests/sdk/test_jev_client.py::TestRetriesAreCapped`, `test_jev_client_offline.py::TestTheRateLimiter` |
+| Nothing sent to Jev reaches a log | At DEBUG the SDK logs whole request and response bodies, and it reads `TYPESAFE_LOG_LEVEL` once, at import. `jev_client` sets it `off` before its lazy import, then holds the `typesafe_sdk` logger above CRITICAL with a filter that drops every record, on every call, so a later logging configuration cannot undo it; the lane logs neither the state nor the body. `tests/sdk/test_jev_client.py::TestNothingReachesALog`, down to a fresh process told to log at DEBUG; `test_jev_client_offline.py::TestTheSDKIsImportedLateAndSilenced`; `tests/unit/test_jev_lane.py::TestNothingSentReachesALog` |
+| Every job kind has exactly one owner | `jobs` has two consumers. The programme claims only `JEV_HANDLERS` — today `jev_probe` — read at claim time as the worker reads `HANDLERS`, and only while `programme_enabled` and `jev_enabled` are both on: two independent switches, both required, neither derived from the other, so switching the programme off stops Jev's spend as well as the tick's. With either off a queued job waits, its attempts untouched. A running job's lease is extended every 60 s, and a failure's error has the key redacted. `test_job_ownership.py::TestEachKindHasOneOwner` and `::TestEveryEnqueuedKindHasExactlyOneOwner` hold the two tables disjoint and every kind enqueued in `src/`, each spelled as a literal, to one of them, and refuse an `INSERT INTO jobs` anywhere in `src/` but `jobs.py`, which the scan would not see; `::TestTheProgrammeClaimsOnlyItsOwnKinds` and `::TestTheProgrammeRunsWhatItClaims`; `tests/integration/test_jev_lane.py::TestTheProgrammeLoop` |
+| A stored credential's fallback is documented and delivered | The programme reads each model key from the vault first and its environment second. When `typesafe_api_key` joined `KNOWN_SECRETS`, documenting its fallback in `.env.example` and passing it in `programme.yml` were steps to remember; `test_env_example_is_complete.py::TestTheVaultAndTheEnvironmentAgree` now requires both of every stored secret. `TestTheDangerousDefaultsAreSafe::test_no_secret_has_a_value` finds credentials by the ending of their names rather than a list, which checked `SECRETS_KEY` for the first time |
 
 ## Adding a strategy
 
@@ -353,7 +411,7 @@ Key tables: `daily_bars` (raw prices, `source` in the PK so vendors can be
 reconciled), `backtest_runs`/`backtest_equity`/`backtest_orders`,
 `deployments`/`decisions`/`orders`/`fills`, `daily_marks`, `walkforward_runs`,
 `system_flags` (the kill switch, the programme's switch and autonomy ceiling,
-and the model settings), `jobs`, `audit_log`, `commentary`.
+the model settings, and the Jev switches), `jobs`, `audit_log`, `commentary`.
 
 The AI programme adds `programme_config` (the operating prompt's section 2,
 NULL meaning TBD), `hypotheses` (append-only), `candidates` (a hypothesis as one
@@ -366,6 +424,27 @@ of those carry rules rather than only columns — the no-delete rule on
 `hypotheses`, the immutable-preregistration trigger on `experiments`, and the
 operator-only closure constraint on `findings`. See the structural guarantees
 above before changing any of them.
+
+Migration 0012 adds the Jev ledger: `jev_requests` (every question put to Jev
+and every refusal to put one, with the state, the questions and the raw body),
+`jev_answers` (one per question asked, valid or not), and `jev_signals`,
+`web_documents`, `jev_labels` and `jev_evaluations`, created now and filled
+from phase C. All six refuse UPDATE, DELETE and TRUNCATE with an exception,
+`web_documents` allowing only a one-way quarantine with a reason.
+`available_at` is stamped by a trigger with `clock_timestamp()`, whatever the
+writer offers, and `jev_signals.backfilled` is generated from it. The partial
+unique index `jev_requests_canonical` admits one `ok` answer per request hash
+outside the probe lane; CHECKs hold each request row to its status and a valid
+answer to being a measurement, a valid Choice its own argmax; and a trigger,
+`jev_signals_rest_on_their_answer`, holds a signal's lane, provenance and pack
+to its answer's request. `questions` is `json`, not `jsonb`, so a stored
+request keeps its option order and recomputes its own hash. 0012 also makes
+`candidates.evidence_uses_model_signals` sticky, gives `backtest_runs` and
+`walkforward_runs` signal-provenance columns that are all NULL or all set,
+adds `deployments.evidence_class` with the CHECK
+`deployments_forward_experiment_is_paper`, and seeds the Jev switches, every
+one off. A data-only restore needs `--disable-triggers`, or every
+`available_at` becomes the moment of the restore.
 
 P&L is `equity_t − equity_{t−1} − net deposits`, from `daily_marks`, written by
 `src/db/repos/marks.py`. The legacy `get_daily_pnl` in
@@ -477,12 +556,19 @@ inert while the backtest continues to honour them.
   exercised by unit tests against fabricated replies and by nothing else. The
   gates, the reconciliation and the promotions do not need the model and are
   tested end to end against real Postgres.
-- **Jev is planned, not integrated.** TypeSafe AI's System One model is to
-  categorise research and operations, record signals, and — on paper only, and
-  only once the proposed Rule 5 amendment is in force — make direct decisions.
-  `docs/08-jev-integration.md` is the plan, the verified facts behind it, and
-  the record of each phase. Phase A, the safety prerequisites, is done: the
-  panel sits, enabling asks the gate, the worker claims only its own kinds, and
-  the import, dependency and key boundaries refuse Jev before it arrives. There
-  is no Jev code and no call has ever been made. The next live step needs a
-  TypeSafe key from an existing account, because TypeSafe has paused signups.
+- **Jev is built dark, and has never been called.** TypeSafe AI's System One
+  model is to categorise research and operations, record signals, and — on
+  paper only, and only once the proposed Rule 5 amendment is in force — make
+  direct decisions. `docs/08-jev-integration.md` is the plan, the verified
+  facts behind it, and the record of each phase. Phase A, the safety
+  prerequisites, is done: the panel sits, enabling asks the gate, the worker
+  claims only its own kinds, and the import, dependency and key boundaries
+  refuse Jev before it arrives. Phase B, the foundations, is done and switched
+  off: the ledger (migration 0012), the pure catalogue, question sets, features
+  and validator, the client and the lane, and a `jev_probe` job the programme
+  claims. Every Jev switch is seeded off, no lane is wired into the tick,
+  nothing in the API or the UI reads the ledger, and nothing enqueues the
+  probe yet. The client is tested against the real SDK and a fake TypeSafe
+  server over real HTTP, as is one call end to end into the ledger, but no
+  request has ever been sent to TypeSafe, because no key exists: the next live
+  step needs one from an existing account, since TypeSafe has paused signups.

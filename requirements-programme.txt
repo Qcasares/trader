@@ -14,19 +14,70 @@
 # `src/worker` or the decision path ever import one.
 #
 # `src/programme` is the single package permitted to hold a model client, and
-# it runs as its own process for exactly that reason. Putting `anthropic` here
+# it runs as its own process for exactly that reason. Putting the SDKs here
 # rather than in either file above keeps the permission and the process
-# boundary aligned: the API image and the worker image cannot import it because
-# it is not installed in them.
+# boundary aligned: the API image and the worker image cannot import them
+# because they are not installed in them.
 #
-# The programme's own tests do not need it either. `src/programme/client.py`
-# imports it lazily, so the package is importable and every gate, validator and
-# parser is testable without an SDK — which is why the unit suite runs on
-# requirements-dev.txt alone.
+# The programme's own tests do not need them either. `src/programme/client.py`
+# and `src/programme/jev_client.py` import their SDKs lazily, so the package is
+# importable and every gate, validator and parser is testable without an SDK —
+# which is why the unit suite runs on requirements-dev.txt alone.
+#
+# The lock
+# --------
+# This file is what a person edits. What the programme's image, its workflow
+# and CI's `programme sdk` job install is `requirements-programme.lock`: the
+# whole resolved tree of this file, every package pinned to one version and
+# every file to a sha256, installed with `--require-hashes`. A range here
+# says what is acceptable; the lock says what is installed, and pip refuses
+# any file whose hash it does not list, whichever index or proxy served it.
+#
+# Change this file (or requirements.txt, which it includes), regenerate the
+# lock with the command recorded at its top, run from the repository root,
+# and commit both. uv reads the lock it is about to overwrite and keeps every
+# pin that still satisfies this file, so a regeneration moves only what the
+# change requires; `--upgrade` moves everything, and should be a decision.
+# uv is a tool rather than a dependency of anything here: install it in a
+# throwaway virtualenv, not into these requirements.
+# tests/unit/test_dependency_boundaries.py fails when the lock no longer
+# covers what this file declares.
 # =========================================================================
 
 -r requirements.txt
 
-# The only LLM SDK in this repository, installed only in the process that is
-# forbidden from reaching an order.
+# Anthropic's SDK, for the hypothesis author and the specialist panel. One of
+# the two model SDKs in this repository, both installed only in the process
+# that is forbidden from reaching an order.
 anthropic>=0.40.0
+
+# TypeSafe AI's official SDK, for the Jev lanes (docs/08-jev-integration.md).
+#
+# Exact, not a floor. 0.5.7, 0.6.0 and 0.7.0 all echo an explicitly passed key
+# into connection-error text, given a key carrying an illegal header character
+# such as a trailing newline; 0.7.1 strips, validates and redacts it. It is
+# also the release whose provenance was checked: a PEP 740 attestation from
+# typesafe-ai/typesafe-sdk-python's publish.yml at v0.7.1, and a wheel
+# byte-identical to that tag (docs/08, fact 2).
+#
+# The name is exact too. `typesafe-ai`, `typesafe-client` and `jev` on PyPI
+# are not TypeSafe's, and no index but PyPI's is ever to be added, however
+# much its host looks like TypeSafe's (docs/08, fact 9 lists the lookalikes;
+# this file may not name them). Moving this pin is a deliberate act: check the
+# new release's provenance, regenerate the lock, and update the version and
+# the file hashes that tests/unit/test_dependency_boundaries.py holds it to.
+typesafe-sdk==0.7.1
+
+# The SDK's floor, stated here rather than left to its metadata.
+# requirements.txt says >=2.7.0, which is right for the API and the worker.
+# This process has one pydantic, shared by typesafe-sdk 0.7.1, which needs
+# >=2.12.0, and by the Jev question sets' state models, so the higher floor is
+# the one that binds here.
+pydantic>=2.12.0
+
+# The HTTP client the TypeSafe SDK runs on. Declared rather than left to arrive
+# with the SDK, because src/programme/jev_client.py imports it by name: it
+# builds the SDK's client itself, so that redirects are refused and the
+# response the ledger records is the one that came off the wire. A general
+# HTTP client, like aiohttp, and not a model SDK. The floor is the SDK's own.
+httpx2>=2.0.0
