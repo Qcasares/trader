@@ -14,6 +14,7 @@ the way the lane would, and did it keep the key out of everything it printed.
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any
 
 import pytest
@@ -66,6 +67,22 @@ def listed(*names: str) -> Reply:
 
 def answered(body: bytes) -> Reply:
     return Reply(status=200, body=body, headers=JSON)
+
+
+async def run_check(
+    monkeypatch: pytest.MonkeyPatch, transport: Redirect
+) -> jev_check.CheckReport:
+    """
+    ``jev_check.check`` against the fake vendor.
+
+    The check takes no transport — production code never hands the client one
+    — so the client's two calls are patched to carry this test's.
+    """
+    monkeypatch.setattr(
+        jev_client, "list_models", partial(jev_client.list_models, transport=transport)
+    )
+    monkeypatch.setattr(jev_client, "ask", partial(jev_client.ask, transport=transport))
+    return await jev_check.check(KEY)
 
 
 class TestTheListingGoesToTypeSafe:
@@ -163,11 +180,14 @@ class TestTheListingGoesToTypeSafe:
 
 class TestTheCheck:
     async def test_a_working_key_passes(
-        self, server: FakeTypeSafe, transport: Redirect
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        server: FakeTypeSafe,
+        transport: Redirect,
     ) -> None:
         server.script(listed("jev-1.12.0", PIN), answered(probe_body()))
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert report.passed, report.lines
         assert [s.url for s in transport.sent] == [MODELS_URL, SYSTEM_ONE_URL]
@@ -176,57 +196,57 @@ class TestTheCheck:
         assert any("as expected" in line for line in report.lines)
 
     async def test_a_refused_key_stops_before_a_question_is_asked(
-        self, server: FakeTypeSafe, transport: Redirect
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(Reply(status=401, body=b'{"detail":"no"}', headers=JSON))
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert not report.passed
         assert [s.url for s in transport.sent] == [MODELS_URL]
         assert any("console.typesafe.ai" in line for line in report.lines)
 
     async def test_a_pin_the_account_is_not_offered_stops_before_a_question(
-        self, server: FakeTypeSafe, transport: Redirect
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(listed("jev-1.12.0"))
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert not report.passed
         assert [s.url for s in transport.sent] == [MODELS_URL]
         assert any(f"pinned model {PIN}" in line for line in report.lines)
 
     async def test_the_wrong_answer_fails(
-        self, server: FakeTypeSafe, transport: Redirect
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(listed(PIN), answered(probe_body(p=0.03)))
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert not report.passed
         assert report.lines[-1] == "FAIL"
         assert any("expected true" in line for line in report.lines)
 
     async def test_an_answer_the_lane_would_not_measure_fails(
-        self, server: FakeTypeSafe, transport: Redirect
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(listed(PIN), answered(probe_body(model="jev-latest")))
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert not report.passed
         assert any("not measured" in line for line in report.lines)
 
     async def test_a_failed_probe_fails(
-        self, server: FakeTypeSafe, transport: Redirect
+        self, monkeypatch: pytest.MonkeyPatch, server: FakeTypeSafe, transport: Redirect
     ) -> None:
         server.script(
             listed(PIN),
             Reply(status=422, body=b'{"detail":[{"msg":"bad"}]}', headers=JSON),
         )
 
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
 
         assert not report.passed
         assert any("invalid_request" in line for line in report.lines)
@@ -243,11 +263,12 @@ class TestTheCheck:
     )
     async def test_the_key_is_never_printed(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         server: FakeTypeSafe,
         transport: Redirect,
         replies: tuple[Reply, ...],
     ) -> None:
         """Even a vendor that echoes the key back cannot get it printed."""
         server.script(*replies)
-        report = await jev_check.check(KEY, transport=transport)
+        report = await run_check(monkeypatch, transport)
         assert KEY not in "\n".join(report.lines)

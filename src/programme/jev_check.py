@@ -39,7 +39,6 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any
 
 from src.programme import jev_catalogue, jev_client, jev_questions, jev_validate
 from src.programme.jev_lane import PROBE_EXPECTED
@@ -66,14 +65,18 @@ class CheckReport:
         self.lines.append(line)
 
 
-async def check(api_key: str, *, transport: Any = None) -> CheckReport:
+async def check(api_key: str) -> CheckReport:
     """
-    Run the three steps with ``api_key``. ``transport`` is a test seam only.
+    Run the three steps with ``api_key``.
+
+    No transport is accepted, even as a test seam: production code never hands
+    the client one (``tests/unit/test_jev_lane.py::TestTheTransportIsATestSeam``),
+    so the tests reach the fake vendor by patching the client instead.
     """
     report = CheckReport()
     pin = jev_catalogue.DEFAULT_MODEL
 
-    listing = await jev_client.list_models(api_key=api_key, transport=transport)
+    listing = await jev_client.list_models(api_key=api_key)
     report.say(f"models: HTTP {listing.http_status}, request id {listing.request_id}")
     if listing.names is None:
         report.say(
@@ -97,7 +100,6 @@ async def check(api_key: str, *, transport: Any = None) -> CheckReport:
         model=pin,
         state=question_set.dump_state(question_set.state_model()),
         questions=questions,
-        transport=transport,
     )
     report.say(
         f"probe: HTTP {call.http_status}, request id {call.request_id}, "
