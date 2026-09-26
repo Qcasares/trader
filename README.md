@@ -37,7 +37,9 @@ and annualisation basis, and synthetic data is labelled everywhere it appears.
 
 ## Running it
 
-Locally, with Docker or without — see **[SETUP.md](SETUP.md)**.
+Locally, with Docker or without — see **[SETUP.md](SETUP.md)**. The shortest
+route is `scripts/local.sh setup` then `scripts/local.sh up`; and
+`scripts/local.sh check` runs the CI gates without GitHub Actions.
 
 ```bash
 docker compose --profile web up --build
