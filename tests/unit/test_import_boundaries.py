@@ -28,12 +28,13 @@ is therefore one function applied to the real tree *and*, in this same file,
 to synthetic sources that must trip it. A resolver that loses a route fails
 its own test before it can pass a real one.
 
-The boundary is also drawn ahead of the code it bounds. TypeSafe AI's System
-One ("Jev") will be reached through ``src/programme/jev_client.py``, the one
-module that may import ``typesafe_sdk``, with the constant base URL in
+The boundary was also drawn ahead of the code it bounds. TypeSafe AI's System
+One ("Jev") is reached through ``src/programme/jev_client.py``, the one module
+that may import ``typesafe_sdk``, with the constant base URL in
 ``src/programme/jev_catalogue.py`` so the API can show it without holding a
-client. Neither exists yet. The names are refused here first, so the first
-commit that adds them lands against a boundary rather than before one.
+client. The names were refused here in phase A, before either existed, so the
+phase B commit that added them landed against a boundary rather than before
+one.
 
 An import is not the only route to a model, and ``src/`` is not the only place
 a protected process runs from. ``aiohttp`` reaches any vendor given a URL, so
@@ -204,9 +205,9 @@ ORDER_CAPABLE_MODULES = ("src.execution", "src.worker")
 #:
 #: ``client`` and ``jev_client`` hold the SDKs. ``author`` and ``panel`` import
 #: ``client`` at module level, ``tick`` and ``main`` import those, and
-#: ``jev_lane`` will import ``jev_client``. The two Jev modules do not exist
-#: yet. Matching is on the *imported name*, not on a file being present, so
-#: ``from src.programme import jev_client`` is refused today.
+#: ``jev_lane`` imports ``jev_client``. Matching is on the *imported name*, not
+#: on a file being present, which is how ``from src.programme import
+#: jev_client`` was refused in phase A, before the module existed.
 RUNNER_ONLY = (
     "src.programme.tick",
     "src.programme.author",

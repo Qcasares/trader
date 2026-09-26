@@ -37,13 +37,28 @@ from src import crypto
 
 logger = logging.getLogger(__name__)
 
-#: The model API key. Named rather than free-form so a typo cannot quietly
-#: create a second secret nothing reads — the same reason `programme_config`
-#: refuses an unknown key.
+#: The Anthropic API key, which the programme uses to author hypotheses and
+#: convene the specialist panel. Named rather than free-form so a typo cannot
+#: quietly create a second secret nothing reads — the same reason
+#: `programme_config` refuses an unknown key.
 ANTHROPIC_API_KEY = "anthropic_api_key"
 
-#: Every secret this system knows how to store.
-KNOWN_SECRETS: tuple[str, ...] = (ANTHROPIC_API_KEY,)
+#: TypeSafe AI's key, for Jev. Read by the programme alone, and only by its Jev
+#: lanes, every one of which is off until an operator switches it on; the vault
+#: first and `TYPESAFE_API_KEY` in the programme's environment second, as for
+#: the Anthropic key.
+#:
+#: TypeSafe issues keys at console.typesafe.ai and nowhere else. Resellers with
+#: their own endpoints, and sites that ask for a real key, trade on the Jev name
+#: (docs/08-jev-integration.md, fact 9). The programme only ever sends this key
+#: to TypeSafe's own host, so a reseller's key stored here is merely refused;
+#: the loss is the other way round, a real key typed into one of those sites.
+TYPESAFE_API_KEY = "typesafe_api_key"
+
+#: Every secret this system knows how to store, in the order the configuration
+#: page lists them. The API's routes accept these names and no others, so this
+#: tuple is the whole of what an operator can set.
+KNOWN_SECRETS: tuple[str, ...] = (ANTHROPIC_API_KEY, TYPESAFE_API_KEY)
 
 
 @dataclass(frozen=True, slots=True)
