@@ -290,6 +290,101 @@ class TestKillSwitchSecondLayer:
 
         asyncio.run(check())
 
+    def test_open_orders_lists_what_the_venue_still_holds(self) -> None:
+        """
+        What the cancel job asks afterwards, because ``cancel_all`` reports a
+        wholesale failure as nothing cancelled. A cancel in flight is still
+        open, with the venue's own status, until the venue confirms it.
+        """
+
+        async def check(broker, server):
+            acks = [
+                await broker.submit(
+                    OrderIntent(symbol=s, side=Side.BUY, qty=Decimal("1"))
+                )
+                for s in ("SPY", "EFA", "IEF")
+            ]
+            server.fill(acks[0].broker_order_id, "100")
+            server.slow_to_cancel = {acks[2].broker_order_id}
+            before = await broker.open_orders()
+            await broker.cancel_all()
+            during = await broker.open_orders()
+            server.confirm_cancels()
+            after = await broker.open_orders()
+            return acks, before, during, after
+
+        acks, before, during, after = run(check)
+        assert {o["symbol"] for o in before} == {"EFA", "IEF"}
+        assert during == [
+            {
+                "id": acks[2].broker_order_id,
+                "client_order_id": acks[2].broker_order_id,
+                "symbol": "IEF",
+                "status": "pending_cancel",
+            }
+        ]
+        assert after == []
+
+    def test_cancel_order_cancels_one_by_its_id(self) -> None:
+        """
+        What the kill switch's job uses: its own orders by id, never the
+        account's whole book, so an order placed by hand is left alone.
+        """
+
+        async def check(broker, server):
+            ours = await broker.submit(
+                OrderIntent(symbol="SPY", side=Side.BUY, qty=Decimal("1"))
+            )
+            theirs = await broker.submit(
+                OrderIntent(symbol="EFA", side=Side.BUY, qty=Decimal("1"))
+            )
+            accepted = await broker.cancel_order(ours.broker_order_id)
+            return accepted, server.orders, ours, theirs
+
+        accepted, orders, ours, theirs = run(check)
+        assert accepted is True
+        assert orders[ours.broker_order_id]["status"] == "canceled"
+        assert orders[theirs.broker_order_id]["status"] == "accepted"
+
+    def test_an_order_the_venue_will_not_cancel_is_false_not_an_error(self) -> None:
+        """A filled order, or one the venue refuses while it fills: 422."""
+
+        async def check(broker, server):
+            filled = await broker.submit(
+                OrderIntent(symbol="SPY", side=Side.BUY, qty=Decimal("1"))
+            )
+            filling = await broker.submit(
+                OrderIntent(symbol="EFA", side=Side.BUY, qty=Decimal("1"))
+            )
+            server.fill(filled.broker_order_id, "100")
+            server.uncancellable = {filling.broker_order_id}
+            return (
+                await broker.cancel_order(filled.broker_order_id),
+                await broker.cancel_order(filling.broker_order_id),
+                server.orders[filling.broker_order_id]["status"],
+            )
+
+        assert run(check) == (False, False, "accepted")
+
+    def test_cancel_order_raises_when_the_venue_cannot_be_asked(self) -> None:
+        async def check():
+            broker = AlpacaBroker(KEY_ID, SECRET_KEY, base_url="http://127.0.0.1:1")
+            async with broker:
+                await broker.cancel_order("anything")
+
+        with pytest.raises(BrokerError):
+            asyncio.run(check())
+
+    def test_open_orders_raises_rather_than_report_an_empty_book(self) -> None:
+        """A venue that cannot be asked has not said nothing is open."""
+
+        async def check(broker, server):
+            server.listing_fails_with = 503
+            await broker.open_orders()
+
+        with pytest.raises(BrokerError, match="503"):
+            run(check)
+
     def test_close_position_liquidates_entirely(self) -> None:
         """
         Exits use close_position, not a notional sell — a notional order cannot

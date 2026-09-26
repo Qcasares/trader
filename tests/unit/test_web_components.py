@@ -42,9 +42,9 @@ amber "stopped".
    ``trading_enabled ? "settled" : "blocked"``, so a fresh deployment — which
    the migration leaves halted — opened on the same red cross as an open
    live-trading gate. And because the page now calls that state safe, it says
-   what the switch does not do: ``POST /system/kill`` only sets the flag, so an
-   order already at the venue stays there. That sentence is tied to the
-   route's own calls, and fails the other way once the route cancels.
+   what became of the orders already at the venue: ``POST /system/kill`` queues
+   a worker job that cancels them, and the note reports that job's state —
+   never assumes it — tied to the route's own calls.
 
 And one motion rule (5), because a class that compiles to nothing is a
 promise the page does not keep (M-4): no ``tw-animate-css`` class unless the
@@ -807,13 +807,13 @@ def test_system_asks_for_states_and_never_writes_blocked() -> None:
     )
 
 
-def _kill_cancels(source: str) -> bool:
-    """Whether the ``POST /kill`` route itself cancels anything at the venue.
+def _kill_queues_the_cancel(source: str) -> bool:
+    """Whether the ``POST /kill`` route queues the cancel at the venue.
 
-    Read from the route's own calls, not its docstring, which describes the
-    cancel a live deployment would make rather than one it does. A cancel made
-    inside a helper the route calls is not seen: that would be a reviewer's to
-    catch, and this test's message says where to look.
+    Read from the route's own calls: an ``enqueue`` given the literal kind
+    ``cancel_open_orders``. A cancel queued inside a helper the route calls is
+    not seen: that would be a reviewer's to catch, and this test's message says
+    where to look.
     """
     routes = [
         node
@@ -833,7 +833,11 @@ def _kill_cancels(source: str) -> bool:
     return any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
-        and call.func.attr.startswith("cancel")
+        and call.func.attr == "enqueue"
+        and any(
+            isinstance(arg, ast.Constant) and arg.value == "cancel_open_orders"
+            for arg in call.args
+        )
         for call in ast.walk(routes[0])
     )
 
@@ -841,50 +845,142 @@ def _kill_cancels(source: str) -> bool:
 _KILL_THAT_SETS_A_FLAG = '''
 @router.post("/kill")
 async def kill(conn):
-    """In a live deployment this would also call broker.cancel_all()."""
+    """It would be good to enqueue "cancel_open_orders" here."""
     await flags.engage_kill_switch(conn)
 '''
 
-_KILL_THAT_CANCELS = """
+_KILL_THAT_QUEUES_SOMETHING_ELSE = """
 @router.post("/kill")
-async def kill(conn, broker):
+async def kill(conn):
     await flags.engage_kill_switch(conn)
-    await broker.cancel_all()
+    await job_repo.enqueue(conn, "reconcile", {})
+"""
+
+_KILL_THAT_QUEUES_THE_CANCEL = """
+@router.post("/kill")
+async def kill(conn):
+    await flags.engage_kill_switch(conn)
+    await job_repo.enqueue(conn, "cancel_open_orders", {}, priority=100)
 """
 
 
 @pytest.mark.parametrize(
-    "source, cancels",
-    [(_KILL_THAT_SETS_A_FLAG, False), (_KILL_THAT_CANCELS, True)],
+    "source, queues",
+    [
+        (_KILL_THAT_SETS_A_FLAG, False),
+        (_KILL_THAT_QUEUES_SOMETHING_ELSE, False),
+        (_KILL_THAT_QUEUES_THE_CANCEL, True),
+    ],
 )
-def test_the_cancel_check(source: str, cancels: bool) -> None:
-    assert _kill_cancels(source) is cancels
+def test_the_cancel_check(source: str, queues: bool) -> None:
+    assert _kill_queues_the_cancel(source) is queues
 
 
-def test_system_says_what_a_stopped_switch_does_not_do() -> None:
-    """The halted note says the switch leaves orders at the venue, while it does.
+def _braced_body(source: str, signature: str) -> str:
+    """The text of the function whose ``signature`` opens it, up to its brace."""
+    start = source.index(signature)
+    opening = source.index("{", source.index(")", start))
+    depth = 0
+    for index in range(opening, len(source)):
+        depth += {"{": 1, "}": -1}.get(source[index], 0)
+        if depth == 0:
+            return source[opening : index + 1]
+    raise AssertionError(f"{signature} never closes")
+
+
+def _cases(body: str) -> dict[str, str]:
+    """Each ``case "x":`` clause of a switch, by its label."""
+    parts = re.split(r'case "([a-z_]+)":', body)
+    return {label: text for label, text in zip(parts[1::2], parts[2::2], strict=True)}
+
+
+#: For each state the cancel can be in, what its own clause must say — read
+#: clause by clause, so a sentence moved to another state, or every state
+#: saying the same thing, fails rather than passes on a fragment found
+#: somewhere in the file.
+_VENUE_CANCEL_CLAUSES = {
+    "succeeded": ("nothing to cancel", "map(venueSentence)"),
+    "failed": ("could not confirm that this system's orders at the venue",),
+    "running": (
+        "is cancelling this system's orders",
+        "attempt ${cancel.attempts} of ${cancel.max_attempts}.${noWorker}",
+        "${noWorker}",
+    ),
+    "queued": (
+        "will be tried again",
+        "cancel.attempts < cancel.max_attempts",
+        "has been asked to cancel this system's orders",
+        "${noWorker}",
+    ),
+    "cancelled": ("withdrawn before it finished",),
+}
+
+
+def test_system_says_what_became_of_the_orders_at_the_venue() -> None:
+    """The halted note reports the cancel the stop queued, and never assumes it.
 
     /system calls a halted switch the safe state, and the note under it says
-    what stops: no live decision, no submission. The route that halts only
-    sets the flag, so an order already sent stays at the venue. Without that
-    sentence, "stopped" reads as "nothing in flight" — the one belief an
-    operator reaching for this switch must not hold. If the route learns to
-    cancel, the sentence becomes false, and this fails the other way.
+    what stops: no live decision, no submission. The route used to set the flag
+    and nothing more, so the note said orders at the venue were not cancelled —
+    true, and tied to the route by this test. The route now queues a worker job
+    that cancels this system's own orders, so the note reads what became of it
+    from ``status.venue_cancel``, one clause per state: only a confirmed cancel
+    says none of this system's orders is open, and says it of the present; a
+    venue not reached is named; a cancel no worker is alive to run says so;
+    positions stay. "Stopped" must not read as "nothing in flight" while
+    something is.
     """
-    text = " ".join(_blank_comments(SYSTEM_PAGE.read_text(encoding="utf-8")).split())
+    source = SYSTEM_PAGE.read_text(encoding="utf-8")
+    text = " ".join(_blank_comments(source).split())
     assert "no order is submitted" in text, "the halted note no longer says what stops"
-    says_so = "Orders already at the venue are not cancelled" in text
-    if _kill_cancels(SYSTEM_ROUTES.read_text(encoding="utf-8")):
-        assert not says_so, (
-            "POST /system/kill now cancels at the venue, and /system still says "
-            "it does not"
-        )
-    else:
-        assert says_so, (
-            "POST /system/kill only sets the flag (src/api/routers/system.py), "
-            "so an order already at the venue stays there, and /system calls the "
-            "halted state safe without saying so"
-        )
+    assert _kill_queues_the_cancel(SYSTEM_ROUTES.read_text(encoding="utf-8")), (
+        "POST /system/kill no longer queues cancel_open_orders "
+        "(src/api/routers/system.py), and /system reports a cancel at the venue "
+        "as though it did"
+    )
+    assert "Orders already at the venue are not cancelled" not in text
+
+    sentence = " ".join(
+        _braced_body(source, "function venueCancelSentence(").split()
+    )
+    before, _, switch = sentence.partition("switch (cancel.status)")
+    # Absent — an API older than the field — reads as none queued, never throws.
+    assert 'cancel == null || cancel.status === "not_queued"' in before
+    assert "No cancel was queued at the venue for this stop" in before
+    clauses = _cases(switch)
+    assert set(clauses) == set(_VENUE_CANCEL_CLAUSES), sorted(clauses)
+    for label, needed in _VENUE_CANCEL_CLAUSES.items():
+        missing = [n for n in needed if n not in clauses[label]]
+        assert not missing, f"the {label} clause no longer says {missing}"
+    # And a state's own sentence is said by no other state: "will be tried
+    # again" while an attempt runs, or "nothing to cancel" on a failure, is the
+    # page asserting what is not so.
+    owners: dict[str, set[str]] = {}
+    for label, needed in _VENUE_CANCEL_CLAUSES.items():
+        for phrase in needed:
+            owners.setdefault(phrase, set()).add(label)
+    stray = [
+        (phrase, label)
+        for phrase, owned_by in owners.items()
+        for label, clause in clauses.items()
+        if label not in owned_by and phrase in clause
+    ]
+    assert not stray, f"a state says another state's sentence: {stray}"
+    assert "nothing to cancel" not in before
+
+    venue = _braced_body(source, "function venueSentence(")
+    not_reached = _braced_body(venue, "if (!venue.reached)")
+    reached = " ".join(venue[venue.index(not_reached) + len(not_reached) :].split())
+    assert "was not reached" in " ".join(not_reached.split())
+    assert "None of this system's orders is open at the" in reached
+    assert "did not place, left alone" in reached
+
+    # Shown only while the reading is current: a stale page must not present
+    # an old cancel's state as the venue's.
+    guard = text.index("{!status.trading_enabled && !stale ? (")
+    shown = text.index("venueCancelSentence(status.venue_cancel", guard)
+    assert shown < text.index(") : null}", guard)
+    assert "Positions already held are not closed" in text[guard:]
 
 
 # ---------------------------------------------------------------------------

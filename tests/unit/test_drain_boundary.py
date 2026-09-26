@@ -33,7 +33,9 @@ from src.api.drain import DRAINABLE  # noqa: E402
 from src.worker.main import HANDLERS  # noqa: E402
 
 #: Kinds that can reach a broker. None may ever be drainable.
-TRADING_KINDS = frozenset({"live_decision", "submit_orders"})
+#: ``cancel_open_orders`` places nothing, and still acts on orders at the venue
+#: with the venue's keys: it is the worker's, as the orders it cancels were.
+TRADING_KINDS = frozenset({"live_decision", "submit_orders", "cancel_open_orders"})
 
 
 class TestOnlyResearchJobsAreDrainable:

@@ -33,6 +33,7 @@ from src.core.clock import RealClock
 from src.db.repos import flags
 from src.db.repos import jobs as job_repo
 from src.worker.backtest_job import run_backtest_job
+from src.worker.kill_job import KILL_GATED_KINDS, run_cancel_open_orders
 from src.worker.live_job import run_live_decision, run_submit_orders
 from src.worker.maintenance_jobs import (
     run_eod_marks,
@@ -80,7 +81,13 @@ HANDLERS: dict[str, JobHandler] = {
     # decision path against a derived hypothetical book and submits nothing;
     # the programme cannot run it itself because it may not import this module.
     "shadow_decision": run_shadow_decision,
+    # Queued by POST /system/kill, never by the planner: the switch's second
+    # half, which cancels what is already at the venue. It runs while the
+    # switch is engaged — that is the only time it does anything — so it is
+    # deliberately absent from KILL_GATED_KINDS.
+    "cancel_open_orders": run_cancel_open_orders,
 }
+
 
 #: The scheduler is only useful if something runs it. Planning happens on
 #: startup and once per sweep; the dedupe key makes repetition free, which is
@@ -210,9 +217,7 @@ class Worker:
             return
 
         # Trading jobs check the kill switch immediately before doing anything.
-        # Research jobs (backtests) are unaffected: halting trading should not
-        # stop you investigating why you halted it.
-        if job.kind in {"live_decision", "submit_orders"}:
+        if job.kind in KILL_GATED_KINDS:
             if not await flags.trading_enabled(conn):
                 logger.warning("Kill switch engaged; skipping %s job", job.kind)
                 await job_repo.fail(

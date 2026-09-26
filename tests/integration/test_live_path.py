@@ -687,6 +687,674 @@ class TestKillSwitchEngagedMidBatch:
         assert result["submitted"] == 0
 
 
+class TestTheKillSwitchCancelsAtTheVenue:
+    """
+    The switch's second half: what is already at the venue is cancelled.
+
+    ``POST /system/kill`` set the flag and nothing more, so an order submitted
+    at the open and not yet filled stayed live while /system called the state
+    safe. The route now queues ``cancel_open_orders`` and the worker cancels.
+    Driven here from the shipped route, through the worker's own dispatch, to
+    the fake venue over real HTTP, and read back through ``/system/status``.
+    """
+
+    @staticmethod
+    async def _orders_at_the_venue(conn, factory, seeded) -> int:
+        """Stage a decision and submit it, leaving its orders open at the venue."""
+        await flags.release_kill_switch(conn, actor="test")
+        await conn.execute("DELETE FROM jobs WHERE kind = 'cancel_open_orders'")
+        await conn.execute(
+            "DELETE FROM decisions WHERE deployment_id=$1", seeded["deployment_id"]
+        )
+        await conn.execute(
+            "UPDATE deployments SET last_rebalance=NULL WHERE id=$1",
+            seeded["deployment_id"],
+        )
+        decision_session = next(s for s in seeded["sessions"] if s >= date(2021, 4, 1))
+        await run_live_decision(
+            conn, {"session": decision_session.isoformat()}, broker_factory=factory
+        )
+        nxt = next(s for s in seeded["sessions"] if s > decision_session)
+        result = await run_submit_orders(
+            conn,
+            {"session": nxt.isoformat()},
+            broker_factory=factory,
+            now=_in_window(nxt),
+        )
+        assert result["submitted"] >= 2, "need several orders open at the venue"
+        return result["submitted"]
+
+    @staticmethod
+    async def _run_the_cancel(
+        conn, dsn, factory, monkeypatch, *, wait_for_backoff=False
+    ):
+        """
+        Claim the queued cancel and run it through ``Worker._execute``, the
+        worker's own dispatch — the kill-switch check included — with the fake
+        venue handed in for paper. ``wait_for_backoff`` claims a retry the queue
+        has scheduled for later, as the next attempt would be.
+        """
+        from src.db.repos import jobs as job_repo
+        from src.worker import kill_job
+        from src.worker.main import HANDLERS, Worker
+
+        monkeypatch.setitem(
+            HANDLERS,
+            "cancel_open_orders",
+            lambda c, payload: kill_job.run_cancel_open_orders(
+                c, payload, broker_factory=lambda mode: factory()
+            ),
+        )
+        if wait_for_backoff:
+            await conn.execute(
+                "UPDATE jobs SET scheduled_for = NOW() "
+                "WHERE kind = 'cancel_open_orders' AND status = 'queued'"
+            )
+        job = await job_repo.claim(conn, "kill-test", kinds=["cancel_open_orders"])
+        assert job is not None, "POST /system/kill queued no cancel"
+        await Worker(dsn, "kill-test")._execute(conn, job)
+        return await conn.fetchrow(
+            "SELECT status, attempts, result, error FROM jobs WHERE id = $1", job.id
+        )
+
+    def test_engaging_queues_the_cancel_ahead_of_everything(self, client, dsn) -> None:
+        async def queued():
+            conn = await asyncpg.connect(dsn)
+            try:
+                return await conn.fetch(
+                    "SELECT status, priority, max_attempts, payload FROM jobs "
+                    "WHERE kind = 'cancel_open_orders' ORDER BY created_at DESC"
+                )
+            finally:
+                await conn.close()
+
+        client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+        before = len(asyncio.run(queued()))
+        killed = client.post("/api/v1/system/kill", json={"reason": "cancel test"})
+        rows = asyncio.run(queued())
+        try:
+            assert len(rows) == before + 1
+            assert rows[0]["status"] == "queued"
+            assert rows[0]["priority"] == 100
+            assert rows[0]["max_attempts"] == 5
+            assert killed.json()["venue_cancel"]["status"] == "queued"
+            status = client.get("/api/v1/system/status").json()
+            assert status["venue_cancel"]["status"] == "queued"
+        finally:
+            resumed = client.post(
+                "/api/v1/system/resume", json={"confirm": "ENABLE TRADING"}
+            )
+        # Trading enabled: there is no stop, so no cancel to report.
+        assert resumed.json()["venue_cancel"] is None
+
+    def test_the_cancel_empties_the_venue_and_the_ledger_agrees(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                sent = await self._orders_at_the_venue(conn, factory, seeded)
+                assert all(o["status"] == "accepted" for o in server.orders.values())
+                client.post("/api/v1/system/kill", json={"reason": "in flight"})
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                ledger = await conn.fetch(
+                    "SELECT status FROM orders WHERE deployment_id = $1 "
+                    "AND broker_order_id IS NOT NULL",
+                    seeded["deployment_id"],
+                )
+                audited = await conn.fetchval(
+                    "SELECT COUNT(*) FROM audit_log "
+                    "WHERE action = 'kill_switch_venue_cancel'"
+                )
+                return sent, server.orders, job, ledger, audited
+            finally:
+                await conn.close()
+
+        try:
+            sent, venue, job, ledger, audited = asyncio.run(_with_venue(check))
+            status = client.get("/api/v1/system/status").json()
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert {o["status"] for o in venue.values()} == {"canceled"}
+        assert job["status"] == "succeeded", job["error"]
+        assert {r["status"] for r in ledger} == {"canceled"}
+        assert audited >= 1
+        cancel = status["venue_cancel"]
+        assert cancel["status"] == "succeeded"
+        (paper,) = cancel["venues"]
+        assert paper["mode"] == "paper"
+        assert paper["reached"] is True
+        assert paper["cancelled"] == sent
+        assert paper["still_open"] == []
+        assert paper["foreign_open"] == 0
+
+    def test_a_cancel_claimed_after_a_release_touches_nothing(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        Queued by one stop and claimed after trading resumed, it would cancel
+        what the resumed system had just placed.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                client.post("/api/v1/system/kill", json={"reason": "brief"})
+                client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                return server.orders, job
+            finally:
+                await conn.close()
+
+        venue, job = asyncio.run(_with_venue(check))
+        assert {o["status"] for o in venue.values()} == {"accepted"}
+        assert job["status"] == "succeeded"
+        assert "re-enabled" in json.loads(job["result"])["skipped"]
+
+    def test_an_order_the_venue_keeps_open_is_retried_and_reported(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_ROUNDS", 1)
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.05)
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                stuck = next(iter(server.orders))
+                server.uncancellable = {stuck}
+                client.post("/api/v1/system/kill", json={"reason": "stuck order"})
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                return server.orders[stuck], job
+            finally:
+                await conn.close()
+
+        try:
+            stuck, job = asyncio.run(_with_venue(check))
+            status = client.get("/api/v1/system/status").json()
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert stuck["status"] == "accepted"
+        # Failed, and queued to try again rather than reported as done.
+        assert job["status"] == "queued"
+        assert job["attempts"] == 1
+        assert "still open at the venue" in job["error"]
+        assert stuck["symbol"] in job["error"]
+        cancel = status["venue_cancel"]
+        assert cancel["status"] == "queued"
+        assert "still open at the venue" in cancel["error"]
+        assert cancel["venues"] == []
+
+    def test_a_cancel_the_venue_confirms_late_is_waited_for(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """``pending_cancel`` is a cancel in flight, not a failure, for a while."""
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.2)
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                server.slow_to_cancel = set(server.orders)
+                client.post("/api/v1/system/kill", json={"reason": "slow venue"})
+                asyncio.get_running_loop().call_later(0.1, server.confirm_cancels)
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                return server.orders, job
+            finally:
+                await conn.close()
+
+        try:
+            venue, job = asyncio.run(_with_venue(check))
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert {o["status"] for o in venue.values()} == {"canceled"}
+        assert job["status"] == "succeeded", job["error"]
+
+    def test_an_order_this_system_did_not_place_is_left_alone(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        The job may run minutes after the stop, and the operator may have
+        acted at the venue by hand in between, sells to flatten among them. It
+        cancels its own orders by their client order id, and only counts the
+        rest.
+        """
+        from src.core.types import OrderIntent, Side
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                async with factory() as broker:
+                    by_hand = await broker.submit(
+                        OrderIntent(symbol="SPY", side=Side.SELL, qty=Decimal("1")),
+                        client_order_id="placed-by-hand-1",
+                    )
+                client.post("/api/v1/system/kill", json={"reason": "by hand"})
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                return server.orders, by_hand.broker_order_id, job
+            finally:
+                await conn.close()
+
+        try:
+            venue, by_hand, job = asyncio.run(_with_venue(check))
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert job["status"] == "succeeded", job["error"]
+        assert venue[by_hand]["status"] == "accepted"
+        ours = {k: o for k, o in venue.items() if k != by_hand}
+        assert {o["status"] for o in ours.values()} == {"canceled"}
+        (paper,) = json.loads(job["result"])["venues"]
+        assert paper["foreign_open"] == 1
+
+    def test_a_venue_that_fails_does_not_stop_the_next_and_is_audited(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        Venues run in order, live first. A live venue that cannot be listed
+        once stopped every paper order from being cancelled, on every attempt,
+        and left no audit row. Here live fails and paper is still cancelled,
+        both outcomes recorded, and the attempt fails to be tried again.
+        """
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.05)
+        live_id = uuid.uuid4()
+
+        async def check(factory, server):
+            broken = FakeAlpaca()
+            broken_url = await broken.start()
+            broken.listing_fails_with = 503
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                await conn.execute(
+                    """
+                    INSERT INTO deployments (id, strategy_name, params, mode,
+                        capital_usd, risk_limits, approved_backtest_run_id, status)
+                    VALUES ($1,'asset_class_trend_following','{}'::jsonb,'live',
+                            1000,'{}'::jsonb,$2,'disabled')
+                    """,
+                    live_id,
+                    uuid.UUID(seeded["run_id"]),
+                )
+                await flags.engage_kill_switch(conn, "two venues", actor="test")
+
+                def by_mode(mode):
+                    if mode == "paper":
+                        return factory()
+                    return AlpacaBroker(KEY_ID, SECRET_KEY, base_url=broken_url)
+
+                with pytest.raises(kill_job.VenueCancelIncompleteError) as raised:
+                    await kill_job.run_cancel_open_orders(
+                        conn, {}, broker_factory=by_mode
+                    )
+                audited = await conn.fetchval(
+                    "SELECT detail FROM audit_log "
+                    "WHERE action = 'kill_switch_venue_cancel' ORDER BY id DESC LIMIT 1"
+                )
+                return server.orders, str(raised.value), json.loads(audited)
+            finally:
+                await conn.execute("DELETE FROM deployments WHERE id = $1", live_id)
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+                await broken.stop()
+
+        venue, error, audited = asyncio.run(_with_venue(check))
+        assert {o["status"] for o in venue.values()} == {"canceled"}
+        assert error.startswith("live: BrokerError")
+        venues = {v["mode"]: v for v in audited["venues"]}
+        assert "503" in venues["live"]["error"]
+        assert venues["paper"]["cancelled"] == len(venue)
+        assert venues["paper"]["still_open"] == []
+
+    def test_an_order_placing_job_elsewhere_holds_the_confirmation(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        A submit running in another worker read the switch before it was
+        engaged, and can land an order after this job has looked. Until it
+        finishes, the cancel is not confirmed; a lapsed lease is a dead worker
+        and does not count.
+        """
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_ROUNDS", 2)
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.05)
+        running, lapsed = uuid.uuid4(), uuid.uuid4()
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                await conn.execute(
+                    """
+                    INSERT INTO jobs (id, kind, payload, status, locked_by,
+                                      lease_expires_at)
+                    VALUES ($1, 'submit_orders', '{}'::jsonb, 'running', 'other',
+                            NOW() + INTERVAL '5 minutes'),
+                           ($2, 'submit_orders', '{}'::jsonb, 'running', 'dead',
+                            NOW() - INTERVAL '1 minute')
+                    """,
+                    running,
+                    lapsed,
+                )
+                client.post("/api/v1/system/kill", json={"reason": "two workers"})
+                held = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                await conn.execute("DELETE FROM jobs WHERE id = $1", running)
+                done = await self._run_the_cancel(
+                    conn, dsn, factory, monkeypatch, wait_for_backoff=True
+                )
+                return held, done
+            finally:
+                await conn.execute(
+                    "DELETE FROM jobs WHERE id = ANY($1::uuid[])", [running, lapsed]
+                )
+                await conn.close()
+
+        try:
+            held, done = asyncio.run(_with_venue(check))
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert held["status"] == "queued"
+        assert "still running in another worker" in held["error"]
+        assert done["status"] == "succeeded", done["error"]
+
+    def test_an_order_landed_by_a_job_finishing_meanwhile_is_still_cancelled(
+        self, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        The race the look's order closes. Another worker's submit is running;
+        just after a listing, it lands one more order and finishes. Were the
+        venue asked before the jobs, the next look would find the job gone,
+        take the earlier, empty listing as the venue's answer, and confirm the
+        stop with that order open. Asked jobs first, the look that sees the job
+        finished lists after it, and the order is cancelled.
+        """
+        from src.core.types import OrderIntent, Side
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.05)
+        other = uuid.uuid4()
+        prefix = str(seeded["deployment_id"])[:8]
+
+        class LandsOneAfterTheFirstLook:
+            def __init__(self, inner):
+                self._inner = inner
+                self.landed = None
+
+            async def __aenter__(self):
+                await self._inner.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc):
+                return await self._inner.__aexit__(*exc)
+
+            async def cancel_order(self, order_id):
+                return await self._inner.cancel_order(order_id)
+
+            async def get_order(self, order_id):
+                return await self._inner.get_order(order_id)
+
+            async def open_orders(self):
+                listed = await self._inner.open_orders()
+                if self.landed is None:
+                    ack = await self._inner.submit(
+                        OrderIntent(symbol="XLE", side=Side.BUY, qty=Decimal("1")),
+                        client_order_id=f"{prefix}:20210401:XLE",
+                    )
+                    self.landed = ack.broker_order_id
+                    finish = await asyncpg.connect(dsn)
+                    try:
+                        await finish.execute(
+                            "UPDATE jobs SET status = 'succeeded' WHERE id = $1",
+                            other,
+                        )
+                    finally:
+                        await finish.close()
+                return listed
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                # Nothing of ours at the venue at the first look: the race is
+                # only there when that look would otherwise end the attempt.
+                assert server.orders == {}
+                await conn.execute(
+                    """
+                    INSERT INTO jobs (id, kind, payload, status, locked_by,
+                                      lease_expires_at)
+                    VALUES ($1, 'submit_orders', '{}'::jsonb, 'running', 'other',
+                            NOW() + INTERVAL '5 minutes')
+                    """,
+                    other,
+                )
+                await flags.engage_kill_switch(conn, "race", actor="test")
+                venue = LandsOneAfterTheFirstLook(factory())
+                result = await kill_job.run_cancel_open_orders(
+                    conn, {}, broker_factory=lambda mode: venue
+                )
+                return result, server.orders[venue.landed]["status"]
+            finally:
+                await conn.execute("DELETE FROM jobs WHERE id = $1", other)
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+
+        result, landed = asyncio.run(_with_venue(check))
+        assert landed == "canceled"
+        (paper,) = result["venues"]
+        assert paper["still_open"] == []
+
+    def test_a_release_while_it_runs_spares_the_venues_after_it(
+        self, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        The switch is read again before each venue. Released while the job is
+        at the first (live, in sorted order), the resumed system may already be
+        placing orders at the next, and the job must leave them alone.
+        """
+        from src.worker import kill_job
+
+        monkeypatch.setattr(kill_job, "CONFIRM_INTERVAL_SECONDS", 0.05)
+        live_id = uuid.uuid4()
+
+        class ReleasesWhenAsked:
+            def __init__(self, inner):
+                self._inner = inner
+
+            async def __aenter__(self):
+                await self._inner.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc):
+                return await self._inner.__aexit__(*exc)
+
+            async def open_orders(self):
+                resume = await asyncpg.connect(dsn)
+                try:
+                    await flags.release_kill_switch(resume, actor="test")
+                finally:
+                    await resume.close()
+                return await self._inner.open_orders()
+
+        async def check(factory, server):
+            other = FakeAlpaca()
+            other_url = await other.start()
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                await conn.execute(
+                    """
+                    INSERT INTO deployments (id, strategy_name, params, mode,
+                        capital_usd, risk_limits, approved_backtest_run_id, status)
+                    VALUES ($1,'asset_class_trend_following','{}'::jsonb,'live',
+                            1000,'{}'::jsonb,$2,'disabled')
+                    """,
+                    live_id,
+                    uuid.UUID(seeded["run_id"]),
+                )
+                await flags.engage_kill_switch(conn, "brief", actor="test")
+
+                def by_mode(mode):
+                    if mode == "paper":
+                        return factory()
+                    return ReleasesWhenAsked(
+                        AlpacaBroker(KEY_ID, SECRET_KEY, base_url=other_url)
+                    )
+
+                result = await kill_job.run_cancel_open_orders(
+                    conn, {}, broker_factory=by_mode
+                )
+                return result, server.orders
+            finally:
+                await conn.execute("DELETE FROM deployments WHERE id = $1", live_id)
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+                await other.stop()
+
+        result, venue = asyncio.run(_with_venue(check))
+        venues = {v["mode"]: v for v in result["venues"]}
+        assert venues["live"]["reached"] is True
+        assert venues["paper"] == {
+            "mode": "paper",
+            "reached": False,
+            "reason": "trading re-enabled",
+        }
+        assert {o["status"] for o in venue.values()} == {"accepted"}
+
+    def test_a_queue_that_refuses_the_cancel_cannot_undo_the_stop(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        The flag commits on its own before the cancel is queued. A queue that
+        refuses it leaves the stop standing and says no cancel was queued —
+        not the earlier stop's succeeded cancel, which is still on record.
+        """
+        from src.db.repos import jobs as job_repo
+
+        async def refuse(*args, **kwargs):
+            raise RuntimeError("the queue is unavailable")
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                client.post("/api/v1/system/kill", json={"reason": "earlier stop"})
+                earlier = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                assert earlier["status"] == "succeeded", earlier["error"]
+                client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+                monkeypatch.setattr(job_repo, "enqueue", refuse)
+                return client.post("/api/v1/system/kill", json={"reason": "now"})
+            finally:
+                await conn.close()
+
+        try:
+            killed = asyncio.run(_with_venue(check))
+        finally:
+            client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+
+        assert killed.status_code == 200
+        body = killed.json()
+        assert body["trading_enabled"] is False
+        assert body["kill_reason"] == "now"
+        assert body["venue_cancel"]["status"] == "not_queued"
+
+    def test_a_switch_with_no_row_reports_no_cancel_queued(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        A stop made by deleting the row went through no route, so nothing
+        queued a cancel for it. The newest cancel of any earlier stop must not
+        be reported as this one's.
+        """
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await self._orders_at_the_venue(conn, factory, seeded)
+                client.post("/api/v1/system/kill", json={"reason": "earlier stop"})
+                job = await self._run_the_cancel(conn, dsn, factory, monkeypatch)
+                assert job["status"] == "succeeded", job["error"]
+                client.post("/api/v1/system/resume", json={"confirm": "ENABLE TRADING"})
+                await conn.execute(
+                    "DELETE FROM system_flags WHERE key = 'trading_enabled'"
+                )
+                return client.get("/api/v1/system/status").json()
+            finally:
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+
+        status = asyncio.run(_with_venue(check))
+        assert status["trading_enabled"] is False
+        assert status["venue_cancel"]["status"] == "not_queued"
+
+    def test_a_live_venue_behind_a_closed_gate_is_named_not_reached(
+        self, client, dsn, seeded, monkeypatch
+    ) -> None:
+        """
+        The three gates bind a cancel as they bind an order: the live venue is
+        asked for through the shipped factory, which refuses it, and the result
+        says so rather than reach around the gate or claim nothing was there.
+        """
+        from src.config import get_settings
+        from src.worker import kill_job
+        from src.worker.live_job import _alpaca_from_env
+
+        monkeypatch.setenv("ALPACA_KEY_ID", "dummy-key-id")
+        monkeypatch.setenv("ALPACA_SECRET_KEY", "dummy-secret-key")
+        monkeypatch.delenv("LIVE_TRADING_ENABLED", raising=False)
+        monkeypatch.delenv("ALPACA_ALLOW_LIVE", raising=False)
+        get_settings.cache_clear()
+        live_id = uuid.uuid4()
+
+        async def check(factory, server):
+            conn = await asyncpg.connect(dsn)
+            try:
+                await flags.engage_kill_switch(conn, "live gate test", actor="test")
+                await conn.execute(
+                    """
+                    INSERT INTO deployments (id, strategy_name, params, mode,
+                        capital_usd, risk_limits, approved_backtest_run_id, status)
+                    VALUES ($1,'asset_class_trend_following','{}'::jsonb,'live',
+                            1000,'{}'::jsonb,$2,'disabled')
+                    """,
+                    live_id,
+                    uuid.UUID(seeded["run_id"]),
+                )
+                def by_mode(mode):
+                    if mode == "paper":
+                        return factory()
+                    return _alpaca_from_env({"mode": mode})
+
+                return await kill_job.run_cancel_open_orders(
+                    conn, {}, broker_factory=by_mode
+                )
+            finally:
+                await conn.execute("DELETE FROM deployments WHERE id = $1", live_id)
+                await flags.release_kill_switch(conn, actor="test")
+                await conn.close()
+
+        try:
+            result = asyncio.run(_with_venue(check))
+        finally:
+            get_settings.cache_clear()
+
+        venues = {v["mode"]: v for v in result["venues"]}
+        assert venues["paper"]["reached"] is True
+        assert venues["live"]["reached"] is False
+        assert "LIVE_TRADING_ENABLED" in venues["live"]["reason"]
+
+
 class TestIdempotency:
     def test_resubmitting_the_same_session_does_not_double_trade(
         self, dsn, seeded
