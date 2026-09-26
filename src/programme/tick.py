@@ -736,6 +736,13 @@ def _neighbouring_params(
     differently on each run cannot be replicated, and replication is a
     criterion two gates later.
 
+    A step is the one the value's type and the schema allow; whether it is
+    large enough to matter is the strategy's own property. ``buy_and_hold``'s
+    only number is a history guard, so its neighbourhood is one session of
+    guard away from the configuration and its result nearly the same — as it
+    should be for a strategy with nothing to tune, and not evidence that it is
+    stable in anything. (It once moved nothing at all: 1.2 of 1 rounds to 1.)
+
     Returns the parameters and how each numeric one moved: ``"up"``,
     ``"down"`` or ``"held"``.
     """
@@ -782,6 +789,8 @@ async def _enqueue_backtest(
     params = dict(candidate["params"])
     stress = 1.0
     seed: int | None = None
+    #: Said on the note that names the experiment, so it is read beside it.
+    queued_detail: dict[str, Any] = {}
 
     if kind == "cost_stress":
         stress = STRESS_MULTIPLIER
@@ -813,7 +822,7 @@ async def _enqueue_backtest(
                 ),
             )
             return
-        report.note("neighbourhood_moves", candidate=candidate["id"], moves=moves)
+        queued_detail["moves"] = moves
     elif kind == "benchmark":
         strategy_name = "buy_and_hold"
         params = {"symbols": list(candidate["universe"])}
@@ -881,6 +890,7 @@ async def _enqueue_backtest(
         kind=kind,
         experiment=experiment["ref"],
         strategy=strategy_name,
+        **queued_detail,
     )
 
 
@@ -1052,12 +1062,15 @@ def _grid_around(
     from: those of them the strategy's own schema accepts.
 
     The study builds every point in turn and fails at the first the strategy
-    refuses. 1.3 of a concentration cap at its ceiling of 1.0 is such a point,
-    so a study of the default cap failed every time, the failed experiment was
-    queued again on the next pass, and gate 2 → 3, which asks for a robust
-    study, could never pass. Each point is checked with the rest of the configuration
-    as it stands; the configuration's own value is always a point, so no axis
-    is left empty.
+    refuses, and a failed study is queued again on the next pass, so gate
+    2 → 3, which asks for a robust one, could never pass. 1.3 of a
+    concentration cap at its ceiling of 1.0 is such a point. At the default
+    cap this sat behind the neighbourhood's own refusal, which stopped
+    candidates at gate 1 → 2 first — fixed alone, that would have walked them
+    into this — and it already caught a configuration that survived 1.2 and
+    not 1.3: an SMA period of 800, or a cap of 0.8. Each point is checked
+    with the rest of the configuration as it stands; the configuration's own
+    value is always a point, so no axis is left empty.
     """
     grid: dict[str, list[Any]] = {}
     for key, value in params.items():

@@ -317,16 +317,17 @@ class TestTheNeighbourhoodIsAlwaysAMove:
             await tick._enqueue_backtest(
                 conn, candidate, "parameter_neighbourhood", report
             )
-            by_action = {a["action"]: a for a in report.actions}
-            queued = by_action["experiment_queued"]
+            (queued,) = [
+                a for a in report.actions if a["action"] == "experiment_queued"
+            ]
             await _unqueue(conn, queued["experiment"])
-            moved = by_action["neighbourhood_moves"]
             params = await conn.fetchval(
                 "SELECT r.params FROM experiments e "
                 "JOIN backtest_runs r ON r.id = e.backtest_run_id WHERE e.ref = $1",
                 queued["experiment"],
             )
-            return moved["moves"], json.loads(params)
+            # Which way each moved is said on the note naming the experiment.
+            return queued["moves"], json.loads(params)
 
         moves, params = _run(_with_conn(go))
         assert moves == {"sma_period": "up", "max_weight_per_asset": "down"}

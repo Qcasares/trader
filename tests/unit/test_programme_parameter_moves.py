@@ -8,12 +8,13 @@ allows.
 Both once moved every numeric parameter by a fixed factor regardless. A
 concentration cap of 1.0 — the default in every strategy that has one — became
 1.2 in the neighbourhood and 1.3 in the grid, and the strategy refuses both.
-The neighbourhood experiment was rejected before it was queued; the
-walk-forward was queued, failed in the worker at the first point it could not
-build, and was queued again on the next pass. Gate 1 → 2 asks for the
-neighbourhood and gate 2 → 3 for a robust study, so at the default cap a
-candidate could pass neither. Nothing said so except a note in a test
-that had worked around it.
+The neighbourhood experiment was rejected before it was queued, so at the
+default cap no candidate passed gate 1 → 2. The grid's defect sat behind that
+one: a study was queued, failed in the worker at the first point it could not
+build, and was queued again on every pass, so gate 2 → 3 could never pass —
+for the default cap as soon as the neighbourhood was fixed, and already for a
+configuration that survived 1.2 and not 1.3, such as an SMA period of 800.
+Nothing said so except a note in a test that had worked around it.
 """
 
 from __future__ import annotations
