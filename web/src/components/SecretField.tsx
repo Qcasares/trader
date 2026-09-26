@@ -43,11 +43,20 @@ import { fmtInstant } from "@/lib/format";
 /** Human-facing names. The wire name is a database key, not a label. */
 const TITLES: Record<string, string> = {
   anthropic_api_key: "Anthropic API key",
+  typesafe_api_key: "TypeSafe (Jev) API key",
 };
 
+/**
+ * What each credential is for. The TypeSafe note also says where a real key
+ * comes from, and names no other site: tests/unit/test_dependency_boundaries.py
+ * refuses Jev's lookalike hosts by name anywhere in web/src, so the warning
+ * points at the one legitimate source instead.
+ */
 const NOTES: Record<string, string> = {
   anthropic_api_key:
     "Used by the AI programme to propose hypotheses and convene the specialist panel. Without it the runner still reconciles experiments, evaluates gates and promotes candidates — it simply proposes nothing new.",
+  typesafe_api_key:
+    "Used only by the AI programme's Jev lanes, and every lane is off until it is switched on, so storing a key here makes no call by itself. TypeSafe issues keys at console.typesafe.ai and nowhere else. Do not paste a key into any other site offering Jev access: none of them is TypeSafe, and a key typed into one is a key given away.",
 };
 
 export function SecretField({

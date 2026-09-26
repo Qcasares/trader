@@ -18,6 +18,14 @@
 # torch and transformers (~2.5GB) for code the engine may not import, and a CI
 # run that spends four minutes downloading CUDA wheels to test a moving
 # average is a CI run people learn to ignore.
+#
+# The one exception is the `programme sdk` job, which installs the AI
+# programme's hash-locked set, model SDKs included, to test the Jev client
+# against the SDK it will really run on. It holds no secret and its token can
+# only read, and tests/unit/test_dependency_boundaries.py refuses a model SDK
+# in any job here that does not meet both conditions. The `pytest` job stays
+# SDK-free, which is what keeps "the unit suite runs without an SDK" checked
+# rather than assumed.
 
 name: CI
 
@@ -115,6 +123,80 @@ jobs:
       # boundary only proves the mock matches an assumption about it.
       - name: Integration tests
         run: pytest tests/integration -q
+
+  # The Jev client's own tests, and the one job in this file that installs a
+  # model SDK.
+  #
+  # `src/programme/jev_client.py` is the only importer of `typesafe-sdk`, and
+  # the properties that make it safe — the base URL the environment cannot
+  # redirect, the pinned model, the capped retries, the silenced logger — are
+  # properties of the SDK as much as of that module. They can be proved only
+  # with the real SDK, against a fake TypeSafe server over real HTTP. So this
+  # job installs requirements-programme.lock exactly as Dockerfile.programme
+  # does, and runs the SDK-marked tests and nothing else — among them one call
+  # end to end, from the lane through the client and the SDK to a row in the
+  # ledger, the one test in the repository in which nothing but the vendor is
+  # a fake.
+  #
+  # It may hold the SDK because it holds nothing else: no `secrets.` reference
+  # anywhere in it, and a token that can only read. Both conditions are
+  # enforced per job by tests/unit/test_dependency_boundaries.py, as is the
+  # rule that it runs no test but the SDK's.
+  programme-sdk:
+    name: programme sdk
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # A throwaway database for tests/sdk/test_jev_lane_over_http.py, which
+    # drives the lane through the real client and SDK into the real ledger.
+    # Configured exactly as the pytest job's, and for its reason: trust
+    # authentication, so no credential exists here to be held, and the rule
+    # above stays true of this job.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: trader_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres@localhost:5432/trader_test
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-programme.lock
+
+      # Hash-checked and wheels only, as the programme's image installs it.
+      # pytest is a separate call because --require-hashes binds everything
+      # one command installs, and test tooling is not in the lock. A block
+      # scalar because `:all: ` in a plain one is a YAML mapping, and a
+      # workflow that does not parse runs nothing at all.
+      - name: Install the programme's locked dependencies
+        run: |
+          pip install --require-hashes --only-binary :all: -r requirements-programme.lock
+      - name: Install test tooling
+        run: pip install pytest pytest-asyncio
+
+      # Collected from tests/sdk alone. A bare `pytest -m sdk` collects all of
+      # tests/ before it deselects anything, tests/e2e imports Playwright,
+      # which nothing here installs, and an import error at collection fails
+      # the run whatever -m would have kept. If no SDK-marked test is
+      # collected, pytest exits 5 and the job fails, on purpose: a job that
+      # tested nothing would otherwise read as a pass.
+      - name: SDK tests (fake TypeSafe server, real HTTP, real ledger)
+        run: pytest tests/sdk -m sdk -q
 
   web:
     name: next build

@@ -1,12 +1,12 @@
 # The AI programme's image.
 #
 # A separate Dockerfile from the one the API and worker share, for one reason:
-# it installs `anthropic` and they must not. `src/programme` is the only
-# package permitted to hold a model client, and `src/api` and `src/worker` are
-# forbidden from importing one by
+# it installs the model SDKs, `anthropic` and TypeSafe's `typesafe-sdk`, and
+# they must not. `src/programme` is the only package permitted to hold a model
+# client, and `src/api` and `src/worker` are forbidden from importing one by
 # `tests/unit/test_import_boundaries.py`. Building all three from one image
-# would leave the SDK sitting in the container that holds the broker
-# credentials, where only a source-level test stood between it and an import.
+# would leave the SDKs sitting in the container that holds the broker
+# credentials, where only a source-level test stood between them and an import.
 #
 # Two images means the boundary holds at runtime as well as in review: the
 # worker container could not import an LLM client if its code tried.
@@ -14,14 +14,23 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Build deps for asyncpg; removed afterwards to keep the image small.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc libpq-dev \
- && rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt requirements-programme.txt ./
-RUN pip install --no-cache-dir -r requirements-programme.txt \
- && apt-get purge -y gcc && apt-get autoremove -y
+# The lock, not requirements-programme.txt. Every package in it is pinned to
+# one version and every file to a sha256, so this image holds exactly the tree
+# the lock records or the build fails. `--require-hashes` makes a missing hash
+# an error rather than a quiet fetch of whatever the index serves. The lock
+# was resolved for this interpreter, and
+# tests/unit/test_dependency_boundaries.py fails if the tag above moves
+# without it.
+#
+# `--only-binary :all:` because pip does not hash-check what it fetches to
+# build an sdist: the build backend arrives from the index unverified, and the
+# sdist's own build code runs. Every package in the lock publishes a wheel for
+# this platform, so refusing sdists costs nothing today, and a future one that
+# does not fails this build instead of compiling unchecked code. It is also
+# why this image, unlike the shared one, installs no compiler.
+COPY requirements-programme.lock ./
+RUN pip install --no-cache-dir --require-hashes --only-binary :all: \
+    -r requirements-programme.lock
 
 COPY src/ ./src/
 COPY migrations/ ./migrations/

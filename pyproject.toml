@@ -42,6 +42,12 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "unit: Unit tests (no database, no network)",
+    # The Jev client's tests, which need typesafe-sdk. Only
+    # requirements-programme.lock installs it, so they skip wherever it is
+    # absent (a developer's `pytest tests/`, say), and run in CI's `programme
+    # sdk` job as `pytest tests/sdk -m sdk`, against a fake TypeSafe server
+    # over real HTTP. The main CI job never collects them.
+    "sdk: needs typesafe-sdk; run by CI's programme sdk job (pytest tests/sdk -m sdk)",
 ]
 
 [tool.ruff]
