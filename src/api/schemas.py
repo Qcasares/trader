@@ -186,6 +186,30 @@ class BacktestOrder(BaseModel):
     reason: str
 
 
+class VenueCancel(BaseModel):
+    """
+    The kill switch's cancel at the venue, for the stop in force.
+
+    ``status`` is the job's — ``queued``, ``running``, ``succeeded`` or
+    ``failed`` — or ``not_queued`` when this stop has none: engaged before the
+    switch learned to cancel, or the queue refused it. A queued job with an
+    ``error`` failed an attempt and is waiting to try again.
+    """
+
+    status: str
+    requested_at: str | None = None
+    finished_at: str | None = None
+    attempts: int = 0
+    max_attempts: int = 0
+    error: str | None = None
+    #: Per venue, set on success: ``mode`` and ``reached``; for a venue
+    #: reached, ``cancelled`` (the cancels the last attempt made — earlier
+    #: attempts are in the audit log), ``still_open`` (this system's orders,
+    #: empty on success) and ``foreign_open`` (orders it did not place, left
+    #: alone); for one not reached, the ``reason``.
+    venues: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class SystemStatus(BaseModel):
     trading_enabled: bool
     kill_reason: str | None = None
@@ -203,6 +227,9 @@ class SystemStatus(BaseModel):
     jobs: dict[str, int] = Field(default_factory=dict)
     workers: list[dict[str, Any]] = Field(default_factory=list)
     database_ok: bool = True
+    #: Set while the switch is engaged, and ``None`` while trading is enabled:
+    #: what became of the cancel this stop queued at the venue.
+    venue_cancel: VenueCancel | None = None
 
 
 class KillSwitchRequest(BaseModel):

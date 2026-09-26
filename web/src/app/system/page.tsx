@@ -43,7 +43,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CircleSlash, Settings2 } from "lucide-react";
-import { ApiError, api, type JobSummary, type SystemStatus } from "@/lib/api";
+import {
+  ApiError,
+  api,
+  type JobSummary,
+  type SystemStatus,
+  type VenueCancel,
+  type VenueCancelVenue,
+} from "@/lib/api";
 import {
   StatusBadge,
   jobStatus,
@@ -93,6 +100,84 @@ interface Failure {
 function sentence(message: string): string {
   const trimmed = message.trim();
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
+/**
+ * What became of the cancel this stop queued at the venue, in a sentence that
+ * says what is still true there.
+ *
+ * The switch has two halves: the flag stops new orders, and a worker job
+ * cancels this system's own orders already sent (src/worker/kill_job.py) —
+ * not the account's whole book, so an order placed at the venue by hand is
+ * left alone. Until that job has succeeded at every venue, "stopped" must not
+ * read as "nothing in flight", the one belief an operator reaching for this
+ * switch must not hold. So the state decides the sentence before anything
+ * else does; only a confirmed cancel says none of this system's orders is
+ * open, and says it of the present, not of a count one attempt made; a venue
+ * that was not reached is named; and a cancel no worker is alive to run says
+ * so. test_web_components.py ties these to the route.
+ */
+function venueCancelSentence(
+  cancel: VenueCancel | null | undefined,
+  noWorkerAlive: boolean,
+): string {
+  const noWorker = noWorkerAlive
+    ? " No worker is running, so it will not finish until one does."
+    : "";
+  if (cancel == null || cancel.status === "not_queued") {
+    return (
+      "No cancel was queued at the venue for this stop, so any order this " +
+      "system placed that is still open there stands until it fills or is " +
+      "cancelled at the venue."
+    );
+  }
+  switch (cancel.status) {
+    case "succeeded":
+      return cancel.venues.length === 0
+        ? "No deployment of the operator's trades at a venue, so there was nothing to cancel."
+        : cancel.venues.map(venueSentence).join(" ");
+    case "failed":
+      return (
+        "The worker could not confirm that this system's orders at the venue " +
+        `were cancelled: ${sentence(cancel.error ?? "no reason was recorded")} ` +
+        "Orders there may stand; check the venue."
+      );
+    case "running":
+      return (
+        "The worker is cancelling this system's orders still open at the " +
+        `venue, attempt ${cancel.attempts} of ${cancel.max_attempts}.${noWorker}`
+      );
+    case "queued":
+      return cancel.error && cancel.attempts < cancel.max_attempts
+        ? `Cancelling at the venue failed on attempt ${cancel.attempts} of ` +
+            `${cancel.max_attempts} and will be tried again: ` +
+            `${sentence(cancel.error)}${noWorker}`
+        : "The worker has been asked to cancel this system's orders still " +
+            `open at the venue.${noWorker}`;
+    case "cancelled":
+      return (
+        "The cancel at the venue was withdrawn before it finished, so any " +
+        "order this system placed that is still open there stands."
+      );
+  }
+}
+
+function venueSentence(venue: VenueCancelVenue): string {
+  if (!venue.reached) {
+    return (
+      `The ${venue.mode} venue was not reached (${venue.reason}), so any ` +
+      "order this system placed there stands."
+    );
+  }
+  const foreign =
+    venue.foreign_open === 0
+      ? ""
+      : ` ${venue.foreign_open} open order${venue.foreign_open === 1 ? "" : "s"} ` +
+        "this system did not place, left alone.";
+  return (
+    `None of this system's orders is open at the ${venue.mode} venue; the ` +
+    `orders page shows which were cancelled and which filled.${foreign}`
+  );
 }
 
 /**
@@ -333,20 +418,24 @@ function Loaded({
               (src/worker/main.py). Said because the state is safe, and a safe
               state an operator cannot interpret is one they will "fix".
 
-              And what it does not do. `POST /system/kill` sets the flag and
-              nothing more (src/api/routers/system.py), so an order already
-              at the venue stays there. Calling the state safe without saying
-              so would let "stopped" read as "nothing in flight", which is the
-              one belief an operator reaching for this switch must not hold.
-              test_web_components.py ties this sentence to the route.
+              And what became of the orders already sent. `POST /system/kill`
+              also queues a worker job that cancels them at the venue
+              (src/api/routers/system.py, src/worker/kill_job.py); the second
+              sentence reports that job, never assumes it, and says positions
+              stay. test_web_components.py ties this to the route.
             */}
             {!status.trading_enabled && !stale ? (
-              <p className="m-0 text-sm text-pretty">
-                No live decision is taken and no order is submitted, to paper or
-                to live, until trading is re-enabled. Orders already at the
-                venue are not cancelled. Backtests, marks and reconciliation
-                carry on.
-              </p>
+              <>
+                <p className="m-0 text-sm text-pretty">
+                  No live decision is taken and no order is submitted, to paper
+                  or to live, until trading is re-enabled. Backtests, marks and
+                  reconciliation carry on.
+                </p>
+                <p className="m-0 text-sm text-pretty">
+                  {venueCancelSentence(status.venue_cancel, noWorkerAlive)}{" "}
+                  Positions already held are not closed.
+                </p>
+              </>
             ) : null}
             {status.kill_reason ? (
               <p className="m-0 text-sm text-ink-muted">{status.kill_reason}</p>

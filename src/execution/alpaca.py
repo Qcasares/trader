@@ -60,6 +60,9 @@ PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 LIVE_BASE_URL = "https://api.alpaca.markets"
 
 #: Alpaca order status -> our OrderState.
+#: The most orders ``GET /v2/orders`` returns in one response.
+OPEN_ORDERS_LIMIT = 500
+
 _STATE_MAP: dict[str, OrderState] = {
     "new": OrderState.SUBMITTED,
     "accepted": OrderState.SUBMITTED,
@@ -308,6 +311,56 @@ class AlpacaBroker(BrokerBase):
                 failed,
             )
         return cancelled
+
+    async def cancel_order(self, broker_order_id: str) -> bool:
+        """
+        Cancel one order by the venue's id.
+
+        True when the venue accepted the cancel, which may still be pending;
+        False when it refused (422 or 403), as it does an order that is filled,
+        already cancelled or filling. Raises :class:`BrokerError` when the
+        venue cannot be asked. Not part of :class:`BrokerAdapter`: the kill
+        switch's cancel job cancels this system's own orders by id rather than
+        the account's whole book (``src/worker/kill_job.py``).
+        """
+        try:
+            await self._request("DELETE", f"/v2/orders/{broker_order_id}")
+        except OrderRejectedError as exc:
+            logger.warning("Venue refused to cancel %s: %s", broker_order_id, exc)
+            return False
+        return True
+
+    async def open_orders(self) -> list[dict[str, str]]:
+        """
+        Every order the venue still holds open, each with the venue's own
+        status — ``pending_cancel`` among them, a cancel asked for and not yet
+        confirmed.
+
+        Not part of :class:`BrokerAdapter`. The kill switch's cancel job asks,
+        to confirm :meth:`cancel_all` did what it reported: a cancel that fails
+        wholesale also reports nothing cancelled, which reads the same as
+        nothing to cancel. Raises :class:`BrokerError` when the venue cannot be
+        asked, so that failure is never mistaken for an empty book. At most
+        :data:`OPEN_ORDERS_LIMIT` are listed, the most the venue returns at
+        once; a listing that long is reported as that many or more.
+        """
+        data = await self._request(
+            "GET",
+            "/v2/orders",
+            params={"status": "open", "limit": str(OPEN_ORDERS_LIMIT)},
+        )
+        if not isinstance(data, list):
+            raise BrokerError(f"Alpaca GET /v2/orders returned {type(data).__name__}")
+        return [
+            {
+                "id": str(row.get("id", "")),
+                "client_order_id": str(row.get("client_order_id") or ""),
+                "symbol": str(row.get("symbol", "")),
+                "status": str(row.get("status", "")),
+            }
+            for row in data
+            if isinstance(row, dict)
+        ]
 
     async def close_position(self, symbol: str) -> None:
         """

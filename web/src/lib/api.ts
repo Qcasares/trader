@@ -253,6 +253,61 @@ export interface BacktestOrder {
   reason: string;
 }
 
+/** An order still open at a venue, as the venue reports it. */
+export interface VenueOrder {
+  id: string;
+  client_order_id: string;
+  symbol: string;
+  /** The venue's own status: `pending_cancel` is a cancel not yet confirmed. */
+  status: string;
+}
+
+/**
+ * One venue's part of the kill switch's cancel (src/worker/kill_job.py), as a
+ * succeeded job reports it. A venue reached carries its counts; one not
+ * reached, the reason — never a count, so none can be read as zero.
+ */
+export type VenueCancelVenue =
+  | {
+      mode: string;
+      reached: true;
+      /** Cancels the job's last attempt made; earlier attempts are audited. */
+      cancelled: number;
+      /** This system's orders still open: empty, on a job that succeeded. */
+      still_open: VenueOrder[];
+      /** Open orders this system did not place, which it leaves alone. */
+      foreign_open: number;
+    }
+  | {
+      mode: string;
+      reached: false;
+      /** A closed live gate, no credentials, or trading re-enabled. */
+      reason: string;
+    };
+
+/**
+ * The cancel the kill switch queued at the venue, for the stop in force.
+ * `status` is the job's — any `jobs` status, `cancelled` among them — or
+ * `not_queued` when this stop has none. A queued job with an `error` failed an
+ * attempt and is waiting to try again.
+ */
+export interface VenueCancel {
+  status:
+    | "not_queued"
+    | "queued"
+    | "running"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  requested_at: string | null;
+  finished_at: string | null;
+  attempts: number;
+  max_attempts: number;
+  error: string | null;
+  /** Set on success only. */
+  venues: VenueCancelVenue[];
+}
+
 export interface SystemStatus {
   trading_enabled: boolean;
   kill_reason: string | null;
@@ -277,6 +332,12 @@ export interface SystemStatus {
     stale: boolean;
   }[];
   database_ok: boolean;
+  /**
+   * Set while the switch is engaged; null while trading is enabled. Optional
+   * because the web and the API deploy apart: an API from before the switch
+   * learned to cancel sends no such key.
+   */
+  venue_cancel?: VenueCancel | null;
 }
 
 export interface JobSummary {

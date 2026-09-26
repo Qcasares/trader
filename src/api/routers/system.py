@@ -12,6 +12,7 @@ starting should not.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -27,6 +28,7 @@ from src.api.schemas import (
     SetSecretRequest,
     SystemConfigurationRequest,
     SystemStatus,
+    VenueCancel,
 )
 from src.api.security import (
     SESSION_COOKIE,
@@ -57,6 +59,18 @@ router = APIRouter(prefix="/api/v1/system", tags=["system"])
 #: up shorter than the cadence it measures, which would report every healthy
 #: worker as dead.
 WORKER_STALE_AFTER_SECONDS = 60.0
+
+#: The kill switch's cancel goes ahead of everything else queued: a backtest
+#: claimed first would hold the worker for minutes while orders it could have
+#: cancelled filled. The scheduler's highest is 30 (``scheduling.PRIORITY``).
+CANCEL_PRIORITY = 100
+
+#: Attempts before the cancel is reported as failed. Each attempt already
+#: cancels and looks again for up to twenty seconds (``kill_job``), so a
+#: retry is for a venue that could not be asked at all; between attempts the
+#: queue backs off ten seconds per attempt made, and the worker may take
+#: another job meanwhile, so the span is not bounded by these numbers alone.
+CANCEL_ATTEMPTS = 5
 
 
 async def _build_status(conn, settings: AppSettings) -> SystemStatus:
@@ -105,6 +119,51 @@ async def _build_status(conn, settings: AppSettings) -> SystemStatus:
             for w in workers
         ],
         database_ok=True,
+        venue_cancel=(
+            None
+            if state.trading_enabled
+            else await _venue_cancel(conn, state.updated_at)
+        ),
+    )
+
+
+async def _venue_cancel(conn, engaged_at) -> VenueCancel:
+    """
+    The cancel queued for the stop in force: the newest at or after the
+    moment the switch was last engaged, so an earlier stop's result is never
+    reported as this one's. Both times are the database's own.
+
+    A switch with no row reads as stopped, fail-closed, and has no moment of
+    engagement to measure from. Nothing that went through the route stopped
+    it, so nothing queued a cancel for it: ``not_queued``, rather than the
+    newest cancel of any stop, which would report an old one as this one's.
+    """
+    if engaged_at is None:
+        return VenueCancel(status="not_queued")
+    row = await conn.fetchrow(
+        """
+        SELECT status, attempts, max_attempts, error, result, created_at,
+               finished_at
+        FROM jobs
+        WHERE kind = 'cancel_open_orders' AND created_at >= $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        engaged_at,
+    )
+    if row is None:
+        return VenueCancel(status="not_queued")
+    result = row["result"]
+    if isinstance(result, str):
+        result = json.loads(result)
+    return VenueCancel(
+        status=row["status"],
+        requested_at=row["created_at"].isoformat(),
+        finished_at=row["finished_at"].isoformat() if row["finished_at"] else None,
+        attempts=row["attempts"],
+        max_attempts=row["max_attempts"],
+        error=row["error"],
+        venues=(result or {}).get("venues", []) if row["status"] == "succeeded" else [],
     )
 
 
@@ -124,16 +183,29 @@ async def kill(
     settings: AppSettings,
 ) -> SystemStatus:
     """
-    Engage the kill switch.
+    Engage the kill switch, and queue the cancel of what is already at the
+    venue.
 
-    Sets the durable flag the worker checks before every submission. In a
-    deployment with a live broker this endpoint would also call
-    ``broker.cancel_all()`` synchronously — the flag stops new orders, the
-    cancel deals with the ones already in flight, and neither alone is enough.
-    That half lands with the Alpaca adapter; today there is no live venue to
-    cancel against, so engaging the flag is the whole of it.
+    The flag stops new orders: the worker checks it before every submission.
+    The cancel deals with the ones already sent, and neither alone is enough.
+    The cancel is the worker's (``src/worker/kill_job.py``), queued ahead of
+    everything else, rather than a venue call made here: this endpoint stays a
+    database write that cannot fail on a venue, and the process that talks to
+    the venue about orders stays the worker. The flag is written first and
+    committed on its own, so a queue that refuses the cancel cannot undo the
+    stop; ``venue_cancel`` in the response then reads ``not_queued``.
     """
     await flags.engage_kill_switch(conn, body.reason, actor=session.subject)
+    try:
+        await job_repo.enqueue(
+            conn,
+            "cancel_open_orders",
+            {"requested_by": session.subject},
+            priority=CANCEL_PRIORITY,
+            max_attempts=CANCEL_ATTEMPTS,
+        )
+    except Exception:  # noqa: BLE001 - the stop stands; the status says what failed
+        logger.exception("Kill switch engaged; the venue cancel could not be queued")
     return await _build_status(conn, settings)
 
 

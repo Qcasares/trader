@@ -15,6 +15,7 @@ It models the behaviours that actually bite:
 - notional-vs-qty order forms
 - rejection of ``opg``/``cls`` on fractional and notional orders
 - partial failure from ``DELETE /v2/orders``
+- a cancel the venue has accepted and not yet confirmed (``pending_cancel``)
 - insufficient buying power
 """
 
@@ -29,6 +30,11 @@ from aiohttp import web
 
 KEY_ID = "test-key-id"
 SECRET_KEY = "test-secret-key"
+
+#: The venue's terminal order states: everything else is open.
+CLOSED = frozenset(
+    {"filled", "canceled", "expired", "rejected", "replaced", "done_for_day"}
+)
 
 
 class FakeAlpaca:
@@ -51,6 +57,12 @@ class FakeAlpaca:
         #: When set, DELETE /v2/orders reports these ids as failing to cancel,
         #: so the adapter's partial-failure handling can be exercised.
         self.uncancellable: set[str] = set()
+        #: When set, DELETE /v2/orders leaves these ids in ``pending_cancel``,
+        #: as the venue does while a cancel is in flight, until
+        #: :meth:`confirm_cancels` completes them.
+        self.slow_to_cancel: set[str] = set()
+        #: When set, GET /v2/orders fails with this status.
+        self.listing_fails_with: int | None = None
         #: When set, order submission is refused with insufficient buying power.
         self.reject_all = False
 
@@ -72,6 +84,8 @@ class FakeAlpaca:
             "/v2/orders:by_client_order_id", self._get_order_by_client_id
         )
         app.router.add_delete("/v2/orders", self._cancel_all)
+        app.router.add_get("/v2/orders", self._list_orders)
+        app.router.add_delete("/v2/orders/{order_id}", self._cancel_one)
         app.router.add_get("/v2/clock", self._clock)
 
         self._runner = web.AppRunner(app)
@@ -206,9 +220,51 @@ class FakeAlpaca:
             if order_id in self.uncancellable:
                 results.append({"id": order_id, "status": 500})
                 continue
+            if order_id in self.slow_to_cancel:
+                order["status"] = "pending_cancel"
+                results.append({"id": order_id, "status": 200})
+                continue
             order["status"] = "canceled"
             results.append({"id": order_id, "status": 204})
         return web.json_response(results, status=207)
+
+    async def _cancel_one(self, request: web.Request) -> web.Response:
+        """
+        204 for a cancel accepted, left ``pending_cancel`` for a slow one; 422
+        for an order the venue will not cancel (closed, a cancel already in
+        flight, or one marked uncancellable, as a filling order is); 404 for an
+        id it does not know.
+        """
+        order_id = request.match_info["order_id"]
+        order = self.orders.get(order_id)
+        if order is None:
+            return web.json_response({"message": "order not found"}, status=404)
+        if (
+            order["status"] in CLOSED
+            or order["status"] == "pending_cancel"
+            or order_id in self.uncancellable
+        ):
+            return web.json_response(
+                {"message": "order is not cancelable"}, status=422
+            )
+        order["status"] = (
+            "pending_cancel" if order_id in self.slow_to_cancel else "canceled"
+        )
+        return web.Response(status=204)
+
+    async def _list_orders(self, request: web.Request) -> web.Response:
+        """``status`` is ``open`` (the venue's default), ``closed`` or ``all``."""
+        if self.listing_fails_with is not None:
+            return web.json_response(
+                {"message": "listing unavailable"}, status=self.listing_fails_with
+            )
+        wanted = request.query.get("status", "open")
+        rows = [
+            order
+            for order in self.orders.values()
+            if wanted == "all" or (order["status"] in CLOSED) == (wanted == "closed")
+        ]
+        return web.json_response(rows[: int(request.query.get("limit", "50"))])
 
     async def _clock(self, request: web.Request) -> web.Response:
         return web.json_response(
@@ -223,6 +279,13 @@ class FakeAlpaca:
     # ------------------------------------------------------------------
     # Test helpers
     # ------------------------------------------------------------------
+
+    def confirm_cancels(self) -> None:
+        """Complete every cancel left in flight, as the venue eventually does."""
+        for order in self.orders.values():
+            if order["status"] == "pending_cancel":
+                order["status"] = "canceled"
+        self.slow_to_cancel.clear()
 
     def fill(self, order_id: str, price: str, qty: str | None = None) -> None:
         """Mark an order filled, as the venue would once it executes."""
