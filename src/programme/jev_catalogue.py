@@ -158,23 +158,28 @@ LANE_AREA: dict[str, str | None] = {
 
 def estimate_tokens(text: str) -> int:
     """
-    A token count for ``text`` that errs high: one token per three UTF-8 bytes.
+    A token count for ``text`` that errs high: one token per three ASCII bytes,
+    and one for every byte of anything else.
 
     A subword tokenizer spends about four characters of English prose on a
-    token, so this over-counts prose by about a third, and it counts bytes
-    rather than characters so accented and non-Latin text is charged for its
-    width. What it does not bound is text built from short, unusual runs — long
-    digit strings, emoji — where a tokenizer can spend a token on every one or
-    two bytes. The decision lane sends labels rather than figures for that
-    reason among others, and the margin between :data:`MAX_TOTAL_TOKENS` and
-    the vendor's limit is what absorbs the rest.
+    token, so three ASCII bytes to a token over-counts prose by about a third.
+    Anything outside ASCII is charged the byte-level worst case, a token a
+    byte: the vendor's tokenizer is undisclosed, its training language is
+    English, and byte-level vocabularies spend up to a token per byte on
+    non-Latin scripts — three times what counting them at three bytes would
+    allow, far past the margin between :data:`MAX_TOTAL_TOKENS` and the
+    vendor's limit. What this still does not bound is ASCII built from short,
+    unusual runs, such as long digit strings; the decision lane sends labels
+    rather than figures for that reason among others. Never less than a third
+    of the UTF-8 bytes, so it can only have grown from what it was.
     """
     if not isinstance(text, str):
         raise TypeError(f"estimate_tokens takes text, got {type(text).__name__}")
     size = len(text.encode("utf-8"))
+    ascii_bytes = len(text.encode("ascii", "ignore"))
     # Integer ceiling: float division loses exactness long before a request
     # this large would be sent, but there is no reason to find out where.
-    return -(-size // BYTES_PER_TOKEN_ESTIMATE)
+    return -(-ascii_bytes // BYTES_PER_TOKEN_ESTIMATE) + (size - ascii_bytes)
 
 
 def model_problem(model: object) -> str | None:

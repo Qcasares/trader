@@ -184,29 +184,52 @@ class TestTheTokenEstimate:
             ("abc", 1),
             ("abcd", 2),
             ("abcdef", 2),
-            # Two bytes each in UTF-8.
-            ("é", 1),
-            ("éé", 2),
-            # Three bytes each.
-            ("日本語", 3),
-            # Four bytes.
-            ("\U0001f600", 2),
+            # Anything else is a token a byte: two bytes each in UTF-8,
+            ("é", 2),
+            ("éé", 4),
+            ("aé", 3),
+            # three bytes each,
+            ("日本語", 9),
+            # and four.
+            ("\U0001f600", 4),
         ],
     )
-    def test_it_is_a_ceiling_of_utf8_bytes_over_three(
+    def test_ascii_is_three_bytes_a_token_and_the_rest_a_token_a_byte(
         self, text: str, tokens: int
     ) -> None:
         assert catalogue.estimate_tokens(text) == tokens
 
-    def test_it_charges_wide_text_for_its_width(self) -> None:
+    def test_it_charges_wide_text_the_byte_level_worst_case(self) -> None:
         """
-        Counting characters would undercount every non-Latin script by up to
-        three times, which is exactly the text a web lane will one day send.
+        A byte-level tokenizer can spend a token on every byte of a non-Latin
+        script. Counting characters would undercount such text ninefold, and
+        counting three bytes to a token threefold — far past the margin under
+        the vendor's limits — and it is exactly the text a web lane will send.
         """
         wide = "日" * 300
         assert len(wide) == 300
-        assert catalogue.estimate_tokens(wide) == 300
+        assert catalogue.estimate_tokens(wide) == 900
         assert catalogue.estimate_tokens("a" * 300) == 100
+
+    def test_it_never_charges_less_than_either_bound(self) -> None:
+        """Over mixed scripts: never below a token a non-ASCII byte, nor below
+        a third of all the bytes, which is where the estimate began."""
+        import random
+
+        alphabet = (
+            "abcXYZ0123456789 ,.{}\"\\"
+            "éüßñ" "αβγ" "дж" "שׁ" "ع" "日本" "한" "ไ" "\U0001f600"
+        )
+        generator = random.Random(20260926)
+        for _ in range(2_000):
+            text = "".join(
+                generator.choice(alphabet) for _ in range(generator.randint(0, 60))
+            )
+            size = len(text.encode("utf-8"))
+            wide = size - len(text.encode("ascii", "ignore"))
+            estimate = catalogue.estimate_tokens(text)
+            assert estimate >= wide, text
+            assert estimate >= -(-size // catalogue.BYTES_PER_TOKEN_ESTIMATE), text
 
     def test_it_takes_text_not_bytes(self) -> None:
         with pytest.raises(TypeError):
@@ -255,9 +278,9 @@ class TestTheRequestSize:
         assert catalogue.request_size_problem("{}", {name: "{}"}, 10) is None
 
     def test_wide_state_is_charged_by_the_byte(self) -> None:
-        state = "é" * 3_000  # 6,000 bytes: 2,000 tokens
-        assert catalogue.request_size_problem(state, {"q": "{}"}, 2_000) is None
-        assert catalogue.request_size_problem(state, {"q": "{}"}, 1_999) is not None
+        state = "é" * 3_000  # 6,000 bytes, none of them ASCII: 6,000 tokens
+        assert catalogue.request_size_problem(state, {"q": "{}"}, 6_000) is None
+        assert catalogue.request_size_problem(state, {"q": "{}"}, 5_999) is not None
 
     @pytest.mark.parametrize("limit", [0, -1, True, False, 1.5, "8000", None])
     def test_a_limit_that_cannot_be_read_refuses_every_request(
