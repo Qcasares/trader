@@ -34,8 +34,11 @@ import {
   type SystemConfiguration,
   type SystemConfigurationBody,
 } from "@/lib/api";
+import { Absent } from "@/components/Absent";
 import { Skeleton } from "@/components/Skeleton";
 import { SecretField } from "@/components/SecretField";
+import { StatusBadge } from "@/components/StatusBadge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 /** Money, at the precision a per-call figure actually carries. */
 function usd(value: number): string {
@@ -46,9 +49,12 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-/** A cadence, in the unit an operator thinks in. */
+/**
+ * A cadence, in the unit an operator thinks in. Only called on a cadence that
+ * is a positive number of seconds; anything else has no description, and the
+ * form says why beside the save button.
+ */
 function describeCadence(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
   if (seconds % 3600 === 0) {
     const hours = seconds / 3600;
     return `${plural(hours, "hour")} between passes`;
@@ -203,7 +209,12 @@ export default function SystemConfigurationPage() {
   if (error && !config) return <p className="banner banner-bad">{error}</p>;
   if (!config || !draft) return <Skeleton rows={5} label="Loading the configuration" />;
 
-  const passesPerDay = draft.tick_seconds > 0 ? 86400 / draft.tick_seconds : 0;
+  // Null, not 0, when the draft is not a cadence at all: "at most 0 passes a
+  // day" is a figure, and a false one — nothing about an unusable draft says
+  // the runner would stop.
+  const cadenceValid =
+    Number.isFinite(draft.tick_seconds) && draft.tick_seconds > 0;
+  const passesPerDay = cadenceValid ? 86400 / draft.tick_seconds : null;
   const perCallCeiling = chosen
     ? (draft.max_tokens / 1_000_000) * chosen.output_usd_per_mtok
     : null;
@@ -243,192 +254,226 @@ export default function SystemConfigurationPage() {
         </p>
       ) : null}
 
-      <section className="card">
-        <div className="card-head spread">
-          <h2>Model</h2>
+      {/*
+        Sections are the one card, `Card` with its `h2` title (owner decision
+        of 2026-09-26, web/DESIGN.md OD-3, K-16). They were the legacy `.card`,
+        whose edge, 19px title and spacing matched no other page. The fields
+        inside stay native, on the legacy field rules, until they migrate too.
+      */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Model</CardTitle>
           {provenance ? (
-            <span className="muted">
+            <p className="m-0 text-sm text-ink-muted">
               {provenance.updated_by === "migration"
-                ? "still the seeded default — nobody has reviewed this"
-                : `last changed by ${provenance.updated_by}`}
-            </span>
+                ? "Still the seeded default — nobody has reviewed this."
+                : `Last changed by ${provenance.updated_by}.`}
+            </p>
           ) : null}
-        </div>
+        </CardHeader>
+        <CardContent>
+          <div className="field-grid">
+            <label>
+              <span>Provider</span>
+              <select
+                value={draft.provider}
+                onChange={(e) => setProvider(e.target.value)}
+              >
+                {/* Same reason as the model select below. */}
+                {config.providers.some((p) => p.key === draft.provider) ? null : (
+                  <option value={draft.provider}>{draft.provider} — unknown</option>
+                )}
+                {config.providers.map((p) => (
+                  <option key={p.key} value={p.key} disabled={!p.available}>
+                    {p.title}
+                    {p.available ? "" : " — no adapter"}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">
+                Only one is implemented. The rest are listed so their absence is a
+                stated fact rather than a gap.
+              </span>
+            </label>
 
-        <div className="field-grid">
-          <label>
-            <span>Provider</span>
-            <select
-              value={draft.provider}
-              onChange={(e) => setProvider(e.target.value)}
-            >
-              {/* Same reason as the model select below. */}
-              {config.providers.some((p) => p.key === draft.provider) ? null : (
-                <option value={draft.provider}>{draft.provider} — unknown</option>
-              )}
-              {config.providers.map((p) => (
-                <option key={p.key} value={p.key} disabled={!p.available}>
-                  {p.title}
-                  {p.available ? "" : " — no adapter"}
-                </option>
-              ))}
-            </select>
-            <span className="hint">
-              Only one is implemented. The rest are listed so their absence is a
-              stated fact rather than a gap.
-            </span>
-          </label>
+            <label>
+              <span>Model</span>
+              <select
+                value={draft.model}
+                onChange={(e) => set("model", e.target.value)}
+              >
+                {/*
+                  A `select` whose value matches no option renders the *first*
+                  one, so a stored model that is not in the catalogue would
+                  display as whatever happens to sit at the top of the list —
+                  the page would show a working model while the runner refused
+                  to call anything. The stored value gets its own option so it
+                  is shown as what it is.
+                */}
+                {chosen === null ? (
+                  <option value={draft.model}>{draft.model} — not in the catalogue</option>
+                ) : null}
+                {providerModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.title}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">
+                {chosen
+                  ? `${usd(chosen.input_usd_per_mtok)} in / ${usd(
+                      chosen.output_usd_per_mtok,
+                    )} out per million tokens, read ${config.prices_as_of}.`
+                  : "Not in the catalogue."}
+              </span>
+            </label>
 
-          <label>
-            <span>Model</span>
-            <select
-              value={draft.model}
-              onChange={(e) => set("model", e.target.value)}
-            >
-              {/*
-                A `select` whose value matches no option renders the *first*
-                one, so a stored model that is not in the catalogue would
-                display as whatever happens to sit at the top of the list —
-                the page would show a working model while the runner refused
-                to call anything. The stored value gets its own option so it
-                is shown as what it is.
-              */}
-              {chosen === null ? (
-                <option value={draft.model}>{draft.model} — not in the catalogue</option>
-              ) : null}
-              {providerModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.title}
-                </option>
-              ))}
-            </select>
-            <span className="hint">
-              {chosen
-                ? `${usd(chosen.input_usd_per_mtok)} in / ${usd(
-                    chosen.output_usd_per_mtok,
-                  )} out per million tokens, read ${config.prices_as_of}.`
-                : "Not in the catalogue."}
-            </span>
-          </label>
+            <label>
+              <span>Effort</span>
+              <select
+                value={draft.effort}
+                disabled={!chosen || chosen.efforts.length === 0}
+                onChange={(e) => set("effort", e.target.value)}
+              >
+                {config.efforts.map((level) => (
+                  <option
+                    key={level}
+                    value={level}
+                    disabled={
+                      chosen !== null &&
+                      chosen.efforts.length > 0 &&
+                      !chosen.efforts.includes(level)
+                    }
+                  >
+                    {level}
+                  </option>
+                ))}
+              </select>
+              <span className="hint">
+                {chosen && chosen.efforts.length === 0
+                  ? `${chosen.title} has no effort parameter. The stored value is kept for the day the model changes and is not sent.`
+                  : "Cheapest on the left. Controls how much the model thinks before answering, and most of what a pass costs."}
+              </span>
+            </label>
 
-          <label>
-            <span>Effort</span>
-            <select
-              value={draft.effort}
-              disabled={!chosen || chosen.efforts.length === 0}
-              onChange={(e) => set("effort", e.target.value)}
-            >
-              {config.efforts.map((level) => (
-                <option
-                  key={level}
-                  value={level}
-                  disabled={
-                    chosen !== null &&
-                    chosen.efforts.length > 0 &&
-                    !chosen.efforts.includes(level)
-                  }
-                >
-                  {level}
-                </option>
-              ))}
-            </select>
-            <span className="hint">
-              {chosen && chosen.efforts.length === 0
-                ? `${chosen.title} has no effort parameter. The stored value is kept for the day the model changes and is not sent.`
-                : "Cheapest on the left. Controls how much the model thinks before answering, and most of what a pass costs."}
-            </span>
-          </label>
-
-          <label>
-            <span>Token ceiling per call</span>
-            <input
-              type="number"
-              value={draft.max_tokens}
-              min={config.limits.min_max_tokens}
-              max={chosen?.max_output}
-              step={100}
-              onChange={(e) => set("max_tokens", Number(e.target.value))}
-            />
-            <span className="hint">
-              A cap, not a request size. Each prompt asks for what it needs; this
-              is the most any of them may get.
-            </span>
-          </label>
-        </div>
-
-        {chosen?.note ? <p className="banner banner-info">{chosen.note}</p> : null}
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>Cadence</h2>
-        </div>
-        <div className="field-grid">
-          <label>
-            <span>Seconds between scheduled passes</span>
-            <input
-              type="number"
-              value={draft.tick_seconds}
-              min={config.limits.min_tick_seconds}
-              max={config.limits.max_tick_seconds}
-              step={60}
-              onChange={(e) => set("tick_seconds", Number(e.target.value))}
-            />
-            <span className="hint">
-              {describeCadence(draft.tick_seconds)}, so at most{" "}
-              {Math.floor(passesPerDay)} a day. An operator can force an
-              immediate pass from the Programme page at any time.
-            </span>
-          </label>
-        </div>
-      </section>
-
-      <section className="card">
-        <div className="card-head">
-          <h2>What this costs</h2>
-        </div>
-        <dl className="assumptions">
-          <div className="assumption-row">
-            <dt>Output, at most, per model call</dt>
-            <dd>{perCallCeiling === null ? "—" : usd(perCallCeiling)}</dd>
+            <label>
+              <span>Token ceiling per call</span>
+              <input
+                type="number"
+                value={draft.max_tokens}
+                min={config.limits.min_max_tokens}
+                max={chosen?.max_output}
+                step={100}
+                onChange={(e) => set("max_tokens", Number(e.target.value))}
+              />
+              <span className="hint">
+                A cap, not a request size. Each prompt asks for what it needs; this
+                is the most any of them may get.
+              </span>
+            </label>
           </div>
-          <div className="assumption-row">
-            <dt>Scheduled passes per day, at most</dt>
-            <dd>{Math.floor(passesPerDay)}</dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Effort actually sent</dt>
-            <dd>
-              {/*
-                Three different answers, and collapsing any two of them would
-                mislead: the model has no effort parameter, or the settings
-                would not produce a request at all, or this is the level.
-              */}
-              {chosen === null ? (
-                <span className="pill pill-bad">no request is made</span>
-              ) : chosen.efforts.length === 0 ? (
-                <span className="pill pill-mute">not applicable</span>
-              ) : (
-                draft.effort
-              )}
-            </dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Prices read</dt>
-            <dd>{config.prices_as_of}</dd>
-          </div>
-        </dl>
-        <p className="muted">
-          The first figure is a ceiling on the <em>output</em> of one call and
-          nothing more. It excludes input tokens, which depend on how much of
-          the ledger a prompt carries, and it excludes the panel: a pass that
-          convenes a stage&apos;s specialists makes one call per role. Read it as
-          the floor of what a bill could be, not an estimate of what it will be
-          — and a pass makes no call at all when there is nothing new to judge.
-        </p>
-      </section>
 
-      <div className="row">
+          {chosen?.note ? <p className="banner banner-info">{chosen.note}</p> : null}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Cadence</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="field-grid">
+            <label>
+              <span>Seconds between scheduled passes</span>
+              <input
+                type="number"
+                value={draft.tick_seconds}
+                min={config.limits.min_tick_seconds}
+                max={config.limits.max_tick_seconds}
+                step={60}
+                onChange={(e) => set("tick_seconds", Number(e.target.value))}
+              />
+              <span className="hint">
+                {passesPerDay === null
+                  ? "Not a cadence: the runner needs a positive number of seconds."
+                  : `${describeCadence(draft.tick_seconds)}, so at most ${Math.floor(passesPerDay)} a day.`}{" "}
+                An operator can force an immediate pass from the Programme page
+                at any time.
+              </span>
+            </label>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>What this costs</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="assumptions">
+            <div className="assumption-row">
+              <dt>Output, at most, per model call</dt>
+              <dd>
+                {perCallCeiling === null ? (
+                  <Absent
+                    kind="not-measured"
+                    reason="the model is not in the catalogue, so it has no price"
+                  />
+                ) : (
+                  usd(perCallCeiling)
+                )}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Scheduled passes per day, at most</dt>
+              <dd>
+                {passesPerDay === null ? (
+                  <Absent
+                    kind="not-measured"
+                    reason="the cadence entered is not a positive number of seconds"
+                  />
+                ) : (
+                  Math.floor(passesPerDay)
+                )}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Effort actually sent</dt>
+              <dd>
+                {/*
+                  Three different answers, and collapsing any two of them would
+                  mislead: the model has no effort parameter, or the settings
+                  would not produce a request at all, or this is the level.
+                */}
+                {chosen === null ? (
+                  <StatusBadge status="blocked">no request is made</StatusBadge>
+                ) : chosen.efforts.length === 0 ? (
+                  <StatusBadge status="mute">not applicable</StatusBadge>
+                ) : (
+                  draft.effort
+                )}
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Prices read</dt>
+              <dd>{config.prices_as_of}</dd>
+            </div>
+          </dl>
+          <p className="muted mb-0">
+            The first figure is a ceiling on the <em>output</em> of one call and
+            nothing more. It excludes input tokens, which depend on how much of
+            the ledger a prompt carries, and it excludes the panel: a pass that
+            convenes a stage&apos;s specialists makes one call per role. Read it as
+            the floor of what a bill could be, not an estimate of what it will be
+            — and a pass makes no call at all when there is nothing new to judge.
+          </p>
+        </CardContent>
+      </Card>
+
+      {/* 12px from the card above and the one below, like every other gap
+          between sections; the legacy card had a bottom margin and no top
+          one, so the credentials sat flush under this row. */}
+      <div className="row mt-3">
         <button
           type="button"
           className="primary"
@@ -443,67 +488,71 @@ export default function SystemConfigurationPage() {
         ) : null}
       </div>
 
-      <section className="card">
-        <div className="card-head">
-          <h2>Credentials</h2>
-        </div>
-        <p className="muted">
-          Stored encrypted, and never readable back. There is no endpoint that
-          returns a credential, so the most this page can ever show is that one
-          is set and which one it is. The fingerprint answers &quot;is this the
-          key I think it is&quot; without being any part of the key.
-        </p>
-        {config.secrets_key_problem ? (
-          <p className="banner banner-warn">
-            <strong>This deployment cannot store a credential.</strong>{" "}
-            {config.secrets_key_problem}. Generate one with{" "}
-            <code>python -m src.db.secrets_cli keygen</code> and set it as{" "}
-            <code>SECRETS_KEY</code> for the API and the programme — and not for
-            the worker, which holds the broker credentials and must not be able
-            to decrypt a model key. Until then the programme falls back to
-            <code> ANTHROPIC_API_KEY</code> from its own environment, which is
-            how this worked before.
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>Credentials</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="muted">
+            Stored encrypted, and never readable back. There is no endpoint that
+            returns a credential, so the most this page can ever show is that one
+            is set and which one it is. The fingerprint answers &quot;is this the
+            key I think it is&quot; without being any part of the key.
           </p>
-        ) : null}
-        {config.secrets.map((secret) => (
-          <SecretField
-            key={secret.name}
-            secret={secret}
-            disabled={config.secrets_key_problem !== null}
-            onChanged={() => void refresh()}
-          />
-        ))}
-      </section>
+          {config.secrets_key_problem ? (
+            <p className="banner banner-warn">
+              <strong>This deployment cannot store a credential.</strong>{" "}
+              {config.secrets_key_problem}. Generate one with{" "}
+              <code>python -m src.db.secrets_cli keygen</code> and set it as{" "}
+              <code>SECRETS_KEY</code> for the API and the programme — and not for
+              the worker, which holds the broker credentials and must not be able
+              to decrypt a model key. Until then the programme falls back to
+              <code> ANTHROPIC_API_KEY</code> from its own environment, which is
+              how this worked before.
+            </p>
+          ) : null}
+          {config.secrets.map((secret) => (
+            <SecretField
+              key={secret.name}
+              secret={secret}
+              disabled={config.secrets_key_problem !== null}
+              onChanged={() => void refresh()}
+            />
+          ))}
+        </CardContent>
+      </Card>
 
-      <section className="card">
-        <div className="card-head">
-          <h2>The other controls</h2>
-        </div>
-        <p className="muted">
-          Listed rather than duplicated. A control with two places to set it is
-          a control with two answers to what it is set to.
-        </p>
-        <dl className="assumptions">
-          <div className="assumption-row">
-            <dt>Kill switch</dt>
-            <dd>
-              <Link href="/system">System</Link>
-            </dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Programme switch and autonomy ceiling</dt>
-            <dd>
-              <Link href="/programme">Programme</Link>
-            </dd>
-          </div>
-          <div className="assumption-row">
-            <dt>Research parameters, section 2</dt>
-            <dd>
-              <Link href="/programme/config">Programme configuration</Link>
-            </dd>
-          </div>
-        </dl>
-      </section>
+      <Card className="mt-3">
+        <CardHeader>
+          <CardTitle>The other controls</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="muted">
+            Listed rather than duplicated. A control with two places to set it is
+            a control with two answers to what it is set to.
+          </p>
+          <dl className="assumptions">
+            <div className="assumption-row">
+              <dt>Kill switch</dt>
+              <dd>
+                <Link href="/system">System</Link>
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Programme switch and autonomy ceiling</dt>
+              <dd>
+                <Link href="/programme">Programme</Link>
+              </dd>
+            </div>
+            <div className="assumption-row">
+              <dt>Research parameters, section 2</dt>
+              <dd>
+                <Link href="/programme/config">Programme configuration</Link>
+              </dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
     </>
   );
 }

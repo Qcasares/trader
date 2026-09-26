@@ -172,35 +172,47 @@ export interface PortfolioHistory {
   marks: PortfolioMark[];
 }
 
+/**
+ * A run's figures, exactly as the engine stored them.
+ *
+ * Every figure is nullable. A finished run carries the whole set; a row that
+ * lacks one — an older engine's, or one written by hand — arrives as `null`,
+ * because the API no longer substitutes 252 sessions a year, zero fills, or a
+ * Sharpe of 0 ± 0 (`src/api/schemas.py`, `BacktestMetrics`). A null is the
+ * caller's to render, through `<Absent>`, never with a fallback number.
+ */
 export interface BacktestMetrics {
   start: string | null;
   end: string | null;
-  n_sessions: number;
-  initial_equity: number;
-  total_return: number;
-  cagr: number;
-  volatility: number;
-  sharpe: number;
-  sharpe_stderr: number;
-  sharpe_is_significant: boolean;
-  sortino: number;
-  max_drawdown: number;
+  n_sessions: number | null;
+  initial_equity: number | null;
+  total_return: number | null;
+  cagr: number | null;
+  volatility: number | null;
+  sharpe: number | null;
+  sharpe_stderr: number | null;
+  /** The engine's verdict. `null` is not `false`: no verdict was recorded. */
+  sharpe_is_significant: boolean | null;
+  sortino: number | null;
+  max_drawdown: number | null;
   /** When the worst drawdown began and ended — depth without dates cannot
    * answer "was that 2008, or was that us?". */
   max_drawdown_start: string | null;
   max_drawdown_end: string | null;
-  calmar: number;
-  exposure: number;
-  n_rebalances: number;
-  n_fills: number;
-  total_commission: number;
-  turnover_annual: number;
-  final_equity: number;
+  calmar: number | null;
+  exposure: number | null;
+  n_rebalances: number | null;
+  /** Every fill the run made — the total the capped `/orders` page is a slice of. */
+  n_fills: number | null;
+  total_commission: number | null;
+  turnover_annual: number | null;
+  final_equity: number | null;
   /** First session the whole universe existed. Metrics before it are not the strategy. */
   effective_start: string | null;
-  cost_stress_multiplier: number;
+  /** The cost assumption the figures were produced under. */
+  cost_stress_multiplier: number | null;
   /** Sessions per year used to annualise. 252 = NYSE; a 24/7 venue is 365. */
-  periods_per_year: number;
+  periods_per_year: number | null;
 }
 
 export interface BacktestRun {
@@ -738,7 +750,18 @@ export const api = {
 
   equity: (id: string) => request<EquityPoint[]>(`/api/v1/backtests/${id}/equity`),
 
-  orders: (id: string) => request<BacktestOrder[]>(`/api/v1/backtests/${id}/orders`),
+  /**
+   * The run's most recent fills, newest first — a page, not the list.
+   *
+   * The API caps it at `limit` (500 when none is sent), so its length is never
+   * the run's fill count. That is `BacktestMetrics.n_fills`, which the engine
+   * counts from the same fills these rows were written from
+   * (`tests/unit/test_fill_count_contract.py` holds the two together).
+   */
+  orders: (id: string, limit?: number) =>
+    request<BacktestOrder[]>(
+      `/api/v1/backtests/${id}/orders${limit ? `?limit=${limit}` : ""}`,
+    ),
 
   portfolio: (mode: PortfolioMode = "paper") =>
     request<Portfolio>(`/api/v1/portfolio?mode=${mode}`),
@@ -954,16 +977,11 @@ export const api = {
 
 // ---------------------------------------------------------------------------
 // Formatting
+//
+// Moved to `lib/format.ts`, which is now the one file allowed to turn a stored
+// fraction into a percentage (tests/unit/test_web_formatting.py). Re-exported
+// so an import written against the old home keeps compiling; new code imports
+// from "@/lib/format".
 // ---------------------------------------------------------------------------
 
-export const fmtPct = (value: number, digits = 2) =>
-  `${(value * 100).toFixed(digits)}%`;
-
-export const fmtUsd = (value: number) =>
-  value.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  });
-
-export const fmtNum = (value: number, digits = 3) => value.toFixed(digits);
+export { fmtNum, fmtPct, fmtUsd } from "./format";

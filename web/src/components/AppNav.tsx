@@ -30,6 +30,18 @@
  * Density is the same argument as everywhere else here: 28px rows and 12px
  * labels, so the whole application fits above the fold on a laptop and the
  * sidebar never itself needs scrolling.
+ *
+ * The groups are where it breathes: 48px apart (`--s-7`), and in the rail the
+ * first sits 48px under the wordmark. Each heading carries 32px above it
+ * (`--s-6`, `mt-8`) on top of the 16px gap before it, the nav's or the
+ * rail's. That is the spacing that shipped, when the 32px came from the
+ * legacy `h2` rule in `globals.css`; scoping that sheet away from components
+ * (web/DESIGN.md K-15) took the margin with it and closed the groups up to
+ * 16px, which nobody chose. The heading says it itself now.
+ *
+ * The rows sit in list items, which `globals.css` treats as running text and
+ * underlines a link in (A-5). A row is navigation, not a sentence, so it says
+ * `no-underline`.
  */
 
 import Link from "next/link";
@@ -107,7 +119,7 @@ export function AppNav({ onNavigate }: { onNavigate?: () => void }) {
     <nav aria-label="Sections" className="flex flex-col gap-4">
       {GROUPS.map((group) => (
         <div key={group.heading}>
-          <h2 className="mb-1 px-2 text-xs font-medium tracking-[0.045em] text-ink-faint uppercase">
+          <h2 className="mt-8 mb-1 px-2 text-xs font-medium tracking-[0.045em] text-ink-faint uppercase">
             {group.heading}
           </h2>
           <ul className="m-0 list-none p-0">

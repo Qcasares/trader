@@ -268,18 +268,23 @@ export default function FindingsPage() {
               {
                 id: "candidate",
                 header: "Candidate",
+                // A finding raised against the programme rather than one
+                // configuration names no candidate. That is a fact about the
+                // finding, not a value that failed to arrive, so it is a word
+                // and not a dash.
                 cell: (f) =>
                   f.candidate_id ? (
                     <Link href={`/programme/candidates/${f.candidate_id}`}>
                       view
                     </Link>
                   ) : (
-                    "—"
+                    <span className="text-ink-muted">none</span>
                   ),
               },
               {
                 id: "open_detail",
-                header: "",
+                header: "Details",
+                hideHeader: true,
                 className: "text-right",
                 cell: (f) => (
                   <Button

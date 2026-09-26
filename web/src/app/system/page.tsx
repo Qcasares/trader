@@ -17,6 +17,26 @@
  * - **A worker's liveness comes from heartbeat age, not its stored status.**
  *   That column is only ever written `'alive'`, so rendering it directly showed
  *   a green badge for a process that died an hour ago.
+ *
+ * Three more, since the owner's decisions of 2026-09-26:
+ *
+ * - **Red means live money reachable, and nothing else, on this page's safety
+ *   controls** (web/DESIGN.md OD-2, C-12). A halted kill switch is the safe
+ *   state and reads as a strong amber "stopped". It used to be the same red
+ *   `✕` as an open live-trading gate, so the page an operator reads under
+ *   stress drew the safest condition it has and the most dangerous one alike —
+ *   and a fresh deployment, which the migration leaves halted, opened on a red
+ *   chip. The mapping lives in `StatusBadge` (`killSwitchStatus`,
+ *   `liveGateStatus`); this page asks for a state, never a colour.
+ * - **A switch that cannot be read is not shown as its last value.** The kill
+ *   switch fails closed on the server; the page used to fail open, keeping the
+ *   last good reading on screen, chips and all, under an error banner. When a
+ *   refresh fails now, the kill switch and the gates read "not read", beside
+ *   what they last were, and everything else is marked stale with the time it
+ *   was read (DESIGN.md G-2, E-13).
+ * - **The page keeps its heading in every state.** A first load that failed
+ *   used to leave "Loading system status…" on screen for ever, with no `h1`
+ *   and no error; it now says what failed (E-9, T-5).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -24,9 +44,17 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CircleSlash, Settings2 } from "lucide-react";
 import { ApiError, api, type JobSummary, type SystemStatus } from "@/lib/api";
-import { StatusBadge, jobStatus, livenessStatus } from "@/components/StatusBadge";
-import { fmtInstant } from "@/lib/format";
+import {
+  StatusBadge,
+  jobStatus,
+  killSwitchStatus,
+  liveGateStatus,
+  livenessStatus,
+  type Status,
+} from "@/components/StatusBadge";
+import { fmtAge, fmtInstant } from "@/lib/format";
 import { DataTable } from "@/components/DataTable";
+import { Skeleton } from "@/components/Skeleton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -42,79 +70,146 @@ import {
 
 const CONFIRM_PHRASE = "ENABLE TRADING";
 
+/** How often the page re-reads the control plane. */
+const POLL_MS = 5000;
+
 /** Job statuses, loudest first. The order the status column sorts in. */
 const JOB_ORDER = ["failed", "expired", "running", "queued", "succeeded"];
 
-/** Heartbeat age, in the largest unit that still reads as a number. */
-function fmtAge(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "—";
-  if (seconds < 90) return `${Math.round(seconds)}s`;
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
-  return `${Math.round(seconds / 3600)}h`;
+/** One answer from the API, kept whole so its parts cannot come from two reads. */
+interface Reading {
+  status: SystemStatus;
+  jobs: JobSummary[];
+  /** When the answer arrived. The states are current as of this, not as of now. */
+  readAt: string;
+}
+
+/** Refreshes that have not produced a reading, since the first of them. */
+interface Failure {
+  message: string;
+  since: string;
+}
+
+function sentence(message: string): string {
+  const trimmed = message.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 /**
- * One of the three independent conditions a live order needs.
+ * The state of a safety condition — or, when the page cannot read it now,
+ * that it is not read, beside what it last was.
  *
- * `open` is the dangerous direction here, so an open gate is the loud badge.
- * The usual instinct — green for "on" — would make the configuration that can
- * move real money the calm-looking one.
+ * Never the last value on its own: "enabled" on a page that has lost the API
+ * is a control plane defaulting to "go" because it cannot find out, which is
+ * the one thing the switch behind it is built never to do.
  */
-function Gate({ name, open, note }: { name: string; open: boolean; note: string }) {
+function SafetyState({
+  status,
+  word,
+  stale,
+}: {
+  status: Status;
+  word: string;
+  stale: boolean;
+}) {
+  if (!stale) return <StatusBadge status={status}>{word}</StatusBadge>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <StatusBadge status="unknown">not read</StatusBadge>
+      <span className="text-xs font-normal text-ink-muted">last read: {word}</span>
+    </span>
+  );
+}
+
+/**
+ * One of the three independent conditions a live order needs. Open is the
+ * dangerous direction, and `liveGateStatus` makes it the one red chip here.
+ */
+function Gate({
+  name,
+  open,
+  note,
+  stale,
+}: {
+  name: string;
+  open: boolean;
+  note: string;
+  stale: boolean;
+}) {
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-line py-2 last:border-b-0">
       <div className="min-w-0">
         <div className="font-mono text-sm">{name}</div>
         <div className="text-xs text-ink-muted text-pretty">{note}</div>
       </div>
-      <StatusBadge status={open ? "blocked" : "settled"}>
-        {open ? "open" : "closed"}
-      </StatusBadge>
+      <SafetyState
+        status={liveGateStatus(open)}
+        word={open ? "open" : "closed"}
+        stale={stale}
+      />
     </div>
   );
 }
 
 export default function SystemPage() {
   const router = useRouter();
-  const [status, setStatus] = useState<SystemStatus | null>(null);
-  const [jobs, setJobs] = useState<JobSummary[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [reading, setReading] = useState<Reading | null>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
+  // A failed engage or release is not a failed read: the state on screen may
+  // still be current, so it is said where the control is and marks nothing
+  // stale.
+  const [actionError, setActionError] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [nextStatus, nextJobs] = await Promise.all([
-        api.systemStatus(),
-        api.jobs(),
-      ]);
-      setStatus(nextStatus);
-      setJobs(nextJobs);
-      setError(null);
+      const [status, jobs] = await Promise.all([api.systemStatus(), api.jobs()]);
+      setReading({ status, jobs, readAt: new Date().toISOString() });
+      setFailure(null);
     } catch (err: unknown) {
       if (err instanceof ApiError && err.isUnauthorized) {
         router.push("/login");
         return;
       }
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      // Kept from the first failure of a run of them, so the banner says how
+      // long the states have been unread, and is not re-announced on every
+      // failed poll.
+      setFailure((previous) =>
+        previous !== null && previous.message === message
+          ? previous
+          : { message, since: new Date().toISOString() },
+      );
     }
   }, [router]);
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(refresh, 5000);
+    const timer = setInterval(refresh, POLL_MS);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  /**
+   * The switch answers a change with its new state, which is shown at once;
+   * then the whole page is re-read, so nothing on it claims a time it was not
+   * read at.
+   */
+  const adopt = (status: SystemStatus) => {
+    setReading((previous) => (previous === null ? previous : { ...previous, status }));
+    void refresh();
+  };
 
   const engage = async () => {
     if (!reason.trim()) return;
     setBusy(true);
     try {
-      setStatus(await api.kill(reason.trim()));
+      adopt(await api.kill(reason.trim()));
       setReason("");
+      setActionError(null);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
@@ -123,18 +218,17 @@ export default function SystemPage() {
   const release = async () => {
     setBusy(true);
     try {
-      setStatus(await api.resume("released from control plane"));
+      adopt(await api.resume("released from control plane"));
       setConfirm("");
+      setActionError(null);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
   };
 
-  if (!status) return <p className="muted">Loading system status…</p>;
-
-  const noWorkerAlive = status.workers.every((w) => w.stale);
+  const stale = reading !== null && failure !== null;
 
   return (
     <>
@@ -153,17 +247,107 @@ export default function SystemPage() {
         </Button>
       </div>
 
-      {error && <p className="banner banner-bad">{error}</p>}
+      {reading === null ? (
+        failure ? (
+          <p className="banner banner-bad" role="alert">
+            The control plane could not be read: {sentence(failure.message)} The
+            kill switch and the gates are not shown, because there is nothing
+            current to show.
+          </p>
+        ) : (
+          <Skeleton rows={6} label="Loading system status" />
+        )
+      ) : (
+        <Loaded
+          reading={reading}
+          failure={stale ? failure : null}
+          actionError={actionError}
+          reason={reason}
+          setReason={setReason}
+          confirm={confirm}
+          setConfirm={setConfirm}
+          busy={busy}
+          engage={engage}
+          release={release}
+        />
+      )}
+    </>
+  );
+}
+
+function Loaded({
+  reading,
+  failure,
+  actionError,
+  reason,
+  setReason,
+  confirm,
+  setConfirm,
+  busy,
+  engage,
+  release,
+}: {
+  reading: Reading;
+  /** Set when the latest refresh failed: everything below is as of `readAt`. */
+  failure: Failure | null;
+  actionError: string | null;
+  reason: string;
+  setReason: (value: string) => void;
+  confirm: string;
+  setConfirm: (value: string) => void;
+  busy: boolean;
+  engage: () => void;
+  release: () => void;
+}) {
+  const { status, jobs, readAt } = reading;
+  const stale = failure !== null;
+  const noWorkerAlive = status.workers.every((w) => w.stale);
+  const bothGatesOpen = status.live_trading_enabled && status.alpaca_allow_live;
+
+  return (
+    <>
+      {failure ? (
+        <p className="banner banner-warn" role="status" data-stale="true">
+          <strong>Stale.</strong> Refreshing has failed since{" "}
+          {fmtInstant(failure.since)}: {sentence(failure.message)} Everything
+          below was read at {fmtInstant(readAt)}. The kill switch and the gates
+          read &ldquo;not read&rdquo; rather than their last value, because
+          either may have changed since.
+        </p>
+      ) : null}
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
+            <CardTitle className="flex flex-wrap items-center gap-2">
               Trading
-              <StatusBadge status={status.trading_enabled ? "settled" : "blocked"}>
-                {status.trading_enabled ? "enabled" : "halted"}
-              </StatusBadge>
+              <SafetyState
+                status={killSwitchStatus(status.trading_enabled)}
+                word={status.trading_enabled ? "enabled" : "stopped"}
+                stale={stale}
+              />
             </CardTitle>
+            {/*
+              What "stopped" means, in the worker's terms: the two job kinds
+              that can reach a venue fail on the switch, and nothing else does
+              (src/worker/main.py). Said because the state is safe, and a safe
+              state an operator cannot interpret is one they will "fix".
+
+              And what it does not do. `POST /system/kill` sets the flag and
+              nothing more (src/api/routers/system.py), so an order already
+              at the venue stays there. Calling the state safe without saying
+              so would let "stopped" read as "nothing in flight", which is the
+              one belief an operator reaching for this switch must not hold.
+              test_web_components.py ties this sentence to the route.
+            */}
+            {!status.trading_enabled && !stale ? (
+              <p className="m-0 text-sm text-pretty">
+                No live decision is taken and no order is submitted, to paper or
+                to live, until trading is re-enabled. Orders already at the
+                venue are not cancelled. Backtests, marks and reconciliation
+                carry on.
+              </p>
+            ) : null}
             {status.kill_reason ? (
               <p className="m-0 text-sm text-ink-muted">{status.kill_reason}</p>
             ) : null}
@@ -176,10 +360,16 @@ export default function SystemPage() {
               </p>
             )}
 
+            {actionError ? (
+              <p className="banner banner-bad" role="alert">
+                {actionError}
+              </p>
+            ) : null}
+
             {status.trading_enabled ? (
               <div className="space-y-2">
                 <Label htmlFor="kill-reason">
-                  Reason for halting (recorded in the audit log)
+                  Reason for stopping (recorded in the audit log)
                 </Label>
                 <Input
                   id="kill-reason"
@@ -231,11 +421,13 @@ export default function SystemPage() {
               name="LIVE_TRADING_ENABLED"
               open={status.live_trading_enabled}
               note="The environment gate."
+              stale={stale}
             />
             <Gate
               name="ALPACA_ALLOW_LIVE"
               open={status.alpaca_allow_live}
               note="The allow-live gate, set separately from the one above."
+              stale={stale}
             />
             <div className="flex items-baseline justify-between gap-3 border-b border-line py-2">
               <div className="min-w-0">
@@ -249,13 +441,23 @@ export default function SystemPage() {
             </div>
             <div className="flex items-baseline justify-between gap-3 pt-2">
               <span className="text-sm text-ink-muted">Broker credentials</span>
-              <StatusBadge status={status.broker_configured ? "settled" : "mute"}>
-                {status.broker_configured ? "present" : "absent"}
-              </StatusBadge>
+              <SafetyState
+                status={status.broker_configured ? "settled" : "mute"}
+                word={status.broker_configured ? "present" : "absent"}
+                stale={stale}
+              />
             </div>
-            {(!status.live_trading_enabled || !status.alpaca_allow_live) && (
+            {bothGatesOpen ? (
+              <p className="mt-3 mb-0 text-sm text-blocked text-pretty">
+                {stale ? "When last read, both" : "Both"} environment gates{" "}
+                {stale ? "were" : "are"} open: a deployment in live mode reaches
+                real money whenever trading is enabled.
+              </p>
+            ) : (
               <p className="mt-3 mb-0 text-sm text-settled">
-                No real order can be placed in this configuration.
+                {stale
+                  ? "When last read, no real order could be placed in this configuration."
+                  : "No real order can be placed in this configuration."}
               </p>
             )}
           </CardContent>
@@ -264,7 +466,10 @@ export default function SystemPage() {
 
       <Card className="mt-3">
         <CardHeader>
-          <CardTitle>Workers</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            Workers
+            {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {/*
@@ -285,7 +490,7 @@ export default function SystemPage() {
             </p>
           )}
           {status.workers.length > 0 && (
-            <Table>
+            <Table label="Workers">
               <TableHeader>
                 <TableRow>
                   <TableHead>Worker</TableHead>
@@ -319,7 +524,10 @@ export default function SystemPage() {
 
       <Card className="mt-3">
         <CardHeader>
-          <CardTitle>Jobs</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            Jobs
+            {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
+          </CardTitle>
           <div className="flex flex-wrap gap-1.5">
             {Object.entries(status.jobs).map(([key, count]) => (
               <StatusBadge key={key} status={jobStatus(key)}>
@@ -371,8 +579,10 @@ export default function SystemPage() {
                 id: "error",
                 header: "Error",
                 // Deliberately unsortable: there is no meaningful order over
-                // free text, and a sort button implies there is one.
-                className: "max-w-[36ch] text-blocked text-pretty",
+                // free text, and a sort button implies there is one. Wraps:
+                // table cells are `nowrap`, and an error set on one line ran
+                // 176px into the next column and printed over its timestamp.
+                className: "max-w-[36ch] whitespace-normal text-blocked text-pretty",
                 cell: (job) => job.error ?? "",
               },
               {

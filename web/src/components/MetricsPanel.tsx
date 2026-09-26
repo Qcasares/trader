@@ -19,7 +19,9 @@
  */
 
 import type { BacktestMetrics, BacktestRun } from "@/lib/api";
-import { fmtNum, fmtPct, fmtUsd } from "@/lib/api";
+import { fmtNum, fmtPct, fmtUsd } from "@/lib/format";
+import { Absent } from "@/components/Absent";
+import { StatusBadge } from "@/components/StatusBadge";
 
 interface Props {
   run: BacktestRun;
@@ -42,14 +44,18 @@ export function MetricsPanel({ run, metrics }: Props) {
         </p>
       )}
 
-      {!metrics.sharpe_is_significant && (
-        <p className="banner banner-warn">
-          <strong>Not statistically significant.</strong> The Sharpe estimate
-          ({fmtNum(metrics.sharpe)}) is within two standard errors of zero
-          (± {fmtNum(metrics.sharpe_stderr)}). This is not evidence the strategy
-          works.
-        </p>
-      )}
+      {/* The engine's verdict, and only when it gave one: a null
+          `sharpe_is_significant` is no verdict, not a "false". */}
+      {metrics.sharpe_is_significant === false &&
+        metrics.sharpe != null &&
+        metrics.sharpe_stderr != null && (
+          <p className="banner banner-warn">
+            <strong>Not statistically significant.</strong> The Sharpe estimate
+            ({fmtNum(metrics.sharpe)}) is within two standard errors of zero
+            (± {fmtNum(metrics.sharpe_stderr)}). This is not evidence the
+            strategy works.
+          </p>
+        )}
 
       {truncated && (
         <p className="banner banner-info">
@@ -61,29 +67,42 @@ export function MetricsPanel({ run, metrics }: Props) {
       )}
 
       <dl className="metric-grid">
-        <Metric label="Total return" value={fmtPct(metrics.total_return)} />
-        <Metric label="CAGR" value={fmtPct(metrics.cagr)} />
-        <Metric label="Volatility" value={fmtPct(metrics.volatility)} />
+        <Metric label="Total return" value={figure(metrics.total_return, fmtPct)} />
+        <Metric label="CAGR" value={figure(metrics.cagr, fmtPct)} />
+        <Metric label="Volatility" value={figure(metrics.volatility, fmtPct)} />
         <Metric
           label="Sharpe"
-          value={`${fmtNum(metrics.sharpe)} ± ${fmtNum(metrics.sharpe_stderr)}`}
-          badge={metrics.sharpe_is_significant ? undefined : "not significant"}
+          value={
+            // Never one without the other (CLAUDE.md): a Sharpe whose standard
+            // error was not recorded is not shown bare.
+            metrics.sharpe == null || metrics.sharpe_stderr == null ? (
+              <Absent kind="not-measured" />
+            ) : (
+              `${fmtNum(metrics.sharpe)} ± ${fmtNum(metrics.sharpe_stderr)}`
+            )
+          }
+          badge={
+            metrics.sharpe_is_significant === false ? "not significant" : undefined
+          }
         />
-        <Metric label="Sortino" value={fmtNum(metrics.sortino)} />
-        <Metric label="Max drawdown" value={fmtPct(metrics.max_drawdown)} />
-        <Metric label="Calmar" value={fmtNum(metrics.calmar, 2)} />
-        <Metric label="Exposure" value={fmtPct(metrics.exposure, 1)} />
-        <Metric label="Rebalances" value={String(metrics.n_rebalances)} />
-        <Metric label="Fills" value={String(metrics.n_fills)} />
+        <Metric label="Sortino" value={figure(metrics.sortino, fmtNum)} />
+        <Metric label="Max drawdown" value={figure(metrics.max_drawdown, fmtPct)} />
+        <Metric label="Calmar" value={figure(metrics.calmar, (v) => fmtNum(v, 2))} />
+        <Metric label="Exposure" value={figure(metrics.exposure, (v) => fmtPct(v, 1))} />
+        <Metric label="Rebalances" value={figure(metrics.n_rebalances, String)} />
+        <Metric label="Fills" value={figure(metrics.n_fills, String)} />
         <Metric
           label="Turnover"
-          value={`${fmtNum(metrics.turnover_annual, 2)}×/yr`}
+          value={figure(metrics.turnover_annual, (v) => `${fmtNum(v, 2)}×/yr`)}
         />
-        <Metric label="Final equity" value={fmtUsd(metrics.final_equity)} />
+        <Metric label="Final equity" value={figure(metrics.final_equity, fmtUsd)} />
       </dl>
 
+      {/* Above the list, not in it: a `dl` holds only its term and definition
+          groups, and a heading inside one is a structure assistive technology
+          cannot read as a list (axe: definition-list, WCAG 1.3.1). */}
+      <h3>Assumptions this result depends on</h3>
       <dl className="assumptions">
-        <h3>Assumptions this result depends on</h3>
         <Row label="Data source" value={run.data_source} />
         <Row
           label="Requested window"
@@ -91,21 +110,52 @@ export function MetricsPanel({ run, metrics }: Props) {
         />
         <Row
           label="Effective start"
-          value={metrics.effective_start ?? "—"}
+          value={metrics.effective_start ?? <Absent kind="not-measured" />}
           hint="First session the whole universe was tradeable, warm-up included."
         />
         <Row
           label="Slippage"
-          value={`${run.cost_model.slippage_bps ?? 0} bps`}
+          value={
+            // Not `?? 0`. The runs the programme queued before a run's cost
+            // model was stored whole record only a stress multiplier, and for
+            // those this cell used to read "0 bps" — a frictionless fill —
+            // while the worker applied its own default. A cost assumption the
+            // run did not record is missing, not zero.
+            typeof run.cost_model.slippage_bps === "number" ? (
+              `${run.cost_model.slippage_bps} bps`
+            ) : (
+              <Absent
+                kind="missing"
+                reason="not recorded on this run; the engine applied its own default, not zero"
+              />
+            )
+          }
         />
         <Row
           label="Cost stress"
-          value={`${metrics.cost_stress_multiplier}×`}
+          value={
+            // Every result carries its multiplier (CLAUDE.md); one that does
+            // not is missing it, and 1× would be the cheapest guess going.
+            metrics.cost_stress_multiplier == null ? (
+              <Absent kind="missing" reason="not recorded with these figures" />
+            ) : (
+              `${metrics.cost_stress_multiplier}×`
+            )
+          }
           hint="Re-run at 3× and check the sign does not flip before trusting this."
         />
         <Row
           label="Annualised on"
-          value={`${metrics.periods_per_year ?? 252} sessions/year`}
+          value={
+            // Not `?? 252`: a count nobody recorded is not the NYSE year, and
+            // for a venue that never closes, 252 moves volatility and the
+            // Sharpe by about a fifth.
+            metrics.periods_per_year == null ? (
+              <Absent kind="not-measured" />
+            ) : (
+              `${metrics.periods_per_year} sessions/year`
+            )
+          }
           hint="252 is the NYSE year. A venue that never closes has 365, and annualising it on 252 understates volatility by about 20%."
         />
         <Row
@@ -119,13 +169,23 @@ export function MetricsPanel({ run, metrics }: Props) {
   );
 }
 
+/**
+ * A figure, or the words for one that was never computed. The API sends null
+ * for a figure the run did not record, where it used to send a zero or 252
+ * (`BacktestMetrics` in `lib/api.ts`), so every figure here passes through
+ * this rather than straight into a formatter.
+ */
+function figure(value: number | null, format: (value: number) => string) {
+  return value == null ? <Absent kind="not-measured" /> : format(value);
+}
+
 function Metric({
   label,
   value,
   badge,
 }: {
   label: string;
-  value: string;
+  value: React.ReactNode;
   badge?: string;
 }) {
   return (
@@ -133,7 +193,13 @@ function Metric({
       <dt>{label}</dt>
       <dd>
         {value}
-        {badge && <span className="badge">{badge}</span>}
+        {/* The one chip, as the backtests list draws the same caveat. It was
+            the legacy `.badge`: the same amber in a second type system. */}
+        {badge && (
+          <StatusBadge status="unknown" className="mt-1 flex">
+            {badge}
+          </StatusBadge>
+        )}
       </dd>
     </div>
   );
@@ -145,7 +211,7 @@ function Row({
   hint,
 }: {
   label: string;
-  value: string;
+  value: React.ReactNode;
   hint?: string;
 }) {
   return (

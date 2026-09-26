@@ -778,6 +778,12 @@ async def _enqueue_backtest(
         return
 
     criteria = await _criteria_for(conn, candidate, kind)
+    # The whole cost model the worker will apply, not only the multiplier this
+    # experiment varies. Written as the multiplier alone, the run and its
+    # experiment recorded no slippage, the worker applied 5 bps, and every
+    # figure the programme produced was quoted without the assumption behind
+    # it (CLAUDE.md). One mapping for both rows, so they cannot disagree.
+    cost_model = backtest_repo.complete_cost_model({"stress_multiplier": stress})
     request = backtest_repo.BacktestRequest(
         strategy_name=strategy_name,
         strategy_version=strategy_cls.version,
@@ -787,7 +793,7 @@ async def _enqueue_backtest(
         end_session=date.fromisoformat(candidate["end_session"]),
         initial_cash=DEFAULT_INITIAL_CASH,
         data_source=candidate["data_source"],
-        cost_model={"stress_multiplier": stress},
+        cost_model=cost_model,
     )
     run_id = await backtest_repo.create_run(conn, request)
     job_id = await job_repo.enqueue(conn, "backtest", {"run_id": str(run_id)})
@@ -805,7 +811,7 @@ async def _enqueue_backtest(
         },
         seed=seed,
         universe=strategy.universe(),
-        cost_assumptions={"stress_multiplier": stress},
+        cost_assumptions=cost_model,
         backtest_run_id=str(run_id),
         job_id=str(job_id) if job_id else None,
         test_start=date.fromisoformat(candidate["start_session"]),
@@ -948,6 +954,9 @@ async def _enqueue_walkforward(
         preregistered_criteria=[{"metric": "is_robust", "op": "==", "value": 1}],
         code_commit=code_version(),
         universe=candidate["universe"],
+        # What the walk-forward job applies to every study: the default cost
+        # model, read from the same mapping (`walkforward_job._execute`).
+        cost_assumptions=backtest_repo.complete_cost_model(None),
         walkforward_run_id=str(wf_id),
         job_id=str(job_id) if job_id else None,
     )

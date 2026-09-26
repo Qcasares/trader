@@ -1,0 +1,11 @@
+{
+  "name": "trader-design-checks",
+  "version": "0.0.0",
+  "private": true,
+  "description": "axe-core for tests/e2e/design_axe.py (web/DESIGN.md §13 (c)), pinned to 4.13.0, the version the design evidence was measured with, so a baseline of rule ids means the same rules on every run. Its own package for the reason tests/e2e/live is: Vercel builds web/, and nothing it builds should install test tooling.",
+  "author": "Quentin Casares",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "axe-core": "4.13.0"
+  }
+}

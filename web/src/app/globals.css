@@ -1,5 +1,17 @@
 @import "tailwindcss";
 
+/* Tailwind finds its classes by reading every file under web/ that git does not
+   ignore, and the design system beside this code (web/DESIGN.md OD-1) is a
+   quarter of a megabyte of prose about classes. Read as source, it put rules no
+   component uses into the stylesheet every visitor downloads — `.bg-red-500`,
+   and `.text-[Npx]` from a sentence forbidding it among 29. These are
+   documents, not source. `*.md` reaches only web/'s own files, so the folder
+   the decision log and the checks moved into is named on its own. */
+@source not "../../*.md";
+@source not "../../design-tokens.json";
+@source not "../../examples";
+@source not "../../design";
+
 /*
  * globals.css
  * -----------
@@ -38,6 +50,11 @@
  *    inverts the usual dashboard instinct, where success is the bright colour.
  *    An operator opens this to find out what is wrong; a page where "passed"
  *    shouts and "refused" murmurs is optimised for the wrong reader.
+ *
+ *    One state is loud without being alarming: a safety switch that is off.
+ *    The owner decided on 2026-09-26 (web/DESIGN.md OD-2) that on a safety
+ *    control red means live money reachable and nothing else, so a halted kill
+ *    switch — the safe state — is `--stopped`, an amber plate, not red.
  */
 
 :root {
@@ -85,9 +102,30 @@
      0.70. Dropping the tint for a neutral chip freed lightness entirely,
      and is quieter on a status-dense page besides. Measured, not eyeballed:
      three of the original values failed. */
-  --blocked: oklch(0.725 0.185 30);    /* refused, failed, halted   loudest */
+  --blocked: oklch(0.725 0.185 30);    /* refused, failed; live money reachable */
   --unknown: oklch(0.800 0.140 78);    /* not measured, indeterminate       */
   --settled: oklch(0.660 0.072 158);   /* met, passed, alive       quietest */
+
+  /* --- stopped --------------------------------------------------------
+     A safety switch that is off: the kill switch, halted. Red would say
+     "danger" about the one state in which no order can reach any venue, and
+     the owner reserved red for live money reachable (OD-2), so a stopped
+     switch is a strong amber — prominent, not alarming.
+
+     Its own role rather than `--unknown` reused, because the two must never
+     read as one another: `--unknown` is amber *text* on the neutral chip and
+     means "not measured"; `--stopped` is an amber *plate* carrying dark ink,
+     and means a known state. Same hue family, so amber still means "read
+     this"; opposite treatment, so the two differ with no colour at all.
+
+     One value for both schemes, deliberately. Light `--unknown` is darkened
+     for text on a light surface and as a fill reads brown, not amber; the
+     plate stays the amber a caution sign is. Solved, not chosen: ink on
+     plate 9.79:1 in both schemes. The plate against the card is 9.09:1 dark
+     and 1.90:1 light — a hue boundary in light, not a luminance one — which
+     is why the chip's word and glyph carry the state, never its edge. */
+  --stopped: oklch(0.800 0.140 78);
+  --stopped-ink: oklch(0.185 0.020 78);
 
   /* --- type -----------------------------------------------------------
      System stacks. A product UI does not need a display face, and a
@@ -190,10 +228,10 @@
  * What shadcn has no slot for at all is `unknown`. Its palette runs
  * default / secondary / destructive / outline, and the nearest fit for "not
  * measured" is `secondary`, which renders grey — the exact regression the
- * palette note above describes fixing. So `blocked`, `unknown` and `settled`
- * keep their own names and are added to the component variants rather than
- * folded into shadcn's. `destructive` is aliased to `blocked` so the stock
- * components still read correctly where they use it.
+ * palette note above describes fixing. So `blocked`, `unknown`, `settled` and
+ * `stopped` keep their own names and are added to the component variants
+ * rather than folded into shadcn's. `destructive` is aliased to `blocked` so
+ * the stock components still read correctly where they use it.
  *
  * `--color-ink*` rather than `--color-text*` because Tailwind v4 already owns
  * the `--text-*` namespace for font sizes; `text-ink-muted` for a colour and
@@ -239,6 +277,8 @@
   --color-blocked: var(--blocked);
   --color-unknown: var(--unknown);
   --color-settled: var(--settled);
+  --color-stopped: var(--stopped);
+  --color-stopped-ink: var(--stopped-ink);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
@@ -264,13 +304,21 @@
  * Here rather than as a Tailwind `before:content-[…]` utility because these
  * need the two-value form: the second value is the alternative text, and empty
  * is what stops a screen reader announcing the decoration in addition to the
- * label. The same syntax the legacy `.pill-*` classes further down use, for the
- * same reason — this is the accessibility half of "status is never colour
- * alone", and it survives the component library changing underneath it. */
+ * label. The legacy `.pill-*` classes used the same syntax for the same reason
+ * before they were retired into this chip — this is the accessibility half of
+ * "status is never colour alone", and it survives the component library
+ * changing underneath it. */
 [data-slot="badge"][data-variant="settled"]::before { content: "\2713" / ""; }
 [data-slot="badge"][data-variant="unknown"]::before { content: "?" / ""; }
+/* The triangle `.pill-warn` carried for a gate that has not passed. It shares
+   `unknown`'s amber, so the glyph is what says "not yet" rather than "not
+   measured" when the colour is gone. */
+[data-slot="badge"][data-variant="caution"]::before { content: "\25B2" / ""; }
 [data-slot="badge"][data-variant="blocked"]::before { content: "\2715" / ""; }
 [data-slot="badge"][data-variant="mute"]::before { content: "\2022" / ""; }
+/* The stop square: the one glyph every media control already uses for
+   "stopped, and safe to leave". */
+[data-slot="badge"][data-variant="stopped"]::before { content: "\25A0" / ""; }
 
 /* ---------------------------------------------------------------------------
  * Everything below is in `@layer base`, and it has to be.
@@ -287,10 +335,44 @@
  * relationship a migration needs: the old rules keep styling every page that
  * has not moved yet, and a utility on a migrated component overrides them
  * without needing `!important` or a more specific selector.
+ *
+ * Below the utilities was not far enough. A utility only wins for the
+ * properties it sets, so an element rule still filled in every property a
+ * component left alone: a 1px edge and a grey fill on every shadcn button, a
+ * 12px margin under every `Label`, 19px on the sheet's title, the table head's
+ * case and rule. shadcn is canonical here (owner decision of 2026-09-26,
+ * web/DESIGN.md OD-3, K-15), so a component decides its own look, and the
+ * element rules below reach only the markup that has no component: every one
+ * that names an element a component also renders is scoped to markup with no
+ * `data-slot` (each shadcn part carries one) or to a legacy class, and
+ * `tests/unit/test_web_components.py` refuses an unscoped one.
+ *
+ * The scope is written `el:where(:not([data-slot]))`, never
+ * `:where(el:not([data-slot]))`. The first keeps the element's own
+ * specificity, which is what lets it beat Tailwind's preflight (`h1`, `a`,
+ * `input`, all in this same layer) and lose to a legacy class (`.brand`), as
+ * the bare element did. The second has none, and silently loses to preflight:
+ * every page title dropped to body size, and every link lost its colour.
+ *
+ * What still reaches everything is what should: box sizing, the page's type,
+ * the hairline border default, the pointer cursor and the one focus indicator.
  * ------------------------------------------------------------------------- */
 @layer base {
 
 * { box-sizing: border-box; }
+
+/* A bare `border` names no colour, and Tailwind's preflight leaves it at
+   `currentColor`. That outlined every shadcn Card, the sheet and the menus in
+   the text colour, 15–16:1 against the page, while the legacy cards used the
+   hairline. shadcn's own base layer sets exactly this default and this sheet
+   had dropped it. A border that names no colour is now the hairline, and one
+   that wants another colour says so (web/DESIGN.md C-8, C-8a). */
+*, ::before, ::after { border-color: var(--border); }
+
+/* Tailwind 4 stopped giving buttons a pointer, and the legacy button rule was
+   the only thing that did. Kept for every button, as an interaction default
+   rather than as anybody's chrome. */
+:where(button, [role="button"]):not(:disabled) { cursor: pointer; }
 
 html { color-scheme: dark light; }
 
@@ -305,31 +387,61 @@ body {
 }
 
 /* Every figure on this screen is read down a column and compared with the one
-   above it. Proportional digits make that a reading task instead of a glance. */
-.mono, code, kbd, table, input, select, textarea {
+   above it. Proportional digits make that a reading task instead of a glance.
+   The shadcn `Table` and `Input` carry `tabular-nums` themselves. */
+.mono, code, kbd,
+table:where(:not([data-slot])),
+input:where(:not([data-slot])),
+select:where(:not([data-slot])),
+textarea:where(:not([data-slot])) {
   font-variant-numeric: tabular-nums;
 }
 
-/* One ring, everywhere, and never suppressed without replacement. */
-:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
-  outline: 2px solid var(--accent);
+/* One focus indicator, on every control, never suppressed without
+   replacement: a 2px accent outline at 2px offset (web/DESIGN.md A-4, owner
+   decision OD-3). shadcn shipped its own — the border turned accent and a 3px
+   ring of accent at 50% — and the ring measured 1.50–2.94:1, under the 3:1 a
+   focus indicator needs; the components no longer draw it.
+
+   The outline sits 2px outside the control, so what it is read against is
+   whatever is behind the control. Against every backdrop a control sits on,
+   computed from the tokens (clipped sRGB, alpha composited; a hovered row is
+   --panel-2 at 50% over --panel; each banner is shown on a card, then on the
+   page):
+
+                        --bg  --panel  --panel-2  row    warn         info         bad
+     dark   #6ab5dc     8.34  7.62     6.79       7.21   6.31 / 7.07  6.40 / 7.16  6.44 / 7.17
+     light  #00739d     4.97  5.33     4.71       5.02   4.57 / 4.28  4.63 / 4.34  4.21 / 3.93
+
+   The lowest, 3.93:1, is a link inside a failure banner on the page
+   background in light. `tests/unit/test_web_components.py` recomputes every
+   one of these from the tokens and fails if this table disagrees.
+
+   The colour and offset are set at rest, and only the style changes on
+   focus. A control that transitions its colours (the nav links) otherwise
+   faded its outline in from its own text colour, so for 150ms the focus
+   indicator was not one (A-4r).
+
+   A date input needs `:focus-within` as well. Tabbing into it visits month,
+   day, year and the calendar button, and on the calendar button the input
+   matches neither `:focus` nor `:focus-visible` — measured in Chromium — so
+   that stop showed nothing at all. */
+:where(a, button, input, select, textarea, summary, [tabindex]) {
+  outline-color: var(--accent);
   outline-offset: 2px;
+}
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible,
+:where(input[type="date"], input[type="datetime-local"], input[type="month"],
+       input[type="time"], input[type="week"]):focus-within {
+  outline-width: 2px;
+  outline-style: solid;
   border-radius: var(--radius-sm);
 }
 
-/* --- top bar --------------------------------------------------------- */
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: var(--s-5);
-  padding: var(--s-3) var(--s-5);
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
-  position: sticky;
-  top: 0;
-  z-index: var(--z-sticky);
-}
+/* --- the wordmark ------------------------------------------------------
+   The `.topbar` rules that used to sit here went with the top bar itself,
+   which `AppShell`'s sidebar replaced and nothing had rendered since; their
+   `nav a` rule would have restyled any `Button` rendered as a link there. */
 
 .brand {
   display: flex;
@@ -347,16 +459,6 @@ body {
   border-radius: 2px;
   background: var(--accent);
 }
-
-.topbar nav { display: flex; gap: var(--s-4); margin-left: auto; align-items: center; }
-.topbar nav a {
-  color: var(--muted);
-  text-decoration: none;
-  padding: var(--s-1) 0;
-  border-bottom: 1px solid transparent;
-  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease);
-}
-.topbar nav a:hover { color: var(--text); border-bottom-color: var(--border-strong); }
 
 .footer {
   padding: var(--s-4) var(--s-5) var(--s-7);
@@ -392,11 +494,23 @@ body {
 
 /* --- structure ------------------------------------------------------- */
 
-h1 { font-size: var(--t-xl); margin: 0 0 var(--s-1); letter-spacing: -0.018em;
-     line-height: 1.25; text-wrap: balance; }
-h2 { font-size: var(--t-lg); margin: var(--s-6) 0 var(--s-3); letter-spacing: -0.012em;
-     line-height: 1.3; text-wrap: balance; }
-h3 { font-size: var(--t-md); margin: var(--s-5) 0 var(--s-2); letter-spacing: -0.006em; }
+/* The page title. Every page writes its own `h1` and relies on this for its
+   size; no component renders one. */
+h1:where(:not([data-slot])) {
+  font-size: var(--t-xl); margin: 0 0 var(--s-1); letter-spacing: -0.018em;
+  line-height: 1.25; text-wrap: balance;
+}
+
+/* No `h2` rule. A section title is `CardTitle`, which renders the `h2` and
+   decides its own look, and the last legacy sections that wanted the element
+   rule are cards now. That rule sized every `h2` at 19px with 32px above it,
+   which caught the sheet's title and wrapped the wordmark onto two lines. The
+   32px was also what spaced the sidebar's groups 48px apart, and that spacing
+   was wanted: AppNav sets it on its own headings (`mt-8`). */
+
+h3:where(:not([data-slot])) {
+  font-size: var(--t-md); margin: var(--s-5) 0 var(--s-2); letter-spacing: -0.006em;
+}
 
 /* Lists, given back the affordance Tailwind's preflight removes.
  *
@@ -449,26 +563,10 @@ p { margin: 0 0 var(--s-3); }
   text-wrap: pretty;
 }
 
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--s-4);
-  margin-bottom: var(--s-3);
-}
-
-/* A card inside a card is always a mistake: the second border says "separate
-   thing" about something that is part of the first. */
-.card .card { border: none; background: none; padding: 0; margin: 0; }
-
-.card-head {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-3);
-  flex-wrap: wrap;
-  margin-bottom: var(--s-3);
-}
-.card-head h2 { margin: 0; }
+/* No `.card`. The section surface is the shadcn `Card` (components/ui/card.tsx)
+   with the hairline edge, the one card the owner chose (OD-3, web/DESIGN.md
+   K-16, C-8a). The legacy class drew the same box a second way, and the two
+   disagreed about the edge, the title and the gap between them. */
 
 .row { display: flex; gap: var(--s-3); flex-wrap: wrap; align-items: center; }
 .spread { display: flex; justify-content: space-between; align-items: center;
@@ -519,22 +617,11 @@ p { margin: 0 0 var(--s-3); }
 .metric dd { margin: var(--s-1) 0 0; font-family: var(--mono); font-size: var(--t-md);
              line-height: 1.3; }
 
-/* Model-authored content. The convention `src/llm/commentary.py` established:
-   output is output, never input, and it must not look identical to a measured
-   fact. */
-.badge {
-  display: inline-block;
-  padding: 1px var(--s-2);
-  border-radius: 10px;
-  font-family: var(--sans);
-  font-size: var(--t-xs);
-  text-transform: uppercase;
-  letter-spacing: .045em;
-  background: var(--panel-2);
-  color: var(--unknown);
-  border: 1px solid color-mix(in oklab, var(--unknown) 45%, transparent);
-  vertical-align: middle;
-}
+/* No `.badge`, and no `.pill` below: a status is `StatusBadge`, the one chip
+   (OD-3, web/DESIGN.md K-16). The two legacy classes rendered the same states
+   in a second type system — sans, UPPERCASE, 400, a 10px radius — beside the
+   chip on the same page. Model-authored content keeps its marker, `AiBadge`,
+   drawn through the chip. */
 
 .assumptions { margin: 0; }
 .assumption-row {
@@ -546,8 +633,13 @@ p { margin: 0 0 var(--s-3); }
 }
 .assumption-row:last-child { border-bottom: none; }
 .assumption-row dt { color: var(--muted); }
+/* `anywhere`, not `break-word`: a value such as a candidate's parameters is one
+   unbroken JSON string, and only `anywhere` lets it count as breakable when the
+   grid sizes its column. With `break-word` the column still took the string's
+   full width, and at phone width that widened the whole page to 784px
+   (web/DESIGN.md E-1, E-2). */
 .assumption-row dd { margin: 0; font-family: var(--mono); font-size: var(--t-base);
-                     text-wrap: pretty; }
+                     text-wrap: pretty; overflow-wrap: anywhere; }
 .hint { display: block; color: var(--muted); font-family: var(--sans);
         font-size: var(--t-sm); margin-top: 2px; }
 
@@ -558,23 +650,40 @@ p { margin: 0 0 var(--s-3); }
 .chart figcaption { color: var(--muted); font-size: var(--t-sm); margin-top: var(--s-2); }
 .chart-empty { color: var(--muted); padding: var(--s-7); text-align: center; }
 
-.grid { stroke: var(--border); stroke-width: 1; }
-.axis { fill: var(--muted); font-size: 10px; font-family: var(--mono); }
+/* Inside an SVG only: `.grid` is also Tailwind's `display: grid`, so the bare
+   class put a stroke on every grid container, `CardHeader` among them. */
+svg .grid { stroke: var(--border); stroke-width: 1; }
+/* In CSS pixels: `EquityChart` draws at its measured width, so a size here is
+   the size on screen. It used to be 10 units of a 900-unit canvas scaled to the
+   card, which rendered 3.6px on a phone (web/DESIGN.md T-1, E-5). The chart
+   reserves its label margin from this size (`AXIS_TEXT_PX`). */
+.axis { fill: var(--muted); font-size: var(--t-sm); font-family: var(--mono); }
 .axis-line { stroke: var(--border-strong); stroke-width: 1; }
 .equity-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
 .drawdown-area { fill: color-mix(in oklab, var(--blocked) 26%, transparent);
                  stroke: var(--blocked); stroke-width: 1; }
 .warmup { fill: color-mix(in oklab, var(--muted) 12%, transparent); }
 .effective-line { stroke: var(--unknown); stroke-width: 1; stroke-dasharray: 3 3; }
-.effective-label { fill: var(--unknown); font-size: 10px; font-family: var(--mono); }
+/* The one label drawn inside the plot, so it can land on the curve; the halo in
+   the card's own colour keeps the curve from running through the words. */
+.effective-label { fill: var(--unknown); font-size: var(--t-sm); font-family: var(--mono);
+                   paint-order: stroke; stroke: var(--panel); stroke-width: 3px;
+                   stroke-linejoin: round; }
 
-/* --- forms ----------------------------------------------------------- */
+/* --- forms -----------------------------------------------------------
+   The native fields the legacy markup still writes (`/system/configuration`).
+   The shadcn `Label`, `Input` and `Select` carry a `data-slot` and are left
+   alone: this rule used to give every `Label` a 12px bottom margin, which put
+   the findings checkbox 6.6px off its own label. */
 
-label { display: block; margin-bottom: var(--s-3); }
-label > span { display: block; color: var(--muted); font-size: var(--t-sm);
-               margin-bottom: 3px; }
+label:where(:not([data-slot])) { display: block; margin-bottom: var(--s-3); }
+label:where(:not([data-slot])) > span {
+  display: block; color: var(--muted); font-size: var(--t-sm); margin-bottom: 3px;
+}
 
-input, select, textarea {
+input:where(:not([data-slot])),
+select:where(:not([data-slot])),
+textarea:where(:not([data-slot])) {
   width: 100%;
   padding: 7px 9px;
   background: var(--panel-2);
@@ -585,15 +694,21 @@ input, select, textarea {
   font-size: var(--t-base);
   transition: border-color var(--fast) var(--ease);
 }
-input:hover:not(:disabled), select:hover:not(:disabled) { border-color: var(--border-strong); }
-input:disabled, select:disabled, textarea:disabled { opacity: .5; cursor: not-allowed; }
+input:where(:not([data-slot])):hover:not(:disabled),
+select:where(:not([data-slot])):hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+input:where(:not([data-slot])):disabled, select:where(:not([data-slot])):disabled,
+textarea:where(:not([data-slot])):disabled {
+  opacity: .5; cursor: not-allowed;
+}
 /* Placeholders are read, so they are held to the body contrast ratio rather
    than the usual near-invisible default. `--muted`, not `--faint`: the first
    draft used the latter and measured 3.32:1, which is the exact failure this
    comment claimed to prevent. */
 ::placeholder { color: var(--muted); opacity: 1; }
 
-input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+input[type="checkbox"]:where(:not([data-slot])) { width: auto; accent-color: var(--accent); }
 
 .field-grid {
   display: grid;
@@ -601,58 +716,55 @@ input[type="checkbox"] { width: auto; accent-color: var(--accent); }
   gap: 0 var(--s-4);
 }
 
-button {
+/* The committing direction, for the one legacy button left
+   (`/system/configuration`'s save). There is no rule for a bare `<button>`
+   any more: that one gave every button on the site — every shadcn `Button`,
+   the sheet's close, the table's sort headers, the secret field's eye — a
+   1px edge, a grey fill and 7px 16px of padding none of them asked for. */
+button.primary {
   padding: 7px var(--s-4);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  background: var(--panel-2);
-  color: var(--text);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--sans);
   font-size: var(--t-base);
-  cursor: pointer;
+  font-weight: 500;
   transition: border-color var(--fast) var(--ease),
               background-color var(--fast) var(--ease);
 }
-button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel); }
-button:active:not(:disabled) { background: var(--panel-2); }
-/* Inactive controls never carry saturated colour: a disabled button that still
-   looks primary invites the click it is about to refuse. */
-button:disabled { opacity: .45; cursor: not-allowed; border-color: var(--border); }
-
-/* The committing direction. Deliberately the only filled control on a screen,
-   so the asymmetry between stopping and starting is visible before the label
-   is read. */
-button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-ink);
-  font-weight: 500;
-}
 button.primary:hover:not(:disabled) { background: var(--accent-dim); border-color: var(--accent-dim); }
-button.danger { background: var(--blocked); border-color: var(--blocked); color: oklch(0.99 0 0); }
+button.primary:disabled { opacity: .45; cursor: not-allowed; }
 
-/* --- tables ---------------------------------------------------------- */
+/* --- tables ----------------------------------------------------------
+   The raw rows of the candidate page's scorecard, which sit inside the shadcn
+   `Table` (for its scroller) and are the last markup these rules reach. The
+   shadcn `Table` parts carry a `data-slot` and their own look; this is what used
+   to make their headers uppercase and rule them in `--border-strong`. The raw
+   `table` rule and `.table-scroll` went when the scorecard moved into the
+   shadcn `Table`, whose own classes set the same width and size.
 
-/* Sans by default, monospace only where figures live. A table set entirely in
+   Sans by default, monospace only where figures live. A table set entirely in
    monospace turns every label and sentence in it into pseudo-data: "Risk-adjusted
    return" renders with a hyphen the width of an en dash and reads as a formula.
    `.num` and `.mono` opt individual cells back in, which is where tabular
    figures actually earn the face. */
-table { width: 100%; border-collapse: collapse; font-family: var(--sans);
-        font-size: var(--t-sm); }
 td.num, th.num, td.mono { font-family: var(--mono); }
-th { text-align: left; color: var(--muted); font-family: var(--sans);
-     font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .045em;
-     padding: var(--s-2); border-bottom: 1px solid var(--border-strong);
-     white-space: nowrap; }
-td { padding: var(--s-2); border-bottom: 1px solid var(--border);
-     vertical-align: top; }
-tbody tr:last-child td { border-bottom: none; }
-tbody tr { transition: background-color var(--fast) var(--ease); }
-tbody tr:hover { background: var(--panel-2); }
+th:where(:not([data-slot])) {
+  text-align: left; color: var(--muted); font-family: var(--sans);
+  font-size: var(--t-xs); text-transform: uppercase; letter-spacing: .045em;
+  padding: var(--s-2); border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+td:where(:not([data-slot])) {
+  padding: var(--s-2); border-bottom: 1px solid var(--border); vertical-align: top;
+}
+tbody > tr:where(:not([data-slot])):last-child > td:where(:not([data-slot])) {
+  border-bottom: none;
+}
+tbody > tr:where(:not([data-slot])) { transition: background-color var(--fast) var(--ease); }
+tbody > tr:where(:not([data-slot])):hover { background: var(--panel-2); }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-
-.table-scroll { overflow-x: auto; }
 
 /* Prose inside a data table sets in the sans face at a readable measure; the
    monospace inherited from the table is for figures, not sentences. */
@@ -665,59 +777,9 @@ td.prose { max-width: 42ch; text-wrap: pretty; color: var(--muted); }
            text-transform: uppercase; letter-spacing: .04em; }
 
 /* --- status ----------------------------------------------------------
-   Colour is never the only channel. Each pill carries a glyph, so the hue
-   could be stripped entirely and the meaning would survive; the glyph is
-   given an empty alternative text so a screen reader announces the label
-   rather than the decoration.
-
-   `pill-unknown` exists because "not measured" is this system's most
-   important honest state and it used to render in the same grey as
-   "nothing to say here". Those are different facts. */
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px var(--s-2);
-  border-radius: 10px;
-  font-size: var(--t-xs);
-  font-family: var(--sans);
-  text-transform: uppercase;
-  letter-spacing: .045em;
-  white-space: nowrap;
-  border: 1px solid transparent;
-}
-.pill::before { font-family: var(--mono); font-size: 10px; line-height: 1; }
-
-.pill-good {
-  background: var(--panel-2);
-  color: var(--settled);
-  border-color: color-mix(in oklab, var(--settled) 45%, transparent);
-}
-.pill-good::before { content: "\2713" / ""; }
-
-.pill-warn,
-.pill-unknown {
-  background: var(--panel-2);
-  color: var(--unknown);
-  border-color: color-mix(in oklab, var(--unknown) 45%, transparent);
-}
-.pill-warn::before { content: "\25B2" / ""; }
-.pill-unknown::before { content: "?" / ""; }
-
-.pill-bad {
-  background: var(--panel-2);
-  color: var(--blocked);
-  border-color: color-mix(in oklab, var(--blocked) 52%, transparent);
-}
-.pill-bad::before { content: "\2715" / ""; }
-
-.pill-mute {
-  background: var(--panel-2);
-  color: var(--muted);
-  border-color: var(--border);
-}
-.pill-mute::before { content: "\2022" / ""; }
+   Colour is never the only channel: every status is `StatusBadge`, whose
+   glyphs are set near the top of this file with an empty alternative text, so
+   the hue could be stripped entirely and the meaning would survive. */
 
 /* Sits among the nav links, so it reads as one rather than as a control. */
 .linklike {
@@ -749,8 +811,33 @@ td.prose { max-width: 42ch; text-wrap: pretty; color: var(--muted); }
 .faint { color: var(--faint); }
 .error { color: var(--blocked); }
 
-a { color: var(--accent); text-underline-offset: 2px; }
-a:hover { text-decoration-thickness: 2px; }
+/* A link is the accent. A `Button` rendered as a link carries a `data-slot`
+   and is not reached here: its variant names its own colour (`ui/button.tsx`). */
+a:where(:not([data-slot])) {
+  color: var(--accent);
+  text-underline-offset: 2px;
+}
+
+/* A link in running text is underlined as well, because there its colour alone
+   does not tell it apart: the accent against body text is 1.98:1 in dark, and
+   axe failed the in-text links on /programme for it (web/DESIGN.md A-5).
+   Running text is a paragraph, a list item, a table cell, a definition and a
+   banner. Tailwind's preflight strips every underline, and this is the one
+   rule that puts it back, so the hover thickens a line that is drawn.
+
+   Only there. The rule that stood here underlined every link on the site,
+   which A-5 does not ask for: navigation, the wordmark, a pipeline card, the
+   report's back link and the skip link are drawn by their own components.
+   The sidebar's rows sit in list items, so AppNav says `no-underline` for
+   them; a `Button` rendered as a link carries a `data-slot`, even inside a
+   paragraph, and keeps the button's look. */
+:where(p, li, td, dd, .banner) a:where(:not([data-slot])) {
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+}
+:where(p, li, td, dd, .banner) a:where(:not([data-slot])):hover {
+  text-decoration-thickness: 2px;
+}
 
 /* --- loading ---------------------------------------------------------
    A skeleton in the shape of the thing being loaded, not a spinner in the
@@ -854,7 +941,7 @@ a:hover { text-decoration-thickness: 2px; }
 /* --- gate checklist --------------------------------------------------
    The densest reading on the site: an operator scanning for the one line
    that says why something is refused. Unmet rows carry a left marker in
-   addition to the pill, which is the one place a directional accent earns
+   addition to the chip, which is the one place a directional accent earns
    its keep — it is a scan target in a long list, not decoration on a card. */
 
 .gate-list { list-style: none; margin: 0; padding: 0; }
@@ -877,10 +964,8 @@ a:hover { text-decoration-thickness: 2px; }
 @media (max-width: 640px) {
   main { padding: var(--s-4) var(--s-4) var(--s-6); }
   .assumption-row { grid-template-columns: 1fr; gap: 0; }
-  .topbar { flex-wrap: wrap; gap: var(--s-3); }
-  .topbar nav { margin-left: 0; gap: var(--s-3); }
   .gate-criterion { grid-template-columns: 1fr; gap: var(--s-1); }
-  h1 { font-size: var(--t-lg); }
+  h1:where(:not([data-slot])) { font-size: var(--t-lg); }
 }
 
 /* Reduced motion gets an alternative, not a removal: the skeleton still needs

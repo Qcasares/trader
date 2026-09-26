@@ -11,15 +11,29 @@ import { cn } from "@/lib/utils"
  * anything real, and 24px of padding around every panel means fewer rows on
  * screen and more scrolling between the figure and the figure it must be
  * compared against. `--s-4` (16px) and the 6px radius are what the rest of the
- * app already uses; matching them is what keeps a shadcn card and a legacy
- * `.card` indistinguishable while the migration is half done.
+ * app already uses.
+ *
+ * This is the one card (owner decision of 2026-09-26, web/DESIGN.md OD-3,
+ * K-16): the legacy `.card` class is gone, and every section surface is this
+ * component. Two further changes from stock, logged in DESIGN.md (K-8):
+ *
+ * - **The edge names its colour: the hairline, `--border` (C-8a).** Stock
+ *   writes a bare `border`, and with no default border colour in the base
+ *   layer that fell back to `currentColor` — every card was outlined in the
+ *   text colour, 15–16:1 against the page, the loudest line on any screen.
+ *   `globals.css` now sets the hairline as the default too, but a component
+ *   that decides its own look says so itself.
+ * - **`CardTitle` is an `h2`.** Stock renders a `div`, so a page went from its
+ *   `h1` straight to whatever `h3` sat inside a card, and axe reported the
+ *   skipped level on three pages. A card is a section; its title is the
+ *   section's heading.
  */
 function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card"
       className={cn(
-        "flex flex-col gap-3 rounded-md border bg-card py-4 text-card-foreground",
+        "flex flex-col gap-3 rounded-md border border-border bg-card py-4 text-card-foreground",
         className
       )}
       {...props}
@@ -40,9 +54,9 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   )
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"div">) {
+function CardTitle({ className, ...props }: React.ComponentProps<"h2">) {
   return (
-    <div
+    <h2
       data-slot="card-title"
       className={cn("leading-none font-semibold", className)}
       {...props}

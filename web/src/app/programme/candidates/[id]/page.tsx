@@ -15,8 +15,8 @@
  * Rebuilt on shadcn primitives to match `system/page.tsx` and
  * `backtests/page.tsx`. `.gate-list`/`.gate-criterion` (rendered by the
  * unmodified `GateChecklist`, and reused directly here for Findings and
- * Specialist assessments), `.assumptions`/`.assumption-row`, `.table-scroll`
- * and `.no-data` are kept — they are tuned and this page's honesty behaviour
+ * Specialist assessments), `.assumptions`/`.assumption-row` and `.no-data`
+ * are kept — they are tuned and this page's honesty behaviour
  * depends on them. What changed:
  *
  * - **Sections are `Card`s**, so this reads as the same instrument as every
@@ -25,12 +25,15 @@
  *   rows, experiment conclusions, finding severity, assessment verdicts, the
  *   candidate's own lifecycle state — driven by local mappings onto the same
  *   four states (`settled`/`unknown`/`blocked`/`mute`) every other page uses,
- *   rather than a `pill-*` ternary local to this file. The scorecard's
- *   "not measured" cell keeps its own words rather than becoming a generic
- *   "no data": that is the label the API's own `observed_display` carries for
- *   the reason CLAUDE.md states — it is the metric whose whole purpose is to
- *   be unflattering, and the codebase reserves "not measured" for it
- *   specifically.
+ *   rather than a `pill-*` ternary local to this file. The gate's own summary
+ *   chip is the one exception, and not this file's: `GateChecklist` asks
+ *   `promotionGateStatus`, which draws a gate that has not passed as the
+ *   amber `caution`, while each unmet criterion under it stays red. The
+ *   scorecard's "not measured" cell keeps its own words rather than becoming
+ *   a generic "no data": that is the label the API's own `observed_display`
+ *   carries for the reason CLAUDE.md states — it is the metric whose whole
+ *   purpose is to be unflattering, and the codebase reserves "not measured"
+ *   for it specifically.
  * - **Experiments and shadow sessions are `DataTable`s**, sortable by the
  *   columns worth sorting on; an absent conclusion or equity figure sorts out
  *   of the ranking rather than settling at either end, matching the rule
@@ -58,6 +61,7 @@ import {
   type Scorecard,
   type ShadowHistory,
 } from "@/lib/api";
+import { Absent } from "@/components/Absent";
 import { Skeleton } from "@/components/Skeleton";
 import { AiBadge, GateChecklist } from "@/components/GateChecklist";
 import { DataTable } from "@/components/DataTable";
@@ -68,6 +72,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Table } from "@/components/ui/table";
 
 const CONFIRM_PHRASE = "PROMOTE";
 
@@ -322,42 +327,45 @@ export default function CandidatePage({
                 ? ` Needs: ${card.approvers.join(", ")}.`
                 : null}
             </p>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Dimension</th>
-                    <th>Metric</th>
-                    <th className="num">Observed</th>
-                    <th>Target</th>
-                    <th>Status</th>
-                    <th>Commentary</th>
+            {/* The raw rows keep the legacy table look; the shadcn `Table`
+                around them is for its scroller, which becomes a focusable,
+                named region when the table is wider than the card — at
+                phone width it is, and a keyboard could not scroll it
+                (web/DESIGN.md A-7). */}
+            <Table label="Scorecard">
+              <thead>
+                <tr>
+                  <th>Dimension</th>
+                  <th>Metric</th>
+                  <th className="num">Observed</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th>Commentary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {card.rows.map((row) => (
+                  <tr key={row.metric}>
+                    <td>{row.dimension}</td>
+                    <td>{row.metric}</td>
+                    <td className="num mono">
+                      {row.observed === null ? (
+                        <Absent kind="not-measured" />
+                      ) : (
+                        String(row.observed_display)
+                      )}
+                    </td>
+                    <td className="text-ink-muted">{row.target}</td>
+                    <td>
+                      <StatusBadge status={SCORE_STATUS[row.status]}>
+                        {row.status}
+                      </StatusBadge>
+                    </td>
+                    <td className="text-ink-muted">{row.commentary}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {card.rows.map((row) => (
-                    <tr key={row.metric}>
-                      <td>{row.dimension}</td>
-                      <td>{row.metric}</td>
-                      <td className="num mono">
-                        {row.observed === null ? (
-                          <span className="no-data">not measured</span>
-                        ) : (
-                          String(row.observed_display)
-                        )}
-                      </td>
-                      <td className="text-ink-muted">{row.target}</td>
-                      <td>
-                        <StatusBadge status={SCORE_STATUS[row.status]}>
-                          {row.status}
-                        </StatusBadge>
-                      </td>
-                      <td className="text-ink-muted">{row.commentary}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </Table>
           </CardContent>
         </Card>
       ) : null}
@@ -415,13 +423,16 @@ export default function CandidatePage({
                   // end — a not-yet-concluded experiment is not the "worst"
                   // one.
                   sortValue: (e) => e.conclusion ?? undefined,
+                  // A conclusion is the preregistered criteria evaluated
+                  // against the engine's metrics, so one that does not exist
+                  // yet was never computed.
                   cell: (e) =>
                     e.conclusion ? (
                       <StatusBadge status={CONCLUSION_STATUS[e.conclusion]}>
                         {e.conclusion}
                       </StatusBadge>
                     ) : (
-                      <span className="text-ink-muted">—</span>
+                      <Absent kind="not-measured" />
                     ),
                 },
                 {
@@ -475,7 +486,9 @@ export default function CandidatePage({
                   header: "Rebalanced",
                   sortable: true,
                   sortValue: (s) => (s.rebalanced ? 1 : 0),
-                  cell: (s) => (s.rebalanced ? "yes" : "—"),
+                  // "no", not a dash: this is a recorded false, and a dash is
+                  // what this interface once used for a value nobody knew.
+                  cell: (s) => (s.rebalanced ? "yes" : "no"),
                 },
                 {
                   id: "intents",
@@ -495,7 +508,7 @@ export default function CandidatePage({
                   className: "text-right font-mono tabular-nums",
                   cell: (s) =>
                     s.equity === null ? (
-                      <span className="no-data">no data</span>
+                      <Absent kind="no-data" />
                     ) : (
                       s.equity.toFixed(2)
                     ),
@@ -514,7 +527,8 @@ export default function CandidatePage({
                     ) : s.underfunded.length > 0 ? (
                       <div>
                         <StatusBadge status="unknown">
-                          {s.underfunded.length} buy trimmed
+                          {s.underfunded.length} buy
+                          {s.underfunded.length === 1 ? "" : "s"} trimmed
                         </StatusBadge>
                         {/* Said out loud rather than left behind a `title` a
                             keyboard never reaches: this is the exact honesty
@@ -525,7 +539,9 @@ export default function CandidatePage({
                         </p>
                       </div>
                     ) : (
-                      <span className="text-ink-muted">—</span>
+                      // Nothing to note is a fact about the session — no
+                      // error, nothing trimmed — not a value that is missing.
+                      <span className="text-ink-muted">none</span>
                     ),
                 },
               ]}

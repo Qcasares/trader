@@ -12,9 +12,12 @@
  * reason is the same too: a control that is equally easy in both directions
  * gets flipped by accident in the direction that costs money.
  *
- * The board shows stages 0 to 8. Stages 3 and up are rendered but cannot be
- * reached yet, and the page says so rather than leaving an operator to wonder
- * why nothing crosses the line.
+ * The board shows stages 0 to 8. Shadow operation, stage 3, is built; broker
+ * paper trading and the production stages after it are not, so their gates
+ * report the missing capability rather than a verdict. Stages 4 and up are
+ * rendered anyway, and the page says why nothing gets past them rather than
+ * leaving an operator to wonder. It used to say shadow-mode operation was the
+ * thing not built — the one stage past validation that is.
  *
  * Rebuilt on shadcn primitives, matching `/system` and `/backtests`. Five
  * things the rewrite is careful about:
@@ -66,7 +69,7 @@ import { Skeleton } from "@/components/Skeleton";
 import { DataTable } from "@/components/DataTable";
 import { StatusBadge, jobStatus, livenessStatus } from "@/components/StatusBadge";
 import { AiBadge } from "@/components/GateChecklist";
-import { fmtInstant } from "@/lib/format";
+import { fmtAge } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -81,15 +84,12 @@ import {
 
 const CONFIRM_PHRASE = "ENABLE PROGRAMME";
 
-/** The last stage this slice can evidence. Above it, gates report why not. */
+/**
+ * The last stage whose operation is built: shadow mode. The gates out of the
+ * stages above it report the missing capability rather than a verdict
+ * (`_MISSING_CAPABILITY` in src/programme/gates.py).
+ */
 const LAST_BUILT_STAGE = 3;
-
-function fmtAge(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "—";
-  if (seconds < 90) return `${Math.round(seconds)}s`;
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
-  return `${Math.round(seconds / 3600)}h`;
-}
 
 function Metric({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -460,11 +460,13 @@ export default function ProgrammePage() {
             </span>
           </div>
           <p className="m-0 text-sm text-ink-muted text-pretty">
-            Stages {LAST_BUILT_STAGE + 1} and above are shown for completeness
-            and cannot be reached in this slice: shadow-mode operation is not
-            built, so their gates report the missing capability rather than a
-            verdict. Stage {board.first_human_gated_stage} onwards always
-            needs an operator.
+            Shadow operation, stage {LAST_BUILT_STAGE}, is built: a candidate
+            there decides on a schedule against a disabled deployment and
+            reaches no venue. Stages {LAST_BUILT_STAGE + 1} and above are shown
+            for completeness — broker paper trading and the production stages
+            are not built, so their gates report the missing capability rather
+            than a verdict. Stage {board.first_human_gated_stage} onwards
+            always needs an operator.
           </p>
         </CardHeader>
         <CardContent>
@@ -492,13 +494,15 @@ export default function ProgrammePage() {
                     ) : null}
                   </h3>
                   {cards.length === 0 ? (
+                    // An empty stage is a count of zero, said as a word: a
+                    // lone dash is how this interface once wrote "unknown".
                     <p
                       className={
                         "m-0 text-xs " +
                         (unreachable ? "text-ink-faint" : "text-ink-muted")
                       }
                     >
-                      —
+                      none
                     </p>
                   ) : (
                     cards.map((candidate) => (

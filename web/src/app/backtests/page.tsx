@@ -19,21 +19,42 @@
  * - **The error bar travels in the same cell as the figure**, so no sort can
  *   separate a number from its uncertainty.
  * - **Significance is marked on every row**, rather than left to be inferred
- *   from position in the order.
+ *   from position in the order — and marked in words. It used to be a muted
+ *   colour plus a `title` tooltip: 2.2:1 from the significant state on dark,
+ *   invisible to anyone who cannot tell the two greys apart, and unreachable
+ *   by keyboard. A non-significant estimate now carries a "not significant"
+ *   chip beside its standard error, read from the stored
+ *   `sharpe_is_significant` rather than recomputed here.
+ *
+ * Two more honesty rules bind a list of results as much as a tearsheet: every
+ * metric carries the session the whole universe first existed, and every
+ * annualised figure carries the session count it was annualised on. A result
+ * spanning a smaller universe, or annualised on the wrong year, looks exactly
+ * like one that does not until both are on the same row. So the Window cell
+ * reads the way the tearsheet's assumptions do — requested window, effective
+ * start, annualised on — rather than growing two columns, which pushed the
+ * cost column out of view at laptop widths, and the cost assumption is an
+ * honesty rule too.
  */
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ApiError, api, fmtNum, fmtPct, type BacktestRun } from "@/lib/api";
+import { ApiError, api, type BacktestRun } from "@/lib/api";
+import { fmtNum, fmtPct } from "@/lib/format";
+import { Absent } from "@/components/Absent";
 import { DataTable } from "@/components/DataTable";
 import { StatusBadge, jobStatus } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/Skeleton";
 
-/** An absent figure. A bare dash beside right-aligned numbers reads as a minus. */
-const NO_DATA = <span className="no-data">no data</span>;
+/**
+ * A figure of a run that has none yet — queued, running or failed. Its metrics
+ * were never computed, which is "not measured", not a zero and not a dash (a
+ * dash beside right-aligned numbers reads as a minus).
+ */
+const NOT_MEASURED = <Absent kind="not-measured" />;
 
 export default function BacktestsPage() {
   const router = useRouter();
@@ -97,7 +118,33 @@ export default function BacktestsPage() {
                   sortable: true,
                   sortValue: (run) => run.start_session,
                   className: "font-mono whitespace-nowrap",
-                  cell: (run) => `${run.start_session} → ${run.end_session}`,
+                  cell: (run) => (
+                    <>
+                      {run.start_session} → {run.end_session}
+                      {run.metrics ? (
+                        <>
+                          <span className="block text-xs text-ink-muted">
+                            effective from{" "}
+                            {run.metrics.effective_start ?? (
+                              <Absent kind="not-measured" />
+                            )}
+                          </span>
+                          {/* The year the Sharpe on this row was annualised
+                              on. 252 is the NYSE year; a venue that never
+                              closes has 365, and the difference moves
+                              volatility and the Sharpe by about a fifth. */}
+                          <span className="block text-xs text-ink-muted">
+                            annualised on{" "}
+                            {run.metrics.periods_per_year == null ? (
+                              <Absent kind="not-measured" />
+                            ) : (
+                              `${run.metrics.periods_per_year}/yr`
+                            )}
+                          </span>
+                        </>
+                      ) : null}
+                    </>
+                  ),
                 },
                 {
                   id: "source",
@@ -131,64 +178,85 @@ export default function BacktestsPage() {
                   id: "return",
                   header: "Return",
                   sortable: true,
-                  sortValue: (run) => run.metrics?.total_return,
+                  // A figure the run did not record is `null` from the API, and
+                  // `undefined` here, so it sorts last like a run with none.
+                  sortValue: (run) => run.metrics?.total_return ?? undefined,
                   headerClassName: "text-right",
                   className: "text-right font-mono tabular-nums",
                   cell: (run) =>
-                    run.metrics ? fmtPct(run.metrics.total_return) : NO_DATA,
+                    run.metrics?.total_return == null
+                      ? NOT_MEASURED
+                      : fmtPct(run.metrics.total_return),
                 },
                 {
                   id: "sharpe",
                   header: "Sharpe",
                   sortable: true,
-                  sortValue: (run) => run.metrics?.sharpe,
+                  sortValue: (run) => run.metrics?.sharpe ?? undefined,
                   headerClassName: "text-right",
                   className:
                     "text-right font-mono tabular-nums whitespace-nowrap",
                   cell: (run) =>
-                    run.metrics ? (
-                      <span
-                        className={
-                          run.metrics.sharpe_is_significant ? "" : "muted"
-                        }
-                        title={
-                          run.metrics.sharpe_is_significant
-                            ? "Clears two standard errors from zero"
-                            : "Within two standard errors of zero — not significant"
-                        }
-                      >
-                        {fmtNum(run.metrics.sharpe)} ±{" "}
-                        {fmtNum(run.metrics.sharpe_stderr)}
-                      </span>
+                    // Never a Sharpe without its standard error: if either was
+                    // not recorded, neither is shown.
+                    run.metrics?.sharpe == null ||
+                    run.metrics.sharpe_stderr == null ? (
+                      NOT_MEASURED
                     ) : (
-                      NO_DATA
+                      <span className="inline-flex flex-col items-end gap-1">
+                        <span
+                          className={
+                            run.metrics.sharpe_is_significant === false
+                              ? "muted"
+                              : ""
+                          }
+                        >
+                          {fmtNum(run.metrics.sharpe)} ±{" "}
+                          {fmtNum(run.metrics.sharpe_stderr)}
+                        </span>
+                        {/* The engine's verdict, and only when it gave one:
+                            a null is no verdict, not a "false". */}
+                        {run.metrics.sharpe_is_significant === false && (
+                          <StatusBadge status="unknown">not significant</StatusBadge>
+                        )}
+                      </span>
                     ),
                 },
                 {
                   id: "drawdown",
                   header: "Max DD",
                   sortable: true,
-                  sortValue: (run) => run.metrics?.max_drawdown,
+                  sortValue: (run) => run.metrics?.max_drawdown ?? undefined,
                   headerClassName: "text-right",
                   className: "text-right font-mono tabular-nums",
                   cell: (run) =>
-                    run.metrics ? fmtPct(run.metrics.max_drawdown) : NO_DATA,
+                    run.metrics?.max_drawdown == null
+                      ? NOT_MEASURED
+                      : fmtPct(run.metrics.max_drawdown),
                 },
                 {
                   id: "cost",
                   header: "Cost",
                   sortable: true,
-                  sortValue: (run) => run.metrics?.cost_stress_multiplier,
+                  sortValue: (run) =>
+                    run.metrics?.cost_stress_multiplier ?? undefined,
                   headerClassName: "text-right",
                   className: "text-right font-mono tabular-nums",
                   cell: (run) =>
-                    run.metrics
-                      ? `${run.metrics.cost_stress_multiplier}×`
-                      : NO_DATA,
+                    !run.metrics ? (
+                      NOT_MEASURED
+                    ) : run.metrics.cost_stress_multiplier == null ? (
+                      // A result that does not carry its cost assumption is
+                      // missing one; 1× would be the cheapest guess going.
+                      <Absent kind="missing" reason="not recorded" />
+                    ) : (
+                      `${run.metrics.cost_stress_multiplier}×`
+                    ),
                 },
                 {
                   id: "open",
-                  header: "",
+                  header: "Open",
+                  hideHeader: true,
                   className: "text-right",
                   cell: (run) => (
                     <Button asChild variant="ghost" size="sm">

@@ -14,16 +14,72 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from types import MappingProxyType
 from typing import Any
 
 import asyncpg
 
+from src.core.orders import RebalanceConstraints
+from src.core.types import CostModel
+
 logger = logging.getLogger(__name__)
 
 ENGINE_VERSION = "0.1.0"
+
+#: The cost model the worker applies to a backtest, one entry per key it reads.
+#:
+#: Where a run's row names no value for a key, this is what the engine runs
+#: with — and until the row said so, nobody could tell. The programme queued
+#: its runs with a stress multiplier alone, the worker filled in 5 bps of
+#: slippage, and the page could only report the slippage as missing: a cost
+#: assumption that shaped every figure on the run and was written down nowhere
+#: (CLAUDE.md: never quote a performance figure without its cost assumption).
+#:
+#: Nothing here is chosen: each value is the one the worker has applied since
+#: the first commit. Slippage and the multiplier are ``CostModel``'s own
+#: defaults and the concentration cap is ``RebalanceConstraints``'s, read from
+#: them rather than restated. The minimum trade is the one value the backtest
+#: sets apart from the engine: 25 dollars, where ``RebalanceConstraints``
+#: defaults to one — the worker's fallback and the API's request default, and
+#: the floor the walk-forward job uses.
+DEFAULT_COST_MODEL: Mapping[str, float] = MappingProxyType(
+    {
+        "slippage_bps": CostModel().slippage_bps,
+        "stress_multiplier": CostModel().stress_multiplier,
+        "min_trade_usd": 25.0,
+        "max_weight_per_asset": RebalanceConstraints().max_weight_per_asset,
+    }
+)
+
+
+class UnknownCostKeyError(ValueError):
+    """A cost model named a key the worker does not apply."""
+
+
+def complete_cost_model(recorded: Mapping[str, Any] | None) -> dict[str, Any]:
+    """
+    Every cost the worker will apply to a run, with the run's own values kept.
+
+    ``create_run`` stores the result, so a run's row states its whole cost
+    model, and the worker reads its costs through this same function, so the
+    row and the engine cannot disagree about one.
+
+    A key the worker does not read is refused rather than stored. Recorded, it
+    would read as an assumption the result was produced under — a commission,
+    say — when the engine never saw it, which is the same lie as the missing
+    slippage in the opposite direction.
+    """
+    given = dict(recorded or {})
+    unknown = sorted(set(given) - set(DEFAULT_COST_MODEL))
+    if unknown:
+        raise UnknownCostKeyError(
+            f"cost model keys {unknown} are not applied by the backtest worker; "
+            f"it reads {sorted(DEFAULT_COST_MODEL)}"
+        )
+    return {**DEFAULT_COST_MODEL, **given}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +102,14 @@ class BacktestRequest:
 async def create_run(
     conn: asyncpg.Connection, request: BacktestRequest
 ) -> uuid.UUID:
-    """Insert a queued run and return its id."""
+    """
+    Insert a queued run and return its id.
+
+    The cost model is stored complete, whatever the caller passed: every key
+    the worker will apply, with the caller's values where it gave them
+    (``complete_cost_model``).
+    """
+    cost_model = complete_cost_model(request.cost_model)
     run_id = uuid.uuid4()
     await conn.execute(
         """
@@ -66,7 +129,7 @@ async def create_run(
         request.end_session,
         request.initial_cash,
         request.data_source,
-        json.dumps(request.cost_model),
+        json.dumps(cost_model),
         request.decision_lag_sessions,
         ENGINE_VERSION,
     )

@@ -452,12 +452,19 @@ async def _deployment_gate(
             "first.",
         )
     if not verdict["is_robust"]:
+        # The column is nullable, and `float(None)` turned a refusal into a
+        # 500 that named nothing; a missing figure is said to be missing.
+        degradation = (
+            "not measured"
+            if verdict["degradation"] is None
+            else f"{float(verdict['degradation']):+.3f}"
+        )
         raise HTTPException(
             422,
             f"the walk-forward study for these parameters is NOT ROBUST. "
             f"{_why_not_robust(verdict)} Failing this is strong evidence "
             f"against the configuration. Degradation, for context, was "
-            f"{float(verdict['degradation']):+.3f}.",
+            f"{degradation}.",
         )
     return run_uuid
 
@@ -514,16 +521,34 @@ def _why_not_robust(verdict: dict) -> str:
 
     reasons: list[str] = []
 
-    sharpe = float(metrics.get("sharpe", 0.0))
-    stderr = float(metrics.get("sharpe_stderr", 0.0))
-    if not metrics.get("sharpe_is_significant", False):
+    # Read without defaults. A study that recorded no stitched curve was
+    # refused with "the stitched out-of-sample Sharpe is +0.000 ± 0.000": a
+    # measurement nobody made, quoted to three places, with an error bar of
+    # zero that no real estimate has (CLAUDE.md: an unmeasured metric is never
+    # zero). The refusal stands either way; only its reason was invented.
+    sharpe = metrics.get("sharpe")
+    stderr = metrics.get("sharpe_stderr")
+    significant = metrics.get("sharpe_is_significant")
+    if sharpe is None or stderr is None:
         reasons.append(
-            f"the stitched out-of-sample Sharpe is {sharpe:+.3f} ± {stderr:.3f}, "
-            f"which does not clear two standard errors of zero — the result is "
-            f"indistinguishable from no edge"
+            "the stitched out-of-sample Sharpe was not measured: the study "
+            "recorded no estimate with its standard error, so nothing shows it "
+            "clearing two standard errors of zero"
         )
-    elif sharpe <= 0:
-        reasons.append(f"the stitched out-of-sample Sharpe is {sharpe:+.3f}")
+    elif significant is None:
+        reasons.append(
+            f"the stitched out-of-sample Sharpe is {float(sharpe):+.3f} ± "
+            f"{float(stderr):.3f}, and the study recorded no verdict on whether "
+            f"that clears two standard errors of zero"
+        )
+    elif not significant:
+        reasons.append(
+            f"the stitched out-of-sample Sharpe is {float(sharpe):+.3f} ± "
+            f"{float(stderr):.3f}, which does not clear two standard errors of "
+            f"zero — the result is indistinguishable from no edge"
+        )
+    elif float(sharpe) <= 0:
+        reasons.append(f"the stitched out-of-sample Sharpe is {float(sharpe):+.3f}")
 
     if folds:
         chosen = [json.dumps(f.get("chosen_params", {}), sort_keys=True) for f in folds]

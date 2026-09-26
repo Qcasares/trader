@@ -69,7 +69,15 @@ import {
 export type Column<T> = {
   /** Stable key, also the accessor when `value` is omitted. */
   id: string;
+  /**
+   * What the column is called. Never empty: a header cell with no text is a
+   * column a screen reader announces as nothing, and axe reported exactly that
+   * on the per-row "view" columns (web/DESIGN.md A-8). A column whose meaning
+   * is plain from its cells names itself here and sets `hideHeader`.
+   */
   header: string;
+  /** Keep the header for assistive technology only (`sr-only`). */
+  hideHeader?: boolean;
   /** What the cell renders. */
   cell: (row: T) => React.ReactNode;
   /**
@@ -203,6 +211,8 @@ export function DataTable<T>({
                             />
                           )}
                         </button>
+                      ) : column?.hideHeader ? (
+                        <span className="sr-only">{column.header}</span>
                       ) : (
                         column?.header
                       )}

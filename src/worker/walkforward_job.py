@@ -35,6 +35,7 @@ from src.core.orders import RebalanceConstraints
 from src.core.panel import PricePanel
 from src.core.types import CostModel
 from src.data import bars_to_rows
+from src.db.repos.backtests import complete_cost_model
 from src.engine.walkforward import run_walk_forward
 from src.strategies import build_strategy
 from src.worker.backtest_job import SOURCES
@@ -125,6 +126,13 @@ def _execute(study: dict[str, Any]) -> dict[str, Any]:
     panel = PricePanel.from_bars(bars_to_rows(bars))
     sessions = nyse_sessions(start, end)
 
+    # Every study runs at the default cost model, whatever the backtest it
+    # studies ran at: `walkforward_runs` has no column to carry another. Read
+    # from the mapping the programme records on its walk-forward experiments,
+    # so that record states what the study applied rather than a copy of it
+    # that could drift. The values are the ones this call always passed —
+    # `CostModel()` and a 25-dollar minimum trade.
+    cost = complete_cost_model(None)
     result = run_walk_forward(
         study["strategy_name"],
         panel,
@@ -133,8 +141,14 @@ def _execute(study: dict[str, Any]) -> dict[str, Any]:
         base_params=study["params"] or None,
         train_months=study["train_months"],
         test_months=study["test_months"],
-        cost_model=CostModel(),
-        constraints=RebalanceConstraints(min_trade_usd=Decimal("25")),
+        cost_model=CostModel(
+            slippage_bps=float(cost["slippage_bps"]),
+            stress_multiplier=float(cost["stress_multiplier"]),
+        ),
+        constraints=RebalanceConstraints(
+            min_trade_usd=Decimal(str(cost["min_trade_usd"])),
+            max_weight_per_asset=float(cost["max_weight_per_asset"]),
+        ),
     )
 
     return {

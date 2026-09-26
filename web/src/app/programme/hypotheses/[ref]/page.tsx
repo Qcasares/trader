@@ -25,6 +25,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { ApiError, api, type Candidate, type Hypothesis } from "@/lib/api";
+import { Absent } from "@/components/Absent";
 import { Skeleton } from "@/components/Skeleton";
 import { AiBadge } from "@/components/GateChecklist";
 import { DataTable } from "@/components/DataTable";
@@ -33,25 +34,45 @@ import { fmtInstant } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-/** Section 7.1's order, with a readable label for each. */
-const CARD_FIELDS: [string, string][] = [
-  ["economic_mechanism", "Economic mechanism"],
-  ["why_it_persists", "Why the opportunity persists"],
-  ["instruments", "Instruments and universe"],
-  ["trading_horizon", "Trading horizon"],
-  ["entry_exit_concept", "Entry and exit concept"],
-  ["expected_return_source", "Expected source of return"],
-  ["expected_risks", "Expected risks"],
-  ["expected_turnover", "Expected turnover"],
-  ["expected_capacity", "Expected capacity"],
-  ["data_requirements", "Data requirements"],
-  ["alternative_explanations", "Alternative explanations"],
-  ["simplest_baseline", "Simplest credible baseline"],
-  ["falsification_test", "Falsification test"],
-  ["acceptance_criteria", "Acceptance criteria"],
-  ["rejection_criteria", "Rejection criteria"],
-  ["limitations", "Known limitations"],
+/**
+ * Section 7.1's order, a readable label for each, and whether gate 0 → 1
+ * refuses the card without the field.
+ *
+ * A missing required field and a missing optional one used to render the same
+ * dash, so a card with ten gaps the gate refuses on looked like a card with
+ * one blank the author could leave. The third element mirrors
+ * `REQUIRED_CARD_FIELDS` in `src/programme/gates.py`, and
+ * `tests/unit/test_web_formatting.py` compares the two sets so this copy
+ * cannot drift from the rule it restates.
+ */
+const CARD_FIELDS: [string, string, boolean][] = [
+  ["economic_mechanism", "Economic mechanism", true],
+  ["why_it_persists", "Why the opportunity persists", true],
+  ["instruments", "Instruments and universe", true],
+  ["trading_horizon", "Trading horizon", true],
+  ["entry_exit_concept", "Entry and exit concept", true],
+  ["expected_return_source", "Expected source of return", true],
+  ["expected_risks", "Expected risks", true],
+  ["expected_turnover", "Expected turnover", true],
+  ["expected_capacity", "Expected capacity", true],
+  ["data_requirements", "Data requirements", true],
+  ["alternative_explanations", "Alternative explanations", true],
+  ["simplest_baseline", "Simplest credible baseline", true],
+  ["falsification_test", "Falsification test", true],
+  ["acceptance_criteria", "Acceptance criteria", true],
+  ["rejection_criteria", "Rejection criteria", true],
+  ["limitations", "Known limitations", false],
 ];
+
+/**
+ * A card field as text, or "" when it has none. Blank means what the gate
+ * means by it — whitespace is not an answer (`gates._gate_concept_to_research`)
+ * — and the API types a card's values as anything JSON holds, so a value is
+ * stringified rather than trusted to be a string.
+ */
+function fieldText(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value).trim();
+}
 
 /**
  * A candidate's lifecycle state, on the same four states every other page
@@ -139,16 +160,26 @@ export default function HypothesisPage({
         </CardHeader>
         <CardContent>
           <dl className="assumptions">
-            {CARD_FIELDS.map(([key, label]) => (
-              <div className="assumption-row" key={key}>
-                <dt>{label}</dt>
-                <dd>
-                  {hypothesis.card[key] || (
-                    <span className="text-ink-muted">—</span>
-                  )}
-                </dd>
-              </div>
-            ))}
+            {CARD_FIELDS.map(([key, label, required]) => {
+              const text = fieldText(hypothesis.card[key]);
+              return (
+                <div className="assumption-row" key={key}>
+                  <dt>{label}</dt>
+                  <dd>
+                    {text ? (
+                      text
+                    ) : required ? (
+                      <Absent
+                        kind="missing"
+                        reason="gate 0 → 1 refuses the card without it"
+                      />
+                    ) : (
+                      <Absent kind="no-data" />
+                    )}
+                  </dd>
+                </div>
+              );
+            })}
           </dl>
         </CardContent>
       </Card>

@@ -291,7 +291,7 @@ dots.
 | `src/worker/` | The only process that runs backtests or places orders. `scheduling.py` turns the calendar plan into queue rows; `maintenance_jobs.py` handles ingest, marks and reconciliation |
 | `src/llm/` | Commentary only. Never reachable from the decision path. |
 | `src/programme/` | The AI programme. A third process, and the only one permitted a model client. `gates.py` is pure and decides promotions; `tick.py` is one pass; `author.py` is everything the model may write and what happens to it first; `roles.py` is the twelve specialists as vocabulary and `panel.py` is the one function that asks a model to speak as one; `flags.py` holds the fail-closed switches and settings, Jev's among them; `models.py` is the provider/model/effort catalogue; `scorecard.py` and `reports.py` are artefacts assembled from rows, with no model prose in either. For Jev: `jev_catalogue.py` is the pin, the limits and the vocabulary, pure and API-importable; `jev_questions.py` the versioned, golden-hashed question sets and their enumerated state models; `jev_features.py` turns prices into the decision lane's point-in-time state; `jev_validate.py` judges a raw response strictly and never raises; `jev_repo.py` is the ledger's queries, SDK-free; `jev_client.py` is the only importer of `typesafe_sdk`; `jev_lane.py` is the programme's one road to Jev — gate, pin, hash, replay or call once, validate, record — and `jev_check.py` the operator's, by dispatch, recording nothing, and nothing else imports the client; and `main.py` runs Jev's jobs beside the tick |
-| `web/` | Next.js frontend |
+| `web/` | Next.js frontend. Before any UI change, read `web/CLAUDE.md`: it routes to the design system beside the code (`web/REFERENCE.md`, `web/DESIGN.md`, `web/design-tokens.json`, `web/examples/`), where the honesty rules above are UI rules |
 
 ### Structural guarantees
 
@@ -559,7 +559,7 @@ inert while the backtest continues to honour them.
   exercised by unit tests against fabricated replies and by nothing else. The
   gates, the reconciliation and the promotions do not need the model and are
   tested end to end against real Postgres.
-- **Jev is built dark, and has never been called.** TypeSafe AI's System One
+- **Jev is built dark, and only the key check has called it.** TypeSafe AI's System One
   model is to categorise research and operations, record signals, and — on
   paper only, and only once the proposed Rule 5 amendment is in force — make
   direct decisions. `docs/08-jev-integration.md` is the plan, the verified
@@ -572,7 +572,10 @@ inert while the backtest continues to honour them.
   claims. Every Jev switch is seeded off, no lane is wired into the tick,
   nothing in the API or the UI reads the ledger, and nothing enqueues the
   probe yet. The client is tested against the real SDK and a fake TypeSafe
-  server over real HTTP, as is one call end to end into the ledger, but no
-  request has yet been sent to TypeSafe. A key exists, as the
-  `TYPESAFE_API_KEY` repository secret, and the next live step is dispatching
-  `jev-check.yml` once phase B is on the default branch.
+  server over real HTTP, as is one call end to end into the ledger. The key
+  has been proven against TypeSafe itself: on 2026-09-26 `jev-check.yml` found
+  the `TYPESAFE_API_KEY` secret accepted by TypeSafe's host, the listing naming
+  only the aliases `jev-latest` and `jev-preview`, and the connectivity probe
+  answered by `jev-1.13.0` in 201 ms — `true` at p=0.99, as expected. That is
+  the only traffic so far: the check records nothing, and the programme has
+  made no call, since nothing enqueues the probe and every Jev switch is off.

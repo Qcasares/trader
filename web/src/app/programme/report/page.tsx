@@ -14,6 +14,11 @@
  * reason rather than dropped, because a report showing only what it can
  * measure reads as complete.
  *
+ * Every figure is formatted by `lib/format.ts`, the same functions /portfolio
+ * uses for the same stored values. `drawdown_pct` is a fraction, and this page
+ * once appended "%" to it directly — a 5.12% drawdown read "-0.051%" here and
+ * "-5.12%" on /portfolio, the report being the one an operator skims fastest.
+ *
  * Rebuilt on shadcn primitives. `.metric-grid`, `.assumptions` and `.banner`
  * are kept verbatim — they are tuned, and a report page is exactly the density
  * they were built for. What changed is every place a status used to be a
@@ -25,7 +30,9 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ApiError, api, fmtUsd, type DailyReport } from "@/lib/api";
+import { ApiError, api, type DailyReport } from "@/lib/api";
+import { fmtAge, fmtPct, fmtUsd } from "@/lib/format";
+import { Absent } from "@/components/Absent";
 import { SkeletonMetrics } from "@/components/Skeleton";
 import { StatusBadge, livenessStatus } from "@/components/StatusBadge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -40,42 +47,24 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-/** A figure, or the words that say it does not exist. Never a zero stand-in. */
+/**
+ * A figure, or the words that say it does not exist. Never a zero stand-in.
+ *
+ * Takes a formatter rather than a unit suffix. A suffix is how the drawdown
+ * came to be a raw fraction with "%" after it; a formatter from
+ * `lib/format.ts` is the only thing that knows how its unit is scaled.
+ */
 function Figure({
   value,
-  money = false,
-  suffix = "",
+  format = (n) => n.toLocaleString(),
 }: {
   value: number | null;
-  money?: boolean;
-  suffix?: string;
+  format?: (value: number) => string;
 }) {
   if (value === null || value === undefined) {
-    return <span className="no-data">no data</span>;
+    return <Absent kind="no-data" />;
   }
-  return (
-    <>
-      {money ? fmtUsd(value) : value.toLocaleString()}
-      {suffix}
-    </>
-  );
-}
-
-/** Heartbeat age, in the largest unit that still reads as a number. */
-/**
- * A heartbeat age.
- *
- * The unreachable branch returns the page's own absence marker rather than a
- * bare dash: this renders in a right-aligned column, where a dash sits in the
- * minus-sign position. `age_seconds` is non-nullable in the API contract so the
- * branch should never fire, which is exactly why it must not be the one place
- * that quietly disagrees with the convention if it ever does.
- */
-function fmtAge(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "no data";
-  if (seconds < 90) return `${Math.round(seconds)}s`;
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
-  return `${Math.round(seconds / 3600)}h`;
+  return <>{format(value)}</>;
 }
 
 export default function DailyReportPage() {
@@ -170,39 +159,37 @@ export default function DailyReportPage() {
             <div className="metric">
               <dt>Equity</dt>
               <dd>
-                <Figure value={report.portfolio.equity} money />
+                <Figure value={report.portfolio.equity} format={fmtUsd} />
               </dd>
             </div>
             <div className="metric">
               <dt>Cash</dt>
               <dd>
-                <Figure value={report.portfolio.cash} money />
+                <Figure value={report.portfolio.cash} format={fmtUsd} />
               </dd>
             </div>
             <div className="metric">
               <dt>Daily P&amp;L</dt>
               <dd>
-                <Figure value={report.portfolio.daily_pnl} money />
+                <Figure value={report.portfolio.daily_pnl} format={fmtUsd} />
               </dd>
             </div>
             <div className="metric">
               <dt>Cumulative P&amp;L</dt>
               <dd>
-                <Figure value={report.portfolio.cumulative_pnl} money />
+                <Figure value={report.portfolio.cumulative_pnl} format={fmtUsd} />
               </dd>
             </div>
             <div className="metric">
               <dt>Drawdown</dt>
               <dd>
-                <Figure value={report.portfolio.drawdown_pct} suffix="%" />
+                <Figure value={report.portfolio.drawdown_pct} format={fmtPct} />
               </dd>
             </div>
             <div className="metric">
               <dt>As of</dt>
               <dd>
-                {report.portfolio.as_of ?? (
-                  <span className="no-data">no data</span>
-                )}
+                {report.portfolio.as_of ?? <Absent kind="no-data" />}
               </dd>
             </div>
           </dl>
@@ -330,7 +317,7 @@ export default function DailyReportPage() {
               <dt>Latest session</dt>
               <dd>
                 {report.data_health.latest_session ?? (
-                  <span className="no-data">none ingested</span>
+                  <Absent kind="no-data" reason="nothing has been ingested" />
                 )}
               </dd>
             </div>

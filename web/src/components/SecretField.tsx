@@ -150,7 +150,10 @@ export function SecretField({
       ) : null}
 
       <div className="flex flex-wrap items-end gap-2">
-        <div className="min-w-[16rem] flex-1">
+        {/* `space-y-2`: the label's gap to the field is said here. It used to
+            come from the legacy `label` element rule, which no longer reaches
+            a shadcn `Label` (web/DESIGN.md K-15, S-4). */}
+        <div className="min-w-[16rem] flex-1 space-y-2">
           <Label htmlFor={`secret-${secret.name}`}>
             {secret.configured ? "Replace it" : "Set it"}
           </Label>
@@ -179,7 +182,11 @@ export function SecretField({
               // stored. A paste is worth being able to check; there is nothing
               // else here to show.
               aria-label={reveal ? "Hide what you typed" : "Show what you typed"}
-              className="absolute top-1/2 right-2 -translate-y-1/2 text-ink-faint hover:text-ink"
+              // 28px square inside the field's right padding. Its size used to
+              // come from the legacy button rule's padding, along with an edge
+              // and a fill drawn inside the input; without it the target was
+              // the bare 14px icon, sitting on another target, the field.
+              className="absolute top-1/2 right-1 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-sm text-ink-faint hover:text-ink"
             >
               {reveal ? (
                 <EyeOff aria-hidden="true" className="size-3.5" />
