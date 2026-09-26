@@ -297,9 +297,14 @@ async def _deployed_universe(conn: asyncpg.Connection) -> set[str]:
 
 
 async def _enabled_deployment_rows(conn: asyncpg.Connection) -> list[Any]:
+    # The same owner filter as ``live_job._enabled_deployments``, for the same
+    # reason: marks and reconciliation are the operator's account, and a row
+    # that the live loop will not trade must not be marked or reconciled as
+    # though it were.
     return await conn.fetch(
         "SELECT id, strategy_name, params, mode FROM deployments "
-        "WHERE status = 'enabled' ORDER BY created_at"
+        "WHERE status = 'enabled' AND owner_id = $1 ORDER BY created_at",
+        marks.DEFAULT_OWNER,
     )
 
 

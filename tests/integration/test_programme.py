@@ -729,6 +729,216 @@ class TestABlockingFindingStopsAPromotion:
         assert response.status_code == 422
 
 
+class TestThePanelSitsBeforeThePromotion:
+    """
+    The runner's panel, convened for real, before the gate that it can veto.
+
+    Every test above raises its finding through the API, which proves the gate
+    honours a veto and says nothing about whether the runner ever produces one.
+    It did not: ``tick._convene`` called ``assess`` on a tuple it had named
+    ``panel``, the ``AttributeError`` was swallowed per role, and a candidate
+    whose gate passed was promoted with no role having seen it.
+
+    These drive ``tick._advance`` — the per-candidate pass ``run_tick`` makes,
+    called as ``run_tick`` calls it — with a key, a model configuration, and
+    only the model itself replaced. ``run_tick`` is not used because it walks
+    every active candidate in a database the whole suite shares and then asks
+    a model for a proposal; the ceiling is passed rather than raised in
+    ``system_flags`` because other tests here assert that it starts at zero.
+
+    The candidate is built so its stage 0 -> 1 gate passes on the rows alone: a
+    complete card, a named owner, and one symbol of its own with more than
+    ``MIN_BARS_PER_SYMBOL`` bars. So when it does not move, the finding raised
+    in the same pass is the only thing that stopped it.
+    """
+
+    START = date(2015, 1, 2)
+    END = date(2015, 6, 30)
+    CEILING = 1
+
+    def _passing_candidate(self, authed) -> str:
+        from src.core import calendar
+
+        symbol = f"ZP{uuid.uuid4().hex[:6].upper()}"
+        hypothesis = authed.post(
+            "/api/v1/programme/hypotheses",
+            json={"title": "Reviewed before it moves", "owner": "test", "card": CARD},
+        ).json()
+        response = authed.post(
+            "/api/v1/programme/candidates",
+            json={
+                "hypothesis_ref": hypothesis["ref"],
+                "strategy": "buy_and_hold",
+                "params": {"symbols": [symbol]},
+                "start_session": self.START.isoformat(),
+                "end_session": self.END.isoformat(),
+            },
+        )
+        assert response.status_code == 201, response.text
+        candidate_id = response.json()["candidate_id"]
+
+        bars = [
+            (symbol, session, "yfinance", 100.0, 100.0, 100.0, 100.0, 1e6, 100.0)
+            for session in calendar.sessions(self.START, self.END)
+        ]
+
+        async def ingest(conn):
+            await conn.executemany(
+                "INSERT INTO daily_bars (symbol, session, source, open, high, "
+                "low, close, volume, adj_close) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                bars,
+            )
+
+        _run(_with_conn(ingest))
+        return candidate_id
+
+    def _pass(self, monkeypatch, candidate_id: str, replies: dict) -> list[dict]:
+        """One pass over one candidate, with ``replies`` standing in for the
+        model. A role with no reply supports."""
+        from src.programme import models, panel, repo, tick
+        from src.programme.roles import Assessment
+
+        async def assess(role, api_key, settings, facts_brief):
+            return replies.get(role.key) or Assessment(
+                verdict="support",
+                summary="The card is complete and the window has the data.",
+            )
+
+        # On the module that owns the model call, not on ``tick``: the fake is
+        # reached only if the runner reaches the real thing.
+        monkeypatch.setattr(panel, "assess", assess)
+        settings = models.build_settings(
+            models.ANTHROPIC,
+            models.DEFAULT_MODEL,
+            models.DEFAULT_EFFORT,
+            models.DEFAULT_MAX_TOKENS,
+        )
+
+        async def one_pass(conn):
+            candidate = await repo.get_candidate(conn, candidate_id)
+            report = tick.TickReport()
+            await tick._advance(
+                conn, candidate, report, self.CEILING, "sk-test-not-real", settings
+            )
+            return report.actions
+
+        return _run(_with_conn(one_pass))
+
+    def _state(self, candidate_id: str) -> dict:
+        async def read(conn):
+            cand = uuid.UUID(candidate_id)
+            return {
+                "stage": await conn.fetchval(
+                    "SELECT stage FROM candidates WHERE id = $1", cand
+                ),
+                "roles": {
+                    r["role"]
+                    for r in await conn.fetch(
+                        "SELECT role FROM role_assessments "
+                        "WHERE candidate_id = $1 AND stage = 0",
+                        cand,
+                    )
+                },
+                "findings": [
+                    dict(r)
+                    for r in await conn.fetch(
+                        "SELECT ref, raised_by, severity, status FROM findings "
+                        "WHERE candidate_id = $1",
+                        cand,
+                    )
+                ],
+                "gate": await conn.fetchrow(
+                    "SELECT passed, promoted, criteria FROM gate_evaluations "
+                    "WHERE candidate_id = $1 ORDER BY id DESC LIMIT 1",
+                    cand,
+                ),
+            }
+
+        return _run(_with_conn(read))
+
+    def test_every_role_the_stage_summons_is_recorded(
+        self, authed, monkeypatch
+    ) -> None:
+        """
+        Also the control for the test below: with a panel that supports, this
+        candidate's gate passes and it is promoted, so the fixture is not
+        refusing it for some reason of its own.
+        """
+        from src.programme.roles import roles_for_stage
+
+        candidate_id = self._passing_candidate(authed)
+        actions = self._pass(monkeypatch, candidate_id, {})
+        state = self._state(candidate_id)
+
+        assert [a for a in actions if a["action"] == "assessment_failed"] == []
+        assert state["roles"] == {role.key for role in roles_for_stage(0)}
+        assert state["stage"] == 1
+        assert state["gate"]["promoted"] is True
+
+    def test_a_veto_raised_this_pass_blocks_this_pass(
+        self, authed, monkeypatch
+    ) -> None:
+        """
+        CLAUDE.md: the panel reviews before the promotion, not after. A
+        blocking finding the panel raises must stop the promotion it was
+        convened to review, not the next one.
+        """
+        from src.programme import repo
+        from src.programme.gates import VETO_ROLES, evaluate
+        from src.programme.roles import Assessment, ProposedFinding, roles_for_stage
+
+        candidate_id = self._passing_candidate(authed)
+
+        async def gate_before(conn):
+            return evaluate(await repo.load_facts(conn, candidate_id))
+
+        assert _run(_with_conn(gate_before)).passed, (
+            "the fixture must pass its gate on the rows alone, or a refusal "
+            "below proves nothing about the finding"
+        )
+
+        assert "data_engineering" in VETO_ROLES
+        objection = Assessment(
+            verdict="object",
+            summary="Every bar is the same price; this is not a market series.",
+            findings=[
+                ProposedFinding(
+                    severity="critical",
+                    title="the price series is constant across the window",
+                    detail="Every open, high, low and close is 100.0, which no "
+                    "traded instrument produces.",
+                    remediation="Re-ingest from a vendor and reconcile sources.",
+                )
+            ],
+        )
+        replies = {"data_engineering": objection}
+        actions = self._pass(monkeypatch, candidate_id, replies)
+        state = self._state(candidate_id)
+
+        assert state["stage"] == 0, "the veto arrived after the promotion"
+        assert [a for a in actions if a["action"] == "promoted"] == []
+        (finding,) = state["findings"]
+        assert (finding["raised_by"], finding["severity"], finding["status"]) == (
+            "data_engineering",
+            "critical",
+            "open",
+        )
+
+        gate = state["gate"]
+        assert gate["passed"] is False
+        assert gate["promoted"] is False
+        veto = next(
+            c for c in json.loads(gate["criteria"]) if c["id"] == "no_blocking_findings"
+        )
+        assert veto["met"] is False
+        assert finding["ref"] in veto["detail"]
+
+        # The panel still sat in full: one role's veto does not stop the others
+        # being heard.
+        assert state["roles"] == {role.key for role in roles_for_stage(0)}
+
+
 # ---------------------------------------------------------------------------
 # The autonomy ceiling
 # ---------------------------------------------------------------------------

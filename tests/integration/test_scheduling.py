@@ -45,7 +45,7 @@ from src.core.types import (  # noqa: E402
 from src.data import SyntheticSource  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
 from src.db.repos import marks  # noqa: E402
-from src.worker.main import HANDLERS, SCHEDULED_KINDS  # noqa: E402
+from src.worker.main import HANDLERS, SCHEDULED_KINDS, Worker  # noqa: E402
 from src.worker.maintenance_jobs import (  # noqa: E402
     run_eod_marks,
     run_ingest_bars,
@@ -167,6 +167,82 @@ def test_scheduled_kinds_match_what_the_planner_emits() -> None:
 
     emitted = {job.kind.value for job in plan_session(SESSION)}
     assert emitted == set(SCHEDULED_KINDS)
+
+
+# ---------------------------------------------------------------------------
+# ...and nothing is claimed that has none
+# ---------------------------------------------------------------------------
+
+
+class TestTheWorkerClaimsOnlyWhatItCanRun:
+    """
+    The converse of the test above, against the real queue.
+
+    ``jobs`` is shared with the programme process, which owns kinds the worker
+    has no handler for. A worker that claimed every row would take those, find
+    no handler, and fail them permanently — ``retry=False``, attempts spent, an
+    error written into another process's job — while every job of its own
+    succeeded. The unit half, ``tests/unit/test_worker_claim.py``, pins the
+    argument; this pins the outcome.
+    """
+
+    #: A kind the worker has never heard of, standing in for the programme's.
+    FOREIGN_KIND = "jev_pass"
+
+    def test_a_foreign_kind_is_left_queued_and_untouched(self, dsn) -> None:
+        assert self.FOREIGN_KIND not in HANDLERS, (
+            "the stand-in foreign kind is now a worker kind; pick another"
+        )
+
+        async def check():
+            conn = await asyncpg.connect(dsn)
+            try:
+                await conn.execute("DELETE FROM jobs")
+                # No deployments makes eod_marks a real handler that returns
+                # at once, so the known job is cheap and runs for real.
+                await conn.execute("DELETE FROM deployments")
+                foreign = await job_repo.enqueue(
+                    conn, self.FOREIGN_KIND, {"candidate_id": "c-1"}
+                )
+                known = await job_repo.enqueue(
+                    conn, "eod_marks", {"session": SESSION.isoformat()}
+                )
+            finally:
+                await conn.close()
+
+            worker = Worker(dsn, "claim-filter-test")
+            await worker.start()
+            try:
+                did_work = await worker._drain()
+            finally:
+                await worker.stop()
+
+            conn = await asyncpg.connect(dsn)
+            try:
+                rows = await conn.fetch(
+                    "SELECT id, status, attempts, error, locked_by, started_at "
+                    "FROM jobs WHERE id = ANY($1::uuid[])",
+                    [foreign, known],
+                )
+            finally:
+                await conn.close()
+            by_id = {row["id"]: row for row in rows}
+            return did_work, by_id[foreign], by_id[known]
+
+        did_work, foreign, known = asyncio.run(check())
+
+        assert did_work, "the worker ran nothing, so this proves nothing"
+        assert known["status"] == "succeeded"
+        assert known["locked_by"] == "claim-filter-test"
+
+        assert foreign["status"] == "queued", (
+            f"the worker took a {self.FOREIGN_KIND!r} job it cannot run and "
+            f"left it {foreign['status']!r}: {foreign['error']!r}"
+        )
+        assert foreign["attempts"] == 0, "an attempt was spent on a foreign job"
+        assert foreign["error"] is None
+        assert foreign["locked_by"] is None
+        assert foreign["started_at"] is None
 
 
 # ---------------------------------------------------------------------------

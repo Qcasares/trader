@@ -954,12 +954,15 @@ async def ensure_shadow_deployment(
     Give a candidate entering stage 3 something to operate against.
 
     The row is created **disabled** and stays that way for the whole of shadow
-    mode. ``_enabled_deployments`` in the worker filters on ``status``, so a
-    disabled deployment cannot be picked up by the live loop however long it
-    sits there — the shadow job reaches it by id, deliberately, and submits
-    nothing.
+    mode. ``_enabled_deployments`` in the worker filters on ``status`` and on
+    the ``default`` owner, so this row cannot be picked up by the live loop
+    however long it sits there or whatever flips its status — the shadow job
+    reaches it by id, deliberately, and submits nothing. The API's enable route
+    refuses it too.
 
-    ``approved_backtest_run_id`` is required by the schema, and by the time a
+    ``approved_backtest_run_id`` is nullable in the schema (despite a comment
+    in 0002 that says otherwise) but is always written here, and the API's
+    deployment gate refuses a row without one. By the time a
     candidate is at stage 3 the 2 -> 3 gate has already established that a
     succeeded backtest and a robust walk-forward of these exact parameters
     exist. This does not re-check that; it reads the row the gate read.

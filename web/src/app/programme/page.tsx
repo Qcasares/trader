@@ -339,9 +339,10 @@ export default function ProgrammePage() {
           </dl>
 
           <p className="mt-3 text-sm text-ink-muted text-pretty">
-            Three independent things must agree before the runner promotes
+            Four independent things must agree before the runner promotes
             anything: the gate passes, the stage does not require an operator,
-            and the ceiling below permits it. The ceiling cannot be raised past
+            the ceiling below permits it, and every specialist the panel was
+            due to hear has reported. The ceiling cannot be raised past
             stage {status.autonomy_hard_cap} whatever is stored, because stage{" "}
             {status.autonomy_hard_cap + 1} is where the programme&apos;s own
             decision would expose capital.

@@ -550,16 +550,34 @@ async def dry_run(
 # ---------------------------------------------------------------------------
 
 
+#: The only owner whose enabled deployments this worker trades.
+#:
+#: Status alone was the filter, and status is one ``UPDATE`` from anything. The
+#: programme's shadow deployments are rows in this table under ``programme``,
+#: disabled for the whole of shadow mode, and the API's enable route now refuses
+#: them — but that is one route, and the worker is what places the order. So
+#: the worker asks whose a row is as well: a programme row flipped to enabled by
+#: any other path still reaches no venue, and every venue call made here reads
+#: its marks, its account and its risk history as the operator's. A later owner
+#: gets its own account and its own marks deliberately, not by inheriting these.
+TRADED_OWNER = marks.DEFAULT_OWNER
+
+
 async def _enabled_deployments(
     conn: asyncpg.Connection, ids: list[str] | None
 ) -> list[dict[str, Any]]:
     if ids:
         rows = await conn.fetch(
-            "SELECT * FROM deployments WHERE status='enabled' AND id = ANY($1::uuid[])",
+            "SELECT * FROM deployments WHERE status='enabled' AND owner_id = $1 "
+            "AND id = ANY($2::uuid[])",
+            TRADED_OWNER,
             [uuid.UUID(i) for i in ids],
         )
     else:
-        rows = await conn.fetch("SELECT * FROM deployments WHERE status='enabled'")
+        rows = await conn.fetch(
+            "SELECT * FROM deployments WHERE status='enabled' AND owner_id = $1",
+            TRADED_OWNER,
+        )
     return [_decode_deployment(r) for r in rows]
 
 
