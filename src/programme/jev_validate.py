@@ -42,6 +42,14 @@ Three decisions carry the weight.
   because an answer that failed is still a fact about the model; the verbatim
   body is on the request row either way.
 
+A Score is also checked against itself (docs/08 open item 20). Its ``legend``,
+where it sends one, must name the levels asked, in order; and its ``score``,
+documented as the probability-weighted mean of its levels, must be that mean
+within a conservative bound on what rounding can move it
+(:func:`score_consistency_bound`). A score that is not its own mean, like a
+choice that is not its own argmax, is an answer that disagrees with itself, and
+it is not measured.
+
 Numbers are compared as the decimals the vendor wrote, not their binary
 approximations, wherever the difference can decide a rule. In binary,
 ``1.02 - 1`` exceeds 0.02, so three probabilities of 0.34 would fail a tolerance
@@ -73,8 +81,47 @@ QUESTION_TYPES: tuple[str, ...] = ("noul", "choice", "score")
 #: Values have been observed on a 0.01 grid, which TypeSafe does not document,
 #: and rounding each option to it moves a sum by up to 0.005 an option: inside
 #: the tolerance for the four options the regime set asks, and not necessarily
-#: for a Score of ten levels, which is a reason to measure one before asking it.
+#: for a Score of ten levels, which is why the registry takes a Score of at most
+#: four (``jev_questions.MAX_SCORE_LEVELS_UNMEASURED``) until one is measured.
 PROBABILITY_SUM_TOLERANCE = Decimal("0.02")
+
+#: How far a value observed on the 0.01 grid can sit from the value it rounds:
+#: half a step.
+GRID_ROUNDING = Decimal("0.005")
+
+
+def score_consistency_bound(levels: int) -> Decimal:
+    """
+    How far a Score's ``score`` may sit from the probability-weighted mean of
+    its ``levels`` levels, 0 to ``levels - 1``, as observed, before the two are
+    taken to disagree.
+
+    Derived, not chosen, and deliberately conservative. The documented score
+    is that mean (docs/08, "What Jev is"). Each probability is observed on the
+    0.01 grid, within half a step of its true value, and level ``i``'s
+    rounding moves the mean by up to ``i`` half-steps; the score's own grid
+    has not been observed, so it is allowed half a step more, as though it
+    were rounded independently. Level 0 contributes nothing, so the whole is
+    ``0.005 * (1 + 0 + 1 + ... + (levels - 1))``, which is
+    ``0.005 * (1 + levels * (levels - 1) / 2)``: 0.01 at two levels, 0.02 at
+    three, 0.035 at four.
+
+    That covers a score reported at full precision and one rounded to the grid
+    as the probabilities are, either way a half is rounded; it is not tight. A
+    score rounded to the grid is the rounding of the same mean the
+    probabilities were rounded from, so rounding moves it by no more than
+    this and mostly by less: not at all at two levels, where it is exactly its
+    rounded top probability, while the bound admits 0.01 either side. So it
+    admits some answers that rounding alone could not produce, and refuses
+    only answers that rounding cannot explain however the score is reported.
+    Tightening it waits on recorded answers that show how the score is
+    reported, not on a guess. ``tests/unit/test_jev_validate.py::TestAScore``
+    works out both, the bound and how much of it each way of reporting uses.
+    """
+    if isinstance(levels, bool) or not isinstance(levels, int) or levels < 2:
+        raise ValueError(f"a Score has two levels or more, got {levels!r}")
+    return GRID_ROUNDING * (1 + Decimal(levels * (levels - 1)) / 2)
+
 
 #: The largest count the ledger's INT token columns hold. A count beyond it is
 #: not one anybody was billed for, and writing it would fail the insert that
@@ -123,6 +170,14 @@ ANSWER_REASONS: Mapping[str, str] = MappingProxyType(
         "probability_sum": "the probabilities do not sum to 1 within 0.02",
         "choice_not_in_criteria": "`choice` is not one of the options asked",
         "score_invalid": "`score` is not a real number from 0 to the top level",
+        "legend_mismatch": (
+            "`legend` is present and is not the levels asked, in order: a list "
+            'of them, or an object mapping "0" to "n-1" to them'
+        ),
+        "score_inconsistent": (
+            "`score` differs from the probability-weighted mean of its levels "
+            "by more than rounding to the 0.01 grid allows"
+        ),
         "confidence_invalid": "`confidence` is not a real number from 0 to 1",
         "tie": "no single option is most probable; for a Noul, exactly 0.5",
         "choice_not_argmax": (
@@ -354,6 +409,10 @@ def _distribution(question: _Question, raw: dict[str, Any]) -> ValidatedAnswer:
         # can fall between levels but never outside them.
         if score is None or not 0.0 <= score <= len(options) - 1:
             reason = "score_invalid"
+        elif "legend" in raw and not _legend_is_the_levels(raw["legend"], question):
+            reason = "legend_mismatch"
+        elif not _score_is_its_mean(score, probabilities, options):
+            reason = "score_inconsistent"
     if reason is None and not _in_unit(confidence):
         reason = "confidence_invalid"
     if reason is None and argmax is None:
@@ -392,6 +451,50 @@ def _sums_to_one(values: Iterable[float]) -> bool:
     with localcontext(_DECIMAL):
         total = sum((_decimal(value) for value in values), Decimal(0))
         return abs(total - 1) <= PROBABILITY_SUM_TOLERANCE
+
+
+def _legend_is_the_levels(legend: object, question: _Question) -> bool:
+    """
+    Whether a Score's ``legend`` names exactly the levels asked, in order.
+
+    Two shapes are read, because the vendor's has not been observed: a list of
+    the levels, lowest first, or an object keying each level by its index as
+    text, ``"0"`` to ``"n-1"``. Anything else — another order, another word, a
+    level missing or added, a null — is not the question that was asked, and
+    the check fails closed. A level is compared as the text it was asked in:
+    ``true`` is not a level, whatever Python says about ``True == 1``.
+    """
+    levels = question.levels
+    if isinstance(legend, list):
+        return len(legend) == len(levels) and all(
+            isinstance(named, str) and named == level
+            for named, level in zip(legend, levels, strict=True)
+        )
+    if isinstance(legend, dict):
+        return set(legend) == set(question.options) and all(
+            isinstance(legend[key], str) and legend[key] == level
+            for key, level in zip(question.options, levels, strict=True)
+        )
+    return False
+
+
+def _score_is_its_mean(
+    score: float, probabilities: Mapping[str, float] | None, options: tuple[str, ...]
+) -> bool:
+    """
+    Whether ``score`` is the probability-weighted mean of the levels within
+    :func:`score_consistency_bound`, computed on the decimals written.
+
+    Only reached once the probabilities are keyed ``"0"`` to ``"n-1"``, real,
+    and sum to 1 within the tolerance, and the score is real and in range.
+    """
+    if probabilities is None:  # pragma: no cover - the rules above refuse it
+        return False
+    with localcontext(_DECIMAL):
+        mean = sum(
+            (int(key) * _decimal(probabilities[key]) for key in options), Decimal(0)
+        )
+        return abs(_decimal(score) - mean) <= score_consistency_bound(len(options))
 
 
 def _carried_probabilities(
@@ -493,6 +596,9 @@ class _Question:
     #: options in the order asked, or a Score's levels "0" to "n-1". Empty for
     #: a Noul.
     options: tuple[str, ...] = ()
+    #: A Score's levels as asked, lowest first, which its legend must name.
+    #: Empty for a Noul or a Choice.
+    levels: tuple[object, ...] = ()
 
 
 def _read_questions(asked: object) -> tuple[list[_Question], str | None]:
@@ -548,7 +654,8 @@ def _read_question(key: object, question: object) -> tuple[_Question, str | None
             return _Question(key, kind, tuple(criteria)), None
         return unread, f"Choice {shown} needs criteria naming two or more options"
     if isinstance(criteria, (list, tuple)) and len(criteria) >= 2:
-        return _Question(key, kind, tuple(str(i) for i in range(len(criteria)))), None
+        options = tuple(str(i) for i in range(len(criteria)))
+        return _Question(key, kind, options, tuple(criteria)), None
     return unread, f"Score {shown} needs criteria listing two or more levels"
 
 
@@ -743,6 +850,7 @@ def _kind(value: object) -> str:
 
 __all__ = [
     "ANSWER_REASONS",
+    "GRID_ROUNDING",
     "MAX_TOKEN_COUNT",
     "PROBABILITY_SUM_TOLERANCE",
     "QUESTION_TYPES",
@@ -750,5 +858,6 @@ __all__ = [
     "RESPONSE_REASONS",
     "ValidatedAnswer",
     "Validation",
+    "score_consistency_bound",
     "validate_body",
 ]

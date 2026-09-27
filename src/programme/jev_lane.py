@@ -29,30 +29,69 @@ A probe is the exception, deliberately. It asks again on purpose, to measure
 how far repeated answers move, so it never replays and is never replayed: its
 rows are written in the ``probe`` lane, which the canonical index leaves out.
 
-What each early return writes, and why
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The road, not its callers, holds the rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Every rule a lane could forget is applied here, on every ask, so a lane added
+later — a planner, a harness, a job nobody has written yet — cannot forget it.
+The loops that call this still read their own switches; the road no longer
+depends on them having done so.
+
+What each step does, and what it writes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In order, the first that applies decides:
 
-1. **Switched off** — ``jev_enabled``, and the area switch for the set's lane.
-   Nothing is written. A switch that is off is a standing state, not an event
-   per request, and a ledger that grew a row for every question a lane did not
-   ask would bury the ones it did.
-2. **No usable model** — ``jev_model`` reads as ``None``. Nothing is written,
-   because nothing honest can be: every row names the model it requested, and
-   there is none to name. ``flags.jev_model`` has already logged why.
-3. **Replayed** — the canonical answer exists. Nothing is written or sent.
-4. **No key.** Nothing is written. A replay needs no key, which is why the key
-   is asked for only after the ledger has been.
-5. **Over budget** — the calls made today have reached
-   ``jev_daily_request_budget``. A ``refused_budget`` row, and no call.
-6. **Too large** — :func:`jev_catalogue.request_size_problem` refuses it under
+0. **The arguments**, before any switch is read, so a caller's mistake shows
+   while Jev is off: the registered set, exactly its state model, a subject
+   that is the state model's own subject type, and, for text, the sha256 of
+   exactly the text sent (a session is an ISO date). Raises; writes nothing.
+1. **Switched off** — ``programme_enabled``, ``jev_enabled``, the area switch
+   for the set's own lane, and for a set that carries this system's detail
+   ``jev_send_internal_detail``: each read by its own fail-closed reader, none
+   derived from another. ``disabled``; nothing is written. A switch that is off
+   is a standing state, not an event per request, and a ledger that grew a row
+   for every question a lane did not ask would bury the ones it did.
+2. **No usable model** — ``jev_model`` reads as ``None``. ``refused_model``,
+   and nothing is written, because nothing honest can be: every row names the
+   model it requested, and there is none to name.
+3. **The web gate**, for a web set. Text quarantined under any source is
+   ``quarantined``. Text without a valid, clear answer from the registered
+   injection screen under the pin is ``unscreened`` — for every web set but the
+   screen itself, probes included, and before any replay, so a stored answer
+   about text that has since been quarantined is not read back either. With no
+   screen registered, or none of the screen's shape, every web ask is
+   unscreened: the gate fails closed.
+4. **Content blocked** — a call about exactly this text was answered with a
+   content block, so it is not sent again, by any set, a probe of one
+   included, and nor is an answer about it read back. ``content_blocked``.
+   Text only — a web excerpt or a hypothesis title, the states a content
+   filter could object to. An enumerated state is labels computed in code, a
+   403 page about one is likelier an edge's than a verdict on its content,
+   and holding it for good would take that state out of the forward clock,
+   so it is held by nothing: its failure is recorded, and it is asked again.
+5. **Replayed** — the canonical answer exists. Nothing is written or sent. A
+   canonical row recorded by another pack raises before anything is sent: no
+   answer crosses from one question set to another (open item 15).
+6. **No key.** ``no_key``. A replay needs no key, which is why the key is asked
+   for only after the ledger has been.
+7. **The vendor's standing refusals** — an authentication failure recorded
+   since 00:00 UTC is ``auth_held``, in every lane, the connectivity probe's
+   included, however the key has changed since; a 422 recorded for this set,
+   version and model is ``set_refused`` until a new version. After the replay
+   and the key, because they exist to stop calls and those make none.
+8. **Over budget** — the calls made today have reached
+   ``jev_daily_request_budget``, or the recorded lane's slice of it
+   (``jev_catalogue.LANE_BUDGET_PERCENT``). A ``refused_budget`` row, and no
+   call.
+9. **Too large** — :func:`jev_catalogue.request_size_problem` refuses it under
    ``jev_max_state_tokens``. A ``refused_limits`` row, and no call.
 
-The last two are written because they are requests the programme wanted to
+Steps 8 and 9 are written because they are requests the programme wanted to
 send and did not, for reasons an operator should see on the status page and
-can act on. The first four write nothing: a switch that is off and a missing
-key are standing states rather than events, a model nobody can name cannot be
-recorded as requested, and a replayed answer is already on record.
+can act on. Every earlier step writes nothing: a switch that is off, a missing
+key, a quarantine and each standing refusal are states rather than events — the
+refusals derive from rows already written, which is what holds them — a model
+nobody can name cannot be recorded as requested, and a replayed answer is
+already on record.
 
 Then the call, and always a row for it, because a call is spent whether or not
 anything useful came back. A 2xx with a body is judged by
@@ -79,7 +118,11 @@ everybody else will read. Its own answer is dropped, and logged with its
 vendor request id. The daily budget does not count that call — only a row can
 be counted — and the same is true of the budget check generally: it and the
 call are not one step, so asks in flight together can overspend it by at most
-their number. The programme asks one at a time.
+their number. The programme asks one at a time. A winner recorded by another
+question set's pack raises instead of being replayed, like a canonical row of
+another pack found before the call — but after this call, not before it: the
+call was made and billed, and like every lost race's it is dropped unrecorded,
+logged with its vendor request id (docs/08 open item 17).
 
 The transport
 ~~~~~~~~~~~~~
@@ -91,13 +134,12 @@ in ``src/`` passes one: ``tests/unit/test_jev_lane.py`` reads every call site.
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 import asyncpg
@@ -111,6 +153,7 @@ from src.programme import (
     jev_repo,
     jev_validate,
 )
+from src.programme.jev_hash import request_hash, state_hash, text_sha256
 from src.programme.jev_questions import QuestionSet
 from src.programme.jev_validate import ValidatedAnswer, Validation
 
@@ -143,7 +186,12 @@ _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
 AskStatus = Literal[
     "disabled",
     "refused_model",
+    "quarantined",
+    "unscreened",
+    "content_blocked",
     "no_key",
+    "auth_held",
+    "set_refused",
     "refused_budget",
     "refused_limits",
     "ok",
@@ -151,14 +199,29 @@ AskStatus = Literal[
     "error",
 ]
 
+#: The statuses that record nothing and send nothing: standing states, read
+#: from switches, settings and rows already written, rather than events.
+UNRECORDED_STATUSES: frozenset[str] = frozenset(
+    {
+        "disabled",
+        "refused_model",
+        "quarantined",
+        "unscreened",
+        "content_blocked",
+        "no_key",
+        "auth_held",
+        "set_refused",
+    }
+)
+
 
 @dataclass(frozen=True)
 class AskResult:
     """
     What asking came to.
 
-    ``status`` is the recorded request's status, or ``disabled``,
-    ``refused_model`` or ``no_key``, which record nothing. ``request_row_id`` is
+    ``status`` is the recorded request's status, or one of
+    :data:`UNRECORDED_STATUSES`, which record nothing. ``request_row_id`` is
     the ``jev_requests`` row that holds the answer — on a replay, the canonical
     row it was read from — and ``None`` when nothing was written. ``answers``
     maps each question asked to its answer, in the order asked; a caller reads
@@ -176,53 +239,9 @@ class AskResult:
     error_kind: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# The request's identity
-# ---------------------------------------------------------------------------
-
-
-def state_hash(state: Any) -> str:
-    """sha256 of ``state`` with its keys sorted, compact, as UTF-8."""
-    return _sha256(_canonical(_keys_sorted(state)))
-
-
-def request_hash(model: str, state: Any, questions: Mapping[str, Any]) -> str:
-    """
-    sha256 of the canonical request, ``{model, state, questions}``: the key a
-    replay is found by.
-
-    The state's keys are sorted, at every depth, because their order carries
-    nothing: the state is a record of values, and the ledger's ``jsonb`` column
-    reorders them anyway. The questions are not sorted, nor their options,
-    because their order is part of what the model reads — moving an option has
-    been seen to move an ambiguous answer — so two orders are two requests.
-    Lists keep their order everywhere; in a state, order is data.
-
-    Compact and ``ensure_ascii=False``, like the pack hash, so the text hashed
-    is the text a reader would write down. A NaN or an infinity raises: JSON
-    cannot spell either, so no request could have carried one.
-    """
-    return _sha256(
-        _canonical(
-            {"model": model, "state": _keys_sorted(state), "questions": questions}
-        )
-    )
-
-
-def _keys_sorted(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _keys_sorted(value[key]) for key in sorted(value)}
-    if isinstance(value, (list, tuple)):
-        return [_keys_sorted(item) for item in value]
-    return value
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+# The request's identity — ``state_hash`` and ``request_hash`` — lives in
+# ``jev_hash``, which anything may import without importing the client, and is
+# imported above under the names it always had here.
 
 
 # ---------------------------------------------------------------------------
@@ -257,10 +276,16 @@ async def ask(
     golden hash, and a threshold measured on them would describe questions
     nobody reviewed — and the state exactly its ``state_model``, because a
     subclass can carry a field the registered model refused (``TypeError``).
+    The subject must be the state model's own subject type, and a text
+    subject's id the sha256 of exactly the text sent (``ValueError``).
 
     Every early return, and what it writes, is in the module docstring. A
     database error is not one of them: it propagates, and no call is made
-    after it.
+    after it. Nor is an answer recorded by another question set's pack, which
+    raises ``ValueError`` naming both: before anything is sent when it is the
+    canonical row a replay would read, and after the call when it is the winner
+    of a race this call lost, whose call was made, billed and is dropped
+    unrecorded (docs/08 open item 17).
     """
     sent_state = _checked(question_set, state, subject_type, subject_id, as_of)
     is_probe = probe or question_set.lane == PROBE_LANE
@@ -274,12 +299,28 @@ async def ask(
     if model is None:
         return AskResult(status="refused_model")
 
+    stated = state_hash(sent_state)
+    gated = await _web_gate(conn, question_set, subject_id, stated, model)
+    if gated is not None:
+        logger.info("Jev %s: the web gate held this ask (%s)", question_set.name, gated)
+        return AskResult(status=gated)
+
+    # Text only (see the module docstring). The connectivity probe's state is
+    # enumerated, so a block recorded against it holds nothing either.
+    if _is_text(question_set) and await jev_repo.content_blocked(conn, stated):
+        logger.warning(
+            "Jev %s: the vendor blocked this text before; not sent again",
+            question_set.name,
+        )
+        return AskResult(status="content_blocked")
+
     questions = question_set.as_request_questions()
     hashed = request_hash(model, sent_state, questions)
 
     if not is_probe:
         canonical = await jev_repo.find_canonical(conn, hashed)
         if canonical is not None:
+            _refuse_another_pack(question_set, canonical)
             logger.debug(
                 "Jev %s answer replayed from request %s",
                 question_set.name,
@@ -295,9 +336,13 @@ async def ask(
         )
         return AskResult(status="no_key")
 
+    held = await _standing_refusal(conn, question_set, model)
+    if held is not None:
+        return AskResult(status=held)
+
     request = {
         "request_hash": hashed,
-        "state_hash": state_hash(sent_state),
+        "state_hash": stated,
         "question_set": question_set.name,
         "question_set_version": question_set.version,
         "pack_hash": question_set.pack_hash,
@@ -318,6 +363,17 @@ async def ask(
             "Jev budget spent: %d of %d calls made today; %s refused",
             spent,
             budget,
+            question_set.name,
+        )
+        return await _refused(conn, request, "refused_budget")
+    share = jev_catalogue.lane_budget(budget, lane)
+    spent_here = await jev_repo.requests_today(conn, lane)
+    if spent_here >= share:
+        logger.warning(
+            "Jev %s lane's share spent: %d of its %d calls made today; %s refused",
+            lane,
+            spent_here,
+            share,
             question_set.name,
         )
         return await _refused(conn, request, "refused_budget")
@@ -372,6 +428,18 @@ async def ask(
         winner = await jev_repo.find_canonical(conn, hashed)
         if winner is None:
             raise
+        if winner["pack_hash"] != question_set.pack_hash:
+            # Said before raising, with the one identifier the vendor could
+            # match to this call: it was made, and no row will record it.
+            logger.error(
+                "Jev %s: the canonical answer this call raced for was recorded "
+                "by another question set's pack (request %s); this call's "
+                "answer is dropped unrecorded (vendor request id %s)",
+                question_set.name,
+                winner["id"],
+                call.request_id,
+            )
+            _refuse_another_pack(question_set, winner)
         logger.warning(
             "Jev %s: another writer recorded this request's answer first "
             "(request %s); replaying it and dropping this call's (vendor "
@@ -400,7 +468,7 @@ async def run_probe(
     reports what came back beside what it should have been. It proves the key,
     the pin, the call and the validator end to end, and it is the check to run
     before any area is switched on, which is why the probe answers to
-    ``jev_enabled`` alone.
+    ``programme_enabled`` and ``jev_enabled`` alone.
 
     Returns what the probe found: the status, the row, each answer as
     recorded, and ``as_expected`` — ``None`` unless every answer the probe
@@ -482,7 +550,65 @@ def _checked(
             "store; a call is recorded after it is made, so a request whose row "
             "could not be written is never sent"
         )
+    _check_subject(question_set, sent_state, subject_type, subject_id)
     return sent_state
+
+
+def _check_subject(
+    question_set: QuestionSet,
+    sent_state: Mapping[str, Any],
+    subject_type: str,
+    subject_id: str,
+) -> None:
+    """
+    The subject is the one the state describes: the state model's own subject
+    type, and for text, the sha256 of exactly the text sent.
+
+    Content-addressed because a replay is found by the request hash, which
+    names no subject: without this, the same excerpt filed under two ids would
+    be answered once and recorded against one of them, and a label on the
+    other would never meet its answer. With it, the canonical row for a text
+    always carries that text's subject. Neither the text nor its hash is put in
+    the error, which reaches the jobs page.
+    """
+    model = question_set.state_model
+    expected = jev_questions.STATE_SUBJECT.get(model)
+    if expected is None:
+        raise ValueError(
+            f"{model.__name__} has no subject type in jev_questions.STATE_SUBJECT"
+        )
+    if subject_type != expected:
+        raise ValueError(
+            f"subject_type must be {expected!r} for a {model.__name__}, the "
+            f"subject its state describes; got {subject_type!r}"
+        )
+    field = jev_questions.TEXT_SUBJECT_FIELD.get(model)
+    if field is not None:
+        if subject_id != text_sha256(sent_state[field]):
+            raise ValueError(
+                f"subject_id must be the sha256 of the `{field}` sent: a text "
+                "subject is its content, so a replay cannot answer for another "
+                "subject and a label joins its answer exactly"
+            )
+    elif question_set.provenance == "web":
+        # Registration forbids it; a set placed in the registry by hand could
+        # still try, and the web gate has nothing to address it by.
+        raise ValueError(
+            f"{question_set.name} is a web set whose state is not "
+            "content-addressed text"
+        )
+    elif expected == "session" and not _is_iso_date(subject_id):
+        raise ValueError(
+            f"a session subject is its date as YYYY-MM-DD, got {subject_id!r}"
+        )
+
+
+def _is_iso_date(text: str) -> bool:
+    """Whether ``text`` is a calendar date written exactly as YYYY-MM-DD."""
+    try:
+        return date.fromisoformat(text).isoformat() == text
+    except ValueError:
+        return False
 
 
 def _holds_unstorable(value: Any) -> bool:
@@ -501,17 +627,146 @@ def _holds_unstorable(value: Any) -> bool:
 
 async def _switched_on(conn: asyncpg.Connection, question_set: QuestionSet) -> bool:
     """
-    The master switch, and the area switch for the set's own lane.
+    The programme's switch, Jev's master switch, the area switch for the set's
+    own lane, and for a set carrying this system's detail the detail switch.
 
-    The set's lane rather than the lane a probe is recorded in: an area an
-    operator switched off is asked nothing, probes of its questions included.
-    Only a set whose own lane is the probe lane answers to the master switch
-    alone.
+    Each is read here, on every ask, through its own fail-closed reader, and
+    none is derived from another: the loops that call this read the first two
+    as well, and a caller that did not — a planner, a harness, anything added
+    later — is held to them anyway. The set's lane rather than the lane a probe
+    is recorded in: an area an operator switched off is asked nothing, probes
+    of its questions included. Only a set whose own lane is the probe lane
+    answers to the programme and the master switch alone.
     """
+    if not await flags.programme_enabled(conn):
+        return False
     if not await flags.jev_enabled(conn):
         return False
     area = jev_catalogue.LANE_AREA[question_set.lane]
-    return area is None or await flags.jev_area_enabled(conn, area)
+    if area is not None and not await flags.jev_area_enabled(conn, area):
+        return False
+    return not question_set.internal_detail or await flags.jev_send_internal_detail(
+        conn
+    )
+
+
+async def _web_gate(
+    conn: asyncpg.Connection,
+    question_set: QuestionSet,
+    content_sha256: str,
+    stated: str,
+    model: str,
+) -> AskStatus | None:
+    """
+    Whether a web set may be asked about this text: ``None`` if it may, or why
+    not.
+
+    Text quarantined under any source is not asked about, by any set, the
+    screen included. Otherwise every web set but the screen needs the screen's
+    clear answer about exactly this state — from the version registered now and
+    the pinned model, a canonical answer and not a probe's — and while no
+    screen is registered there is none to have, so every web ask is refused.
+    Checked for probes as for any ask, and before any replay: an answer read
+    back about text since quarantined is the text, asked about again.
+
+    ``content_sha256`` is the subject id, which :func:`_check_subject` has
+    already held to the sha256 of the text sent.
+
+    The screen's exemption, and its answers' standing, go to a set of the
+    screen's shape alone (:func:`jev_questions.screen_problem`): one question,
+    ``addressed_to_ai``, a Noul. Registration refuses any other under the
+    screen's name; one placed in the registry by hand clears nothing, and is
+    itself asked nothing about unscreened text, since a second question in it
+    would be answered about text nobody screened.
+    """
+    if question_set.provenance != "web":
+        return None
+    if await jev_repo.content_quarantined(conn, content_sha256) is not None:
+        return "quarantined"
+    if question_set.name == jev_questions.SCREEN_SET_NAME:
+        if jev_questions.screen_problem(question_set) is None:
+            return None
+        return "unscreened"
+    screen = jev_questions.REGISTRY.get(jev_questions.SCREEN_SET_NAME)
+    if screen is None or jev_questions.screen_problem(screen) is not None:
+        return "unscreened"
+    clean = await jev_repo.screened_clean(
+        conn, state_hash=stated, pack_hash=screen.pack_hash, model=model
+    )
+    return None if clean else "unscreened"
+
+
+def _is_text(question_set: QuestionSet) -> bool:
+    """
+    Whether ``question_set`` asks about text a content filter could object to:
+    a content-addressed text state, a web excerpt or a hypothesis title
+    (:data:`jev_questions.TEXT_SUBJECT_FIELD`). Only such a state is held by a
+    content block; an enumerated one is labels computed in code.
+    """
+    return question_set.state_model in jev_questions.TEXT_SUBJECT_FIELD
+
+
+async def _standing_refusal(
+    conn: asyncpg.Connection, question_set: QuestionSet, model: str
+) -> AskStatus | None:
+    """
+    A refusal the vendor has already given and would give again: ``None``, or
+    the status that holds this ask.
+
+    An authentication failure since 00:00 UTC holds every lane until then: a
+    refused key is refused on every call, and each would spend the budget to
+    learn it again. The ledger keeps no trace of which key failed, so a key
+    replaced after the failure is held too, the connectivity probe's included:
+    until 00:00 UTC only the operator's dispatch-only check,
+    ``python -m src.programme.jev_check`` by ``jev-check.yml``, can prove it. A
+    422 for this set, version and model holds the set until a new version
+    changes its words, or a new pin its judge. Both derive from rows already
+    written, so no process writes a switch, and neither writes one of its own.
+    """
+    if await jev_repo.auth_failed_today(conn):
+        logger.warning(
+            "Jev %s held: an authentication failure was recorded today, and "
+            "asks resume at 00:00 UTC",
+            question_set.name,
+        )
+        return "auth_held"
+    if await jev_repo.set_refused(
+        conn,
+        question_set=question_set.name,
+        version=question_set.version,
+        model=model,
+    ):
+        logger.warning(
+            "Jev %s v%s held: the vendor refused its request with a 422 under "
+            "%s; a new version is needed",
+            question_set.name,
+            question_set.version,
+            model,
+        )
+        return "set_refused"
+    return None
+
+
+def _refuse_another_pack(question_set: QuestionSet, row: Mapping[str, Any]) -> None:
+    """
+    Raise unless ``row``, a canonical answer about to be read back, was
+    recorded by this set's own pack.
+
+    The request hash names no set, so two sets asking identical words about an
+    identical state share one canonical row. The registry refuses a second set
+    with a registered set's questions, and the suite refuses a version whose
+    words repeat a released one's; this is the third line, for a row written by
+    hand or by a set since retired. Loud, because serving one set another's
+    answer is a defect, not a case to settle (docs/08 open item 15).
+    """
+    if row["pack_hash"] != question_set.pack_hash:
+        raise ValueError(
+            f"the canonical answer to this request (request {row['id']}) was "
+            f"recorded by {row['question_set']} v{row['question_set_version']} "
+            f"(pack {str(row['pack_hash'])[:12]}), not by {question_set.name} "
+            f"v{question_set.version} (pack {question_set.pack_hash[:12]}); no "
+            "answer crosses from one question set to another"
+        )
 
 
 async def _refused(
@@ -712,6 +967,7 @@ __all__ = [
     "MAX_INT_COLUMN",
     "PROBE_EXPECTED",
     "PROBE_LANE",
+    "UNRECORDED_STATUSES",
     "AskResult",
     "AskStatus",
     "ask",

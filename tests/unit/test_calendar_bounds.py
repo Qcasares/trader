@@ -11,25 +11,27 @@ engine cannot process most of it:
     start 1000-01-01  -> OverflowError from pandas; a year-1000 Timestamp does
                          not fit in nanoseconds
     end   9999-12-31  -> the same
-    end   2030-01-01  -> DateOutOfBounds; exchange_calendars publishes
-                         sessions only a couple of years ahead
+    end   2030-01-01  -> DateOutOfBounds; exchange_calendars builds sessions
+                         only a year past the day it was imported
 
 Each was a 202 Accepted followed by a queued run, a claimed job, three retry
 attempts, and a failure whose message mentions nanoseconds rather than the date
 the operator typed. Cheap to prevent, and expensive to diagnose otherwise.
 
 The bounds are read from the calendar rather than written down, because the
-upper one belongs to the ``exchange_calendars`` release and moves when it is
-upgraded. A literal here would be correct until the next `pip install`.
+upper one is no release's: ``nyse`` passes no ``end``, so ``exchange_calendars``
+builds XNYS to its default, a year from the day the process imported it, and
+the bound moves with every start (docs/08 open item 30). A literal here would
+be right only for a process started on the day it was written.
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
-from src.core.calendar import CALENDAR_START, bounds, sessions
+from src.core.calendar import CALENDAR_START, bounds, nyse, sessions
 
 
 class TestBoundsDescribeTheRealCalendar:
@@ -55,6 +57,29 @@ class TestBoundsDescribeTheRealCalendar:
         """
         first, last = bounds()
         assert sessions(first, last), "no sessions between the reported bounds"
+
+
+class TestTheUpperBoundMovesWithTheProcess:
+    """
+    docs/08 open item 30, and the reason the bounds are read rather than
+    written down. The end is ``exchange_calendars``' default, a year from the
+    day the library was imported, because :func:`nyse` passes no ``end`` and
+    XNYS sets no maximum of its own: no release carries it, and no upgrade is
+    due by any date. Should either change — an ``end`` passed to widen it, or a
+    release that fixes a date — this fails, and item 30 and the CLAUDE.md row
+    that quote it are to be read again.
+    """
+
+    def test_the_end_is_a_year_from_today(self) -> None:
+        # The process imported the library today, or yesterday if this runs
+        # across midnight; a year is 365 or 366 days, and the last session
+        # falls at most a long weekend short of it.
+        _, last = bounds()
+        today = date.today()
+        assert today + timedelta(days=357) <= last <= today + timedelta(days=366)
+
+    def test_xnys_sets_no_maximum_of_its_own(self) -> None:
+        assert nyse().bound_max() is None
 
 
 class TestTheRangesThatUsedToCrashTheWorker:

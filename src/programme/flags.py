@@ -385,18 +385,22 @@ async def _count(
 
 async def jev_daily_request_budget(conn: asyncpg.Connection) -> int:
     """
-    How many calls the programme may make to TypeSafe in a UTC day, where zero
-    means none. A call is one ledger row and at most two HTTP requests, the
-    client retrying a transient failure once, so the vendor may see up to
-    twice this many.
+    How many calls the programme may make to TypeSafe in a UTC day: zero,
+    meaning none, or from :data:`jev_catalogue.MIN_DAILY_REQUEST_BUDGET` up.
+    Each recorded lane spends at most its share of it
+    (:data:`jev_catalogue.LANE_BUDGET_PERCENT`), rounded down. A call is one
+    ledger row and at most two HTTP requests, the client retrying a transient
+    failure once, so the vendor may see up to twice this many.
 
     Zero on a database error, a missing row, and anything the catalogue
     refuses: a boolean (``True`` is an int in Python and is not a count), a
-    string, a float, a negative number, or a figure above
-    :data:`jev_catalogue.MAX_DAILY_REQUEST_BUDGET`. The rule is applied here,
-    at the runner, and not only at the form, because a row can be written by
-    something other than the form, and this one exists to bound spend in a
-    process nobody is watching.
+    string, a float, a negative number, a figure above
+    :data:`jev_catalogue.MAX_DAILY_REQUEST_BUDGET`, or one above zero and below
+    the minimum, under which some lane's share would round to no call at all
+    while the setting read as a budget that permitted some. The rule is
+    applied here, at the runner, and not only at the form, because a row can
+    be written by something other than the form, and this one exists to bound
+    spend in a process nobody is watching.
 
     Above the ceiling reads as zero rather than as the ceiling. Clamping would
     permit the largest spend the catalogue allows on the strength of a value it

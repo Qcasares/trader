@@ -41,7 +41,7 @@ import math
 import random
 import re
 from collections.abc import Iterator, Mapping
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal
 from typing import Any
 
 import pytest
@@ -135,6 +135,8 @@ REASONS_BY_TYPE: dict[str, set[str]] = {
         "probability_invalid",
         "probability_sum",
         "score_invalid",
+        "legend_mismatch",
+        "score_inconsistent",
         "confidence_invalid",
         "tie",
     },
@@ -1167,7 +1169,10 @@ class TestAScore:
         ("score", "probabilities", "reason", "argmax"),
         [
             (0, (1.0, 0.0, 0.0), None, "0"),
-            (0.0, (0.9, 0.1, 0.0), None, "0"),
+            # A mean of 0.01, which a score of 0.0 is within rounding of. The
+            # distribution was (0.9, 0.1, 0.0) until the score was checked
+            # against its own mean, and a score of 0.0 is 0.1 from that one.
+            (0.0, (0.99, 0.01, 0.0), None, "0"),
             (2, (0.0, 0.0, 1.0), None, "2"),
             (1.7, (0.1, 0.1, 0.8), None, "2"),
             (-0.01, (0.7, 0.2, 0.1), "score_invalid", "0"),
@@ -1220,6 +1225,326 @@ class TestAScore:
         answer = _one("severity", _score((0.45, 0.45, 0.1), score=0.65))
         assert answer.invalid_reason == "tie"
         assert (answer.argmax, answer.margin) == (None, 0.0)
+
+    # -- open item 20: a Score is checked against itself ----------------------
+
+    @pytest.mark.parametrize(
+        "legend",
+        [
+            DROP,
+            list(LEVELS),
+            {"0": "calm", "1": "unusual", "2": "extreme"},
+            {"2": "extreme", "0": "calm", "1": "unusual"},
+        ],
+        ids=["absent", "a-list", "keyed-by-index", "keyed-in-another-order"],
+    )
+    def test_a_legend_that_is_the_levels_is_accepted(self, legend: Any) -> None:
+        """The vendor's legend has not been observed; both readings of it that
+        name exactly the levels asked, in order, are accepted, and so is none."""
+        answer = _one("severity", _with(SCORE, legend=legend))
+        assert answer.valid, answer.invalid_reason
+
+    @pytest.mark.parametrize(
+        "legend",
+        [
+            ["calm", "extreme", "unusual"],
+            ["calm", "unusual"],
+            ["calm", "unusual", "extreme", "off the scale"],
+            ["Calm", "unusual", "extreme"],
+            [" calm", "unusual", "extreme"],
+            [0, 1, 2],
+            [True, "unusual", "extreme"],
+            {"1": "calm", "2": "unusual", "3": "extreme"},
+            {"0": "calm", "1": "unusual"},
+            {"0": "calm", "1": "unusual", "2": "extreme", "3": "off the scale"},
+            {"0": "unusual", "1": "calm", "2": "extreme"},
+            {"00": "calm", "1": "unusual", "2": "extreme"},
+            {"0": 0, "1": "unusual", "2": "extreme"},
+            {"calm": 0, "unusual": 1, "extreme": 2},
+            "calm, unusual, extreme",
+            3,
+            None,
+            [],
+            {},
+        ],
+        ids=[
+            "reordered",
+            "a-level-missing",
+            "a-level-added",
+            "another-case",
+            "a-space",
+            "indices-for-levels",
+            "true-for-a-level",
+            "keyed-1-to-n",
+            "a-key-missing",
+            "a-key-added",
+            "swapped",
+            "zero-padded",
+            "a-number-for-a-level",
+            "inverted",
+            "a-string",
+            "a-number",
+            "null",
+            "an-empty-list",
+            "an-empty-object",
+        ],
+    )
+    def test_a_legend_that_is_not_the_levels_is_refused(self, legend: Any) -> None:
+        """
+        A legend naming other levels, or the same ones in another order, says
+        the answer was given to a question that was not asked. It fails closed:
+        anything not recognisably the levels asked is refused, a null included.
+        The distribution was sound, so what it says is still recorded.
+        """
+        answer = _one("severity", _with(SCORE, legend=legend))
+        assert answer.invalid_reason == "legend_mismatch"
+        assert not answer.valid
+        assert (answer.argmax, answer.margin) == ("0", 0.5)
+        assert answer.score == 0.4
+
+    @pytest.mark.parametrize(
+        ("probabilities", "score", "reason"),
+        [
+            # Three levels, a mean of 0.4, and a bound of 0.02.
+            ((0.7, 0.2, 0.1), 0.42, None),
+            ((0.7, 0.2, 0.1), 0.38, None),
+            ((0.7, 0.2, 0.1), 0.43, "score_inconsistent"),
+            ((0.7, 0.2, 0.1), 0.37, "score_inconsistent"),
+            ((0.7, 0.2, 0.1), 1.4, "score_inconsistent"),
+            # The mean as the decimals were written: 0.98, from probabilities
+            # summing to 1.02. In binary 0.98 - 0.96 exceeds 0.02; it does not.
+            ((0.36, 0.34, 0.32), 0.96, None),
+            ((0.36, 0.34, 0.32), 1.0, None),
+            ((0.36, 0.34, 0.32), 0.95, "score_inconsistent"),
+        ],
+    )
+    def test_a_score_off_its_own_mean_is_refused(
+        self, probabilities: tuple[float, ...], score: float, reason: str | None
+    ) -> None:
+        """
+        The score is documented as the probability-weighted mean of the levels
+        (docs/08, "What Jev is"). One further from it than rounding to the
+        0.01 grid explains disagrees with itself, like a choice that is not
+        its own argmax, and is not measured; what it said is kept.
+        """
+        answer = _one("severity", _score(probabilities, score=score))
+        assert answer.invalid_reason == reason
+        assert answer.score == score
+        assert answer.argmax == "0"
+
+    @pytest.mark.parametrize(
+        ("levels", "probabilities", "within", "beyond"),
+        [
+            (2, (0.7, 0.3), (0.29, 0.31), (0.28, 0.32)),
+            (4, (0.1, 0.2, 0.3, 0.4), (1.965, 2.035), (1.964, 2.036)),
+        ],
+    )
+    def test_the_bound_is_inclusive_at_every_size(
+        self,
+        levels: int,
+        probabilities: tuple[float, ...],
+        within: tuple[float, ...],
+        beyond: tuple[float, ...],
+    ) -> None:
+        """
+        At the bound and just past it. What is within is not all rounding: a
+        two-level score rounded to the grid is its rounded top probability,
+        0.3 here, so 0.29 and 0.31 are admitted by the bound's conservatism,
+        not explained by rounding (see the test below).
+        """
+        asked = {"s": {"type": "score", "instructions": "Rate.", "criteria": []}}
+        asked["s"]["criteria"] = [f"level {i}" for i in range(levels)]
+        keys = [str(i) for i in range(levels)]
+
+        def judged(score: float) -> ValidatedAnswer:
+            answer = {
+                "type": "score",
+                "score": score,
+                "confidence": 0.3,
+                "probabilities": dict(zip(keys, probabilities, strict=True)),
+            }
+            validation = _judge(_body({"s": answer}), asked)
+            return validation.answers[0]
+
+        for score in within:
+            assert judged(score).invalid_reason is None, score
+        for score in beyond:
+            assert judged(score).invalid_reason == "score_inconsistent", score
+
+    def test_the_bound_is_its_derivation(self) -> None:
+        """
+        Worked out again from its definition, not from the formula: the score
+        and each probability are each taken to be within half a 0.01 step of
+        their true values, independently, so the furthest a score can sit from
+        the mean of what was observed is the largest
+        ``|e_score - sum(i * e_i)|`` over every way the errors can fall — the
+        corners of the box they span, since the quantity is linear in them.
+        Independent is the conservative reading, chosen because the score's
+        own grid has not been observed; the next test shows what each way of
+        reporting it actually uses.
+        """
+        half = Decimal("0.005")
+        for levels in range(2, jev_questions.MAX_SCORE_LEVELS + 1):
+            worst = max(
+                abs(corner[0] - sum(i * e for i, e in enumerate(corner[1:])))
+                for corner in itertools.product((-half, half), repeat=levels + 1)
+            )
+            assert jev_validate.score_consistency_bound(levels) == worst, levels
+        assert jev_validate.score_consistency_bound(2) == Decimal("0.01")
+        assert jev_validate.score_consistency_bound(3) == Decimal("0.02")
+        assert jev_validate.score_consistency_bound(4) == Decimal("0.035")
+
+    def test_how_much_of_the_bound_each_way_of_reporting_the_score_uses(
+        self,
+    ) -> None:
+        """
+        The bound is sound and not tight, and this is the evidence for both.
+        The vendor may report the score at full precision, or rounded to the
+        0.01 grid as it rounds the probabilities, a half going up or to even.
+        For each, the furthest the score can sit from the mean of the rounded
+        probabilities, over every true distribution whose levels lie within
+        half a step of the grid — on a lattice of 0.0005, which reaches every
+        tie, and from bases of both parities, which half to even needs. Level
+        0 carries no weight in the mean, so it takes the remainder.
+
+        Every way fits within the bound, so it refuses nothing rounding could
+        explain, however the score turns out to be reported; only a score
+        rounded half to even at three levels uses all of it. A score rounded to
+        the grid uses none of it at two levels, where it is exactly its rounded
+        top probability: the bound admits there a score 0.01 off that no
+        rounding produced. Tightening it waits on answers that show how the
+        score is reported, since the tighter bound for a score rounded halves up
+        would refuse an honest full-precision one — 0.015 off at three levels,
+        against 0.01.
+        """
+        step = Decimal("0.01")
+        offsets = [Decimal(k) * Decimal("0.0005") for k in range(-10, 11)]
+        ways = {"full precision": None, "half up": ROUND_HALF_UP}
+        ways["half to even"] = ROUND_HALF_EVEN
+        found: dict[int, dict[str, Decimal]] = {}
+        for levels in range(2, jev_questions.MAX_SCORE_LEVELS_UNMEASURED + 1):
+            worst = dict.fromkeys(ways, Decimal(0))
+            for bases in itertools.product(
+                (Decimal("0.10"), Decimal("0.11")), repeat=levels - 1
+            ):
+                for shifts in itertools.product(offsets, repeat=levels - 1):
+                    true = [b + s for b, s in zip(bases, shifts, strict=True)]
+                    mean = sum(i * p for i, p in enumerate(true, start=1))
+                    for way, mode in ways.items():
+                        rounding = ROUND_HALF_UP if mode is None else mode
+                        observed = sum(
+                            i * p.quantize(step, rounding=rounding)
+                            for i, p in enumerate(true, start=1)
+                        )
+                        score = mean if mode is None else mean.quantize(step, mode)
+                        worst[way] = max(worst[way], abs(score - observed))
+            found[levels] = worst
+            bound = jev_validate.score_consistency_bound(levels)
+            assert max(worst.values()) <= bound, (levels, worst)
+            assert worst["half up"] < bound, "not tight"
+        expected = {
+            2: ("0.005", "0", "0"),
+            3: ("0.015", "0.01", "0.02"),
+            4: ("0.03", "0.03", "0.03"),
+        }
+        assert {
+            levels: tuple(worst[way] for way in ways) for levels, worst in found.items()
+        } == {
+            levels: tuple(Decimal(v) for v in values)
+            for levels, values in expected.items()
+        }
+
+    @pytest.mark.parametrize("levels", [1, 0, True, 2.0])
+    def test_the_bound_is_for_a_score(self, levels: Any) -> None:
+        with pytest.raises(ValueError):
+            jev_validate.score_consistency_bound(levels)
+
+    @pytest.mark.parametrize(
+        ("levels", "step", "distributions"),
+        [(2, "0.01", 99), (3, "0.01", 4851), (4, "0.05", 969)],
+    )
+    def test_grid_rounding_at_2_to_4_levels_is_accepted(
+        self, levels: int, step: str, distributions: int
+    ) -> None:
+        """
+        Every way rounding to the 0.01 grid can move an answer, and more, at
+        every size the registry admits. A true distribution ``p`` and its mean
+        are each observed within half a step, independently — the bound's
+        conservative reading, which covers every real rounding and some that
+        none produces: ``p_i + e_i`` and ``mean + e``. The sum
+        is then off by ``sum(e_i)`` and the score off its observed mean by
+        ``e - sum(i * e_i)``, both linear in the errors, so each is worst at a
+        corner of the box ``|e| <= 0.005``. Every corner is accepted — by the
+        sum's tolerance and by the consistency bound, both inclusive, both
+        compared as the decimals written — for every distribution on the 0.01
+        grid at two and three levels, and on the 0.05 grid at four, where the
+        0.01 grid's 156,849 would take minutes. No level is zero: rounding
+        never moves a probability below it.
+        """
+        grid = Decimal(step)
+        parts = int(1 / grid)
+        half = Decimal("0.005")
+        keys = [str(i) for i in range(levels)]
+        asked = {
+            f"s{index}": {
+                "type": "score",
+                "instructions": "Rate.",
+                "criteria": [f"level {i}" for i in range(levels)],
+            }
+            for index in range(2 ** (levels + 1))
+        }
+        judged = spread = 0
+        for head in itertools.product(range(1, parts), repeat=levels - 1):
+            if sum(head) >= parts:
+                continue
+            spread += 1
+            true = [grid * unit for unit in (*head, parts - sum(head))]
+            mean = sum(i * p for i, p in enumerate(true))
+            answers = {}
+            corners = itertools.product((-half, half), repeat=levels + 1)
+            for key, corner in zip(asked, corners, strict=True):
+                observed = [p + e for p, e in zip(true, corner[1:], strict=True)]
+                answers[key] = {
+                    "type": "score",
+                    "score": float(mean + corner[0]),
+                    "confidence": 0.3,
+                    "legend": [f"level {i}" for i in range(levels)],
+                    "probabilities": {
+                        k: float(p) for k, p in zip(keys, observed, strict=True)
+                    },
+                }
+            validation = validate_body(json.dumps(_body(answers)), asked, MODEL)
+            assert validation.status == "ok", validation.problem
+            for answer in validation.answers:
+                # A tie at the top is an abstention, and no concern of this.
+                assert answer.invalid_reason in (None, "tie"), (true, answer)
+                judged += 1
+        assert spread == distributions, "not every distribution on the grid"
+        assert judged == distributions * 2 ** (levels + 1)
+
+    def test_four_levels_is_the_most_the_sum_tolerance_covers(self) -> None:
+        """
+        Why the registry stops at four (``MAX_SCORE_LEVELS_UNMEASURED``):
+        rounding can move a sum of ``n`` probabilities by ``n`` half-steps,
+        which is inside the 0.02 tolerance up to four levels and beyond it at
+        five. There the corner of the rounding box the test above would build,
+        every probability half a step high, sums to 1.025 and is refused as
+        malformed, though nothing but rounding moved it.
+        """
+        limit = jev_questions.MAX_SCORE_LEVELS_UNMEASURED
+        rounding = jev_validate.GRID_ROUNDING
+        assert limit * rounding <= jev_validate.PROBABILITY_SUM_TOLERANCE
+        assert (limit + 1) * rounding > jev_validate.PROBABILITY_SUM_TOLERANCE
+        asked = {"s": {"type": "score", "instructions": "Rate.", "criteria": []}}
+        asked["s"]["criteria"] = [f"level {i}" for i in range(5)]
+        answer = {
+            "type": "score",
+            "score": 1.0,
+            "confidence": 0.3,
+            "probabilities": {str(i): p for i, p in enumerate((0.205,) * 5)},
+        }
+        (judged,) = _judge(_body({"s": answer}), asked).answers
+        assert judged.invalid_reason == "probability_sum"
 
 
 class TestConfidence:
@@ -1329,6 +1654,45 @@ class TestWhenTwoRulesFailTheFirstIsRecorded:
                 "confidence_invalid",
             ),
             ("severity", _score((0.45, 0.45, 0.1), score=5), "score_invalid", "tie"),
+            # Open item 20's two checks, between the score's range and the
+            # confidence: a Score is checked against itself only once each of
+            # its parts is well formed.
+            (
+                "severity",
+                _with(SCORE, score=5, legend=None),
+                "score_invalid",
+                "legend_mismatch",
+            ),
+            (
+                "severity",
+                _score((0.5, 0.2, 0.1), score=1.4),
+                "probability_sum",
+                "score_inconsistent",
+            ),
+            (
+                "severity",
+                _with(SCORE, score=1.4, legend=["calm"]),
+                "legend_mismatch",
+                "score_inconsistent",
+            ),
+            (
+                "severity",
+                _with(SCORE, legend=None, confidence=2),
+                "legend_mismatch",
+                "confidence_invalid",
+            ),
+            (
+                "severity",
+                _with(SCORE, score=1.4, confidence=2),
+                "score_inconsistent",
+                "confidence_invalid",
+            ),
+            (
+                "severity",
+                _score((0.45, 0.45, 0.1), score=1.5),
+                "score_inconsistent",
+                "tie",
+            ),
         ],
     )
     def test_the_earlier_rule_is_the_reason(
@@ -1567,6 +1931,16 @@ REACHABLE: dict[str, tuple[Any, Any, Any]] = {
     ),
     "score_invalid": (
         json.dumps(_body({**CLEAN, "severity": _with(SCORE, score=3)})),
+        ASKED,
+        MODEL,
+    ),
+    "legend_mismatch": (
+        json.dumps(_body({**CLEAN, "severity": _with(SCORE, legend=["calm"])})),
+        ASKED,
+        MODEL,
+    ),
+    "score_inconsistent": (
+        json.dumps(_body({**CLEAN, "severity": _with(SCORE, score=1.4)})),
         ASKED,
         MODEL,
     ),
@@ -1927,7 +2301,9 @@ class _Fuzz:
 
     def _tie(self, body: dict[str, Any]) -> None:
         # The top two levelled at their mean, so the sum still holds and the
-        # tie is judged as a tie rather than filed under the sum.
+        # tie is judged as a tie rather than filed under the sum; and a Score's
+        # score moved to its new mean, so the tie is not filed under the
+        # consistency check either.
         for answer in _answer_objects(body):
             probabilities = answer.get("probabilities")
             if isinstance(probabilities, dict):
@@ -1941,6 +2317,15 @@ class _Fuzz:
                     pair = [Decimal(repr(float(probabilities[k]))) for k in ranked[:2]]
                     mean = float(sum(pair) / 2)
                     probabilities[ranked[0]] = probabilities[ranked[1]] = mean
+                    levels = len(reals) == len(probabilities)
+                    if answer.get("type") == "score" and levels:
+                        if all(key.isdecimal() for key in reals):
+                            answer["score"] = float(
+                                sum(
+                                    int(key) * Decimal(repr(float(probabilities[key])))
+                                    for key in reals
+                                )
+                            )
                 return
 
     def _repick(self, body: dict[str, Any]) -> None:
@@ -2132,6 +2517,23 @@ def _keys_of(question: Mapping[str, Any]) -> list[str]:
     return [str(level) for level in range(len(question["criteria"]))]
 
 
+def _names_the_levels(legend: Any, levels: list[Any]) -> bool:
+    """A list of exactly the levels, or an object from each level's index,
+    written as text, to exactly that level; each level a string."""
+    if type(legend) is list:
+        named = legend
+    elif type(legend) is dict and sorted(legend) == sorted(
+        str(index) for index in range(len(levels))
+    ):
+        named = [legend[str(index)] for index in range(len(levels))]
+    else:
+        return False
+    return len(named) == len(levels) and all(
+        type(name) is str and type(level) is str and name == level
+        for name, level in zip(named, levels, strict=False)
+    )
+
+
 def _expected_reason(question: Mapping[str, Any], sent: Any) -> str | None:
     """The first rule ``sent`` breaks, in the documented order, or ``None``."""
     kind = question["type"]
@@ -2161,6 +2563,18 @@ def _expected_reason(question: Mapping[str, Any], sent: Any) -> str | None:
         not _is_real(score) or not 0 <= float(score) <= len(keys) - 1
     ):
         return "score_invalid"
+    if kind == "score" and "legend" in sent:
+        if not _names_the_levels(sent["legend"], list(question["criteria"])):
+            return "legend_mismatch"
+    if kind == "score":
+        mean = sum(
+            level * Decimal(str(float(probabilities[str(level)])))
+            for level in range(len(keys))
+        )
+        # Half a 0.01 step for the score, and ``i`` half-steps for level i.
+        bound = Decimal("0.005") * (1 + sum(range(len(keys))))
+        if abs(Decimal(str(float(score))) - mean) > bound:
+            return "score_inconsistent"
     confidence = sent.get("confidence")
     if not _is_real(confidence) or not 0 <= float(confidence) <= 1:
         return "confidence_invalid"
