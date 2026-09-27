@@ -1880,6 +1880,307 @@ def test_shadow_mode_lives_in_the_worker_because_of_that_boundary() -> None:
     assert not (SRC / "programme" / "shadow_job.py").exists()
 
 
+# ---------------------------------------------------------------------------
+# The programme reads prices; it never writes them
+# ---------------------------------------------------------------------------
+
+#: A write verb, in SQL — the statements that change rows, and the ones that
+#: drop or alter the table itself, which change every row at once.
+_WRITE_VERB = (
+    r"\b(?:insert\s+into|update|delete\s+from|copy|truncate(?:\s+table)?"
+    r"|merge\s+into|drop\s+table(?:\s+if\s+exists)?"
+    r"|alter\s+table(?:\s+if\s+exists)?)\s+(?:only\s+)?"
+)
+
+#: A write to the price table, schema-qualified or quoted.
+_PRICE_WRITE = re.compile(
+    _WRITE_VERB + r"""(?:"?\w+"?\.)?"?daily_bars"?(?![\w])""", re.IGNORECASE
+)
+
+#: A literal that is a write verb and at most the start of a table name — a
+#: schema, or a name broken at an underscore — so the table is concatenated on
+#: from something the scan cannot read. "update available" is not one.
+_WRITE_PREFIX = re.compile(
+    r"\s*" + _WRITE_VERB + r"""(?:"?\w+"?\.)?(?:"?\w*_)?\s*""", re.IGNORECASE
+)
+
+#: A literal that is a write verb and nothing else, not even the space before
+#: its table: ``"INSERT INTO"`` joined to ``"daily_bars"`` by ``" ".join`` or
+#: a ``+``, the pieces handed about in a list the scan cannot follow. A
+#: one-word verb counts only in capitals, as SQL is written here, so the
+#: English "update" or "copy" standing alone is not one.
+_WRITE_VERB_ALONE = re.compile(
+    r"\s*(?:(?i:insert\s+into|delete\s+from|merge\s+into|truncate\s+table"
+    r"|drop\s+table(?:\s+if\s+exists)?|alter\s+table(?:\s+if\s+exists)?)"
+    r"|UPDATE|COPY|TRUNCATE)(?:\s+(?i:only))?\s*"
+)
+
+#: A write whose table is interpolated into an f-string, the interpolation
+#: marked by a NUL where the scan joins the literal parts.
+_WRITE_INTERPOLATED = re.compile(
+    _WRITE_VERB + r"""(?:"?\w*"?\.)?"?\w*\x00""", re.IGNORECASE
+)
+
+#: A write whose table is a placeholder ``%`` or ``str.format`` fills in.
+_WRITE_PLACEHOLDER = re.compile(
+    _WRITE_VERB + r"""(?:"?\w*"?\.)?"?\w*(?:%s|%\(\w+\)s|\{\w*\})""", re.IGNORECASE
+)
+
+#: asyncpg's bulk writers, which take the table as an argument and build the
+#: SQL inside the driver, so no string anywhere names the write.
+BULK_WRITERS = frozenset({"copy_records_to_table", "copy_to_table"})
+
+
+def _price_writes(source: str) -> list[str]:
+    """
+    Every write to ``daily_bars`` spelled in ``source``, and every write whose
+    table the scan cannot read.
+
+    SQL is a string, so this reads string literals rather than imports: an
+    ``INSERT``, ``UPDATE``, ``DELETE``, ``COPY``, ``TRUNCATE`` or ``MERGE`` on
+    the table, or a ``DROP`` or ``ALTER`` of it; a write verb whose table is
+    interpolated, formatted or concatenated on; a statement assembled from
+    literals by ``+`` or ``str.join``, read as the one text it makes; a write
+    verb standing alone, whose table is joined on from somewhere the scan
+    cannot follow; and a bulk writer handed the table, or handed anything it
+    cannot read. Reads are allowed. A label, a docstring or a ``SELECT`` naming
+    the table is not a write. It reads spellings, and is not a sandbox.
+    """
+    found: list[str] = []
+    tree = ast.parse(source)
+    parts = {
+        id(part)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        for part in node.values
+    }
+    inner = {
+        id(side)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+        for side in (node.left, node.right)
+        if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add)
+    }
+    for node in ast.walk(tree):
+        assembled = None if id(node) in inner else _assembled(node)
+        if assembled is not None and (
+            _PRICE_WRITE.search(assembled)
+            or _WRITE_INTERPOLATED.search(assembled)
+            or _WRITE_PLACEHOLDER.search(assembled)
+        ):
+            found.append(f"line {node.lineno}: {ast.unparse(node)[:80]}")
+        if isinstance(node, ast.JoinedStr):
+            text = "".join(
+                part.value
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                else "\x00"
+                for part in node.values
+            )
+            if _PRICE_WRITE.search(text) or _WRITE_INTERPOLATED.search(text):
+                found.append(f"line {node.lineno}: {ast.unparse(node)}")
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in parts
+        ):
+            if (
+                _PRICE_WRITE.search(node.value)
+                or _WRITE_PREFIX.fullmatch(node.value)
+                or _WRITE_VERB_ALONE.fullmatch(node.value)
+                or _WRITE_PLACEHOLDER.search(node.value)
+            ):
+                found.append(f"line {node.lineno}: {node.value.strip()[:80]!r}")
+        elif isinstance(node, ast.Call) and _name_of(node.func) in BULK_WRITERS:
+            table = _argument(node, 0, "table_name")
+            if not (
+                isinstance(table, ast.Constant)
+                and isinstance(table.value, str)
+                and not re.search(r'(?:^|\.)"?daily_bars"?$', table.value)
+            ):
+                found.append(f"line {node.lineno}: {ast.unparse(node.func)}(...)")
+    return found
+
+
+def _literal_text(node: ast.expr) -> str | None:
+    """
+    The text a string literal holds, or an f-string with each interpolation
+    marked by a NUL; ``None`` for anything else.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            else "\x00"
+            for part in node.values
+        )
+    return None
+
+
+def _added(node: ast.BinOp) -> list[ast.expr]:
+    """The operands of a chain of ``+``, left to right."""
+    pieces: list[ast.expr] = []
+    for side in (node.left, node.right):
+        if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add):
+            pieces.extend(_added(side))
+        else:
+            pieces.append(side)
+    return pieces
+
+
+def _assembled(node: ast.AST) -> str | None:
+    """
+    The one text a chain of ``+``, or a ``str.join`` of a literal list, makes
+    of the strings in it, each piece the scan cannot read marked by a NUL;
+    ``None`` when the node assembles nothing from a literal.
+
+    ``"INSERT INTO" + " daily_bars VALUES ($1)"`` names the table in neither
+    literal, and ``" ".join(["INSERT INTO", "daily_bars", ...])`` in none, so
+    each literal alone reads as no write at all.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        pieces, separator = _added(node), ""
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and isinstance(node.func.value, ast.Constant)
+        and isinstance(node.func.value.value, str)
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.List | ast.Tuple | ast.Set)
+    ):
+        pieces, separator = list(node.args[0].elts), node.func.value.value
+    else:
+        return None
+    texts = [_literal_text(piece) for piece in pieces]
+    if all(text is None for text in texts):
+        return None
+    return separator.join("\x00" if text is None else text for text in texts)
+
+
+def _name_of(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _price_write_offences(graph: ImportGraph, starts: Iterable[str]) -> list[str]:
+    """Every write to ``daily_bars`` in the closure of ``starts``, with its route."""
+    parents = _walk(graph, starts)
+    return [
+        f"{_route(parents, module)}: {write}"
+        for module in sorted(parents)
+        for write in _price_writes(graph.sources[module])
+    ]
+
+
+def test_nothing_in_the_programme_writes_daily_bars() -> None:
+    """
+    The live decision reads ``daily_bars``, and the forward clock is to read
+    nothing else, so web text, a model's output or anything else the programme
+    holds must have no road to a price.
+
+    The worker writes the table — the live ingest, and the reference bars the
+    programme's planner is to enqueue — and the programme may import neither.
+    Walked rather than read a file at a time, because a helper the programme
+    imports from ``src/db`` or ``src/data`` that wrote the table would be the
+    same road without the programme's own files naming it.
+    """
+    graph = _real_graph()
+    starts = _package_modules(graph, MODEL_HOLDING_PACKAGE)
+    assert starts, "the scan found no modules in src/programme"
+    offenders = _price_write_offences(graph, starts)
+    assert not offenders, (
+        "something the programme loads writes daily_bars, the table the forward "
+        "clock and the live decision read, or writes a table this scan cannot "
+        "read; name the table in the SQL:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_price_write_scan_sees_the_workers_own_writes() -> None:
+    """Guards the guard: the ingests' real SQL trips the scan."""
+    source = (SRC / "worker" / "maintenance_jobs.py").read_text(encoding="utf-8")
+    assert len(_price_writes(source)) >= 2
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.execute("INSERT INTO daily_bars (symbol) VALUES ($1)")',
+        'await conn.executemany("insert into public.daily_bars values ($1)", r)',
+        'await conn.execute("UPDATE daily_bars SET close = $1")',
+        "await conn.execute('DELETE FROM \"daily_bars\" WHERE session < $1')",
+        'q = "TRUNCATE TABLE daily_bars"',
+        'q = "COPY daily_bars FROM STDIN"',
+        'q = "MERGE INTO daily_bars USING staged ON true"',
+        'await conn.execute("DROP TABLE IF EXISTS daily_bars")',
+        'await conn.execute("ALTER TABLE daily_bars RENAME TO old_bars")',
+        'T = "daily_bars"\nawait conn.execute(f"INSERT INTO {T} VALUES ($1)")',
+        'await conn.execute(f"UPDATE daily_{suffix} SET close = 1")',
+        'await conn.execute("INSERT INTO " + table + " VALUES ($1)")',
+        'await conn.execute("INSERT INTO %s VALUES ($1)" % table)',
+        'await conn.execute("UPDATE {} SET close = 1".format(table))',
+        'await conn.copy_records_to_table("daily_bars", records=rows)',
+        'await conn.copy_records_to_table(table_name="daily_bars", records=r)',
+        'await conn.copy_to_table(TABLE, source=f)',
+        # Assembled from literals, the table named in none of them alone.
+        '_PRICES = " ".join(["INSERT INTO", "daily_bars", "VALUES ($1)"])',
+        '_PRICES = "INSERT INTO" + " daily_bars VALUES ($1)"',
+        'q = "UPDATE" + " " + "daily_bars SET close = 1"',
+        'q = "".join(("MERGE INTO ", "daily", "_bars USING s ON true"))',
+        'q = "DELETE FROM " + f"{schema}.daily_bars"',
+        # ...where no literal alone reads as a verb waiting for its table.
+        'q = "update" + " daily_bars set close = 1"',
+        'q = " ".join(["copy", "daily_bars", "from stdin"])',
+        'q = "WITH s AS (SELECT 1) INSERT INTO" + " daily_bars SELECT * FROM s"',
+        # A verb alone, its table joined on from where the scan cannot follow.
+        'PARTS = ["INSERT INTO", TABLE, "VALUES ($1)"]',
+        'VERB = "TRUNCATE"',
+    ],
+)
+def test_the_price_write_scan_finds_each_spelling(source: str) -> None:
+    assert _price_writes(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.fetch("SELECT symbol, COUNT(*) FROM daily_bars GROUP BY 1")',
+        'Evidence("daily_bars", "SPY", {})',
+        '"""Reads ``daily_bars``; the worker writes into ``daily_bars``."""',
+        'await conn.execute("INSERT INTO daily_bars_audit VALUES ($1)")',
+        'await conn.execute("UPDATE jev_answers SET valid = false")',
+        'await conn.copy_records_to_table("jev_answers", records=rows)',
+        'def f():\n    """Takes a deep copy\n    """',
+        'note = "the next update"',
+        'status = "update available"',
+        'note = "the next " + "update"',
+        'label = ", ".join(["copy", "update", "daily_bars"])',
+        'q = "SELECT close FROM " + "daily_bars"',
+        'title = "Prices: " + "daily_bars"',
+    ],
+)
+def test_the_price_write_scan_ignores_what_does_not_write_prices(source: str) -> None:
+    assert _price_writes(source) == []
+
+
+def test_the_price_write_scan_follows_the_imports() -> None:
+    graph = _synthetic(
+        {
+            "src/programme/tick.py": "from src.db.repos import prices",
+            "src/db/repos/prices.py": 'SQL = "INSERT INTO daily_bars VALUES ($1)"',
+        }
+    )
+    offenders = _price_write_offences(graph, ["src.programme.tick"])
+    assert offenders == [
+        "src.programme.tick -> src.db.repos.prices: "
+        "line 1: 'INSERT INTO daily_bars VALUES ($1)'"
+    ]
+
+
 def test_the_api_does_not_import_the_programme_runner() -> None:
     """
     The API may read the programme's rows; it may not become the runner.
