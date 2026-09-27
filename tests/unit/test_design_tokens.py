@@ -1037,6 +1037,33 @@ def test_the_tailwind_theme_mapping_is_mirrored() -> None:
 
 
 # ---------------------------------------------------------------------------
+# cn() merges every declared font size as a size
+# ---------------------------------------------------------------------------
+
+UTILS = SRC / "lib" / "utils.ts"
+
+#: The font sizes tailwind-merge 3's default config recognises: the literal
+#: ``base`` in its font-size group, and its ``tshirtUnitRegex`` for the rest.
+#: Any other ``text-*`` it reads as a colour, so ``cn("text-body",
+#: "text-ink-muted")`` drops the size.
+_TW_MERGE_SIZE = re.compile(r"base|(\d+(\.\d+)?)?(xs|sm|md|lg|xl)")
+
+
+def test_every_declared_font_size_is_one_cn_merges_as_a_size() -> None:
+    _, _, theme = _css_blocks()
+    sizes = {p[len("--text-") :] for p in theme if re.fullmatch(r"--text-[a-z0-9]+", p)}
+    assert "body" in sizes, "the @theme block no longer declares --text-body"
+    utils = _blank_comments(UTILS.read_text(encoding="utf-8"))
+    extended = re.search(r"\btext:\s*\[([^\]]*)\]", utils)
+    registered = set(re.findall(r'"([^"]+)"', extended.group(1))) if extended else set()
+    unknown = sorted(s for s in sizes - registered if not _TW_MERGE_SIZE.fullmatch(s))
+    assert not unknown, (
+        f"tailwind-merge reads text-{{{','.join(unknown)}}} as a colour; add "
+        f"{unknown} to the `text` theme scale in web/src/lib/utils.ts"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The design system's own files are not stylesheet source (web/DESIGN.md D-TOK-5)
 # ---------------------------------------------------------------------------
 
