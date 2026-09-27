@@ -758,7 +758,7 @@ six below the table, beside a UI pull request that is not phase C's.
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2 done |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2 and W done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
@@ -1614,21 +1614,274 @@ one-snapshot test repeats an excerpt rather than a hash; and the probe-verdict
 table gains the new statuses and the budget's new words. The integration
 probe-job cases run on databases of their own, and the SDK suite switches the
 programme on.
+Phase C lands as several pull requests, each reviewed on its own, and each has
+a part here.
+
+#### W: the reference bars, and one adjustment basis for the live ingest
+
+A worker change, reviewed as one on the live path, with the parity and
+real-data suites unchanged and green. It moves no switch, and nothing it adds
+is enqueued: the programme's planner (C4) will be the new job's first producer.
+
+**The live ingest keeps one adjustment basis** (open item 23, closed here).
+Yahoo back-adjusts `Adj Close` at every distribution, so each fetch returns the
+whole history on the basis of the day it was made. `run_ingest_bars` refetched
+ten days and upserted them, which left every older row on the basis of the last
+day that fetched it: each distribution left a step at the ten-day boundary, the
+steps accumulated, and a stored series drifted from any fresh fetch of its own
+history by roughly the symbol's distribution yield a year — an estimate from
+the yields, not a measurement. The live decision read that table while a
+backtest of the same days fetched afresh, so a signal with a lookback was
+computed on different numbers on the two paths. The ingest now refetches each
+symbol it owns over its whole stored span, from the earlier of its first stored
+session and `session - REFERENCE_WINDOW_DAYS` (2,200 calendar days, which hold
+between 1,510 and 1,524 NYSE sessions across the calendar) to its latest stored
+session or the job's, whichever is later, and every stored row the fetch
+returns takes that fetch's `adj_close`: the adjusted series is on one basis,
+even when a retried job for an older session runs after a newer one. A stored
+session the fetch did not return keeps its older basis: it is counted in the
+job's `rows_not_refreshed`, with a warning naming the first five, and the job
+still succeeds, because a vendor that has stopped returning a session will not
+return it to a retry either, and the live path is never failed over a
+data-quality condition it did not fail on before. A symbol whose session bar
+the fetch left out is named in `session_missing`, with a warning, and the job
+succeeds too: the live decision has no close for it, as it never had; the
+warning used to be judged by the newest bar across every symbol, which one
+symbol's landing made look complete. A fetch of the whole span that fails is
+another matter, because a retry can mend it. It is followed by one of the
+last `INGEST_LOOKBACK_DAYS`, the window this job always fetched, and that is
+written, so the session's bar lands wherever the ten-day ingest landed it and
+the live decision loses nothing. The job then fails, naming the stored rows
+it could not re-base, so the worker retries the whole span: those rows keep an
+older basis, so a step at the ten-day boundary is back for every distribution
+since the last whole refetch, and as built the job succeeded that day with the
+fact in a result nothing reads. `ingest_bars:{session}` now succeeds only once
+one fetch has re-based every stored row it returns, which is what the forward
+clock can read (open item 40). The fetch runs in a thread, as a backtest's
+does, so the lease and the heartbeat keep answering while years download, and
+the writes are one transaction, so a failure part-way leaves every stored row
+as it was and no reader sees a series half re-based; the refresh is one
+statement in `(symbol, session)` order, so two workers refreshing overlapping
+spans lock rows in one order and cannot deadlock. The thread and the
+transaction were claims with no test behind them until review removed each
+and found the suite still green:
+`tests/unit/test_reference_bars.py::test_the_fetch_leaves_the_event_loop_free`
+now needs a coroutine to run beside the download for the download to return,
+and `tests/integration/test_reference_bars.py::TestOneTransaction` fails the
+second statement of a write on Postgres and finds every row the first one
+rewrote as it was, down to its `xmin`. Refetching years every session would
+rewrite every row every day, so a row the fetch repeats is left alone; on a
+day with no distribution only the new session is written, and the result's
+`new_bars` counts the sessions the table did not hold before, beside `bars`,
+every row the span returned. The span grows a session a day, bounded by the
+instrument's listed history.
+
+**Raw prices stay as they were written.** `daily_bars` holds raw prices, and
+Yahoo's `Close` is split-adjusted: a split halves every earlier session's raw
+prices in each fetch after it. The ingest refreshes a row whole, raw prices
+included, only inside `INGEST_LOOKBACK_DAYS` of the job's session, as it always
+refreshed it — which is how a vendor's correction of a recent bar lands, and a
+missed recent session is caught — and any other stored row takes only its new
+`adj_close`, its open, high, low, close and volume staying as first written. So
+after a split an old row's adjusted close is on the new basis and its raw close
+is as first written — as it traded for a row written before the split, and
+already split-adjusted for one first fetched after an earlier split, which
+covers the six years the first ingest after this merges backfills: their ratio
+is no adjustment factor, and nothing reads it as one. A session not yet stored
+is inserted whole, so a missed session is now caught across the whole span —
+on the split basis of the day it is fetched, so a gap older than the lookback,
+filled after a split, sits on another raw basis than the rows either side of
+it, where the ten-day ingest never filled it at all.
+`tests/integration/test_reference_bars.py::TestTheLiveIngestKeepsOneBasis`
+puts a fake vendor with Yahoo's shape through a distribution between two
+ingests and finds every stored row's adjusted close on the second day's basis,
+over a thousand of them behind the old ten-day boundary; through a split, and
+finds raw prices repriced inside the lookback and nowhere else, and the shadow
+replay's prices for older sessions unchanged; leaves no row on another fetch's
+basis when a late job runs after a newer one; when the span will not download,
+lands the old window and fails, and through the worker's own claim is retried
+until the whole span lands on one basis; counts a session the fetch omits and
+keeps its row; changes nothing when every fetch fails; rewrites no row a rerun
+repeats, down to its `xmin`; and reads the live panel back as exactly the
+panel a fresh fetch of the same span builds, every field, cut at the session.
+
+**No money reads an old row.** A split inside the lookback still reprices those
+rows, as it always has, and every old row's adjusted close now moves with each
+distribution, so `tests/unit/test_daily_bars_readers.py` names every statement
+that reads `daily_bars`, with what it reads, and fails the build on one it does
+not name — spelled as a literal, an f-string, a string assembled by `+` or
+`str.join`, SQL's `TABLE daily_bars` shorthand, or one of asyncpg's table
+copies, which name the table as an argument and hold no SQL; review found the
+last three passing unnamed, and each spelling is now proved against sources
+that must trip it: the live panel (`live_job._load_panel`), whose old rows reach a
+strategy only as `adj_close` and money only as the session's own close, through
+`Driver._prices`; the shadow replay (`shadow_job._price_map`), which fills and
+marks a hypothetical book at old opens and closes and writes no order, fill or
+mark; and five that count rows or sessions and read no price. Marks come from
+the venue's account, and fills from its orders. For every registered strategy,
+scrambling the raw prices of every row before the session leaves
+`Driver.decide`'s orders exactly where they were, and scrambling the session's
+own close moves them. The first ingest after this merges backfills about six
+years for each deployed symbol, SPY today. The deployed `buy_and_hold` needs
+one session of history, so its decisions do not change; a strategy with a
+lookback now has on the live path the history its backtest had, where before it
+had the weeks the ten-day windows had accumulated. The programme's gate 0 → 1
+counts a candidate's rows in `daily_bars` (`universe_available`, at least 60),
+so a candidate on SPY now finds years there where it found weeks.
+
+**The reference bars are the worker's.** `src/data/reference.py` holds
+constants the worker reads, and the programme will read from C4:
+`REFERENCE_SLEEVES` (equities SPY, bonds IEF, commodities GSG, keyed by
+`jev_questions.SLEEVES`), `REFERENCE_SOURCE` (`yfinance`, the one source the
+forward clock will read), `REFERENCE_WINDOW_DAYS`, `REFERENCE_MIN_ROWS` (1,300:
+above the 1,280 closes a regime state needs, and below the fewest sessions any
+backfill writes, so one backfill is enough) and `REFERENCE_PRIORITY`.
+`run_ingest_reference_bars` is registered in the worker's `HANDLERS` and
+nowhere else — not `SCHEDULED_KINDS`, `JobKind`, `DRAINABLE` or
+`KILL_GATED_KINDS`, as `shadow_decision` is not — so the worker claims it, the
+session planner never plans it, the API cannot drain it, and the kill switch,
+which stops what reaches a venue, does not stop it, as it does not stop
+`ingest_bars`. It reads one thing from its payload, the session, which must be
+an NYSE session. The symbols are the constant, so a symbol list in a payload is
+ignored and no job row chooses which instruments the worker fetches, and a
+source by any name but `REFERENCE_SOURCE` is refused.
+
+Nor does the session choose when the job runs or how far back it reaches. As
+built it was checked against the calendar alone, so a job run before the close
+fetched the session in progress as its close, and a job for a session years
+past counted a live-owned sleeve's rows only up to that session, found it
+short, and backfilled years in front of the live ingest's first row, from
+which every later live ingest refetched. Review found both. The job now runs
+only inside `maintenance_jobs.reference_window`: from its session's close plus
+`INGEST_AFTER_CLOSE`, when the live ingest fetches the same bars, until the
+next session's bars settle, when that session's job refetches everything this
+one would and this one's forward-clock cutoff has long passed. Both bounds come
+from the calendar, early closes and daylight saving included, and are judged
+by the database's clock, the one that released the job from the queue, so a
+job the planner schedules at the moment its bars settle is never refused over
+two machines disagreeing. Outside the window the job is refused before it
+fetches or writes anything.
+
+A sleeve is the live ingest's while an enabled operator deployment trades it,
+since the live ingest fetches exactly what enabled deployments trade. A sleeve
+no enabled deployment trades is refetched over its whole stored span and
+written as the live ingest writes its own: adjusted closes everywhere, raw
+prices whole only inside the lookback. A sleeve the live ingest owns is that
+job's: it is fetched only when it has fewer than `REFERENCE_MIN_ROWS` rows up
+to the session, and then only its history before the live ingest's lookback is
+inserted, with `ON CONFLICT DO NOTHING`, so no row the live ingest wrote
+changes, and no bar the live ingest refreshes whole is written by a job the
+programme enqueues. The session's close is among those bars, and it is what
+the live decision sizes its orders from: as built, a backfill ran to the
+session itself, so a newly enabled deployment whose live ingest failed that
+day read its close from the reference job — the session in progress, had the
+job run early — where before it read none. The live ingest re-bases what was
+filled on its next whole refetch, since its span starts at the first stored
+session. Ownership is read again inside the transaction that writes, so a
+deployment enabled while the job downloads takes its sleeve back before
+anything of it is written (`taken_back` in the result). Ownership follows the
+live ingest in both directions — as built, this section and CLAUDE.md said no
+live-ingest row was ever overwritten, which review found false after a
+disable: disabling the last deployment that trades a sleeve hands the sleeve
+to this job, which refetches its whole span and writes it by the live ingest's
+own rules, and enabling one hands it back, the next live ingest re-basing the
+whole span again, so a sleeve is always exactly one job's. Making ownership
+outlast a disable instead would leave a disabled deployment's sleeve to
+neither job, and a forward clock reading a series nobody refreshes. One
+consequence is deliberate and small: a deployment enabled after its session's
+live ingest has run finds, for that session's decision, the bars the reference
+job last wrote while the sleeve was its own — the same vendor's settled bars by
+the same rules — where before this it found no close for the session at all,
+and traded a session later.
+
+The job exists to put its session's close in the table for every sleeve, and
+as built it succeeded without one: a vendor late with one ticker's bar, or a
+per-ticker failure `yfinance` swallows while the other tickers load, left a
+sleeve short with the job retired as done, and its staleness warning read the
+newest bar across the sleeves, which the other two made look complete. Now,
+once what landed has committed, the job fails while any sleeve lacks its
+session's close, naming each and whose bar it is — the vendor's, which a retry
+can fetch, or the live ingest's, which this job never writes — so the worker
+retries it and the jobs page says why. That covers a live-owned sleeve too,
+the live ingest having left its bar out or the deployment having been enabled
+after the live ingest ran. The two jobs share one fetch and one writer, so they
+cannot drift apart. One fetch, in a thread, serves every symbol that needs one;
+both writes are one transaction; a failed fetch fails the job for the worker's
+retry, with no fallback, since nothing on the live path waits on it; and the
+result holds counts and symbols, never a price. `REFERENCE_PRIORITY` is 1,
+below every live-path kind (the lowest is 5) and above a queued backtest's 0,
+so when the reference job and `ingest_bars` are due together the worker, which
+runs one job at a time, claims the ingest first. A priority orders claims and
+does not preempt a job already running, so the planner is to schedule the job
+no earlier than `ingest_bars`, at the same minute after the close. Every
+`enqueue` of the kind anywhere in `src/` must pass `REFERENCE_PRIORITY` by name,
+and only `src/programme/jev_plan.py` may enqueue it, so the planner that lands
+in C4 is held to both. Nothing in `src/programme`, or anything it loads, writes
+`daily_bars`: `test_import_boundaries.py::test_nothing_in_the_programme_writes_daily_bars`
+walks the programme's import closure reading SQL — a write to the table named,
+interpolated, formatted or concatenated on, a `DROP` or `ALTER` of it, a
+statement assembled from literals by `+` or `str.join` and read as the one text
+it makes, a write verb standing alone whose table is joined on from somewhere
+the scan cannot follow, and asyncpg's bulk writers — each spelling proved
+against sources that must trip it. Review planted a joined and a concatenated
+`INSERT` in the programme and found both passing; both now fail it. Like every
+scan here, it reads spellings and is not a sandbox.
+`tests/unit/test_reference_bars.py` holds the rules without a database, and
+`tests/integration/test_reference_bars.py` holds them on Postgres.
+`TestTheReferenceJob`: sentinel rows of a live-owned symbol survive whole, a
+distribution re-bases every stored row of a sleeve the job owns, a rerun
+changes nothing, the job runs through the worker's own claim with the kill
+switch engaged, and a sleeve without its session's close fails the job, which
+the worker retries until the bar lands. `TestTheWindow`: Postgres's own clock
+refuses a session not yet settled and one long superseded, and a stale session
+leaves a live-owned sleeve as the live ingest wrote it. `TestWhoOwnsASleeve`:
+a disable hands a sleeve over and an enable hands it back, a deployment
+enabled mid-download takes its sleeve back with every row as it was, and the
+live decision's close is the live ingest's or none. Like the live ingest, it
+reads the deployed universe by building each enabled deployment's strategy, so
+a deployment whose stored parameters no longer validate fails it, as it fails
+the live ingest and the live decision.
+
+**Where W departs from the design.** Two departures, both toward keeping what
+is stored. The design refetched a reference-only sleeve over the window alone,
+which leaves every row older than the window on the basis of the last day the
+window reached it, so a regime state recorded more than about a year earlier
+would recompute across a step; the reference job starts each span at the first
+stored session, as the live ingest does. And the adjustments to the design had
+the live ingest upsert every row returned, which would have carried each split
+into every old row's raw prices: the shadow replay fills its recorded
+quantities at those prices, so a split would have repriced a candidate's whole
+shadow book after the fact, where the ten-day ingest repriced at most ten days
+of it. Raw prices are refreshed only where they always were, and the adjusted
+close, which is what needs one basis, is refreshed everywhere. Additions: the
+refetch reaches the latest stored session, the live ingest falls back to the
+old window when the span will not download and then fails the job so it is
+retried, a row the fetch repeats is not rewritten, the fetch runs in a thread,
+the writes are one transaction in one row order, the result counts the new
+sessions apart from the re-based ones, a source not named `yfinance` is
+refused, the priority is a constant every enqueue must name, the job runs only
+in its session's window, a backfill never enters the live ingest's lookback,
+and a sleeve without its session's close fails the job.
 
 ### Open items Phase C found
 
 Numbered on from Phase B's.
 
-23. **The live ingest stitches `adj_close`.** It refetches the last ten
-    calendar days (`INGEST_LOOKBACK_DAYS`, about seven sessions) and upserts
-    them, and Yahoo back-adjusts `Adj Close` at every distribution, so the rows
-    before that span sit on an older adjustment basis than the rows in it, and
-    a stored series drifts by roughly its distribution yield a year. Pull request W keeps the live ingest on one basis; the fix is wanted
-    before the decisions area is switched on.
-24. **`live_job._load_panel` and `shadow_job._price_map` filter no `source`,**
-    and `PricePanel.from_bars` keeps the last of a duplicate. Latent while
-    yfinance is the only source written; phase C adds none, and its forward
-    loader filters `source = 'yfinance'`.
+23. ~~**The live ingest stitched `adj_close`.**~~ *Closed by W:*
+    `run_ingest_bars` refetched ten days, so every distribution left a step at
+    the ten-day boundary and a stored series drifted from any fresh fetch of
+    the same history. It now refetches each owned symbol's whole stored span
+    and every stored row takes that fetch's `adj_close`; see W above.
+24. **The live path's `daily_bars` readers have no `source` filter.**
+    `live_job._load_panel` and `shadow_job._price_map` read every source's rows
+    for a symbol, and `PricePanel.from_bars` keeps the last of two rows for one
+    session, so a second vendor's rows would be mixed into the live panel
+    without a word. Latent while `yfinance` is the only source written — the
+    live ingest and the reference job both write it, and nothing in
+    `src/programme` writes the table at all — but a second vendor needs the
+    filter first. The reference job's backfill of a live-owned symbol assumes
+    the same: it writes `yfinance` rows that only a live ingest writing
+    `yfinance` would re-base.
 25. **Phase E needs an allow-list of the `jev_repo` functions the API may
     call.** The API may import the module, and nothing yet says which of its
     reads a route may serve.
@@ -1695,6 +1948,30 @@ Numbered on from Phase B's.
     key; the probe's error says so. Lifting the hold on a later success would
     need the probe exempt from it, which is the design's "every lane" undone,
     so it is left for an operator to decide.
+38. **The daily report's data health reads every symbol's rows.**
+    `reports.build_daily_report` takes the newest session in `daily_bars`
+    across every symbol. Once the reference job runs (C4), a fresh IEF or GSG
+    row would read as fresh data while the live ingest for the traded universe
+    had failed, and `sessions_behind` would say 0 where the live decision reads
+    a stale panel. The report should read the traded universe's newest
+    session; C4, which starts the reference job, should land that with it.
+39. **C4's planner must give the reference job attempts enough to reach the
+    cutoff.** The job fails while a sleeve lacks its session's close, so that
+    the worker retries it, and the queue backs a retry off by `attempts × 10 s`.
+    The design's three attempts span about 30 seconds, which leaves a vendor
+    late after the close no room at all. For the retries to reach the forward
+    clock's cutoff, 15 minutes after the job's first chance, the planner
+    should allow at least 14 attempts (`5·n·(n−1)` seconds of backoff, at least
+    900); the regime job's 20 were sized the same way.
+40. **A day the live ingest could not refetch its span is a failed
+    `ingest_bars:{S}`, and the forward clock should read it.** On such a day a
+    live-owned sleeve keeps an older basis before the ten-day window, which
+    the reference job, leaving that sleeve to the live ingest, cannot mend.
+    The job fails saying so until a retry lands the span. When a sleeve is
+    live-owned, C4's regime handler should not measure S before
+    `ingest_bars:{S}` has succeeded, treating it as a missing close: retry
+    until the cutoff, then leave the session absent, the job's error its
+    reason.
 
 ## Inputs needed from the operator
 
