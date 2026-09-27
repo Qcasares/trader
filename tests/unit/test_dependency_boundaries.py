@@ -1424,26 +1424,40 @@ def _compose_services(text: str) -> dict[str, str]:
     }
 
 
-def _repository_files(keep: Callable[[Path], bool], *, tests: bool) -> list[Path]:
+def _repository_files(
+    keep: Callable[[Path], bool], *, tests: bool, root: Path = ROOT
+) -> list[Path]:
+    """Every file of this checkout that ``keep`` accepts.
+
+    A subdirectory holding a ``.git`` entry — a directory, or the file a
+    worktree or submodule carries — is another checkout, and is left to its own
+    run. Claude Code puts worktrees under ``.claude/worktrees/``, hidden only by
+    the local ``.git/info/exclude``, and reading them reported another branch's
+    programme files as this one's. Only the checkout is skipped, never
+    ``.claude/`` itself: a hook or setting there that installed a model SDK is
+    what these rules exist to catch.
+    """
     found: list[Path] = []
-    for directory, subdirectories, names in os.walk(ROOT):
+    for directory, subdirectories, names in os.walk(root):
         subdirectories[:] = sorted(
             d
             for d in subdirectories
             if d not in SKIPPED_DIRECTORIES
-            and (tests or Path(directory, d) != ROOT / "tests")
+            and (tests or Path(directory, d) != root / "tests")
+            and not os.path.lexists(Path(directory, d, ".git"))
         )
         found.extend(p for p in (Path(directory, n) for n in sorted(names)) if keep(p))
     return found
 
 
-def _requirements_files() -> list[Path]:
+def _requirements_files(root: Path = ROOT) -> list[Path]:
     """Every requirements file pip could be pointed at: sources, inputs and locks."""
     return _repository_files(
         lambda p: (
             p.name.startswith("requirements") and p.suffix in {".txt", ".in", ".lock"}
         ),
         tests=True,
+        root=root,
     )
 
 
@@ -1585,6 +1599,39 @@ def test_the_include_follower_reaches_everything_an_include_brings_in(
     (tmp_path / "broken.txt").write_text("-r missing.txt\n", encoding="utf-8")
     with pytest.raises(AssertionError, match="does not exist"):
         _read(tmp_path / "broken.txt")
+
+
+def test_the_walk_skips_another_checkout_and_nothing_else(tmp_path: Path) -> None:
+    """
+    A worktree under ``.claude/worktrees/`` once failed three rules here with
+    another branch's programme files. A nested checkout — a ``.git`` file for a
+    worktree or submodule, a ``.git`` directory for a clone — is its own run's
+    to check. Everything else is this one's, ``.claude/`` included, and a model
+    SDK declared there is still refused.
+    """
+    sdk = "anthropic>=0.40\n"
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "requirements.txt").write_text("requests\n", encoding="utf-8")
+    worktree = tmp_path / ".claude" / "worktrees" / "other"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+    (worktree / "requirements-programme.txt").write_text(sdk, encoding="utf-8")
+    clone = tmp_path / "vendor" / "clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / "requirements.txt").write_text(sdk, encoding="utf-8")
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir()
+    (hooks / "requirements.txt").write_text(sdk, encoding="utf-8")
+
+    found = _requirements_files(tmp_path)
+    assert set(found) == {tmp_path / "requirements.txt", hooks / "requirements.txt"}
+    offenders = [
+        (path, e.line.name)
+        for path in found
+        for e in _read(path, follow=False)
+        if _installs_a_model_sdk(e.line)
+    ]
+    assert offenders == [(hooks / "requirements.txt", "anthropic")]
 
 
 @pytest.mark.parametrize(
