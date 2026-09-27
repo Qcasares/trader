@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { isAlive, type Heartbeat } from "@/lib/heartbeat";
 import { cn } from "@/lib/utils";
 
 /**
@@ -49,15 +50,48 @@ export function StatusBadge({
   children,
   className,
   title,
+  pulse,
 }: {
   status: Status;
   children: React.ReactNode;
   className?: string;
   /** A longer reading, for hover. Never the only place the meaning is. */
   title?: string;
+  /**
+   * Whether the chip breathes: a faint halo that says the reading it shows is
+   * live (web/DESIGN.md M-10, M-10r; owner decision of 2026-09-27, OD-6).
+   *
+   * Pass it only where the chip reports a live reading — a heartbeat — and
+   * pass the reading's freshness, never a constant: the row's own heartbeat
+   * alive, the page's last refresh, and the reading's age, all three, as
+   * `isAlive(worker) && !stale && fresh` with `isAlive` from `lib/heartbeat.ts`
+   * and `fresh` from `useFresh` (`lib/fresh.ts`). None alone is enough. The
+   * row is alive only while it is fresh *and* says so: a clean shutdown
+   * stamps a fresh `last_seen` beside `'stopped'`. The row is what the API
+   * said when the page last heard from it, and a page whose refreshes have
+   * been failing for ten minutes still holds a row that said "alive" ten
+   * minutes ago; a halo on it would keep a worker looking alive that nobody
+   * has heard from since. And a refresh that has not failed may simply not
+   * have come back — a hung request, a throttled tab, a laptop asleep — which
+   * only the reading's age tells.
+   *
+   * Never on a safety control (M-11), and never on an artefact of a past day,
+   * such as the daily report, which is a record and not a reading.
+   *
+   * Given, the chip carries `data-pulse="true"` or `"false"`; omitted, no
+   * attribute at all. `globals.css` animates only `"true"`, so `false` draws
+   * exactly what no prop draws: a still chip. The word and the glyph never
+   * dim or change colour while it breathes; the halo is the chip's `::after`.
+   */
+  pulse?: boolean;
 }) {
   return (
-    <Badge variant={status} className={cn("font-mono", className)} title={title}>
+    <Badge
+      variant={status}
+      className={cn("font-mono", className)}
+      title={title}
+      data-pulse={pulse === undefined ? undefined : String(pulse)}
+    >
       {children}
     </Badge>
   );
@@ -82,15 +116,48 @@ export function jobStatus(status: string): Status {
 }
 
 /**
- * A worker heartbeat.
+ * A process's heartbeat: the worker's, or the programme runner's.
  *
- * Takes `stale` rather than the stored `status` column, which is only ever
- * written `'alive'` and therefore cannot report death. A dead worker produces
- * no error anywhere: backtests queue, no mark is written, and both halting
- * limits go inert, all silently. That is why staleness is the input.
+ * Takes the row, and asks `isAlive` (`lib/heartbeat.ts`) whether it is: fresh
+ * *and* saying `'alive'`. The stored `status` is `'alive'` while a process
+ * runs and `'stopped'` once it has shut down cleanly, and it cannot report a
+ * crash — a process that dies writes nothing — which is why the heartbeat's
+ * age is still the input. But the age alone reads a clean shutdown as alive
+ * for a minute, since the shutdown stamps a fresh `last_seen`. A dead worker
+ * produces no error anywhere: backtests queue, no mark is written, and both
+ * halting limits go inert, all silently. So anything short of alive is red.
+ * The chip's word is `livenessWord`'s, from the same module.
  */
-export function livenessStatus(stale: boolean): Status {
-  return stale ? "blocked" : "settled";
+export function livenessStatus(heartbeat: Heartbeat): Status {
+  return isAlive(heartbeat) ? "settled" : "blocked";
+}
+
+/**
+ * The state of a fail-closed switch — or, when the page cannot read it now,
+ * that it is not read, beside what it last was (web/DESIGN.md G-2, E-13).
+ *
+ * Never the last value on its own: "enabled" on a page that has lost the API
+ * is a control plane defaulting to "go" because it cannot find out, which is
+ * the one thing the switch behind it is built never to do. /system's kill
+ * switch and its gates, and /programme's switch, read through this; `stale`
+ * is the page's own failed refresh.
+ */
+export function SafetyState({
+  status,
+  word,
+  stale,
+}: {
+  status: Status;
+  word: string;
+  stale: boolean;
+}) {
+  if (!stale) return <StatusBadge status={status}>{word}</StatusBadge>;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <StatusBadge status="unknown">not read</StatusBadge>
+      <span className="text-xs font-normal text-ink-muted">last read: {word}</span>
+    </span>
+  );
 }
 
 /**

@@ -33,7 +33,9 @@ follows *and says it followed* until the owner approves it. **PROPOSED** needs s
 
 ### 0.2 Owner decisions
 
-The owner, Quentin Casares, 2026-09-26; quoted verbatim in the decision log.
+The owner, Quentin Casares: OD-1 to OD-4 on 2026-09-26, OD-5 to OD-8 on 2026-09-27, when a generic frontend taste
+skill's directives met this contract; each quoted verbatim in the decision log. What that skill asked, and what was
+declined under the rules rather than asked, is `design/notes.md` §0.5.
 
 - **OD-1** · APPROVED · The owner approves design rules; the system lives in `web/` (this file, `REFERENCE.md`,
   `design-tokens.json`, `examples/`, routing in `CLAUDE.md`); the root `DESIGN.md` is a pointer; rules stay INFERRED
@@ -45,6 +47,22 @@ The owner, Quentin Casares, 2026-09-26; quoted verbatim in the decision log.
   K-16, C-8a, A-4, S-6's chip radius.
 - **OD-4** · APPROVED · An absence says why: "not measured" (a metric never computed), "no data" (an observation that
   never arrived), "missing" plus the reason (a required field); never a bare dash, never 0. *Settles:* H-3r, H-17.
+- **OD-5** · APPROVED · Geist and Geist Mono, self-hosted from the `geist` package through `next/font`: no request to
+  any third party, and the same glyphs on every OS for every character the faces carry; figures stay tabular.
+  *Settles:* T-10. *Revisits:* E-12. *Open:* Q-36 — the faces carry neither ✓, ✕ nor ■, three of the status glyphs,
+  so those still come from each OS, against the answer's "every OS renders identical glyphs".
+- **OD-6** · APPROVED · State-bound motion, CSS only, no new dependency: a press on buttons; a short staggered fade-in
+  when a list first loads, with a reduced-motion alternative; a live dot that pulses only while the worker's heartbeat
+  is fresh and is still when it is stale. Nothing loops unless it reports real state, and nothing moves on the kill
+  switch or the live-order gates. *Settles:* M-3, M-10, M-11, and M-1's loop. *Leaves to this contract:* the stagger's
+  step, cap and delays (M-12); the halo's drawing and what a page counts as fresh (M-10r).
+- **OD-7** · APPROVED · Hairline cards, a 6px radius and no shadows; summary pages (System, Programme, Portfolio) as an
+  asymmetric grid, 2fr/1fr, grouping what belongs together; data pages keep full-width tables; phones one column.
+  *Settles:* S-7, L-4's Summary grid, S-6's container radius. *Confirms:* C-8a, L-3's full-width data.
+- **OD-8** · APPROVED · Dense data, airier prose: tables, figures and metadata stay at 12–13px, body prose is 15px,
+  page sections are 24px apart, and hierarchy is carried by weight and colour, not size. *Settles:* S-2 (Q-12), §2's
+  `--t-body`. *Leaves to this contract:* what counts as prose (T-11). *Open:* Q-37 — the 24px is the target the
+  option's preview named, not the answer's words, and the preview put today's gap at 16px where it was 12px.
 
 ### 0.3 Precedence
 
@@ -78,11 +96,13 @@ Tokens by job. The shadcn names inside `components/ui`, and each token's JSON pa
 | The `stopped` plate (C-12r), PROPOSED (Q-34) | `--stopped` | `bg-stopped`, `border-stopped` (in `StatusBadge`) |
 | Text and glyph on it, PROPOSED (Q-34) | `--stopped-ink` | `text-stopped-ink` (in `StatusBadge`) |
 | Met, passed, alive | `--settled` | `text-settled` |
+| The shade behind a modal sheet, one value in both schemes; the value is this contract's (C-9) | `--scrim` | `bg-scrim/50` (in `ui/sheet.tsx`) |
 
 **Missing roles**, PROPOSED (C-9): `--blocked-ink` for `text-white` on the destructive fill (value **TBD**: ≥4.5:1 at
-rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-black/50` (black at 50 %);
-`--warn-surface`/`--warn-edge`, `--info-surface`/`--info-edge`, `--bad-surface`/`--bad-edge` for the banner mixes
-(`--unknown` 10/42 %, `--accent` 10/38 %, `--blocked` 12/48 %); `--chip-edge` for the chip borders (40 %).
+rest and hover, both themes; white is 3.22 on dark hover); `--warn-surface`/`--warn-edge`, `--info-surface`/`--info-edge`,
+`--bad-surface`/`--bad-edge` for the banner mixes (`--unknown` 10/42 %, `--accent` 10/38 %, `--blocked` 12/48 %);
+`--chip-edge` for the chip borders (40 %). `--scrim`, for the sheet's `bg-black/50`, landed on 2026-09-27 as this
+palette's off-black rather than pure black.
 
 - **C-1** · INFERRED · Colour only through these tokens: no hex/`rgb()`/`hsl()`/`oklch()` literal, palette colour
   (`text-white`, `bg-red-500`) or arbitrary colour (`bg-[#…]`) in `web/src` outside the allow-list in
@@ -124,13 +144,15 @@ rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-bla
 |---|---|---|---|---|
 | `--t-xs` | 11 | `text-xs` | 14.67 | uppercase labels, metric keys, table heads |
 | `--t-sm` | 12 | `text-sm` (**not 14**) | 17.14 | table cells, dense metadata; shadcn controls (Q-29) |
-| `--t-base` | 13 | `text-base` (**not 16**) | 19.5 | secondary prose, inputs, buttons |
-| `--t-body` | 14 | `text-body` | 21.7 | body |
+| `--t-base` | 13 | `text-base` (**not 16**) | 19.5 | inputs, buttons, a hint, a metadata line (T-11) |
+| `--t-body` | 15 | `text-body` | 23.25 | running prose (OD-8, T-11): an intro, a card's paragraph, a banner; tables, figures and metadata keep the steps above |
 | `--t-md` | 16 | `text-md` | inherited | h3, metric values |
 | `--t-lg` | 19 | `text-lg` | 24.7 | h2; h1 at ≤640px |
 | `--t-xl` | 23 | `text-xl` | 28.75 | h1 |
 
-`--sans` for words, `--mono` for figures; weights 400, 500, 600. Line-heights are as rendered, not tokens (T-7).
+`--sans` (Geist) for words, `--mono` (Geist Mono) for figures (T-10); weights 400, 500, 600. Line-heights are as
+rendered, not tokens (T-7): the body's is 1.55 of its size, as it was at 14px. Neither face carries ✓, ✕ or ■, three
+of the status glyphs (A-6); each OS draws those from its own fonts (T-10, Q-36).
 
 - **T-1** · INFERRED · Only the seven sizes; no `text-[Npx]`; nothing under 11 CSS px, SVG chart text at 390px included.
   *Check:* §13 (a), (b).
@@ -146,7 +168,18 @@ rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-bla
 - **T-7** · INFERRED · PROPOSED line-height tokens, values the owner's (Q-14); no new literal line-height meanwhile.
 - **T-8** · INFERRED · Running prose is capped at 65–75ch; tables and dense metadata run as wide as they need.
 - **T-9** · INFERRED · Fixed rem sizes, no `clamp()` or viewport units; the ≤640px h1 is the one responsive size.
-- **T-10** · INFERRED · System font stacks, no web font; compare text width only within one OS (E-12).
+- **T-10** · APPROVED · Geist for words and Geist Mono for figures, self-hosted from the `geist` package (pinned
+  exactly) through `next/font/local`: no request to any third party, and the same glyphs and advance widths on every
+  OS for every character the faces carry. `--sans` and `--mono` lead with them; figures stay tabular (T-4) (OD-5).
+  *Exception, recorded:* the faces lack ✓, ✕ and ■, the `settled`, `blocked` and `stopped` glyphs, which each OS draws
+  from its own fonts (Q-36). Behind each face sits the package's own fallback — a metric-matched local Arial behind
+  Geist, a monospace list ending in `monospace` behind Geist Mono — and then the former system stacks.
+- **T-11** · INFERRED · What counts as prose (OD-8): a running sentence read as text — a page intro, the paragraph that
+  explains a card (an empty state's explanation among them), a banner's text — is `text-body`, 15px, at T-8's measure
+  (`max-w-prose`) in a card, an intro at L-7's 68ch (`.intro`), a banner at 75ch (`.banner`); a caption, a hint tied to its control, a timestamp, a label, a count, an identifier or
+  metadata line, a table cell and a chip keep the 11–13px steps however sentence-like. Hierarchy stays with weight and
+  colour: prose is 400 under a 600 card title, never heavier. Met on every intro, every banner and the three summary
+  pages; not yet in the cards of the detail and data pages. *Check:* `repo:tests/unit/test_web_taste.py`.
 
 ## 3. Spacing, radius, borders, elevation, stacking
 
@@ -154,9 +187,9 @@ rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-bla
 |---|---|---|---|
 | `--s-1` | 4 | `1` | h1→intro, metric key→value |
 | `--s-2` | 8 | `2` | table cell padding, label→control |
-| `--s-3` | 12 | `3` | **section→section**, card gap, metric cell and banner padding |
+| `--s-3` | 12 | `3` | card gap, metric cell and banner padding |
 | `--s-4` | 16 | `4` | card padding, header→first block, phone gutter |
-| `--s-5` | 24 | `6` | desktop gutter |
+| `--s-5` | 24 | `6` | **section→section** (S-2), the summary grid's gaps, desktop gutter |
 | `--s-6` | 32 | `8` | a sidebar group heading's top margin (`AppNav`; the legacy h2's) |
 | `--s-7` | 48 | `12` | empty-chart padding, footer bottom |
 
@@ -165,14 +198,15 @@ rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-bla
 
 - **S-1** · INFERRED · Tailwind steps `0`, `1`, `2`, `3`, `4`, `6`, `8`, `12` only, and `px` for a hairline gap; nothing
   new at `0.5`, `1.5`, `2.5`, `5`, `7`, `9`, `10` (6px is Q-13). *Check:* none yet.
-- **S-2** · INFERRED · Page sections are 12px apart (`gap-3`, `mt-3`, `space-y-3`), never 0 (Q-12).
+- **S-2** · APPROVED · Page sections are 24px apart (`gap-6`, `mt-6`, `space-y-6`, the summary grid), never 0 (OD-8).
+  *Open:* Q-37.
 - **S-3** · INFERRED · Page header → first section: 16px (`mb-4`); retire the `.subtitle` 24px.
 - **S-4** · INFERRED · Label → control: 8px (`space-y-2`); 6px is Q-13.
 - **S-5** · INFERRED · Padding: card and section 16px; metric cell and banner 12px; table cell 8px.
 - **S-6** · INFERRED · `--radius` for containers and controls, `--radius-sm` for small interactive items, fully round
   for the chip (OD-3); no 2px or 10px literal.
-- **S-7** · INFERRED · No shadows in product code: hierarchy is `bg` → `panel` → `panel-2` and hairlines; shadows stay
-  in `components/ui`. *Check:* §13 (a).
+- **S-7** · APPROVED · No shadows in product code: hierarchy is `bg` → `panel` → `panel-2` and hairlines; shadows stay
+  in `components/ui` (OD-7). *Check:* §13 (a).
 - **S-8** · INFERRED · Borders are 1px; the active nav item's 2px accent rule is the only heavier one.
 - **S-9** · INFERRED · Stacking uses the named scale, never an arbitrary number (Q-25).
 - **S-10** · INFERRED · No bordered box inside a bordered box (the metric grid and pipeline cards are Q-18).
@@ -193,13 +227,14 @@ rest and hover, both themes; white is 3.22 on dark hover); `--scrim` for `bg-bla
   | Form | `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3` | parameter forms |
   | Assumption rows | `190px 1fr`, one column ≤640px | what a figure depends on |
   | Gate rows | `84px 1fr`, one column ≤640px | criteria with a chip |
-  | Two-up | `grid gap-3 lg:grid-cols-2` | paired cards |
+  | Summary | `.summary-grid`: one column; from `lg`, `minmax(0, 2fr) minmax(0, 1fr)`, gap 24px. `.summary-main` and `.summary-side` stack their sections 24px apart, main first in source order; `.summary-wide` spans both | the System, Programme and Portfolio summaries (OD-7) |
+  | Two-up | `grid gap-6 lg:grid-cols-2` (S-2) | paired cards |
   | Page header | `mb-4 flex flex-wrap items-end justify-between gap-3` | h1, intro, actions |
   | Board | sideways scroll, 208px columns, gap 12px, `scroll-snap-type: x` | the pipeline |
 
 - **L-5** · INFERRED · A metric grid never paints an empty track.
 - **L-6** · INFERRED · The document never scrolls sideways; wide content scrolls in its own focusable, labelled region.
-- **L-7** · INFERRED · Page header: `h1`, at most one intro (68ch, `--muted`), then actions or the status chip,
+- **L-7** · INFERRED · Page header: `h1`, at most one intro (68ch through `.intro`, `--muted`), then actions or the status chip,
   bottom-right.
 
 ## 5. Components — anatomy, states, reuse
@@ -213,7 +248,9 @@ Canonical: chosen by OD-3. Shipped: not yet approved as the pattern. What each o
   (`jobStatus`, `livenessStatus`, `killSwitchStatus`, `liveGateStatus`, `promotionGateStatus`); action `Button`; field
   `Input`, `Label`, `Select`.
 - **Shipped:** shell `AppShell`, `AppNav`; model-authored marker `AiBadge`; rows `DataTable`; absent value `Absent`
-  (`not-measured`, `no-data`, `missing` with a `reason`); formatting `lib/format.ts` (`fmtPct`, `ABSENCE_WORDS`);
+  (`not-measured`, `no-data`, `missing` with a `reason`); a fail-closed switch's reading, or "not read" beside it,
+  `SafetyState` (in `StatusBadge.tsx`, G-2); liveness `lib/heartbeat.ts` (`isAlive`, `livenessWord`, `byWorkerId`,
+  G-4); a scroller's overflow `lib/overflow.ts` (A-7); formatting `lib/format.ts` (`fmtPct`, `ABSENCE_WORDS`);
   equity curve `EquityChart`; loading `Skeleton`; gate `GateChecklist`; credential `SecretField`; back link, a ghost
   `Button` with `ArrowLeft` at the page foot; element defaults, the legacy `@layer base` sheet, for legacy markup only
   (K-15).
@@ -236,10 +273,11 @@ Canonical: chosen by OD-3. Shipped: not yet approved as the pattern. What each o
   ways; the filter searches every column's visible text; prose cells wrap.
 - **K-7** · INFERRED · Banner tone by meaning (`warn` a caveat or unmeasured state, `info` an explanation, `bad` a
   failure); a caveat about a figure sits *above* it.
-- **K-8** · INFERRED · `components/ui` changes only to fix a defect or bind to tokens, each change commented in the file
-  and logged (`design/notes.md` K-8), since `shadcn add` overwrites it (Q-24).
+- **K-8** · INFERRED · `components/ui` changes only to fix a defect, bind to tokens or carry an owner decision (the
+  press, OD-6), each change commented in the file and logged (`design/notes.md` K-8), since `shadcn add` overwrites it
+  (Q-24).
 - **K-9** · INFERRED · Icons are lucide, `aria-hidden` when decorative, one per nav destination; one size is not
-  settled (the shipped sizes are `design/notes.md` K-9).
+  settled (the shipped sizes are `design/notes.md` K-9), and whether the set changes is Q-35.
 - **K-10** · INFERRED · Every route lights exactly one nav item; a detail route lights its parent.
 - **K-11** · INFERRED · Committing or raising actions confirm through `TypedConfirm`, never `window.prompt`.
 - **K-12** · INFERRED · One back link: ghost `Button` + `ArrowLeft` at the page foot.
@@ -257,7 +295,7 @@ Canonical: chosen by OD-3. Shipped: not yet approved as the pattern. What each o
 | Component | Parts, in order | Do not copy |
 |---|---|---|
 | `Card` | container → header (title, count or chips, right-aligned action) → content | title element and weight (Q-9) |
-| `StatusBadge` | glyph (empty alt text) → word, 6px apart | — |
+| `StatusBadge` | glyph (empty alt text) → word, 6px apart; given `pulse`, a halo outside the chip (M-10r) | — |
 | `Button` | optional 16px icon → label, 8px apart (6px at `sm`) | text size (Q-29); disabled and stop fills (Q-7, Q-8) |
 | Field | `Label` → control → hint → error | control size (Q-29, Q-16); label gap (Q-13); mono prose (Q-11); a boundary under 3:1 |
 | `Banner` | optional bold lead → body → optional remedy link | — |
@@ -274,10 +312,14 @@ K-3 is the rule; what each component had at `0ec084f` is `design/notes.md` §5.4
 
 ## 6. Interaction, motion, reduced motion
 
-- **M-1** · INFERRED · `--fast` 140ms for hover, focus and colour; `--base` 200ms for a value-changed mark; nothing
-  over 250ms. PROPOSED: bridge Tailwind's default transition to `--fast`/`--ease`.
+- **M-1** · INFERRED · `--fast` 140ms for hover, focus and colour; `--base` 200ms for a value-changed mark and an
+  entrance (M-12); no transition or animation that runs once lasts over 250ms. Only two things loop, each while the
+  state it reports holds: the live pulse (M-10), the one decorative loop, and the loading skeleton's sweep (M-8).
+  PROPOSED: bridge Tailwind's default transition to `--fast`/`--ease`.
 - **M-2** · INFERRED · Easing is `--ease` (`cubic-bezier(0.16, 1, 0.3, 1)`) only; no bounce, no elastic.
-- **M-3** · INFERRED · Motion reports a change and does nothing else: no page-load choreography.
+- **M-3** · APPROVED · Motion reports a state or a change and does nothing else (OD-6): a press acknowledges a click, a
+  list's first arrival is staggered once (M-12), the live pulse says a reading is fresh (M-10). Nothing loops unless
+  it reports real state, and nothing implies a liveness it does not have: a dead worker looks dead.
 - **M-4** · INFERRED · No class that compiles to nothing: an animation class has its library installed and imported, or
   goes (Q-17). *Check:* `repo:tests/unit/test_web_components.py`.
 - **M-5** · INFERRED · A polled value that changes is acknowledged (the `.changed` mark or its successor; Q-17).
@@ -287,6 +329,28 @@ K-3 is the rule; what each component had at `0ec084f` is `design/notes.md` §5.4
   is `aria-busy`; loading is a skeleton shaped like what is coming, never a spinner.
 - **M-9** · INFERRED · Stopping takes one action; starting or committing a deliberate one (a typed phrase); the
   control's shape shows the asymmetry the API enforces.
+- **M-10** · APPROVED · The live pulse: the worker's heartbeat chip breathes only while that heartbeat is fresh, and
+  goes still when it is stale; one breath is 2.4s (`--pulse-period`) on `--ease` (OD-6).
+- **M-10r** · INFERRED · How the pulse renders, and what fresh takes. A page passes `StatusBadge pulse` the conjunction
+  of the row's own heartbeat alive (`isAlive`, G-4: fresh and saying so, so a clean shutdown is not), its last refresh
+  a success, and that reading younger than two of its polls (`useFresh`, `lib/fresh.ts`), so a refresh that failed or
+  never came back stills it as a stale heartbeat does; the programme runner's heartbeat breathes on the same terms, and
+  a record of a past day (the daily report) never. No poll moves a breathing row: heartbeat tables order their rows by
+  worker id (`byWorkerId`), since a keyed row React moves restarts its animation. The halo is
+  decorative, a 1px ring 3px outside the chip on its `::after`, 40 % still and breathing between 10 and 60 %: the word
+  and glyph never dim or change colour (A-2, A-6), it is no shadow (S-7), and it is faint, so a breathing "alive" is
+  never louder than a still failure beside it (C-6). Reduced motion holds the halo still. OD-6 chose the pulse; its
+  drawing and this conjunction are this contract's.
+- **M-11** · APPROVED · A safety control never moves: no press, no pulse and no entrance on the kill switch or in the
+  live-order gates' card on `/system`; every `Button` there carries `STILL` (`lib/motion.ts`), which replaces the press
+  through `cn()` (OD-6, C-12).
+- **M-12** · INFERRED · A list's first arrival: `.enter-stagger` on the container, whose direct children each rise 4px
+  and fade in over `--base` on `--ease`, `--stagger-step` (40ms) after the one before, none after the ninth waiting
+  longer (320ms), so the arrival ends within 520ms. It plays when a row mounts and never on a poll: only on a container
+  whose rows stay mounted, and in place, between refreshes (a list a loading state replaces replays, and a row a
+  re-sort moves rises again); `DataTable stagger` drops the class itself in the render that first moves a row it
+  shows. The rise never scrolls: a table's scroller clips its y axis. Reduced motion fades every row in place, at
+  once. The stagger is OD-6's; the step, cap and delays are this contract's.
 
 ## 7. Accessibility
 
@@ -304,9 +368,10 @@ K-3 is the rule; what each component had at `0ec084f` is `design/notes.md` §5.4
   underlined; one that stands alone (navigation, the wordmark, a pipeline card, a back link, the skip link) is not.
 - **A-6** · INFERRED · Never colour alone: each status has a glyph and a word, the glyph `content: "✓" / ""` so the
   word is announced.
-- **A-7** · INFERRED · Every control keyboard-reachable; the skip link first, to `#content`; each data scroller
-  focusable (`tabIndex={0}`, `role="region"`, `aria-label`); Enter submits; `aria-sort` on sortable heads; an open
-  sheet holds focus, nothing behind it tabbable.
+- **A-7** · INFERRED · Every control keyboard-reachable; the skip link first, to `#content`; each sideways scroller a
+  focusable, named region while it overflows (`tabIndex={0}`, `role="region"`, `aria-label`, by `useOverflows` in
+  `lib/overflow.ts`) — the `Table` and `DataTable` containers, named by the `label` they require, and the pipeline
+  board; Enter submits; `aria-sort` on sortable heads; an open sheet holds focus, nothing behind it tabbable.
 - **A-8** · INFERRED · One `h1` per page and state; no skipped heading level; a `<dl>` holds only `dt`/`dd`; every `th`
   has text (hidden for an actions column); `aria-label` only with a role; a dialog has a title and a description.
 - **A-9** · INFERRED · Failures `role="alert"`, saves and notes `role="status"`, loading `aria-busy`.
@@ -339,10 +404,14 @@ What changes with width as shipped is `design/notes.md` §8.0.
 - **E-9** · INFERRED · A failed first load shows the error and keeps the `h1`; nothing waits forever on "Loading…".
 - **E-10** · INFERRED · Long tables paginate or window; page length is bounded (Q-27).
 - **E-11** · INFERRED · Every screenshot run covers both schemes; a manual theme switch is Q-19.
-- **E-12** · INFERRED · Compare screenshots only within one OS and font stack (the capture VM renders DejaVu).
+- **E-12** · INFERRED · The face is bundled (OD-5), so text widths and wrap points compare across machines — except a
+  chip carrying ✓, ✕ or ■, glyphs the face lacks and each OS draws its own way (T-10, Q-36), and a row of such chips;
+  pixels compare only within one OS and browser, whose rasterisers differ, only once the fonts have loaded, never the
+  fallback stack, and only with the motion stopped (§13 (b) waits for the network to go idle and for every finite
+  animation to end, and cancels the live pulse for the shot).
 - **E-13** · INFERRED · Nothing shows as current when it is not: a failed refresh marks what it would have refreshed
   stale, with when it was last read (the kill switch and gates too); a changed subject (paper/live) clears the old
-  figures to loading, labelled as the response says (`Portfolio.mode`). `/programme` does not yet.
+  figures to loading, labelled as the response says (`Portfolio.mode`). `/programme` reads so since 2026-09-27.
 
 ## 9. The honesty rules as UI rules
 
@@ -401,10 +470,15 @@ The safety rules bind the API and worker, where they are tested; these render th
 - **G-1** · INFERRED · The three live-order conditions are three answers, never one chip or summary; one the API does
   not report is `unknown`, never inferred. An open gate is red (C-12).
 - **G-2** · INFERRED · A fail-closed switch shows failing closed: unreadable is unknown (E-13), never its last value or
-  "enabled"; stopped is amber (C-12), never red. Not yet on `/programme`.
+  "enabled"; stopped is amber (C-12), never red. Both switches read through `SafetyState` (`StatusBadge.tsx`): the kill
+  switch on `/system`, the programme's on `/programme`.
 - **G-3** · INFERRED · Stopping is one action; starting a typed phrase never pre-filled (ENABLE TRADING, ENABLE
   PROGRAMME, PROMOTE, RAISE AUTONOMY), through `TypedConfirm`.
-- **G-4** · INFERRED · Liveness from `stale`, never a stored status, through `livenessStatus`.
+- **G-4** · INFERRED · A process is alive only while its heartbeat is fresh *and* says `'alive'`: the stored status
+  cannot report a crash, and the age alone reads a clean shutdown, which writes `'stopped'` with a fresh `last_seen`, as
+  alive. One helper decides it, `isAlive` (`lib/heartbeat.ts`), for the chip (`livenessStatus`), its word
+  (`livenessWord`: "alive", "no heartbeat", "shut down", never the stored "stopped", the kill switch's word, C-12r), the
+  halo (M-10r) and "no worker is alive"; heartbeat rows are drawn in the order of their ids (`byWorkerId`).
 - **G-5** · INFERRED · A requested and an effective value (the autonomy ceiling) are both shown, never one as the other.
 - **G-6** · INFERRED · A request for slow work reports it queued, not done, and never waits on it inline.
 - **G-7** · INFERRED · A promotion control never implies an override: disabled until the gate passes; a 409 shows what

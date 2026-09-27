@@ -99,11 +99,19 @@ export default function BacktestsPage() {
       ) : (
         <Card>
           <CardContent>
+            {/*
+              `stagger`: the list is read once, when the page opens — nothing
+              polls it — and the table mounts once, when the skeleton gives way
+              to it, with each run keyed by its id. So the runs rise into
+              place once, and never again for a reading.
+            */}
             <DataTable
+              label="Backtests"
               rows={runs}
               getRowId={(run) => run.id}
               filterPlaceholder="Filter by strategy or source"
               initialSort={[{ id: "window", desc: true }]}
+              stagger
               columns={[
                 {
                   id: "strategy",

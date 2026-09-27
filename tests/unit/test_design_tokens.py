@@ -107,10 +107,6 @@ ARBITRARY_VALUES: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "duplicates text-xs (--t-xs, 11px); delete",
     ),
-    ("app/programme/page.tsx", "max-w-[68ch]"): (
-        1,
-        "prose measure, the .subtitle value (globals.css:448)",
-    ),
     ("app/programme/page.tsx", "min-h-[34px]"): (
         1,
         "pipeline stage head, the .pipeline-head value (globals.css:824)",
@@ -215,10 +211,8 @@ PALETTE_COLOURS: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "destructive text; DESIGN.md C-9 --blocked-ink",
     ),
-    ("components/ui/sheet.tsx", "bg-black/50"): (
-        1,
-        "sheet overlay; DESIGN.md C-9 --scrim",
-    ),
+    # The sheet overlay's bg-black/50 left on 2026-09-27: it is the --scrim
+    # token now (DESIGN.md C-9).
 }
 
 #: Tailwind's default shadows compile to hard-coded black alpha. Tolerated in

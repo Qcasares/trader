@@ -16,7 +16,8 @@
  * globals.css
  * -----------
  * A dense, quiet instrument. Numbers are monospaced and aligned, the states
- * that matter are impossible to miss, and motion only ever reports a change.
+ * that matter are impossible to miss, and motion only ever reports a state or
+ * a change: nothing loops unless what it reports is still true.
  *
  * The scene this is designed for: one person at a desk, late, in a room lit by
  * the screen, reading a table of numbers to decide whether a month of compute
@@ -127,21 +128,63 @@
   --stopped: oklch(0.800 0.140 78);
   --stopped-ink: oklch(0.185 0.020 78);
 
+  /* --- scrim ----------------------------------------------------------
+     The shade behind a modal sheet. It was `bg-black/50`, a literal with
+     no role (web/DESIGN.md C-9), and pure black besides, where every other
+     dark here is graphite leaning toward the accent's hue. It is now this
+     palette's off-black: darker than --bg, so over the dark page it shades
+     rather than fogs, and drawn at 50 % where it is used, as the black was.
+
+     One value for both schemes, deliberately, as --stopped is: shade is
+     dark whichever scheme it falls on, and the black it replaces was one
+     value in both. */
+  --scrim: oklch(0.130 0.010 255);
+
   /* --- type -----------------------------------------------------------
-     System stacks. A product UI does not need a display face, and a
-     well-tuned sans carrying headings, labels, buttons and data is one
-     fewer thing that can drift out of tune. */
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+     Geist for words and Geist Mono for figures, self-hosted (owner decision
+     of 2026-09-27, web/DESIGN.md OD-5, T-10). The `geist` package ships the
+     font files and `next/font/local` serves them from this app's own
+     origin, so a page makes no request to anyone else for its type.
+     `layout.tsx` puts the two `--font-geist-*` variables on <html>, the
+     element these two are declared on, so each resolves there; without them
+     the whole stack is invalid and the browser falls back to its default
+     serif, which is why tests/unit/test_web_taste.py holds the layout to it.
+
+     What stands behind each face, for the moment before it has loaded and
+     for any character it lacks, is not only the system stacks written here.
+     Each variable carries a list of its own, set by the package: behind
+     Geist, a metric-matched local Arial that next/font generates ("GeistSans
+     Fallback"); behind Geist Mono, the package's monospace list, which ends
+     in the generic `monospace`, so the names after it below ("SF Mono",
+     "JetBrains Mono", Consolas) are reached only for a character that
+     generic font lacks.
+
+     One face on every machine is part of the point: the same advance widths
+     everywhere, so a table wraps on the operator's laptop where it wraps on
+     the capture VM (E-12) — for every character the faces carry. Three the
+     status chips draw are not among them: ✓, ✕ and ■ (settled, blocked,
+     stopped, below) come from whatever font each machine falls back to, so
+     a chip carrying one is not the same width everywhere (T-10, Q-36). A
+     product UI still needs no display face; the one sans carries headings,
+     labels, buttons and data alike. */
+  --mono: var(--font-geist-mono), ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
   /* Fixed rem, not clamp. Users read this at one DPI on one desk, and a
      heading that resizes with the viewport looks worse in a panel, not
      better. Ratio ~1.2: there are many type roles on these screens and
-     exaggerated contrast between them reads as noise. */
+     exaggerated contrast between them reads as noise.
+
+     Dense data, airier prose (OD-8): body prose is 15px, and tables,
+     figures and metadata keep the 11-13px steps they had, so a screen still
+     holds a whole job list. Hierarchy is carried by weight and colour, not
+     by growing the headings to keep their distance from the body. Prose is
+     a running sentence — a page intro, what a card explains, a banner — and
+     a caption, hint, label, timestamp or chip is not (web/DESIGN.md T-11). */
   --t-xs: 0.6875rem;   /* 11px  labels, eyebrow-free small caps    */
   --t-sm: 0.75rem;     /* 12px  table cells, dense metadata        */
-  --t-base: 0.8125rem; /* 13px  secondary prose                    */
-  --t-body: 0.875rem;  /* 14px  body                               */
+  --t-base: 0.8125rem; /* 13px  inputs, hints, metadata lines      */
+  --t-body: 0.9375rem; /* 15px  running prose (T-11)              */
   --t-md: 1rem;        /* 16px  h3 / metric values                 */
   --t-lg: 1.1875rem;   /* 19px  h2                                 */
   --t-xl: 1.4375rem;   /* 23px  h1                                 */
@@ -162,10 +205,19 @@
   /* --- motion ---------------------------------------------------------
      150-250ms. The user is in a task; nothing here is worth waiting to
      watch. Exponential ease-out only: no bounce, no elastic, because a
-     control panel that springs is a control panel you distrust. */
+     control panel that springs is a control panel you distrust.
+
+     Two values are not durations of anything that runs once. The stagger
+     step is the gap between one list row's entrance and the next (M-12).
+     The pulse period is one breath of the live halo, the one decorative
+     loop here, which runs only while the reading it sits on is fresh
+     (M-10); slow on purpose, so that it reads as "still live" and not as
+     an alert. */
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --fast: 140ms;
   --base: 200ms;
+  --stagger-step: 40ms;
+  --pulse-period: 2400ms;
 
   /* --- depth ----------------------------------------------------------
      Named, ordered, and complete. Never an arbitrary 999. */
@@ -279,6 +331,7 @@
   --color-settled: var(--settled);
   --color-stopped: var(--stopped);
   --color-stopped-ink: var(--stopped-ink);
+  --color-scrim: var(--scrim);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
@@ -307,7 +360,14 @@
  * label. The legacy `.pill-*` classes used the same syntax for the same reason
  * before they were retired into this chip — this is the accessibility half of
  * "status is never colour alone", and it survives the component library
- * changing underneath it. */
+ * changing underneath it.
+ *
+ * Geist Mono, the chip's face, carries ?, ▲ and • and not ✓, ✕ or ■: those
+ * three are drawn by whichever font each machine falls back to, with its own
+ * shapes and widths (on the Linux capture VM, DejaVu Sans Mono draws ✓ and ✕
+ * and Liberation Mono ■). Swapping them for glyphs the face has, or bundling
+ * a symbol face behind it, is the owner's choice (web/REFERENCE.md Q-36);
+ * tests/unit/test_web_taste.py holds this list to the face's character map. */
 [data-slot="badge"][data-variant="settled"]::before { content: "\2713" / ""; }
 [data-slot="badge"][data-variant="unknown"]::before { content: "?" / ""; }
 /* The triangle `.pill-warn` carried for a gate that has not passed. It shares
@@ -319,6 +379,57 @@
 /* The stop square: the one glyph every media control already uses for
    "stopped, and safe to leave". */
 [data-slot="badge"][data-variant="stopped"]::before { content: "\25A0" / ""; }
+
+/* The live pulse (web/DESIGN.md M-10, M-10r; owner decision of 2026-09-27,
+ * OD-6).
+ *
+ * A thin halo that breathes around a chip, and only around one a page has
+ * given `pulse`, which it may do only while the reading the chip reports is
+ * fresh: the row's own heartbeat recent, the page's last refresh a success,
+ * and that reading younger than two of the page's polls (`useFresh`).
+ * Everything else on every page is still. That is the whole of the
+ * rule and the only reason the loop is worth having: a worker that dies goes
+ * still, where a decoration that looped whatever happened would keep a dead
+ * worker looking alive — the one thing /system exists to prevent
+ * (repo:CLAUDE.md, "A dead worker looks dead").
+ *
+ * The halo is the chip's `::after` and never the chip. The word and its
+ * `::before` glyph keep their colour and opacity in every frame, so the text
+ * contrast (A-2) and the glyph-and-word reading (A-6) hold while it breathes.
+ * It is a hairline in the chip's own text colour, not a shadow (S-7), faint at
+ * its brightest so a pulsing "alive" is never louder than a still red chip
+ * beside it (C-6), and it takes no pointer events.
+ *
+ * Unlayered, like the glyphs above, for one property: the chip clips its
+ * content with Tailwind's `overflow-hidden`, a utility, and a utility beats
+ * anything in `@layer base`, so a pulsing chip could not otherwise let a halo
+ * sit outside its own box. Only `data-pulse="true"` is read: `pulse={false}`
+ * draws exactly what no `pulse` draws, still, and clipped as every chip is. */
+[data-slot="badge"][data-pulse="true"] {
+  position: relative;
+  overflow: visible;
+}
+[data-slot="badge"][data-pulse="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid currentColor;
+  border-radius: inherit;
+  /* The still halo: what reduced motion keeps, and the level the breath
+     moves around. */
+  opacity: 0.4;
+  pointer-events: none;
+  animation: breathe var(--pulse-period) var(--ease) infinite;
+}
+@keyframes breathe {
+  0%, 100% { opacity: 0.1; }
+  50% { opacity: 0.6; }
+}
+/* Reduced motion keeps the halo and stops the breath: the chip still says it
+   is live, without anything moving (M-6). */
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="badge"][data-pulse="true"]::after { animation: none; }
+}
 
 /* ---------------------------------------------------------------------------
  * Everything below is in `@layer base`, and it has to be.
@@ -563,6 +674,15 @@ p { margin: 0 0 var(--s-3); }
   text-wrap: pretty;
 }
 
+/* A page intro's measure (web/DESIGN.md L-7, T-11). At the 15px body size an
+   intro that ran the width of the page set one line of 179 characters on
+   /programme/findings. A class rather than `max-w-[68ch]` on each page, so
+   the measure is one value and no page needs an arbitrary one. */
+.intro {
+  max-width: 68ch;
+  text-wrap: pretty;
+}
+
 /* No `.card`. The section surface is the shadcn `Card` (components/ui/card.tsx)
    with the hairline edge, the one card the owner chose (OD-3, web/DESIGN.md
    K-16, C-8a). The legacy class drew the same box a second way, and the two
@@ -572,14 +692,65 @@ p { margin: 0 0 var(--s-3); }
 .spread { display: flex; justify-content: space-between; align-items: center;
           gap: var(--s-3); }
 
-/* --- banners --------------------------------------------------------- */
+/* --- summary pages ---------------------------------------------------
+   System, Programme and Portfolio lay their sections out as an asymmetric
+   grid (owner decision of 2026-09-27, web/DESIGN.md OD-7, L-4): a wide main
+   column and a narrow side one, each a stack of sections 24px apart, with
+   the same 24px between the two (S-2). The point is grouping, not variety:
+   what belongs together sits together, and the side column holds what is
+   read beside the main one rather than after it. `.summary-wide` spans both,
+   for a section that needs the whole width.
+
+   One column below `lg`. Tailwind's `lg` is 64rem, and so is the query, so
+   the grid and every `lg:` utility change over together even for a reader
+   who has enlarged the default font. Below it the 208px sidebar leaves too
+   little for two columns: at 768px the content box is 512px wide.
+   `minmax(0, …)` rather than a bare `fr`, which will not shrink below its
+   widest unbreakable content: one long job error or hash would push the side
+   column off the page (E-2, L-6). That holds for the one column below `lg`
+   too, which is why it is spelled out rather than left implicit: an implicit
+   column takes its widest content as its floor, and /programme's board then
+   made a 390px phone's page 2018px wide (measured 2026-09-27). Each region
+   also sets `min-width: 0`, the same guarantee from the other side, so the
+   grid keeps a phone's page as wide as the phone and a page using it adds
+   nothing of its own. Data pages keep their full-width tables (L-3); this
+   grid is for summaries. */
+.summary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s-5);
+  align-items: start;
+}
+.summary-main,
+.summary-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-5);
+  min-width: 0;
+}
+.summary-wide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+@media (min-width: 64rem) {
+  .summary-grid { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+}
+
+/* --- banners ---------------------------------------------------------
+   A banner's text is running prose — the caveat above a figure, a failure,
+   what an operator must do — so it is the body's 15px (web/DESIGN.md T-11,
+   OD-8), where it was 13px, a step under the prose around it, and read as a
+   footnote to what it qualifies. Its tone is its colour (K-7). */
 
 .banner {
   border-radius: var(--radius);
   padding: var(--s-3);
   margin: 0 0 var(--s-3);
   border: 1px solid;
-  font-size: var(--t-base);
+  font-size: var(--t-body);
+  /* A banner is running prose (T-11), so it keeps T-8's upper measure: at
+     15px a full-width stale banner ran 172 characters to the line. */
+  max-width: 75ch;
   text-wrap: pretty;
 }
 .banner p:first-child { margin-top: 0; }
@@ -632,7 +803,11 @@ p { margin: 0 0 var(--s-3); }
   border-bottom: 1px solid var(--border);
 }
 .assumption-row:last-child { border-bottom: none; }
-.assumption-row dt { color: var(--muted); }
+/* The term is metadata, and set at its value's 13px. It inherited the body
+   size until body prose went to 15px (OD-8), which would have set every term
+   two pixels larger than the figure it names; tables, figures and metadata
+   keep the 11-13px steps. */
+.assumption-row dt { color: var(--muted); font-size: var(--t-base); }
 /* `anywhere`, not `break-word`: a value such as a candidate's parameters is one
    unbroken JSON string, and only `anywhere` lets it count as breakable when the
    grid sizes its column. With `break-word` the column still took the string's
@@ -873,6 +1048,54 @@ a:where(:not([data-slot])) {
   to { background: transparent; }
 }
 
+/* --- entrance --------------------------------------------------------
+   A list's rows arrive one after another the first time it mounts
+   (web/DESIGN.md M-12; owner decision OD-6): each rises 4px and fades in
+   over --base, the next --stagger-step behind it, and nothing past the
+   ninth waits longer than the ninth did, so the whole run is over within
+   520ms — less time than the rows take to read. `.enter-stagger` goes on the
+   container; its direct children are the rows.
+
+   It plays when a row mounts and at no other time. A CSS animation runs once
+   per element, and a poll that re-renders the same rows mounts none of them,
+   so a table that refreshes every five seconds does not dance every five
+   seconds. That holds only where the rows stay mounted, and in place,
+   between refreshes: a list a loading state replaces on every poll would
+   replay on every poll, and a row the browser removes and re-inserts — a
+   keyed row moved by a re-sort — rises again. M-12 therefore puts the class
+   only where neither happens, and never on a safety control (M-11); a
+   `DataTable` drops it itself in the render that first moves a row it
+   already shows, whoever moved it.
+
+   The rise starts 4px below where a row ends, so for its length the last
+   rows overhang whatever they sit in. A table's scroller clips its y axis
+   for that reason (`ui/table.tsx`): left to `overflow-x: auto`, which makes
+   y `auto` too, it showed a vertical scrollbar for the length of the
+   entrance wherever scrollbars take space, and every column shifted twice.
+   The board on /programme is not affected: its 8px bottom padding holds the
+   4px.
+
+   `backwards`, not `both`: the first frame holds through the delay, so no
+   row shows before its turn, and once the rise is over the animation lets
+   go. Held at a last frame of opacity 1 it would pin every row there for
+   good, and a disabled control among them would lose its half strength. For
+   the same reason there is no `to` frame: each row rises to its own
+   opacity, whatever that is. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(4px); }
+}
+.enter-stagger > * {
+  animation: rise var(--base) var(--ease) backwards;
+}
+.enter-stagger > :nth-child(2) { animation-delay: calc(var(--stagger-step) * 1); }
+.enter-stagger > :nth-child(3) { animation-delay: calc(var(--stagger-step) * 2); }
+.enter-stagger > :nth-child(4) { animation-delay: calc(var(--stagger-step) * 3); }
+.enter-stagger > :nth-child(5) { animation-delay: calc(var(--stagger-step) * 4); }
+.enter-stagger > :nth-child(6) { animation-delay: calc(var(--stagger-step) * 5); }
+.enter-stagger > :nth-child(7) { animation-delay: calc(var(--stagger-step) * 6); }
+.enter-stagger > :nth-child(8) { animation-delay: calc(var(--stagger-step) * 7); }
+.enter-stagger > :nth-child(n + 9) { animation-delay: calc(var(--stagger-step) * 8); }
+
 /* --- the AI programme ------------------------------------------------
    The pipeline is a horizontally scrolling row of nine stage columns. It
    scrolls inside its own container rather than widening the page: nine
@@ -971,7 +1194,20 @@ a:where(:not([data-slot])) {
 /* Reduced motion gets an alternative, not a removal: the skeleton still needs
    to read as "loading" and a changed value still needs to announce itself. The
    sweep becomes a steady pulse in opacity, which conveys the same thing
-   without translating anything across the screen. */
+   without translating anything across the screen.
+
+   Each alternative is `!important` and sits here, in the same layer as the
+   rule that stops everything else. That rule is `!important` too, and an
+   `!important` declaration in a layer beats one outside it, so an
+   alternative written anywhere else would be cut to 0.01ms: a removal dressed
+   as an alternative. (The live pulse's own alternative, a still halo, is
+   `animation: none`, which that rule never contradicts; it sits beside the
+   pulse, unlayered, for the reason given there.)
+
+   The press on a Button (`ui/button.tsx`) needs none. It is a step, not a
+   travel: the button's `transition-colors` does not carry `translate`, so it
+   moves one pixel at once while held and back at once when let go, under
+   either preference, with nothing in between to take away. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -985,5 +1221,11 @@ a:where(:not([data-slot])) {
     background: var(--panel-2);
   }
   @keyframes fade { from { opacity: .45; } to { opacity: .9; } }
+  /* The entrance keeps its arrival and drops its movement: every row fades
+     in where it will sit, all at once, with no rise and no stagger (M-12). */
+  .enter-stagger > * {
+    animation: appear var(--base) var(--ease) backwards !important;
+  }
+  @keyframes appear { from { opacity: 0; } }
 }
 }

@@ -50,6 +50,19 @@
  * - **`.metric-grid` is kept, not reimplemented.** It is dense, tuned, and
  *   already correct. Rebuilding it out of utilities would have produced a
  *   parallel lookalike and two places to change the same thing.
+ *
+ * Since the owner's decision of 2026-09-27 (OD-7) the page is an asymmetric
+ * grid rather than a stack: the account's figures in the main column and the
+ * positions the fills imply beside them, which together are the account now,
+ * then the equity curve across the full width beneath — the account over
+ * time, and a time series wants the room. The banners stay above the grid,
+ * because each is about everything in it. Nothing here rises into place
+ * (OD-6): the positions are a handful of rows, and switching account clears
+ * them to the loading state by design, so an entrance would replay on every
+ * switch for a list that gains nothing from one. Its prose is the body's 15px
+ * (OD-8, T-11) — the intro, the two sentences under the figures, the empty
+ * positions' explanation, the banners — and the figures, the positions and
+ * the time a reading arrived keep their smaller steps.
  */
 
 import { useEffect, useState } from "react";
@@ -179,7 +192,7 @@ export default function PortfolioPage() {
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="mb-1">Portfolio</h1>
-          <p className="m-0 text-base text-ink-muted">
+          <p className="intro m-0 text-body text-ink-muted">
             The account, not a backtest. P&amp;L is a change in marked equity.
           </p>
         </div>
@@ -243,141 +256,163 @@ export default function PortfolioPage() {
             </p>
           )}
 
-          <Card>
-            <CardContent>
-              <p className="mt-0 mb-2 flex flex-wrap items-center gap-2 text-sm text-ink-muted">
-                {stale ? (
-                  <StatusBadge status="unknown">stale</StatusBadge>
-                ) : null}
-                <span>
-                  {stale ? "Last read" : "Read"} at {fmtInstant(shown.readAt)}
-                </span>
-              </p>
-              <dl className="metric-grid">
-                <Metric label="Equity" value={money(shown.portfolio.equity)} />
-                <Metric label="Cash" value={money(shown.portfolio.cash)} />
-                <Metric
-                  label="Daily P&L"
-                  value={money(shown.portfolio.daily_pnl)}
-                />
-                <Metric
-                  label="Cumulative P&L"
-                  value={money(shown.portfolio.cumulative_pnl)}
-                />
-                <Metric
-                  label="Drawdown"
-                  value={
-                    shown.portfolio.drawdown_pct == null ? (
-                      <Absent kind="no-data" />
-                    ) : (
-                      fmtPct(shown.portfolio.drawdown_pct)
-                    )
-                  }
-                />
-                <Metric
-                  label="Peak equity"
-                  value={money(shown.portfolio.peak_equity)}
-                />
-                <Metric
-                  label="As of"
-                  value={shown.portfolio.as_of ?? <Absent kind="no-data" />}
-                />
-                <Metric label="Mode" value={shown.mode} />
-              </dl>
-              {/*
-                Said out loud rather than hidden in a `title`. Both sentences are
-                corrections of the obvious wrong reading of the figure above them,
-                which makes them the last thing that should need a hover to find.
-              */}
-              <p className="mt-3 mb-0 text-sm text-ink-muted text-pretty">
-                P&amp;L is the change in marked equity less net deposits, never
-                a sum of cash flow. Drawdown is measured against the high-water
-                mark, not the opening balance.
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card className="mt-3">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                Equity
-                {stale ? (
-                  <StatusBadge status="unknown">stale</StatusBadge>
-                ) : null}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {points.length >= 2 ? (
-                <EquityChart points={points} />
-              ) : (
-                <p className="chart-empty">
-                  A curve needs at least two marks; {points.length} recorded.
-                </p>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card className="mt-3">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                Positions
-                {stale ? (
-                  <StatusBadge status="unknown">stale</StatusBadge>
-                ) : null}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {shown.portfolio.positions.length > 0 ? (
-                <DataTable
-                  rows={shown.portfolio.positions}
-                  getRowId={(p) => p.symbol}
-                  initialSort={[{ id: "symbol", desc: false }]}
-                  columns={[
-                    {
-                      id: "symbol",
-                      header: "Symbol",
-                      sortable: true,
-                      sortValue: (p) => p.symbol,
-                      className: "font-mono",
-                      cell: (p) => p.symbol,
-                    },
-                    {
-                      id: "qty",
-                      header: "Quantity",
-                      sortable: true,
-                      sortValue: (p) => p.qty,
-                      headerClassName: "text-right",
-                      className: "text-right font-mono tabular-nums",
-                      cell: (p) => p.qty.toFixed(6),
-                    },
-                    {
-                      id: "entry",
-                      header: "Average entry",
-                      sortable: true,
-                      sortValue: (p) => p.avg_entry_price ?? undefined,
-                      headerClassName: "text-right",
-                      className: "text-right font-mono tabular-nums",
-                      // Words rather than a dash: beside a column of numbers a
-                      // bare dash reads as a minus sign, which is the one thing
-                      // an absent price must never be mistaken for.
-                      cell: (p) =>
-                        p.avg_entry_price == null ? (
+          <div className="summary-grid">
+            {/*
+              Main: the account's figures. Side: the positions the recorded
+              fills imply. Together they are the account now; the curve
+              beneath, full width because a time series wants the room, is
+              the account over time. Source order is reading order, so a
+              phone shows the figures first.
+            */}
+            <div className="summary-main">
+              <Card>
+                <CardContent>
+                  <p className="mt-0 mb-2 flex flex-wrap items-center gap-2 text-sm text-ink-muted">
+                    {stale ? (
+                      <StatusBadge status="unknown">stale</StatusBadge>
+                    ) : null}
+                    <span>
+                      {stale ? "Last read" : "Read"} at {fmtInstant(shown.readAt)}
+                    </span>
+                  </p>
+                  <dl className="metric-grid">
+                    <Metric label="Equity" value={money(shown.portfolio.equity)} />
+                    <Metric label="Cash" value={money(shown.portfolio.cash)} />
+                    <Metric
+                      label="Daily P&L"
+                      value={money(shown.portfolio.daily_pnl)}
+                    />
+                    <Metric
+                      label="Cumulative P&L"
+                      value={money(shown.portfolio.cumulative_pnl)}
+                    />
+                    <Metric
+                      label="Drawdown"
+                      value={
+                        shown.portfolio.drawdown_pct == null ? (
                           <Absent kind="no-data" />
                         ) : (
-                          fmtUsd(p.avg_entry_price)
-                        ),
-                    },
-                  ]}
-                />
-              ) : (
-                <p className="chart-empty">
-                  No open positions. These are derived from recorded fills
-                  rather than read from a snapshot, so an empty table means no
-                  fill has been recorded — not that a snapshot has gone stale.
-                </p>
-              )}
-            </CardContent>
-          </Card>
+                          fmtPct(shown.portfolio.drawdown_pct)
+                        )
+                      }
+                    />
+                    <Metric
+                      label="Peak equity"
+                      value={money(shown.portfolio.peak_equity)}
+                    />
+                    <Metric
+                      label="As of"
+                      value={shown.portfolio.as_of ?? <Absent kind="no-data" />}
+                    />
+                    <Metric label="Mode" value={shown.mode} />
+                  </dl>
+                  {/*
+                    Said out loud rather than hidden in a `title`. Both sentences
+                    are corrections of the obvious wrong reading of the figure
+                    above them, which makes them the last thing that should need
+                    a hover to find.
+                  */}
+                  <p className="mt-3 mb-0 max-w-prose text-body text-ink-muted text-pretty">
+                    P&amp;L is the change in marked equity less net deposits, never
+                    a sum of cash flow. Drawdown is measured against the high-water
+                    mark, not the opening balance.
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="summary-side">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    Positions
+                    {stale ? (
+                      <StatusBadge status="unknown">stale</StatusBadge>
+                    ) : null}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {shown.portfolio.positions.length > 0 ? (
+                    <DataTable
+                      label="Positions"
+                      rows={shown.portfolio.positions}
+                      getRowId={(p) => p.symbol}
+                      initialSort={[{ id: "symbol", desc: false }]}
+                      columns={[
+                        {
+                          id: "symbol",
+                          header: "Symbol",
+                          sortable: true,
+                          sortValue: (p) => p.symbol,
+                          className: "font-mono",
+                          cell: (p) => p.symbol,
+                        },
+                        {
+                          id: "qty",
+                          header: "Quantity",
+                          sortable: true,
+                          sortValue: (p) => p.qty,
+                          headerClassName: "text-right",
+                          className: "text-right font-mono tabular-nums",
+                          cell: (p) => p.qty.toFixed(6),
+                        },
+                        {
+                          id: "entry",
+                          header: "Average entry",
+                          sortable: true,
+                          sortValue: (p) => p.avg_entry_price ?? undefined,
+                          // The head may wrap: in the side column its two words
+                          // on one line were what pushed the table past it.
+                          headerClassName: "text-right whitespace-normal",
+                          className: "text-right font-mono tabular-nums",
+                          // Words rather than a dash: beside a column of numbers
+                          // a bare dash reads as a minus sign, which is the one
+                          // thing an absent price must never be mistaken for.
+                          cell: (p) =>
+                            p.avg_entry_price == null ? (
+                              <Absent kind="no-data" />
+                            ) : (
+                              fmtUsd(p.avg_entry_price)
+                            ),
+                        },
+                      ]}
+                    />
+                  ) : (
+                    // A plain sentence, not `.chart-empty`: that class's 48px
+                    // padding is for a placeholder the width of a chart, and in
+                    // this column it left the sentence 12 characters to a line.
+                    <p className="m-0 max-w-prose text-body text-ink-muted text-pretty">
+                      No open positions. These are derived from recorded fills
+                      rather than read from a snapshot, so an empty table means no
+                      fill has been recorded — not that a snapshot has gone stale.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="summary-wide">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    Equity
+                    {stale ? (
+                      <StatusBadge status="unknown">stale</StatusBadge>
+                    ) : null}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {points.length >= 2 ? (
+                    <EquityChart points={points} />
+                  ) : (
+                    <p className="chart-empty">
+                      A curve needs at least two marks; {points.length} recorded.
+                    </p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
         </>
       )}
     </>

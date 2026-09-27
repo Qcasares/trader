@@ -143,6 +143,24 @@
             }
           }
         }
+      },
+      "scrim": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.13,
+            0.01,
+            255
+          ],
+          "alpha": 1,
+          "hex": "#05070b"
+        },
+        "$description": "The shade behind a modal sheet (ui/sheet.tsx, drawn there at 50 % as bg-scrim/50). Replaced bg-black/50 on 2026-09-27: a palette literal with no role (web/DESIGN.md C-9), and pure black where every other dark here is graphite leaning toward the accent's hue - the design-taste skill's 'no pure black', adopted under C-9. Darker than --bg, so over the dark page it shades rather than fogs. One value for both schemes, deliberately, as --stopped is: shade is dark whichever scheme it falls on, and the black it replaced was one value in both. The value is this contract's, not the owner's.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--scrim"
+          }
+        }
       }
     },
     "ink": {
@@ -448,6 +466,7 @@
       "$type": "fontFamily",
       "sans": {
         "$value": [
+          "var(--font-geist-sans)",
           "ui-sans-serif",
           "system-ui",
           "-apple-system",
@@ -455,7 +474,7 @@
           "Roboto",
           "sans-serif"
         ],
-        "$description": "Everything but figures (globals.css:92-97). System stack; no web font is loaded, so the rendered face depends on the host (DejaVu Sans on the capture VM).",
+        "$description": "Everything but figures: Geist, self-hosted (owner decision OD-5, 2026-09-27; web/DESIGN.md T-10). The first entry is the custom property next/font/local defines on <html> from the `geist` package (1.7.2, pinned exactly in web/package.json); it names the bundled face and its metric-matched fallback, and layout.tsx applies it - without it the whole stack is invalid, which tests/unit/test_web_taste.py guards. The system stack after it is the one this token held before, reached for the moment before the face loads and for any character neither the face nor that fallback carries. No request leaves this app's origin for its type.",
         "$extensions": {
           "com.github.qcasares.trader": {
             "css": "--sans"
@@ -464,6 +483,7 @@
       },
       "mono": {
         "$value": [
+          "var(--font-geist-mono)",
           "ui-monospace",
           "SF Mono",
           "JetBrains Mono",
@@ -471,7 +491,7 @@
           "Consolas",
           "monospace"
         ],
-        "$description": "Stated: figures (0ec084f:DESIGN.md:103), and the .num and .mono cells that opt in (globals.css:636-643). As shipped also every input, select and status badge (globals.css:584; StatusBadge.tsx:39) and assumption-row sentences (globals.css:549).",
+        "$description": "Figures: Geist Mono, self-hosted like the sans (OD-5, T-10); the first entry is next/font's custom property on <html>, which names the bundled face and then the package's own monospace fallback list, ending in the generic monospace; the rest is the system stack this token held before, reached only for a character none of those carries. Geist Mono lacks three status glyphs, \u2713, \u2715 and \u25a0, which each OS draws from its own fonts (T-10, Q-36). Stated: figures (0ec084f:DESIGN.md:103), and the .num and .mono cells that opt in (globals.css:636-643). As shipped also every input, select and status badge (globals.css:584; StatusBadge.tsx:39) and assumption-row sentences (globals.css:549).",
         "$extensions": {
           "com.github.qcasares.trader": {
             "css": "--mono"
@@ -511,7 +531,7 @@
           "value": 0.8125,
           "unit": "rem"
         },
-        "$description": "13px. Stated: secondary prose (globals.css:105); secondary prose, inputs, buttons (0ec084f:DESIGN.md:116). Observed: banners, legacy inputs and buttons, phone-width shadcn inputs. Tailwind: text-base - 13px here, not 16px.",
+        "$description": "13px. Stated: secondary prose (globals.css:105); secondary prose, inputs, buttons (0ec084f:DESIGN.md:116). Since 2026-09-27: inputs, buttons, hints and metadata lines; running prose, banners included, is --t-body (DESIGN.md T-11). Observed: legacy inputs and buttons, phone-width shadcn inputs, identifier and metadata header lines. Tailwind: text-base - 13px here, not 16px.",
         "$extensions": {
           "com.github.qcasares.trader": {
             "css": "--t-base"
@@ -520,10 +540,10 @@
       },
       "t-body": {
         "$value": {
-          "value": 0.875,
+          "value": 0.9375,
           "unit": "rem"
         },
-        "$description": "14px. Body (globals.css:106, :302). Tailwind: text-body.",
+        "$description": "15px. Body prose, since owner decision OD-8 (2026-09-27), 'Dense data, airier prose': tables, figures and metadata keep the 11-13px steps, and hierarchy is carried by weight and colour, not size. Running prose is a sentence read as text - a page intro, what a card explains, a banner's text (DESIGN.md T-11, INFERRED). 14px before (globals.css:106, :302). Line-height as rendered: body 1.55, so 23.25px. Tailwind: text-body.",
         "$extensions": {
           "com.github.qcasares.trader": {
             "css": "--t-body"
@@ -705,7 +725,7 @@
     },
     "duration": {
       "$type": "duration",
-      "$description": "150-250ms stated (globals.css:124-127); tokens are 140 and 200ms. Not bridged into Tailwind, whose transitions use 150ms (REFERENCE.md 6.6).",
+      "$description": "150-250ms stated (globals.css:124-127); tokens are 140 and 200ms, and nothing that runs once runs longer than 250ms (web/DESIGN.md M-1). The two loops are the exception, each bound to the state it reports: the live pulse (--pulse-period, M-10) and the loading skeleton's sweep (1.4s, a literal in .skeleton; M-8). Not bridged into Tailwind, whose transitions use 150ms (REFERENCE.md 6.6).",
       "fast": {
         "$value": {
           "value": 140,
@@ -723,10 +743,34 @@
           "value": 200,
           "unit": "ms"
         },
-        "$description": "The value-changed mark, .changed (globals.css:130, :783), which nothing applies.",
+        "$description": "The value-changed mark, .changed (globals.css:130, :783), which nothing applies; and, since owner decision OD-6 (2026-09-27), each row's entrance in .enter-stagger (web/DESIGN.md M-12).",
         "$extensions": {
           "com.github.qcasares.trader": {
             "css": "--base"
+          }
+        }
+      },
+      "stagger-step": {
+        "$value": {
+          "value": 40,
+          "unit": "ms"
+        },
+        "$description": "The gap between one row's entrance and the next in .enter-stagger. The ninth row and every one after it start eight steps (320ms) in, so a list's whole arrival is over within 520ms (web/DESIGN.md M-12). The stagger is owner decision OD-6; the step and the cap are this contract's. Reduced motion drops it: every row fades in at once.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--stagger-step"
+          }
+        }
+      },
+      "pulse-period": {
+        "$value": {
+          "value": 2400,
+          "unit": "ms"
+        },
+        "$description": "One breath of the live halo on a StatusBadge given `pulse` (web/DESIGN.md M-10; owner decision OD-6, 2026-09-27, whose preview named 2.4s): the one decorative loop, run only while the reading under it is fresh and still otherwise. Slow on purpose, so it reads as 'still live' and not as an alert. Reduced motion holds the halo still.",
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "css": "--pulse-period"
           }
         }
       }
@@ -1102,6 +1146,15 @@
           }
         },
         "$value": "{color.signal.stopped-ink}"
+      },
+      "scrim": {
+        "$extensions": {
+          "com.github.qcasares.trader": {
+            "theme": "--color-scrim",
+            "css": "var(--scrim)"
+          }
+        },
+        "$value": "{color.surface.scrim}"
       }
     },
     "font": {

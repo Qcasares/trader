@@ -45,6 +45,11 @@ function SheetPortal({
  *   button's resting 70% would fade the outline with it. It is 32px square
  *   rather than the bare 16px icon, which the legacy button padding used to
  *   pad out by accident.
+ * - **The overlay is the `--scrim` token**, drawn at 50 % as the stock
+ *   `bg-black/50` was. That was a palette literal with no role
+ *   (web/DESIGN.md C-9), and pure black, where every other dark in this UI
+ *   is graphite leaning toward the accent's hue; the token is that palette's
+ *   off-black, one value in both schemes (`globals.css`).
  */
 
 function SheetOverlay({
@@ -54,7 +59,7 @@ function SheetOverlay({
   return (
     <SheetPrimitive.Overlay
       data-slot="sheet-overlay"
-      className={cn("fixed inset-0 z-50 bg-black/50", className)}
+      className={cn("fixed inset-0 z-50 bg-scrim/50", className)}
       {...props}
     />
   )

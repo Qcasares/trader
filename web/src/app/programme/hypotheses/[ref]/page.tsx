@@ -125,7 +125,9 @@ export default function HypothesisPage({
           <h1 className="mb-1">
             <span className="font-mono">{hypothesis.ref}</span> {hypothesis.title}
           </h1>
-          <p className="subtitle flex flex-wrap items-center gap-2">
+          {/* Metadata, so 13px set here rather than the body's size, which
+              since OD-8 is 15px and for prose. */}
+          <p className="subtitle flex flex-wrap items-center gap-2 text-base">
             <AiBadge origin={hypothesis.origin} />
             <span className="text-ink-muted">
               Owner {hypothesis.owner || "unassigned"} · {hypothesis.status} ·{" "}
@@ -184,7 +186,7 @@ export default function HypothesisPage({
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2">
             <span>Candidates</span>
@@ -201,6 +203,7 @@ export default function HypothesisPage({
             </p>
           ) : (
             <DataTable
+              label="Candidates"
               rows={candidates}
               getRowId={(c) => c.id}
               initialSort={[{ id: "stage", desc: true }]}
@@ -266,7 +269,7 @@ export default function HypothesisPage({
       </Card>
 
       {hypothesis.decision ? (
-        <Card className="mt-3">
+        <Card className="mt-6">
           <CardHeader>
             <CardTitle>Decision</CardTitle>
           </CardHeader>
@@ -284,7 +287,7 @@ export default function HypothesisPage({
         </Card>
       ) : null}
 
-      <p className="mt-4">
+      <p className="mt-6">
         <Button asChild variant="ghost" size="sm">
           <Link href="/programme/hypotheses">
             <ArrowLeft aria-hidden="true" />

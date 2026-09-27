@@ -86,6 +86,10 @@ function Criterion({ criterion }: { criterion: GateCriterion }) {
  * and red on the candidate page is kept for a refused criterion, a rejected
  * candidate and a finding that blocks (`promotionGateStatus`; web/DESIGN.md
  * C-5, Q-33).
+ *
+ * It sits among the candidate page's cards as one of its sections, so it
+ * brings the gap a section has above it: 24px since the owner's decision of
+ * 2026-09-27 (OD-8), where it was 12px.
  */
 export function GateChecklist({
   gate,
@@ -96,7 +100,7 @@ export function GateChecklist({
 }) {
   const unmet = gate.criteria.filter((c) => !c.met).length;
   return (
-    <Card className={cn("mt-3", className)}>
+    <Card className={cn("mt-6", className)}>
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center justify-between gap-2">
           <span>

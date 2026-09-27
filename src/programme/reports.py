@@ -238,6 +238,10 @@ async def build_daily_report(
                 # 60s matches the API's own threshold, which is four missed
                 # heartbeats at the 15s write interval.
                 "stale": float(w["age"]) > 60.0,
+                # 'alive' while the process runs, 'stopped' after a clean
+                # shutdown, which stamps a fresh last_seen: the age alone
+                # reads a process that has just stopped as alive (_alive).
+                "status": w["status"],
             }
             for w in workers
         ],
@@ -297,11 +301,12 @@ def _required_actions(
             f"{programme['severe_findings']} open high or critical finding(s) "
             "are blocking promotions; only an operator can close one"
         )
-    stale = [w["worker_id"] for w in operations["workers"] if w["stale"]]
-    if stale:
+    silent = [w["worker_id"] for w in operations["workers"] if not _alive(w)]
+    if silent:
         actions.append(
-            f"stale heartbeat from {', '.join(stale)}: a dead process "
-            "produces no error anywhere and both halting limits go inert"
+            f"no live heartbeat from {', '.join(silent)}: a process that has "
+            "stopped, cleanly or not, produces no error anywhere and both "
+            "halting limits go inert"
         )
     if operations["shadow_failures"]:
         actions.append(
@@ -318,6 +323,19 @@ def _required_actions(
     if operations["jobs"].get("failed"):
         actions.append(f"{operations['jobs']['failed']} job(s) failed today")
     return actions
+
+
+def _alive(worker: dict[str, Any]) -> bool:
+    """
+    Whether a heartbeat row's process is running: fresh, *and* saying so.
+
+    The stored status is 'alive' while a process runs and 'stopped' after a
+    clean shutdown, and it cannot report a crash, so the age is one half. The
+    shutdown stamps last_seen, so for the minute after it a stopped process is
+    not stale: the status is the other. ``web/src/lib/heartbeat.ts`` decides
+    the same for the pages.
+    """
+    return not worker["stale"] and worker.get("status") == "alive"
 
 
 def _loads(value: Any, default: Any) -> Any:

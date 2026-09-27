@@ -114,7 +114,9 @@ export default function ExperimentPage({
           <h1 className="mb-1">
             <span className="font-mono">{experiment.ref}</span> {experiment.kind}
           </h1>
-          <p className="subtitle">{experiment.status}</p>
+          {/* A status word, and below it criteria and a record: data, so 13px
+              set here rather than the body's 15px, which is for prose (OD-8). */}
+          <p className="subtitle text-base">{experiment.status}</p>
         </div>
         {experiment.conclusion ? (
           <StatusBadge status={CONCLUSION_STATUS[experiment.conclusion]}>
@@ -139,7 +141,7 @@ export default function ExperimentPage({
               them.
             </p>
           ) : (
-            <ul className="mono">
+            <ul className="mono text-base">
               {experiment.preregistered_criteria.map((criterion, index) => (
                 <li key={`${criterion.metric}-${index}`}>
                   {criterion.metric} {criterion.op} {criterion.value}
@@ -150,7 +152,7 @@ export default function ExperimentPage({
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Outcome</CardTitle>
         </CardHeader>
@@ -181,7 +183,7 @@ export default function ExperimentPage({
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Reproducibility</CardTitle>
         </CardHeader>
@@ -249,7 +251,7 @@ export default function ExperimentPage({
         </CardContent>
       </Card>
 
-      <p className="mt-4">
+      <p className="mt-6">
         <Button asChild variant="ghost" size="sm">
           <Link href={`/programme/candidates/${experiment.candidate_id}`}>
             <ArrowLeft aria-hidden="true" />

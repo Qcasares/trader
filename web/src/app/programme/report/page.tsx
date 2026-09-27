@@ -25,6 +25,14 @@
  * legacy `.pill`: worker liveness now goes through the same `StatusBadge` and
  * `livenessStatus` helper the system page uses, so a stale worker reads the
  * same colour on both pages rather than each page inventing its own amber.
+ *
+ * And since 2026-09-27 through the same decision as well: a process is alive
+ * only while its heartbeat is fresh and says so (`isAlive`,
+ * `lib/heartbeat.ts`), so one that shut down cleanly reads "shut down" here as
+ * it does on /system, where it used to read "alive" for the minute its
+ * shutdown kept its row fresh. The rows are in the order of their ids. The
+ * report is a record of its day, not a reading, so nothing on it pulses.
+ * Its intro is prose, at the body's 15px (T-11).
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -35,6 +43,7 @@ import { fmtAge, fmtPct, fmtUsd } from "@/lib/format";
 import { Absent } from "@/components/Absent";
 import { SkeletonMetrics } from "@/components/Skeleton";
 import { StatusBadge, livenessStatus } from "@/components/StatusBadge";
+import { byWorkerId, livenessWord } from "@/lib/heartbeat";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -104,7 +113,7 @@ export default function DailyReportPage() {
             ← Programme
           </Link>
           <h1 className="mb-1">Daily report</h1>
-          <p className="m-0 text-base text-ink-muted text-pretty">
+          <p className="intro m-0 text-body text-ink-muted">
             Assembled from rows. Nothing on this page was written by a model,
             and no figure that does not exist is shown as zero.
           </p>
@@ -196,7 +205,7 @@ export default function DailyReportPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             Programme
@@ -225,20 +234,24 @@ export default function DailyReportPage() {
               ),
             )}
           </dl>
+          {/* A list of promotions, and in its place the word that there were
+              none: data, so 13px set here rather than the body's 15px, which
+              since OD-8 is for prose. The two share a size, as they share a
+              place. */}
           {report.programme.promotions_today.length > 0 ? (
-            <p className="m-0">
+            <p className="m-0 text-base">
               Promoted today:{" "}
               {report.programme.promotions_today
                 .map((p) => `stage ${p.to_stage} by ${p.approved_by}`)
                 .join(", ")}
             </p>
           ) : (
-            <p className="m-0 text-ink-muted">No promotions today.</p>
+            <p className="m-0 text-base text-ink-muted">No promotions today.</p>
           )}
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Operations</CardTitle>
         </CardHeader>
@@ -266,7 +279,7 @@ export default function DailyReportPage() {
               No process has ever reported a heartbeat.
             </p>
           ) : (
-            <Table>
+            <Table label="Workers">
               <TableHeader>
                 <TableRow>
                   <TableHead>Worker</TableHead>
@@ -275,14 +288,15 @@ export default function DailyReportPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {report.operations.workers.map((worker) => (
+                {byWorkerId(report.operations.workers).map((worker) => (
                   <TableRow key={worker.worker_id}>
                     <TableCell className="font-mono">
                       {worker.worker_id}
                     </TableCell>
                     <TableCell>
-                      <StatusBadge status={livenessStatus(worker.stale)}>
-                        {worker.stale ? "stale" : "alive"}
+                      {/* No `pulse`: a report is an artefact of its day, not a live reading. */}
+                      <StatusBadge status={livenessStatus(worker)}>
+                        {livenessWord(worker)}
                       </StatusBadge>
                     </TableCell>
                     <TableCell className="text-right font-mono tabular-nums">
@@ -296,7 +310,7 @@ export default function DailyReportPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Data health</CardTitle>
         </CardHeader>
@@ -331,7 +345,7 @@ export default function DailyReportPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Sections this system cannot produce</CardTitle>
           <p className="m-0 text-sm text-ink-muted text-pretty">

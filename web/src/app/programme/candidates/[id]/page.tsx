@@ -222,7 +222,9 @@ export default function CandidatePage({
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="mb-1">{candidate.hypothesis_title}</h1>
-          <p className="subtitle flex flex-wrap items-center gap-2">
+          {/* Metadata, so 13px set here: since OD-8 the body is 15px and for
+              prose, and this line and the lists below are data. */}
+          <p className="subtitle flex flex-wrap items-center gap-2 text-base">
             <Link
               className="font-mono"
               href={`/programme/hypotheses/${candidate.hypothesis_ref}`}
@@ -302,7 +304,7 @@ export default function CandidatePage({
       {gate ? <GateChecklist gate={gate} /> : null}
 
       {card ? (
-        <Card className="mt-3">
+        <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex flex-wrap items-center justify-between gap-2">
               <span>Scorecard</span>
@@ -370,7 +372,7 @@ export default function CandidatePage({
         </Card>
       ) : null}
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2">
             <span>Experiments</span>
@@ -387,6 +389,7 @@ export default function CandidatePage({
             </p>
           ) : (
             <DataTable
+              label="Experiments"
               rows={experiments}
               getRowId={(e) => e.ref}
               initialSort={[{ id: "created", desc: true }]}
@@ -450,7 +453,7 @@ export default function CandidatePage({
       </Card>
 
       {shadow && shadow.sessions.length > 0 ? (
-        <Card className="mt-3">
+        <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex flex-wrap items-center justify-between gap-2">
               <span>Shadow sessions</span>
@@ -469,6 +472,7 @@ export default function CandidatePage({
               would carry a standard error several times its own size.
             </p>
             <DataTable
+              label="Shadow sessions"
               rows={shadow.sessions}
               getRowId={(s) => s.session}
               initialSort={[{ id: "session", desc: true }]}
@@ -550,7 +554,7 @@ export default function CandidatePage({
         </Card>
       ) : null}
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2">
             <span>Findings</span>
@@ -578,7 +582,7 @@ export default function CandidatePage({
                     </StatusBadge>
                     <div>
                       <p className="gate-criterion-desc">
-                        <span className="font-mono">{finding.ref}</span>{" "}
+                        <span className="font-mono text-base">{finding.ref}</span>{" "}
                         {finding.title}
                       </p>
                       <p className="text-ink-muted gate-criterion-detail">
@@ -594,7 +598,7 @@ export default function CandidatePage({
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center justify-between gap-2">
             <span>Specialist assessments</span>
@@ -623,7 +627,7 @@ export default function CandidatePage({
                     {assessment.verdict}
                   </StatusBadge>
                   <div>
-                    <p className="gate-criterion-desc">{assessment.role}</p>
+                    <p className="gate-criterion-desc text-base">{assessment.role}</p>
                     <p className="text-ink-muted gate-criterion-detail">
                       {assessment.summary}
                     </p>
@@ -640,7 +644,7 @@ export default function CandidatePage({
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Decision</CardTitle>
         </CardHeader>
@@ -714,7 +718,7 @@ export default function CandidatePage({
         </CardContent>
       </Card>
 
-      <p className="mt-4">
+      <p className="mt-6">
         <Button asChild variant="ghost" size="sm">
           <Link href="/programme">
             <ArrowLeft aria-hidden="true" />

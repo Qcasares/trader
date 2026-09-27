@@ -145,7 +145,7 @@ export default function ProgrammeConfigPage() {
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="mb-1">Programme configuration</h1>
-          <p className="m-0 text-base text-ink-muted text-pretty">
+          <p className="intro m-0 text-body text-ink-muted">
             An empty field is TBD, and TBD is what it stays. Nothing here
             substitutes a plausible default for a value nobody supplied,
             because a guessed risk limit is indistinguishable from an agreed
@@ -176,6 +176,7 @@ export default function ProgrammeConfigPage() {
         </CardHeader>
         <CardContent>
           <DataTable
+            label="Critical configuration"
             rows={critical}
             getRowId={(item) => item.key}
             filterPlaceholder="Filter critical keys"
@@ -186,12 +187,13 @@ export default function ProgrammeConfigPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Everything else</CardTitle>
         </CardHeader>
         <CardContent>
           <DataTable
+            label="Everything else"
             rows={rest}
             getRowId={(item) => item.key}
             filterPlaceholder="Filter keys"
