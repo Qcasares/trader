@@ -84,7 +84,7 @@ export default function StrategiesPage() {
         </p>
       </div>
 
-      <div className="space-y-3">
+      <div className="space-y-6">
         {strategies.map((strategy) => (
           <Card key={strategy.name}>
             <CardHeader>

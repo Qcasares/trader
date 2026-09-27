@@ -1481,7 +1481,17 @@ def test_failures_stay_red() -> None:
         "settled",
         "mute",
     ]
-    assert _mapper(source, "livenessStatus") == ("blocked", "settled")
+    # A heartbeat is red unless its process is alive, which the one helper
+    # decides: fresh *and* saying 'alive' (lib/heartbeat.ts, DESIGN.md G-4).
+    liveness = re.search(
+        r"export function livenessStatus\((\w+): Heartbeat\): Status \{\s*"
+        r'return isAlive\((\w+)\) \? "(\w+)" : "(\w+)";\s*\}',
+        _blank_comments(source),
+    )
+    assert liveness and liveness.group(1) == liveness.group(2), (
+        "livenessStatus asks isAlive about the row it is given"
+    )
+    assert liveness.group(3, 4) == ("settled", "blocked")
 
 
 # ---------------------------------------------------------------------------

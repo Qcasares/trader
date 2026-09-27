@@ -5,7 +5,7 @@ import { Slot } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 /**
- * Three changes from the stock new-york button. `shadcn add` would undo each
+ * Four changes from the stock new-york button. `shadcn add` would undo each
  * of them, which is why web/DESIGN.md K-8 keeps a log:
  *
  * - **No focus ring.** Stock draws its own focus indicator — the border turns
@@ -27,9 +27,20 @@ import { cn } from "@/lib/utils"
  *   after which they read as plain words. As a `<button>` — the sheet's
  *   trigger, a form's Cancel — each keeps the text colour, and on hover
  *   every one of them still turns to it.
+ * - **A press** (`active:translate-y-px`): the button steps down one pixel
+ *   while it is held, the tactile acknowledgement the owner chose on
+ *   2026-09-27 (web/DESIGN.md OD-6). A step, not a travel: `transition-colors`
+ *   does not carry `translate`, so nothing interpolates and reduced motion
+ *   has nothing to take away. It acknowledges the click, never the result.
+ *   A safety control does not move at all (M-11): a Button on the kill
+ *   switch or beside the live-order gates passes `STILL` (`lib/motion.ts`),
+ *   and because `cn()` merges with tailwind-merge, its
+ *   `active:translate-y-0` replaces this class rather than sitting beside
+ *   it. The `className` reaches `cn()` last, inside the variants call, which
+ *   is what lets it win.
  */
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors active:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {

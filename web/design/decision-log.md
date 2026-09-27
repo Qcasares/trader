@@ -38,6 +38,43 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
   computed, 'no data' for an observation that never arrived, 'missing' plus the reason for a required field. Never a
   bare dash, never 0."
 
+Answered by the owner, Quentin Casares, in the session of 2026-09-27, through four structured questions put when a
+generic frontend taste skill (`design-taste-frontend`) was invoked on this UI and its directives met this contract,
+which sends such a conflict to the owner (`web/CLAUDE.md`). Each is quoted as asked and as answered: the question, then
+the label of the option chosen and its description. Each has an APPROVED row below, and each rule it settles is
+APPROVED in `DESIGN.md`. What the skill asked that was decided under the rules rather than asked, and why, is
+`design/notes.md` §0.5.
+
+- OD-5, **Typeface** (settles T-10). Question: "Typeface: the web contract (T-10) says system font stacks, no web
+  font. The skill wants Geist + Geist Mono for dashboards (it bans Inter, which we don't use). Which should the UI
+  use?" Answer: "Geist + Geist Mono (Recommended)" — "Self-hosted from the geist npm package through next/font: no
+  request to any third party, and every OS renders identical glyphs, which also makes screenshot comparisons stable
+  across machines. Figures stay tabular. Replaces T-10."
+- OD-6, **Motion** (settles M-3, M-10, M-11). Question: "Motion: the contract (M-3) says motion only reports a change,
+  no page-load choreography. The skill (intensity 6) wants spring physics, staggered reveals and perpetual
+  micro-animations. I will not put movement on the kill switch or live gates, or animate anything in a way that
+  implies liveness (a dead worker must look dead). Within that, how much motion?" Answer: "State-bound motion
+  (Recommended)" — "CSS only, no new dependency: a tactile press on buttons, a short staggered fade-in when a list
+  first loads (with a reduced-motion alternative), and a live dot that pulses only while the worker's heartbeat is
+  fresh and goes still when it is stale. Nothing loops unless it reports real state." The preview the owner saw:
+  `.status-live[data-fresh=true]` breathe 2.4s `var(--ease)` infinite; stale = still; `button:active`
+  `translateY(1px)`; list children rise 200ms `var(--ease)` with `animation-delay: calc(var(--i) * 40ms)`;
+  `prefers-reduced-motion`: opacity only.
+- OD-7, **Layout** (settles S-7 and L-4's Summary grid). Question: "Surfaces and layout: the contract keeps hairline
+  cards (C-8a, approved) and no shadows (S-7). The skill wants asymmetric bento grids, large radii and soft tinted
+  shadows. What should summary pages (System, Programme, Portfolio) look like?" Answer: "Asymmetric, hairline
+  (Recommended)" — "Keep hairline cards, 6px radius and no shadows; lay summary pages out as an asymmetric grid (e.g.
+  2fr/1fr) grouping what belongs together. Data pages keep full-width tables. Phones fall back to one column."
+- OD-8, **Density** (settles S-2, and answers Q-12). Question: "Density: today tables are 12px, body 14px, headings
+  19-23px (a dense control plane). The skill's baseline is density 4, a daily-app feel: larger text and more space.
+  Which?" Answer: "Dense data, airier prose (Recommended)" — "Tables, figures and metadata stay 12-13px so a screen
+  holds a full job list; body prose moves to 15px with more space between sections; hierarchy by weight and colour,
+  not size." The preview the owner saw said "Section gap 16px -> 24px", and misstated the current value: S-2 put page
+  sections 12px apart, and 16px is the page header to the first section (S-3). The answer's own words ask only for
+  "more space between sections"; the 24px is the target the preview named, and the option the owner chose carried it.
+  So page sections are 24px apart — but the owner was shown a step from 16px to 24px, half again, and what ships is a
+  step from 12px, double. That difference is the owner's to settle, and is put to them as Q-37.
+
 ## The log
 
 | ID | Rule (short) | Status | Date | Owner | Basis | Reason |
@@ -46,6 +83,10 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | OD-2 | Red is reserved for "live money reachable"; a halted kill switch is a strong amber "stopped" | **APPROVED** | 2026-09-26 | Quentin Casares | owner decision, in session (Q-30) | answered in session |
 | OD-3 | shadcn canonical; legacy base rules scoped away; one card (hairline), one chip; the accent focus outline on every control | **APPROVED** | 2026-09-26 | Quentin Casares | owner decision, in session (Q-4, Q-5, Q-6) | answered in session |
 | OD-4 | An absence says why: "not measured", "no data", "missing" + reason; never a bare dash, never 0 | **APPROVED** | 2026-09-26 | Quentin Casares | owner decision, in session (Q-10, H-17) | answered in session |
+| OD-5 | Typeface: Geist and Geist Mono, self-hosted from the `geist` package through `next/font`; figures stay tabular | **APPROVED** | 2026-09-27 | Quentin Casares | owner decision, in session (T-10; the taste skill) | answered in session; its reason, "every OS renders identical glyphs", fails for ✓, ✕ and ■, which neither face carries (Q-36) |
+| OD-6 | Motion: state-bound, CSS only — a press, a first-load stagger with a reduced-motion alternative, a live dot only while the heartbeat is fresh; nothing loops unless it reports real state | **APPROVED** | 2026-09-27 | Quentin Casares | owner decision, in session (M-3; the taste skill) | answered in session, within the question's own condition: no movement on the kill switch or the live gates |
+| OD-7 | Layout: hairline cards, 6px radius, no shadows; summary pages an asymmetric 2fr/1fr grid; data pages full width; phones one column | **APPROVED** | 2026-09-27 | Quentin Casares | owner decision, in session (C-8a, S-7; the taste skill) | answered in session |
+| OD-8 | Density: tables, figures and metadata 12–13px; body prose 15px; sections 24px apart; hierarchy by weight and colour | **APPROVED** | 2026-09-27 | Quentin Casares | owner decision, in session (Q-12; the taste skill) | answered in session; the 24px is the chosen option's preview target, and that preview misstated today's section gap as 16px, where S-2 had 12px (Q-37) |
 | D-PREC | Precedence order for conflicting sources | INFERRED | 2026-09-26 | — | the article ("current tokens beat screenshots for exact values") | stops a shipped defect becoming doctrine |
 | C-1 | Colour only through tokens; allow-list for the rest | INFERRED | 2026-09-26 | — | REFERENCE §2.3; `globals.css:166-172` | zero literals at `0ec084f`; keep it so |
 | C-2 | Product utility names in product code | INFERRED | 2026-09-26 | — | EC §1.3 | one vocabulary per layer |
@@ -57,7 +98,7 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | C-7 | Accent only for action, selection, focus, links | INFERRED | 2026-09-26 | — | `globals.css:62-65` | restraint |
 | C-8 | Every border names its colour; a base default | INFERRED | 2026-09-26 | — | REFERENCE §2.5; ES P-1 | a bare `border` fell back to `currentColor`; the default ships since the adopting change |
 | C-8a | The card's edge is a hairline `--border` | **APPROVED** | 2026-09-26 | Quentin Casares | OD-3 | answered in session |
-| C-9 | Missing role tokens (`--blocked-ink`, `--scrim`, tints, `--chip-edge`) | INFERRED, PROPOSED | 2026-09-26 | — | REFERENCE §2.2-2.3 | literals without a role |
+| C-9 | Missing role tokens (`--blocked-ink`, tints, `--chip-edge`); `--scrim` landed 2026-09-27 | INFERRED, PROPOSED | 2026-09-26 | — | REFERENCE §2.2-2.3 | literals without a role; the scrim's value is this contract's, the taste skill's "no pure black" adopted under this rule |
 | C-10 | Both schemes checked | INFERRED | 2026-09-26 | — | `0ec084f:DESIGN.md:11-16` | light is a peer |
 | C-11 | Nothing moves toward the stated anti-references | INFERRED | 2026-09-26 | — | `repo:PRODUCT.md:52-68`; `0ec084f:DESIGN.md:226-231`; `globals.css:15-21` | the brand's prohibited looks need a rule |
 | C-12 | On a safety control, red means live money reachable; halted is a strong amber "stopped" | **APPROVED** | 2026-09-26 | Quentin Casares | OD-2 | answered in session |
@@ -71,21 +112,22 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | T-7 | Line-height tokens | INFERRED, PROPOSED | 2026-09-26 | — | REFERENCE §3.4; Q-14 | 3–4 line-heights per size |
 | T-8 | Prose ≤75ch | INFERRED | 2026-09-26 | — | `0ec084f:DESIGN.md:134-135` | readability |
 | T-9 | Fixed rem, no clamp | INFERRED | 2026-09-26 | — | `globals.css:99-102` | one desk, one DPI |
-| T-10 | System stacks; compare screenshots per OS | INFERRED | 2026-09-26 | — | `globals.css:92-97` | DejaVu captures |
+| T-10 | Geist and Geist Mono, self-hosted, leading the tokens; the package's fallbacks, then the former system stacks, behind; figures tabular; ✓ ✕ ■ from each OS | **APPROVED** | 2026-09-27 | Quentin Casares | OD-5 | answered in session; replaces "system stacks, no web font"; the glyph exception is recorded, not decided (Q-36) |
+| T-11 | What counts as prose: a running sentence — an intro, a card's paragraph, a banner — is 15px at T-8's measure; a caption, hint, timestamp, label, count, id, cell or chip keeps 11–13px; prose is never as heavy as a title | INFERRED | 2026-09-27 | — | OD-8 ("body prose moves to 15px"; "hierarchy by weight and colour, not size"); T-8; review of 2026-09-27 | OD-8 named body prose and not what counts as prose: intros were 15px on two pages and 13px on three, every sentence on the summary pages 12–13px, and a banner kept as "secondary prose" at 13px |
 | S-1 | 4px scale; no new off-scale steps | INFERRED | 2026-09-26 | — | `globals.css:111-119`; Q-13 | 6px is 246 uses off-scale |
-| S-2 | Sections 12px apart, never 0 | INFERRED | 2026-09-26 | — | REFERENCE §4.2; Q-12 | matches every page; two 0px defects |
+| S-2 | Sections 24px apart, never 0 | **APPROVED** | 2026-09-27 | Quentin Casares | OD-8 (answers Q-12) | answered in session; 12px on every page until then (REFERENCE §4.2); 24px is the preview's target, shown as a step from 16px (Q-37) |
 | S-3 | Header → first block 16px | INFERRED | 2026-09-26 | — | REFERENCE §4.2 | six measured variants |
 | S-4 | Label → control 8px | INFERRED | 2026-09-26 | — | REFERENCE §4.2; Q-13 | five values at `0ec084f` |
 | S-5 | Padding 16 / 12 / 8 | INFERRED | 2026-09-26 | — | REFERENCE §4.3 | as shipped |
 | S-6 | Two radii, plus fully round for the one chip | INFERRED | 2026-09-26 | — | REFERENCE §4.7; OD-3 | as shipped |
-| S-7 | No shadows in product code | INFERRED | 2026-09-26 | — | REFERENCE §2.3, §4.7 | hard-coded black alpha |
+| S-7 | No shadows in product code | **APPROVED** | 2026-09-27 | Quentin Casares | OD-7 | the question put S-7 as "no shadows" and the owner kept it; hard-coded black alpha (REFERENCE §2.3, §4.7) |
 | S-8 | 1px borders; nav rule the exception | INFERRED | 2026-09-26 | — | REFERENCE §4.7 | as shipped |
 | S-9 | Named z-index scale | INFERRED | 2026-09-26 | — | `globals.css:132-138`; Q-25 | never an arbitrary 999 |
 | S-10 | No box in a box | INFERRED | 2026-09-26 | — | `globals.css:460-462`; Q-18 | the second border lies |
 | L-1 | One shell | INFERRED | 2026-09-26 | — | REFERENCE §4.4 | as shipped |
 | L-2 | Min-width breakpoints sm/md/lg only | INFERRED | 2026-09-26 | — | REFERENCE §4.5 | the legacy max-width block is half-inert |
 | L-3 | Data full width; prose capped | INFERRED | 2026-09-26 | — | REFERENCE §4.4; Q-15 | no measure exists |
-| L-4 | Reuse the listed grids | INFERRED | 2026-09-26 | — | REFERENCE §4.6 | eight grids already |
+| L-4 | Reuse the listed grids; the Summary grid is OD-7's | INFERRED | 2026-09-27 | — | REFERENCE §4.6; OD-7 (the Summary row); S-2 (the Two-up gap) | eight grids already; the Summary grid added and the Two-up gap raised to 24px on 2026-09-27 |
 | L-5 | No painted empty metric track | INFERRED | 2026-09-26 | — | O-18 | reads as a missing value |
 | L-6 | No sideways document scroll | INFERRED | 2026-09-26 | — | `0ec084f:DESIGN.md:146-150` | as stated |
 | L-7 | One page-header pattern | INFERRED | 2026-09-26 | — | REFERENCE §6.3 item 13 | three intro styles |
@@ -96,8 +138,8 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | K-5 | Forms submit on Enter; inline errors | INFERRED | 2026-09-26 | — | REFERENCE §6.5 | only `/login` does |
 | K-6 | Table headers, `aria-sort`, unknowns last, wrap prose | INFERRED | 2026-09-26 | — | O-12, O-20; `DataTable.tsx:114-120` | three header styles |
 | K-7 | Banner tone by meaning; caveat above figure | INFERRED | 2026-09-26 | — | `globals.css:490-501`; REFERENCE §7 | synthetic banner below the chart |
-| K-8 | Vendored edits logged | INFERRED | 2026-09-26 | — | `ui/card.tsx:5-16`; Q-24 | `shadcn add` overwrites |
-| K-9 | Icons lucide, hidden when decorative, distinct | INFERRED | 2026-09-26 | — | EC §4.3, §7.2 | `Activity` used twice |
+| K-8 | Vendored edits fix a defect, bind a token or carry an owner decision, and are logged | INFERRED | 2026-09-27 | — | `ui/card.tsx:5-16`; Q-24; OD-6 (the press) | `shadcn add` overwrites; the press is the first edit an owner decided |
+| K-9 | Icons lucide, hidden when decorative, distinct; the set is Q-35 | INFERRED | 2026-09-27 | — | EC §4.3, §7.2; `components.json` (`iconLibrary: lucide`) | `Activity` used twice; the taste skill asks for Phosphor or Radix (Q-35) |
 | K-10 | One lit nav item per route | INFERRED | 2026-09-26 | — | `AppNav.tsx:24-28` | two pages light none |
 | K-11 | `TypedConfirm`; no `window.prompt` | INFERRED | 2026-09-26 | — | REFERENCE §6.3 item 12 | two confirm patterns |
 | K-12 | One back-link pattern | INFERRED | 2026-09-26 | — | REFERENCE §6.3 item 11 | 4 of 5 uses |
@@ -105,15 +147,19 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | K-14 | New instances follow 5.3's order of parts; its measurements are observations | INFERRED | 2026-09-26 | — | the article; REFERENCE §6.1, §6.3 | a shipped value is not doctrine |
 | K-15 | Legacy element rules never style shadcn/Radix components | **APPROVED** | 2026-09-26 | Quentin Casares | OD-3 | answered in session |
 | K-16 | shadcn canonical: `Card`, `StatusBadge`, `Button`, the fields; legacy classes retire | **APPROVED** | 2026-09-26 | Quentin Casares | OD-3 | answered in session |
-| M-1 | 140/200ms; bridge Tailwind defaults | INFERRED, PROPOSED | 2026-09-26 | — | `globals.css:124-130` | 150ms and 300/500ms at `0ec084f` |
+| M-1 | 140/200ms; nothing that runs once over 250ms; two loops, each bound to its state; bridge Tailwind defaults | INFERRED, PROPOSED | 2026-09-27 | — | `globals.css:124-130`; OD-6 (the pulse) | 150ms and 300/500ms at `0ec084f`; the loop clause since OD-6 |
 | M-2 | `--ease` only | INFERRED | 2026-09-26 | — | `globals.css:125-128` | as stated |
-| M-3 | Motion reports change only | INFERRED | 2026-09-26 | — | `0ec084f:DESIGN.md:193` | as stated |
+| M-3 | Motion reports a state or a change; nothing loops unless it reports real state | **APPROVED** | 2026-09-27 | Quentin Casares | OD-6 | answered in session; replaces "no page-load choreography" |
 | M-4 | No class that compiles to nothing | INFERRED | 2026-09-26 | — | REFERENCE §6.6; Q-17 | 55 dead classes |
 | M-5 | Changed values acknowledged | INFERRED | 2026-09-26 | — | `globals.css:780-787`; Q-17 | `.changed` never applied |
 | M-6 | Reduced-motion alternatives | INFERRED | 2026-09-26 | — | `globals.css:886-903` | `.changed` has none |
 | M-7 | Cadence documented per page | INFERRED | 2026-09-26 | — | REFERENCE §6.5 | docs say ten seconds |
 | M-8 | Busy states; skeletons not spinners | INFERRED | 2026-09-26 | — | `0ec084f:DESIGN.md:184-186` | label swap only |
 | M-9 | Stopping is one action | INFERRED | 2026-09-26 | — | `repo:PRODUCT.md:88-92` | as stated |
+| M-10 | The live pulse: the worker's heartbeat chip breathes only while that heartbeat is fresh, still when stale; 2.4s on `--ease` | **APPROVED** | 2026-09-27 | Quentin Casares | OD-6 | answered in session; the preview named 2.4s on `--ease` |
+| M-10r | The pulse's drawing and terms: the row alive (fresh and saying so), last refresh and the reading's age (under two polls), all three; the runner too; never a past day; rows in id order; a halo that never dims the chip; still under reduced motion | INFERRED | 2026-09-27 | — | OD-6 (the pulse); `repo:CLAUDE.md` "A dead worker looks dead"; the geometry, strength and conjunction are this contract's | split from M-10, whose APPROVED text had carried them; the reading's age joined the conjunction the same day, after a refresh that hung kept a halo breathing over a reading that had stopped getting newer; then the stored status, after a clean shutdown breathed for a minute, and the id order, after two workers trading places restarted their halos |
+| M-11 | Safety controls never move: no press, pulse or entrance; `STILL` on every Button there | **APPROVED** | 2026-09-27 | Quentin Casares | OD-6 (the question's own condition); C-12 (OD-2) | the owner answered within "I will not put movement on the kill switch or live gates" |
+| M-12 | A list's first arrival: a 4px rise and fade, 40ms apart, capped at 320ms; never on a poll, nor on a moved row; a fade in place under reduced motion | INFERRED | 2026-09-27 | — | OD-6 (the stagger); the step, cap and delays are this contract's | the owner chose a stagger, not its values; the preview's 40ms step is kept and the cap at the ninth row added |
 | A-1 | WCAG 2.2 AA | INFERRED | 2026-09-26 | — | `repo:PRODUCT.md:101` | as stated |
 | A-2 | 4.5:1 in every state and backdrop | INFERRED | 2026-09-26 | — | REFERENCE §2.6 | four failing pairs |
 | A-3 | 3:1 for boundaries and focus | INFERRED | 2026-09-26 | — | WCAG 1.4.11 | inputs 1.37–1.97 |
@@ -121,7 +167,7 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | A-4r | The outline appears at once and is never suppressed without replacement | INFERRED | 2026-09-26 | — | A-4; `0ec084f:DESIGN.md:219-220` | nav links transition it in |
 | A-5 | Underline in-text links, and only those | INFERRED | 2026-09-26 | — | axe `link-in-text-block` | 1.98:1 dark; a link that stands alone is drawn by its own component |
 | A-6 | Glyph + word for every status | INFERRED | 2026-09-26 | — | `repo:PRODUCT.md:109-111` | colour-blind reading |
-| A-7 | Keyboard: focusable scrollers, Enter, `aria-sort` | INFERRED | 2026-09-26 | — | axe `scrollable-region-focusable` | mobile tables unreachable |
+| A-7 | Keyboard: focusable scrollers, Enter, `aria-sort` | INFERRED | 2026-09-26 | — | axe `scrollable-region-focusable` | mobile tables unreachable; on 2026-09-27 the pipeline board with no candidate on it, which axe reported and the seeded captures never reach |
 | A-8 | Document structure | INFERRED | 2026-09-26 | — | axe (four rules) | as found |
 | A-9 | Live regions | INFERRED | 2026-09-26 | — | REFERENCE §6.7 | 27 silent error banners |
 | A-10 | 24px targets | INFERRED | 2026-09-26 | — | REFERENCE §6.7 | five candidates under |
@@ -139,8 +185,8 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | E-9 | Failed load keeps h1 | INFERRED | 2026-09-26 | — | REFERENCE §6.5 | endless "Loading…" |
 | E-10 | Bounded page length | INFERRED | 2026-09-26 | — | Q-27 | 8,708px page |
 | E-11 | Both schemes per run | INFERRED | 2026-09-26 | — | Q-19 | — |
-| E-12 | Same-OS screenshot comparison | INFERRED | 2026-09-26 | — | REFERENCE §3.1 | DejaVu |
-| E-13 | Never show a figure as current when it is not | INFERRED | 2026-09-26 | — | REFERENCE §6.5; `repo:CLAUDE.md:53-55` | last-good figures stayed unmarked |
+| E-12 | Wrap points compare across machines, except chips carrying ✓ ✕ ■; pixels within one OS and browser, once the fonts have loaded and the motion has stopped | INFERRED | 2026-09-27 | — | REFERENCE §3.1; OD-5; Q-36 | DejaVu captures before the face was bundled; the faces lack three status glyphs; the live pulse froze at a different phase in each capture |
+| E-13 | Never show a figure as current when it is not | INFERRED | 2026-09-26 | — | REFERENCE §6.5; `repo:CLAUDE.md:53-55` | last-good figures stayed unmarked; on `/programme` until 2026-09-27 |
 | H-1 | Never render a Sharpe without its SE | **APPROVED** | 2026-08-02 | Quentin Casares | `repo:CLAUDE.md:100-102` (4943156) | repo rule |
 | H-1r | "x ± se" in one element; significance as a word, from the stored flag; SE survives sorting | INFERRED | 2026-09-26 | — | REFERENCE §7; `test_browser_journey.py:46-50` (the tearsheet's banner, by hand) | colour + `title` on the list at `0ec084f` |
 | H-2 | Never quote a searched Sharpe undeflated | **APPROVED** | 2026-08-03 | Quentin Casares | `repo:CLAUDE.md:103-108` (ee547f4) | repo rule |
@@ -172,9 +218,9 @@ decided. Each has an APPROVED row below, and each rule it settles is APPROVED in
 | H-17 | A missing required field reads "missing" plus the reason | **APPROVED** | 2026-09-26 | Quentin Casares | OD-4 | answered in session |
 | H-18 | What the UI says about the system matches `CLAUDE.md` | INFERRED | 2026-09-26 | — | `programme/page.tsx:463-467`; `repo:CLAUDE.md:458-465` | "shadow-mode operation is not built" was false |
 | G-1 | Three live-order gates, three answers, never combined | INFERRED | 2026-09-26 | — | Safety rule 1, `repo:CLAUDE.md:44-52` (4943156); `system/page.tsx:14-16` | as shipped |
-| G-2 | A fail-closed switch is shown failing closed; unreadable state is unknown; stopped is amber | INFERRED | 2026-09-26 | — | Safety rules 2, 7, `repo:CLAUDE.md:53-55`, :90-94; OD-2 | the last value stayed after a failed poll |
+| G-2 | A fail-closed switch is shown failing closed; unreadable state is unknown; stopped is amber | INFERRED | 2026-09-26 | — | Safety rules 2, 7, `repo:CLAUDE.md:53-55`, :90-94; OD-2 | the last value stayed after a failed poll; the programme's switch kept "enabled" so until 2026-09-27 |
 | G-3 | Stopping is one action; starting is a typed phrase, never pre-filled | INFERRED | 2026-09-26 | — | `repo:PRODUCT.md:88-92`; `system/page.tsx:6-9` | `window.prompt` for autonomy |
-| G-4 | Liveness from `stale`, never a stored status | INFERRED | 2026-09-26 | — | `repo:CLAUDE.md:281` (4943156); `StatusBadge.tsx:58-68` | as shipped |
+| G-4 | Alive is a fresh heartbeat that says `'alive'`, decided once (`isAlive`), worded by `livenessWord`, rows in id order | INFERRED | 2026-09-27 | — | `repo:CLAUDE.md` "A dead worker looks dead" (4943156); `lib/heartbeat.ts`; review of 2026-09-27 | from `stale` alone as first written, when the stored status was held to be only ever 'alive'; a clean shutdown writes 'stopped' with a fresh `last_seen`, and read by its age a stopped process was a green "stopped" with a live halo on `/system` and "alive" on `/programme` for a minute |
 | G-5 | Requested and effective values both shown | INFERRED | 2026-09-26 | — | `repo:CLAUDE.md:295` (ee547f4); `programme/page.tsx:26-30` | as shipped |
 | G-6 | Queued work is reported as queued | INFERRED | 2026-09-26 | — | `programme/page.tsx:245-251`; `repo:docs/08-jev-integration.md:624` | as shipped |
 | G-7 | A promotion never implies an override | INFERRED | 2026-09-26 | — | `repo:CLAUDE.md:290` (ee547f4); `candidates/[id]/page.tsx:165-176` | as shipped |

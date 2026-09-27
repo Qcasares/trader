@@ -2,6 +2,7 @@
 
 import * as React from "react"
 
+import { useOverflows } from "@/lib/overflow"
 import { cn } from "@/lib/utils"
 
 /*
@@ -23,27 +24,23 @@ import { cn } from "@/lib/utils"
  *   container becomes a focusable, named region while — and only while — its
  *   table is wider than it, so a table that fits costs no tab stop. axe
  *   reported the unreachable scroller on /system and the candidate page at
- *   phone width (DESIGN.md A-7).
+ *   phone width (DESIGN.md A-7). The name is required: an optional one left
+ *   /portfolio's positions, moved into a narrow column on 2026-09-27, a tab
+ *   stop announced as nothing between 1024 and ~1190px wide, and the jobs,
+ *   backtests, findings and hypotheses tables the same on a phone. Which
+ *   tables overflow depends on the column and the zoom, not on the page, so
+ *   every table carries one. Whether it overflows is `useOverflows`
+ *   (`lib/overflow.ts`), written here and moved out on 2026-09-27 so the
+ *   pipeline board on /programme, which scrolled in a plain div, could be the
+ *   same region by the same measure.
+ * - **It scrolls sideways and never down.** `overflow-x: auto` alone makes the
+ *   y axis `auto` too, and a row rising into place (`.enter-stagger`, M-12)
+ *   starts 4px below where it ends: the last rows overhung the container's
+ *   bottom edge for the length of the entrance, and wherever scrollbars take
+ *   space (Chrome on Windows and Linux) a 15px vertical bar came and went,
+ *   narrowing the table and shifting every column sideways, twice. Nothing in
+ *   a table is meant to overhang it vertically, so the y axis clips.
  */
-
-/** Whether the element's content is wider than the element, kept current. */
-function useOverflows(ref: React.RefObject<HTMLElement | null>): boolean {
-  const [overflows, setOverflows] = React.useState(false)
-  React.useEffect(() => {
-    const element = ref.current
-    if (!element) return
-    const measure = () =>
-      setOverflows(element.scrollWidth > element.clientWidth + 1)
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(element)
-    // The table as well as its container: rows arriving widen the content
-    // without resizing the box it scrolls in.
-    if (element.firstElementChild) observer.observe(element.firstElementChild)
-    return () => observer.disconnect()
-  }, [ref])
-  return overflows
-}
 
 function Table({
   className,
@@ -51,7 +48,7 @@ function Table({
   ...props
 }: React.ComponentProps<"table"> & {
   /** What the scroller is called when it takes focus, e.g. "Workers". */
-  label?: string
+  label: string
 }) {
   const container = React.useRef<HTMLDivElement>(null)
   const scrolls = useOverflows(container)
@@ -59,10 +56,10 @@ function Table({
     <div
       ref={container}
       data-slot="table-container"
-      className="relative w-full overflow-x-auto"
+      className="relative w-full overflow-x-auto overflow-y-hidden"
       tabIndex={scrolls ? 0 : undefined}
-      role={scrolls && label ? "region" : undefined}
-      aria-label={scrolls && label ? `${label}, scrolls sideways` : undefined}
+      role={scrolls ? "region" : undefined}
+      aria-label={scrolls ? `${label}, scrolls sideways` : undefined}
     >
       <table
         data-slot="table"

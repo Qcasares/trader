@@ -377,7 +377,7 @@ export default function SystemConfigurationPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Cadence</CardTitle>
         </CardHeader>
@@ -405,7 +405,7 @@ export default function SystemConfigurationPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>What this costs</CardTitle>
         </CardHeader>
@@ -470,10 +470,10 @@ export default function SystemConfigurationPage() {
         </CardContent>
       </Card>
 
-      {/* 12px from the card above and the one below, like every other gap
-          between sections; the legacy card had a bottom margin and no top
-          one, so the credentials sat flush under this row. */}
-      <div className="row mt-3">
+      {/* 24px from the card above and the one below, like every other gap
+          between sections (OD-8); the legacy card had a bottom margin and no
+          top one, so the credentials sat flush under this row. */}
+      <div className="row mt-6">
         <button
           type="button"
           className="primary"
@@ -482,13 +482,16 @@ export default function SystemConfigurationPage() {
         >
           Save {changed.length || ""} change{changed.length === 1 ? "" : "s"}
         </button>
-        {problem ? <span className="muted">{problem}</span> : null}
+        {/* The keys being changed, or why they cannot be: set at the
+            button's 13px rather than the body's 15px (OD-8), since a list of
+            keys is data, and the two share a place and so a size. */}
+        {problem ? <span className="muted text-base">{problem}</span> : null}
         {!problem && changed.length > 0 ? (
-          <span className="muted">Changing: {changed.join(", ")}.</span>
+          <span className="muted text-base">Changing: {changed.join(", ")}.</span>
         ) : null}
       </div>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>Credentials</CardTitle>
         </CardHeader>
@@ -522,7 +525,7 @@ export default function SystemConfigurationPage() {
         </CardContent>
       </Card>
 
-      <Card className="mt-3">
+      <Card className="mt-6">
         <CardHeader>
           <CardTitle>The other controls</CardTitle>
         </CardHeader>

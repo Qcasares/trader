@@ -103,11 +103,15 @@ async def _build_status(conn, settings: AppSettings) -> SystemStatus:
         broker_configured=settings.has_broker_credentials,
         jobs=await job_repo.counts_by_status(conn),
         # `stale` is reported rather than left for the caller to derive. The
-        # stored `status` column is only ever written as 'alive', so a UI
-        # rendering it directly showed a green "alive" pill for a worker that
-        # died an hour ago — the precise failure the heartbeat exists to catch.
-        # A dead worker produces no error anywhere: backtests queue, no mark is
-        # written, and both halting limits go inert, all silently.
+        # stored `status` column is 'alive' while a process runs and 'stopped'
+        # after a clean shutdown, and cannot report a crash: a process that
+        # dies writes nothing, so a UI rendering the column directly showed a
+        # green "alive" pill for a worker that died an hour ago — the precise
+        # failure the heartbeat exists to catch. Neither field alone says a
+        # process is alive, since a clean shutdown stamps a fresh last_seen:
+        # the UI takes both (web/src/lib/heartbeat.ts). A dead worker produces
+        # no error anywhere: backtests queue, no mark is written, and both
+        # halting limits go inert, all silently.
         workers=[
             {
                 "worker_id": w["worker_id"],

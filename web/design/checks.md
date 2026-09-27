@@ -95,9 +95,11 @@ parity and boundary steps do.
 
 The 15 routes, each at desktop 1440×900 (`is_mobile=False`) and mobile 390×844 (`is_mobile=True`, `has_touch=True`), in
 light and dark (`page.emulate_media`; the app switches only on `prefers-color-scheme`), full page at device scale 1 —
-one image pixel is one CSS pixel. It waits for `networkidle`, then for no `[aria-busy=true]` skeleton, then 700ms, and
-hides Next's dev overlay. Captures are named `<slug>__<desktop|mobile>__<light|dark>.png`, the names the examples
-manifest uses. Not part of a pytest suite and not in CI, for the reason the browser journey is not: it needs a running
+one image pixel is one CSS pixel. It waits for `networkidle`, then for no `[aria-busy=true]` skeleton, then for every
+finite animation to end (`settle`: a list's entrance, M-12), then 700ms, and hides Next's dev overlay. It shoots with
+`animations="disabled"`: the live pulse (M-10r) never ends, and left running it froze at a different phase in each
+capture, so two captures of one state differed inside the worker's chip; cancelled for the shot, the halo draws still.
+Captures are named `<slug>__<desktop|mobile>__<light|dark>.png`, the names the examples manifest uses. Not part of a pytest suite and not in CI, for the reason the browser journey is not: it needs a running
 Postgres, API, worker and Next.js.
 
 ```bash
@@ -137,7 +139,12 @@ since the adopting change fixed both (FX-21, FX-20; its run of 2026-09-26 passed
 - **Pseudo-element text.** `small-text` walks text nodes, so a glyph drawn with `::before` — each chip's — is not
   measured (T-1). The 10px `.pill::before` glyph (`globals.css:690`) it could not see went with FX-9.
 - **Stale data.** (b) forces neither a failed refresh nor a paper→live switch. The browser journey does, for
-  `/portfolio` (its steps 10 and 11) and `/system` (step 12); for `/programme`, E-13 is checked by reading the code.
+  `/portfolio` (its steps 10 and 11) and `/system` (step 12); for `/programme`, E-13 and G-2 are held by
+  `repo:tests/unit/test_web_taste.py` reading the code, and were measured by hand on 2026-09-27 with the API failing
+  after a first read (the switch "not read", the stale banner, the runner still, and all of it back on recovery).
+- **A process that has just stopped.** Nothing stops the worker or the runner during a run, so the minute in which a
+  clean shutdown's row is fresh and says `'stopped'` (G-4) is checked by `repo:tests/unit/test_web_taste.py` and
+  `repo:tests/unit/test_worker_liveness.py`, and was captured by hand on 2026-09-27.
 - **The seed.** Captures are comparable with an example, and the baselines hold, only on the seeded dataset with pinned
   ids (`evidence_screens.md` §0.4). The seed is not in the repository; without `E2E_IDS`, detail ids come from the
   first link on each list page, which is good enough for looking but not for the baselines. Porting the seed and the
@@ -152,7 +159,9 @@ captures from the same OS (E-12).
 `axe-core` 4.13.0, the version the evidence used, comes from its own npm package, `repo:tests/e2e/design/`, for the
 reason `tests/e2e/live` is its own package: Vercel builds `web/`, and nothing it builds should install test tooling. The
 script imports its routes, id resolution, sign-in and readiness wait from `design_capture.py`, so the two can never
-scan different pages, and runs `axe.run({exclude: [['nextjs-portal']]}, {resultTypes: ['violations', 'incomplete']})`.
+scan different pages, and runs `axe.run({exclude: [['nextjs-portal']]}, {resultTypes: ['violations', 'incomplete']})`
+after `settle` once more: a row a poll has just mounted is still fading in, and axe measures it part way (1.5–4.3:1 on
+`/system` 150ms after its rows mounted, none from 300ms).
 
 ```bash
 npm ci --prefix tests/e2e/design
@@ -193,7 +202,10 @@ What axe does not cover, which stays with a person:
 - **Mobile keyboard** (not tested, ES §6.5): an external keyboard on the 390px layout reaches the menu button, every
   sheet link and every scroll region.
 - **States axe never sees.** The baseline covers route captures only, so `page-has-heading-one` on the loading and
-  API-unreachable states (ES §6.1) stays a manual item until (b) captures states.
+  API-unreachable states (ES §6.1) stays a manual item until (b) captures states. So does `/programme` with no
+  candidate on its board, the state in which the board's scroller had nothing inside to focus and axe reported
+  `scrollable-region-focusable` (found in review, 2026-09-27; A-7). Every sideways scroller is now held by
+  `repo:tests/unit/test_web_taste.py`, and the empty board was scanned by hand the same day, clean.
 
 ### (d) How the owner approves and promotes an example
 

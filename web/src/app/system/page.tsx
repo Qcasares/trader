@@ -14,9 +14,20 @@
  * - **The gates are reported separately, never combined.** Live orders need
  *   three independent conditions and deriving any one from another is a
  *   weakening. Three rows, three answers, no summary pill.
- * - **A worker's liveness comes from heartbeat age, not its stored status.**
- *   That column is only ever written `'alive'`, so rendering it directly showed
- *   a green badge for a process that died an hour ago.
+ * - **A worker is alive only while its heartbeat is fresh and says so.** The
+ *   stored status is `'alive'` while a process runs and `'stopped'` after a
+ *   clean shutdown, and it cannot report a crash: a process that dies writes
+ *   nothing, so rendering the column directly showed a green badge for a
+ *   process that died an hour ago. The heartbeat's age is therefore the input
+ *   — and not the only one, since a clean shutdown stamps a fresh `last_seen`
+ *   beside `'stopped'`, and read by its age alone a process that had just
+ *   stopped showed a green "✓ stopped" with a live halo for a minute.
+ *   `isAlive` (`lib/heartbeat.ts`) takes both, for the chip, the halo and the
+ *   "no worker is alive" warning alike. That warning, and the kill switch's
+ *   cancel note, count a worker's rows only (`isWorkerProcess`): the
+ *   programme's runner writes a heartbeat to the same table and claims none
+ *   of the worker's jobs, so a live runner beside a dead worker is no worker
+ *   alive.
  *
  * Three more, since the owner's decisions of 2026-09-26:
  *
@@ -37,9 +48,35 @@
  * - **The page keeps its heading in every state.** A first load that failed
  *   used to leave "Loading system status…" on screen for ever, with no `h1`
  *   and no error; it now says what failed (E-9, T-5).
+ *
+ * And the layout and motion the owner chose on 2026-09-27 (OD-6, OD-7):
+ *
+ * - **An asymmetric grid, grouped by what an operator comes here to do.** The
+ *   main column holds the kill switch, what became of the cancel it queued at
+ *   the venue, and the three gates; the side column the workers' liveness;
+ *   the jobs table runs the full width beneath both. Source order is reading
+ *   order, so a phone shows the switch first.
+ * - **The safety controls never move** (C-12). Each region carries
+ *   `data-safety-control`, and every button in one is `STILL`, which takes
+ *   back the press every other button has — the typed release included.
+ * - **A worker's badge pulses only while its heartbeat is fresh and this
+ *   page's own reading is current** — its last refresh a success, and that
+ *   reading younger than two polls. The pulse claims liveness, so it stops
+ *   the moment any of the three is in doubt: a dead worker must look dead,
+ *   and so must one this page has lost sight of, whether a refresh failed or
+ *   simply never came back. The jobs rise into place once, when the table
+ *   first fills; the table stays mounted and keyed by job id across every
+ *   poll, so a row rises again only when it is a new job. The workers are
+ *   drawn in the order of their ids, not in the API's newest-first order, in
+ *   which two live processes traded places on most polls and restarted the
+ *   halo of whichever one moved.
+ * - **Prose is the body's 15px** (OD-8, T-11): the intro, what a card
+ *   explains, a banner. Tables, chips, labels, hints and timestamps keep
+ *   their 11–13px steps, and a card's title keeps its weight over the prose
+ *   under it.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CircleSlash, Settings2 } from "lucide-react";
@@ -52,14 +89,17 @@ import {
   type VenueCancelVenue,
 } from "@/lib/api";
 import {
+  SafetyState,
   StatusBadge,
   jobStatus,
   killSwitchStatus,
   liveGateStatus,
   livenessStatus,
-  type Status,
 } from "@/components/StatusBadge";
 import { fmtAge, fmtInstant } from "@/lib/format";
+import { useFresh } from "@/lib/fresh";
+import { byWorkerId, isAlive, isWorkerProcess, livenessWord } from "@/lib/heartbeat";
+import { STILL } from "@/lib/motion";
 import { DataTable } from "@/components/DataTable";
 import { Skeleton } from "@/components/Skeleton";
 import { Button } from "@/components/ui/button";
@@ -164,9 +204,11 @@ function venueCancelSentence(
 
 function venueSentence(venue: VenueCancelVenue): string {
   if (!venue.reached) {
+    // The reason after a colon, not in brackets: it is the worker's own
+    // sentence, and it can carry brackets and a full stop of its own.
     return (
-      `The ${venue.mode} venue was not reached (${venue.reason}), so any ` +
-      "order this system placed there stands."
+      `The ${venue.mode} venue was not reached, so any order this system ` +
+      `placed there stands: ${sentence(venue.reason)}`
     );
   }
   const foreign =
@@ -177,32 +219,6 @@ function venueSentence(venue: VenueCancelVenue): string {
   return (
     `None of this system's orders is open at the ${venue.mode} venue; the ` +
     `orders page shows which were cancelled and which filled.${foreign}`
-  );
-}
-
-/**
- * The state of a safety condition — or, when the page cannot read it now,
- * that it is not read, beside what it last was.
- *
- * Never the last value on its own: "enabled" on a page that has lost the API
- * is a control plane defaulting to "go" because it cannot find out, which is
- * the one thing the switch behind it is built never to do.
- */
-function SafetyState({
-  status,
-  word,
-  stale,
-}: {
-  status: Status;
-  word: string;
-  stale: boolean;
-}) {
-  if (!stale) return <StatusBadge status={status}>{word}</StatusBadge>;
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1.5">
-      <StatusBadge status="unknown">not read</StatusBadge>
-      <span className="text-xs font-normal text-ink-muted">last read: {word}</span>
-    </span>
   );
 }
 
@@ -247,13 +263,26 @@ export default function SystemPage() {
   const [reason, setReason] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
+  // Refreshes can overlap — a poll every five seconds, a read allowed ten
+  // (`READ_TIMEOUT_MS`), and one more after every engage or release — and
+  // they settle in any order. Each outcome applies only if no later refresh
+  // has already settled: a slow answer describes an older moment than the one
+  // on screen, and a read that timed out after a newer one succeeded has not
+  // made the newer one stale.
+  const asked = useRef(0);
+  const settled = useRef(0);
 
   const refresh = useCallback(async () => {
+    const turn = ++asked.current;
     try {
       const [status, jobs] = await Promise.all([api.systemStatus(), api.jobs()]);
+      if (turn < settled.current) return;
+      settled.current = turn;
       setReading({ status, jobs, readAt: new Date().toISOString() });
       setFailure(null);
     } catch (err: unknown) {
+      if (turn < settled.current) return;
+      settled.current = turn;
       if (err instanceof ApiError && err.isUnauthorized) {
         router.push("/login");
         return;
@@ -282,6 +311,11 @@ export default function SystemPage() {
    * read at.
    */
   const adopt = (status: SystemStatus) => {
+    // The switch's own answer is newer than every refresh already in flight,
+    // and one of those, read before the change, could otherwise land after
+    // it and put the old state back on the switch. Taking a turn for the
+    // answer drops them; the refresh below is newer again.
+    settled.current = ++asked.current;
     setReading((previous) => (previous === null ? previous : { ...previous, status }));
     void refresh();
   };
@@ -320,7 +354,7 @@ export default function SystemPage() {
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="mb-1">System</h1>
-          <p className="m-0 text-base text-ink-muted">
+          <p className="intro m-0 text-body text-ink-muted">
             Control plane and worker health.
           </p>
         </div>
@@ -386,7 +420,19 @@ function Loaded({
 }) {
   const { status, jobs, readAt } = reading;
   const stale = failure !== null;
-  const noWorkerAlive = status.workers.every((w) => w.stale);
+  // Younger than two polls. A refresh that fails marks the page `stale`; one
+  // that is still waiting marks nothing until it times out, and a throttled
+  // tab or a sleeping laptop polls late or not at all. The live pulse needs
+  // the reading to be recent, not merely unrefuted (web/DESIGN.md M-10r).
+  const fresh = useFresh(readAt, 2 * POLL_MS);
+  // Alive is fresh *and* saying so (`isAlive`): a worker that shut down a
+  // moment ago is not stale, and is not running either. And a worker's row,
+  // not the programme runner's (`isWorkerProcess`): the runner writes to the
+  // same table and runs none of the worker's jobs, the kill switch's cancel
+  // at the venue among them, so a live runner beside a dead worker is still
+  // no worker alive.
+  const workers = status.workers.filter(isWorkerProcess);
+  const noWorkerAlive = !workers.some(isAlive);
   const bothGatesOpen = status.live_trading_enabled && status.alpaca_allow_live;
 
   return (
@@ -401,291 +447,354 @@ function Loaded({
         </p>
       ) : null}
 
-      <div className="grid gap-3 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex flex-wrap items-center gap-2">
-              Trading
-              <SafetyState
-                status={killSwitchStatus(status.trading_enabled)}
-                word={status.trading_enabled ? "enabled" : "stopped"}
-                stale={stale}
-              />
-            </CardTitle>
-            {/*
-              What "stopped" means, in the worker's terms: the two job kinds
-              that can reach a venue fail on the switch, and nothing else does
-              (src/worker/main.py). Said because the state is safe, and a safe
-              state an operator cannot interpret is one they will "fix".
-
-              And what became of the orders already sent. `POST /system/kill`
-              also queues a worker job that cancels them at the venue
-              (src/api/routers/system.py, src/worker/kill_job.py); the second
-              sentence reports that job, never assumes it, and says positions
-              stay. test_web_components.py ties this to the route.
-            */}
-            {!status.trading_enabled && !stale ? (
-              <>
-                <p className="m-0 text-sm text-pretty">
-                  No live decision is taken and no order is submitted, to paper
-                  or to live, until trading is re-enabled. Backtests, marks and
-                  reconciliation carry on.
-                </p>
-                <p className="m-0 text-sm text-pretty">
-                  {venueCancelSentence(status.venue_cancel, noWorkerAlive)}{" "}
-                  Positions already held are not closed.
-                </p>
-              </>
-            ) : null}
-            {status.kill_reason ? (
-              <p className="m-0 text-sm text-ink-muted">{status.kill_reason}</p>
-            ) : null}
-          </CardHeader>
-          <CardContent>
-            {status.updated_at && (
-              <p className="mt-0 mb-3 text-xs text-ink-muted">
-                last changed by {status.updated_by} at{" "}
-                {fmtInstant(status.updated_at)}
-              </p>
-            )}
-
-            {actionError ? (
-              <p className="banner banner-bad" role="alert">
-                {actionError}
-              </p>
-            ) : null}
-
-            {status.trading_enabled ? (
-              <div className="space-y-2">
-                <Label htmlFor="kill-reason">
-                  Reason for stopping (recorded in the audit log)
-                </Label>
-                <Input
-                  id="kill-reason"
-                  value={reason}
-                  placeholder="e.g. reconciliation mismatch on SPY"
-                  onChange={(e) => setReason(e.target.value)}
+      <div className="summary-grid">
+        {/*
+          Main, then side, then the full-width jobs: the order a phone reads
+          them in. The two safety controls are marked `data-safety-control` so
+          a test can find every button inside one and hold it still (C-12).
+        */}
+        <div className="summary-main">
+          <Card data-safety-control="kill-switch">
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">
+                Trading
+                <SafetyState
+                  status={killSwitchStatus(status.trading_enabled)}
+                  word={status.trading_enabled ? "enabled" : "stopped"}
+                  stale={stale}
                 />
-                <Button
-                  variant="destructive"
-                  onClick={engage}
-                  disabled={busy || !reason.trim()}
-                >
-                  <CircleSlash aria-hidden="true" />
-                  Engage kill switch
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <Label htmlFor="kill-confirm">
-                  Type <code>{CONFIRM_PHRASE}</code> to re-enable trading
-                </Label>
-                <Input
-                  id="kill-confirm"
-                  value={confirm}
-                  placeholder={CONFIRM_PHRASE}
-                  onChange={(e) => setConfirm(e.target.value)}
-                />
-                <Button
-                  onClick={release}
-                  disabled={busy || confirm !== CONFIRM_PHRASE}
-                >
-                  Re-enable trading
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              </CardTitle>
+              {/*
+                What "stopped" means, in the worker's terms: the two job kinds
+                that can reach a venue fail on the switch, and nothing else does
+                (src/worker/main.py). Said because the state is safe, and a safe
+                state an operator cannot interpret is one they will "fix".
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Gates on a live order</CardTitle>
-            <p className="m-0 text-sm text-ink-muted text-pretty">
-              Three independent conditions, plus the kill switch. Deriving any
-              one from another is a weakening, so each is reported on its own.
-            </p>
-          </CardHeader>
-          <CardContent>
-            <Gate
-              name="LIVE_TRADING_ENABLED"
-              open={status.live_trading_enabled}
-              note="The environment gate."
-              stale={stale}
-            />
-            <Gate
-              name="ALPACA_ALLOW_LIVE"
-              open={status.alpaca_allow_live}
-              note="The allow-live gate, set separately from the one above."
-              stale={stale}
-            />
-            <div className="flex items-baseline justify-between gap-3 border-b border-line py-2">
-              <div className="min-w-0">
-                <div className="font-mono text-sm">deployment mode</div>
-                <div className="text-xs text-ink-muted text-pretty">
-                  The third condition. Not reported by this endpoint, so it is
-                  shown as unknown rather than guessed from the two above.
+                And what became of the orders already sent. `POST /system/kill`
+                also queues a worker job that cancels them at the venue
+                (src/api/routers/system.py, src/worker/kill_job.py); the second
+                sentence reports that job, never assumes it, and says positions
+                stay. test_web_components.py ties this to the route.
+              */}
+              {!status.trading_enabled && !stale ? (
+                <>
+                  <p className="m-0 max-w-prose text-body text-pretty">
+                    No live decision is taken and no order is submitted, to paper
+                    or to live, until trading is re-enabled. Backtests, marks and
+                    reconciliation carry on.
+                  </p>
+                  <p className="m-0 max-w-prose text-body text-pretty">
+                    {venueCancelSentence(status.venue_cancel, noWorkerAlive)}{" "}
+                    Positions already held are not closed.
+                  </p>
+                </>
+              ) : null}
+              {status.kill_reason ? (
+                <p className="m-0 text-sm text-ink-muted">{status.kill_reason}</p>
+              ) : null}
+            </CardHeader>
+            <CardContent>
+              {status.updated_at && (
+                <p className="mt-0 mb-3 text-xs text-ink-muted">
+                  last changed by {status.updated_by} at{" "}
+                  {fmtInstant(status.updated_at)}
+                </p>
+              )}
+
+              {actionError ? (
+                <p className="banner banner-bad" role="alert">
+                  {actionError}
+                </p>
+              ) : null}
+
+              {status.trading_enabled ? (
+                <div className="space-y-2">
+                  <Label htmlFor="kill-reason">
+                    Reason for stopping (recorded in the audit log)
+                  </Label>
+                  <Input
+                    id="kill-reason"
+                    value={reason}
+                    placeholder="e.g. reconciliation mismatch on SPY"
+                    onChange={(e) => setReason(e.target.value)}
+                  />
+                  {/* `STILL`: no press on a safety control, not even this one. */}
+                  <Button
+                    variant="destructive"
+                    className={STILL}
+                    onClick={engage}
+                    disabled={busy || !reason.trim()}
+                  >
+                    <CircleSlash aria-hidden="true" />
+                    Engage kill switch
+                  </Button>
                 </div>
-              </div>
-              <StatusBadge status="unknown">not reported</StatusBadge>
-            </div>
-            <div className="flex items-baseline justify-between gap-3 pt-2">
-              <span className="text-sm text-ink-muted">Broker credentials</span>
-              <SafetyState
-                status={status.broker_configured ? "settled" : "mute"}
-                word={status.broker_configured ? "present" : "absent"}
+              ) : (
+                <div className="space-y-2">
+                  <Label htmlFor="kill-confirm">
+                    Type <code>{CONFIRM_PHRASE}</code> to re-enable trading
+                  </Label>
+                  <Input
+                    id="kill-confirm"
+                    value={confirm}
+                    placeholder={CONFIRM_PHRASE}
+                    onChange={(e) => setConfirm(e.target.value)}
+                  />
+                  <Button
+                    className={STILL}
+                    onClick={release}
+                    disabled={busy || confirm !== CONFIRM_PHRASE}
+                  >
+                    Re-enable trading
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card data-safety-control="live-gates">
+            <CardHeader>
+              <CardTitle>Gates on a live order</CardTitle>
+              <p className="m-0 max-w-prose text-body text-ink-muted text-pretty">
+                Three independent conditions, plus the kill switch. Deriving any
+                one from another is a weakening, so each is reported on its own.
+              </p>
+            </CardHeader>
+            <CardContent>
+              <Gate
+                name="LIVE_TRADING_ENABLED"
+                open={status.live_trading_enabled}
+                note="The environment gate."
                 stale={stale}
               />
-            </div>
-            {bothGatesOpen ? (
-              <p className="mt-3 mb-0 text-sm text-blocked text-pretty">
-                {stale ? "When last read, both" : "Both"} environment gates{" "}
-                {stale ? "were" : "are"} open: a deployment in live mode reaches
-                real money whenever trading is enabled.
-              </p>
-            ) : (
-              <p className="mt-3 mb-0 text-sm text-settled">
-                {stale
-                  ? "When last read, no real order could be placed in this configuration."
-                  : "No real order can be placed in this configuration."}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              <Gate
+                name="ALPACA_ALLOW_LIVE"
+                open={status.alpaca_allow_live}
+                note="The allow-live gate, set separately from the one above."
+                stale={stale}
+              />
+              <div className="flex items-baseline justify-between gap-3 border-b border-line py-2">
+                <div className="min-w-0">
+                  <div className="font-mono text-sm">deployment mode</div>
+                  <div className="text-xs text-ink-muted text-pretty">
+                    The third condition. Not reported by this endpoint, so it is
+                    shown as unknown rather than guessed from the two above.
+                  </div>
+                </div>
+                <StatusBadge status="unknown">not reported</StatusBadge>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 pt-2">
+                <span className="text-sm text-ink-muted">Broker credentials</span>
+                <SafetyState
+                  status={status.broker_configured ? "settled" : "mute"}
+                  word={status.broker_configured ? "present" : "absent"}
+                  stale={stale}
+                />
+              </div>
+              {bothGatesOpen ? (
+                <p className="mt-3 mb-0 max-w-prose text-body text-blocked text-pretty">
+                  {stale ? "When last read, both" : "Both"} environment gates{" "}
+                  {stale ? "were" : "are"} open: a deployment in live mode reaches
+                  real money whenever trading is enabled.
+                </p>
+              ) : (
+                <p className="mt-3 mb-0 max-w-prose text-body text-settled text-pretty">
+                  {stale
+                    ? "When last read, no real order could be placed in this configuration."
+                    : "No real order can be placed in this configuration."}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
-      <Card className="mt-3">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            Workers
-            {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {/*
-            Keyed off whether any worker is *live*, not whether the table has
-            rows. A heartbeat row persists after the process dies, so "has ever
-            checked in" is a different question from "is running now".
-          */}
-          {noWorkerAlive && (
-            <p className="banner banner-warn">
-              <strong>No worker is alive.</strong>{" "}
-              {status.workers.length === 0
-                ? "None has ever checked in."
-                : "The last heartbeat is stale."}{" "}
-              Backtests will queue and never run, no end-of-day mark will be
-              written, and both halting limits go inert while that is true. A
-              dead worker produces no error anywhere — absence of action looks
-              exactly like nothing needing to be done.
-            </p>
-          )}
-          {status.workers.length > 0 && (
-            <Table label="Workers">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Worker</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Last seen</TableHead>
-                  <TableHead className="text-right">Age</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {status.workers.map((worker) => (
-                  <TableRow key={worker.worker_id}>
-                    <TableCell className="font-mono">{worker.worker_id}</TableCell>
-                    <TableCell>
-                      <StatusBadge status={livenessStatus(worker.stale)}>
-                        {worker.stale ? "no heartbeat" : worker.status}
-                      </StatusBadge>
-                    </TableCell>
-                    <TableCell className="text-ink-muted">
-                      {fmtInstant(worker.last_seen)}
-                    </TableCell>
-                    <TableCell className="text-right font-mono tabular-nums">
-                      {fmtAge(worker.age_seconds)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+        <div className="summary-side">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                Workers
+                {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {/*
+                Keyed off whether any worker is *live*, not whether the table has
+                rows. A heartbeat row persists after the process dies, so "has ever
+                checked in" is a different question from "is running now".
+              */}
+              {noWorkerAlive && (
+                <p className="banner banner-warn">
+                  <strong>No worker is alive.</strong>{" "}
+                  {workers.length === 0
+                    ? "None has ever checked in."
+                    : "Every one that has checked in has shut down or gone silent."}{" "}
+                  Backtests will queue and never run, no end-of-day mark will be
+                  written, and both halting limits go inert while that is true. A
+                  dead worker produces no error anywhere — absence of action looks
+                  exactly like nothing needing to be done.
+                </p>
+              )}
+              {status.workers.length > 0 && (
+                <Table label="Workers">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Worker</TableHead>
+                      <TableHead className="text-right">Age</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {/*
+                      In the order of their ids, which no poll changes. The
+                      API answers newest first, so two live processes traded
+                      places on most polls, and a row React moves restarts
+                      the halo on it (M-10r).
+                    */}
+                    {byWorkerId(status.workers).map((worker) => (
+                      <TableRow key={worker.worker_id}>
+                        {/*
+                          Two columns, so the table fits the side column at
+                          every width from 1024px, where the column leaves it
+                          214px. With the status and the last-seen instant in
+                          columns of their own it scrolled sideways and hid the
+                          age, the figure it is for, from 1024 to about 1270px;
+                          with the instant folded in, the chip — 126px, and it
+                          does not wrap — still left the age 40px short at
+                          1024. So each value is a second line under the one it
+                          belongs to: the chip under the process it describes,
+                          the instant, muted and free to wrap, under its age.
+                          The id has no break a browser will take on its own,
+                          so it breaks anywhere.
+                        */}
+                        <TableCell className="whitespace-normal">
+                          <span className="block font-mono wrap-anywhere">
+                            {worker.worker_id}
+                          </span>
+                          {isWorkerProcess(worker) ? null : (
+                            <span className="block text-xs text-ink-muted">
+                              the programme&apos;s runner, not a worker
+                            </span>
+                          )}
+                          {/*
+                            The pulse says "alive, as of a reading that is
+                            current". A process that is not alive — stale, or
+                            shut down cleanly — a failed refresh of this page,
+                            or a reading two polls old each stills it: a dead
+                            worker looks dead, and so does one this page can
+                            no longer see.
+                          */}
+                          <span className="mt-1 block">
+                            <StatusBadge
+                              status={livenessStatus(worker)}
+                              pulse={isAlive(worker) && !stale && fresh}
+                            >
+                              {livenessWord(worker)}
+                            </StatusBadge>
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span className="block font-mono tabular-nums">
+                            {fmtAge(worker.age_seconds)}
+                          </span>
+                          <span className="block whitespace-normal text-xs text-ink-muted text-balance">
+                            {fmtInstant(worker.last_seen)}
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
-      <Card className="mt-3">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            Jobs
-            {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
-          </CardTitle>
-          <div className="flex flex-wrap gap-1.5">
-            {Object.entries(status.jobs).map(([key, count]) => (
-              <StatusBadge key={key} status={jobStatus(key)}>
-                {key}: {count}
-              </StatusBadge>
-            ))}
-          </div>
-        </CardHeader>
-        <CardContent>
-          <DataTable
-            rows={jobs}
-            getRowId={(job) => job.id}
-            filterPlaceholder="Filter jobs"
-            empty="No jobs yet."
-            initialSort={[{ id: "created", desc: true }]}
-            columns={[
-              {
-                id: "kind",
-                header: "Kind",
-                sortable: true,
-                sortValue: (job) => job.kind,
-                className: "font-mono",
-                cell: (job) => job.kind,
-              },
-              {
-                id: "status",
-                header: "Status",
-                sortable: true,
-                // Sorted by how much attention it deserves, not alphabetically.
-                // `failed` before `queued` is the order an operator scans in;
-                // alphabetical would bury it under `expired` and `queued`.
-                sortValue: (job) => JOB_ORDER.indexOf(job.status),
-                cell: (job) => (
-                  <StatusBadge status={jobStatus(job.status)}>
-                    {job.status}
+        <div className="summary-wide">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                Jobs
+                {stale ? <StatusBadge status="unknown">stale</StatusBadge> : null}
+              </CardTitle>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(status.jobs).map(([key, count]) => (
+                  <StatusBadge key={key} status={jobStatus(key)}>
+                    {key}: {count}
                   </StatusBadge>
-                ),
-              },
-              {
-                id: "attempts",
-                header: "Attempts",
-                sortable: true,
-                sortValue: (job) => job.attempts,
-                headerClassName: "text-right",
-                className: "text-right font-mono tabular-nums",
-                cell: (job) => `${job.attempts}/${job.max_attempts}`,
-              },
-              {
-                id: "error",
-                header: "Error",
-                // Deliberately unsortable: there is no meaningful order over
-                // free text, and a sort button implies there is one. Wraps:
-                // table cells are `nowrap`, and an error set on one line ran
-                // 176px into the next column and printed over its timestamp.
-                className: "max-w-[36ch] whitespace-normal text-blocked text-pretty",
-                cell: (job) => job.error ?? "",
-              },
-              {
-                id: "created",
-                header: "Created",
-                sortable: true,
-                sortValue: (job) => job.created_at ?? "",
-                className: "text-ink-muted whitespace-nowrap",
-                cell: (job) => fmtInstant(job.created_at),
-              },
-            ]}
-          />
-        </CardContent>
-      </Card>
+                ))}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {/*
+                `stagger`: this table mounts once, with the first reading, and
+                stays mounted through every poll after it — a failed refresh
+                keeps the reading and marks it stale rather than unmounting
+                it — and each row is keyed by its job id. So the rows rise
+                once, and later only a new job does.
+              */}
+              <DataTable
+                label="Jobs"
+                rows={jobs}
+                getRowId={(job) => job.id}
+                filterPlaceholder="Filter jobs"
+                empty="No jobs yet."
+                initialSort={[{ id: "created", desc: true }]}
+                stagger
+                columns={[
+                  {
+                    id: "kind",
+                    header: "Kind",
+                    sortable: true,
+                    sortValue: (job) => job.kind,
+                    className: "font-mono",
+                    cell: (job) => job.kind,
+                  },
+                  {
+                    id: "status",
+                    header: "Status",
+                    sortable: true,
+                    // Sorted by how much attention it deserves, not alphabetically.
+                    // `failed` before `queued` is the order an operator scans in;
+                    // alphabetical would bury it under `expired` and `queued`.
+                    sortValue: (job) => JOB_ORDER.indexOf(job.status),
+                    cell: (job) => (
+                      <StatusBadge status={jobStatus(job.status)}>
+                        {job.status}
+                      </StatusBadge>
+                    ),
+                  },
+                  {
+                    id: "attempts",
+                    header: "Attempts",
+                    sortable: true,
+                    sortValue: (job) => job.attempts,
+                    headerClassName: "text-right",
+                    className: "text-right font-mono tabular-nums",
+                    cell: (job) => `${job.attempts}/${job.max_attempts}`,
+                  },
+                  {
+                    id: "error",
+                    header: "Error",
+                    // Deliberately unsortable: there is no meaningful order over
+                    // free text, and a sort button implies there is one. Wraps:
+                    // table cells are `nowrap`, and an error set on one line ran
+                    // 176px into the next column and printed over its timestamp.
+                    className: "max-w-[36ch] whitespace-normal text-blocked text-pretty",
+                    cell: (job) => job.error ?? "",
+                  },
+                  {
+                    id: "created",
+                    header: "Created",
+                    sortable: true,
+                    sortValue: (job) => job.created_at ?? "",
+                    className: "text-ink-muted whitespace-nowrap",
+                    cell: (job) => fmtInstant(job.created_at),
+                  },
+                ]}
+              />
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </>
   );
 }

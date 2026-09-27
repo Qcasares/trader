@@ -175,12 +175,38 @@ SMALL_TEXT_JS = """(minimum) => {
 }"""
 
 
+#: True once no finite animation is running: a list's rows rising into place
+#: (web/DESIGN.md M-12), a transition part way. A loop — the live pulse
+#: (M-10), the loading sweep — never ends, so it is left out here and frozen
+#: by the screenshot instead (``animations="disabled"``).
+FINITE_ANIMATIONS_DONE = """() => document.getAnimations().every(
+  (a) => a.playState !== 'running'
+    || (a.effect !== null && a.effect.getComputedTiming().iterations === Infinity))"""
+
+
 def log(*args: object) -> None:
     print(*args, flush=True)
 
 
+def settle(page: Page, timeout_ms: int = 20000) -> None:
+    """Wait until nothing finite is still moving.
+
+    An entrance that is still running is a page caught half-drawn: a row part
+    way through its fade measures as low contrast to axe (1.5-4.3:1 on /system
+    150ms after its rows mounted, 0 violations from 300ms), and a capture of
+    it differs from the next one. The entrance ends within 520ms (M-12), but a
+    poll can mount a new row just before a scan, so each scan waits for this
+    itself rather than trusting a fixed pause taken earlier.
+    """
+    try:
+        page.wait_for_function(FINITE_ANIMATIONS_DONE, timeout=timeout_ms)
+    except Exception:  # noqa: BLE001
+        log("   still animating after", timeout_ms, "ms")
+
+
 def wait_ready(page: Page, timeout_ms: int = 20000) -> None:
-    """networkidle, then no skeleton (``aria-busy``), then 700ms to settle."""
+    """networkidle, then no skeleton (``aria-busy``), then nothing finite still
+    moving, then 700ms to settle."""
     try:
         page.wait_for_load_state("networkidle", timeout=timeout_ms)
     except Exception:  # noqa: BLE001 - polling pages never go idle
@@ -191,6 +217,7 @@ def wait_ready(page: Page, timeout_ms: int = 20000) -> None:
         )
     except Exception:  # noqa: BLE001
         log("   still busy after", timeout_ms, "ms")
+    settle(page, timeout_ms)
     page.wait_for_timeout(700)
 
 
@@ -277,7 +304,16 @@ def capture(
     page.add_style_tag(content=HIDE_DEV_OVERLAY)
     page.wait_for_timeout(150)
     name = f"{slug}__{vp}__{scheme}"
-    page.screenshot(path=str(SHOTS / f"{name}.png"), full_page=True)
+    # `disabled`: a finite animation still running is finished first, and a
+    # loop is cancelled for the shot. The live pulse (M-10) breathes forever,
+    # so without this each capture of /system and /programme froze its halo at
+    # whatever phase the timing hit — on /system 1.28-1.45s into a 2.4s breath,
+    # its steepest fall — and two captures of one state differed by ~200px
+    # inside the worker's chip, which undid the within-machine pixel
+    # comparison E-12 promises. Cancelled, the halo draws its still 40 %.
+    page.screenshot(
+        path=str(SHOTS / f"{name}.png"), full_page=True, animations="disabled"
+    )
 
     device = VIEWPORTS[vp]["viewport"]["width"]
     found = {

@@ -69,8 +69,9 @@ refuses an APPROVED row in §12 that names no owner, date or basis, and a rule w
 
 ### 0.2 Owner decisions
 
-The owner, Quentin Casares, answered these in the session of 2026-09-26, through a structured question. Each is quoted
-as decided. §12 records each as an APPROVED row, and each rule it settles is APPROVED where it appears.
+The owner, Quentin Casares, answered these through structured questions: OD-1 to OD-4 in the session of 2026-09-26,
+OD-5 to OD-8 in that of 2026-09-27 (§0.5). Each is quoted as decided. §12 records each as an APPROVED row, and each
+rule it settles is APPROVED where it appears.
 
 - **OD-1** — **Ownership and location** (answers Q-28 and Q-1). "The owner approves design rules. The design
   system lives in `web/`: `web/REFERENCE.md`, `web/DESIGN.md`, `web/design-tokens.json`, `web/examples/`, and a short
@@ -88,6 +89,26 @@ as decided. §12 records each as an APPROVED row, and each rule it settles is AP
 - **OD-4** — **Absent values** (answers Q-10 and settles H-17). "An absence says why: 'not measured' for a
   metric never computed, 'no data' for an observation that never arrived, 'missing' plus the reason for a required
   field. Never a bare dash, never 0." *Settles:* H-3r and H-17.
+- **OD-5** — **Typeface** (2026-09-27). Geist and Geist Mono, "Self-hosted from the geist npm package through
+  next/font: no request to any third party, and every OS renders identical glyphs, which also makes screenshot
+  comparisons stable across machines. Figures stay tabular. Replaces T-10." *Settles:* T-10. *Revisits:* E-12.
+  *Open:* Q-36. Neither face carries ✓, ✕ or ■, three of the status glyphs, so "every OS renders identical glyphs"
+  holds for every character but those; each OS draws them from its own fonts (T-10, E-12). Found in review on
+  2026-09-27, after the answer, and put back to the owner rather than decided here.
+- **OD-6** — **Motion** (2026-09-27). "State-bound motion": "CSS only, no new dependency: a tactile press on buttons,
+  a short staggered fade-in when a list first loads (with a reduced-motion alternative), and a live dot that pulses
+  only while the worker's heartbeat is fresh and goes still when it is stale. Nothing loops unless it reports real
+  state." Answered within the question's own condition: no movement on the kill switch or the live gates, and nothing
+  animated so that it implies liveness. *Settles:* M-3, M-10, M-11, and M-1's loop. *Leaves to this contract:* the
+  stagger's step, cap and delays (M-12); the halo's drawing, and what a page counts as a fresh reading (M-10r).
+- **OD-7** — **Layout** (2026-09-27). "Asymmetric, hairline": "Keep hairline cards, 6px radius and no shadows; lay
+  summary pages out as an asymmetric grid (e.g. 2fr/1fr) grouping what belongs together. Data pages keep full-width
+  tables. Phones fall back to one column." *Settles:* S-7, L-4's Summary grid, S-6's container radius. *Confirms:*
+  C-8a, L-3's full-width data.
+- **OD-8** — **Density** (2026-09-27). "Dense data, airier prose": "Tables, figures and metadata stay 12-13px so a
+  screen holds a full job list; body prose moves to 15px with more space between sections; hierarchy by weight and
+  colour, not size." *Settles:* S-2 (Q-12: 24px) and the body size in §2. The 24px is the target its preview named;
+  that preview misstated the old section gap, and the difference is open as Q-37 (§0.5).
 
 Recorded with these, as already following from the honesty rules rather than as a question put to the owner: a
 percentage is formatted from the stored fraction by one shared formatter, never by appending "%" to a raw fraction.
@@ -119,6 +140,64 @@ refusal is louder than a pass, because "an operator opens this to find out what 
 and not grey, because an unmeasured figure in the quietest colour available is "the easiest thing on the page to miss"
 (:89-99); figures in mono and words in sans (:129-132); motion that "reports a change and does nothing else" (:193).
 REFERENCE Appendix A has the full text. The rules below cite the lines they adopt.
+
+### 0.5 The design-taste skill, 2026-09-27
+
+On 2026-09-27 the owner invoked a generic frontend skill, `design-taste-frontend`, on this UI. It sets three dials —
+design variance 8, motion intensity 6, visual density 4 — and a list of directives written for marketing pages and
+SaaS dashboards in general. Where they met this contract they conflicted with it, and `web/CLAUDE.md` sends a conflict
+to the owner. Four were put as structured questions and answered as OD-5 to OD-8 (the decision log quotes each, with
+the preview the owner saw). The rest were decided under rules that already bind, without asking, and are recorded here
+with the rule that decides each, so that the next run of the skill need not reopen them.
+
+| The skill asked for | What became of it | Decided by |
+|---|---|---|
+| Geist + Geist Mono for dashboards; no Inter, no serif | adopted: self-hosted through `next/font/local` from `geist` 1.7.2, pinned exactly; three status glyphs the faces lack still come from each OS (Q-36) | OD-5, T-10 |
+| Motion intensity 6: spring physics on every interactive element, `transition: all 0.3s`, waterfall reveals at 100ms a step, `layout`/`layoutId` transitions | a press, a first-load stagger at 40ms a step capped at the ninth row, and the live pulse; CSS only, nothing that runs once over 250ms | OD-6; M-1, M-2, M-12 |
+| Tactile feedback on `:active`: `-translate-y-[1px]` or `scale-[0.98]` | adopted as `active:translate-y-px`: a step down, not up, and no arbitrary value | OD-6; T-1, S-1; K-8 |
+| Perpetual micro-interactions — pulse, typewriter, float, shimmer, carousel — in status dots and backgrounds; a list that re-sorts itself on a loop | declined: nothing loops unless it reports real state, and the one decorative loop, the live pulse, runs only while its reading is fresh | OD-6; M-3, M-10; `repo:CLAUDE.md` "A dead worker looks dead"; E-13 |
+| Magnetic buttons, cursor-tracking tilt and spotlight cards, custom cursors | declined | OD-6 ("CSS only"); M-3 (a pull toward the pointer reports neither a state nor a change) |
+| Framer Motion (`useMotionValue`, `AnimatePresence`, springs), GSAP, Three.js | declined: no new dependency | OD-6; M-4 |
+| Asymmetric bento grids with fractional tracks, one column on phones | adopted for the three summary pages as `.summary-grid`, 2fr/1fr from `lg` (the skill falls back below 768px; here the sidebar leaves 512px at 768px) | OD-7; L-2, L-4 |
+| `rounded-[2.5rem]` containers, diffusion shadows tinted to the background, "liquid glass" | declined: hairline cards, a 6px radius, no shadows | OD-7; C-8a, S-6, S-7 |
+| Density 4, "daily app": larger text and more space | tables, figures and metadata keep 11–13px; body prose 15px; sections 24px apart; what counts as prose defined on 2026-09-27, after the summary pages were found to hold none at 15px | OD-8; S-2; T-11 |
+| Display headings at `text-4xl md:text-6xl tracking-tighter` | declined: seven fixed sizes, the h1 at 23px; the skill's own "no oversized H1s" agrees | T-1, T-9; OD-8 (hierarchy by weight and colour) |
+| Icons from `@phosphor-icons/react` or `@radix-ui/react-icons` only | not adopted; put to the owner | K-9; OD-3 (shadcn, configured with lucide); Q-35 |
+| No pure black: an off-black | adopted where it applied: the sheet's `bg-black/50` became the `--scrim` token | C-9 |
+| "Organic", messy figures and invented names in place of round placeholders | declined in product UI: every figure is measured, labelled absent or labelled synthetic | `repo:CLAUDE.md` honesty rules; OD-4, H-7 |
+| Centred heroes forbidden above design variance 4 | declined for `/login`, which stays centred: a single form is not a hero | L-1 |
+| `max-w-[1400px] mx-auto` containment | not adopted | L-3 (a `main` maximum is Q-15, open) |
+| A `#f9fafb` page, white cards, `border-slate-200/50`; one accent under 80 % saturation; no AI purple | the palette stands, tokens only; the accent was already a low-chroma steel | C-1, C-7, C-11 |
+| Skeletons over spinners; loading, empty and error states; labels above inputs, 8px apart | already rules here | M-8, E-7, E-9, K-5, S-4 |
+
+Decided under the rules rather than asked, each with the rule that decides it:
+
+- *No movement of any kind on a safety control, not even the press.* C-12 names them — the kill switch and the three
+  live-order gates on `/system` — and the OD-6 question stated the condition the owner answered within. A press
+  acknowledges a click, not a result, and on the kill switch the only thing an operator should read as "done" is the
+  switch's own reported state. M-11; `STILL` in `lib/motion.ts`.
+- *Nothing loops unless it reports real state* — no perpetual micro-interaction, typewriter, carousel, self-sorting
+  list or shimmer loop — because a loop that runs whatever happens makes a dead worker look alive (`repo:CLAUDE.md`,
+  "A dead worker looks dead"; E-13). The loading skeleton's sweep does loop, and stays: it reports a state, a load in
+  flight, and is gone when the load is (M-8, M-1).
+- *No magnetic or cursor-following control, and no framer-motion*: OD-6 is "CSS only, no new dependency".
+- *No fabricated "organic" numbers* in product UI: the honesty rules; synthetic data is labelled everywhere (H-7).
+- *No shadows and no large radii*: the owner chose hairline (OD-7).
+- *Icons stay lucide* (K-9; shadcn is canonical under OD-3, and `components.json` configures it with lucide). The
+  skill's Phosphor or Radix preference is open as Q-35.
+- *The login page stays centred*: a single form, not a hero (L-1).
+
+Adopted from the skill beyond the four answers: the sheet's pure-black scrim became the `--scrim` token C-9 already
+proposed — this palette's off-black, one value in both schemes, drawn at 50 % as the black was (§1).
+
+**A misstatement in the OD-8 preview.** The preview beside the density question said "Section gap 16px -> 24px". The
+contract's S-2 put page sections 12px apart (REFERENCE §4.2); 16px is the page header to its first section (S-3), a
+different gap, which OD-8 did not touch. The answer itself says only "more space between sections": the 24px comes
+from the preview, the target the option the owner chose carried. So S-2 is 24px, as that option showed — but the owner
+was shown a step from 16px, half again, and what ships is a step from 12px, twice what shipped. An earlier version of
+this note, and of the decision log, called 24px "the one the answer states"; it is not, and a gap between what the
+owner was shown and what ships is the owner's to settle (`web/CLAUDE.md`). It is put to them as Q-37, and 24px stands
+meanwhile.
 
 ---
 
@@ -153,6 +232,7 @@ colour (`globals.css:752`) and shadcn's `bg-primary` / `ring` inside `Button`.
 | A safety switch that is off: the fill of the `stopped` chip (C-12r). **PROPOSED** (Q-34): shipped by the adopting change, not yet approved | `--stopped` | `bg-stopped`, `border-stopped` (inside `StatusBadge` only) | — | `color.signal.stopped` |
 | Text and glyph on a `--stopped` plate. **PROPOSED** (Q-34) | `--stopped-ink` | `text-stopped-ink` (inside `StatusBadge` only) | — | `color.signal.stopped-ink` |
 | Met, passed, alive | `--settled` | `text-settled` | — | `color.signal.settled` |
+| The shade behind a modal sheet, drawn at 50 %: one value in both schemes, since 2026-09-27 (C-9); its value is this contract's | `--scrim` | — | `bg-scrim/50` (`ui/sheet.tsx`) | `color.surface.scrim` |
 
 Values, both themes: `design-tokens.json` (`$value` = the unconditional `:root` palette, which is the dark one;
 `$extensions["com.github.qcasares.trader"].light` = the `prefers-color-scheme: light` palette).
@@ -164,7 +244,7 @@ not missing: the adopting change declared them in `globals.css` for C-12r, and t
 | PROPOSED token | Replaces | Value |
 |---|---|---|
 | `--blocked-ink` | `text-white` (`ui/button.tsx:14`), `oklch(0.99 0 0)` (`globals.css:632`) | **TBD** — must clear 4.5:1 on the destructive fill at rest *and* hover in both themes; white gives 5.65/9.21 at rest and **3.22** on dark hover (REFERENCE §2.6) |
-| `--scrim` | `bg-black/50` (`ui/sheet.tsx:39`) | black at 50 %, as shipped |
+| `--scrim` | `bg-black/50` (`ui/sheet.tsx:39`) | black at 50 %, as shipped. *Shipped 2026-09-27:* not black but this palette's off-black, `oklch(0.130 0.010 255)` (`#05070b`), darker than `--bg` so it shades the dark page rather than fogging it; one value in both schemes, as the black was; still drawn at 50 %, where the overlay is (`bg-scrim/50`), because the token file mirrors opaque colours only. The taste skill's "no pure black", adopted under C-9 (§0.5) |
 | `--warn-surface` / `--warn-edge` | `.banner-warn` mixes | `--unknown` at 10 % / 42 % (`globals.css:490-493`) |
 | `--info-surface` / `--info-edge` | `.banner-info` mixes | `--accent` at 10 % / 38 % (`:494-497`) |
 | `--bad-surface` / `--bad-edge` | `.banner-bad` mixes | `--blocked` at 12 % / 48 % (`:498-501`) |
@@ -247,8 +327,8 @@ is not yet a rule. Line-heights come from Tailwind's defaults and element rules,
 |---|---|---|---|---|---|
 | `--t-xs` | 0.6875 | 11 | `text-xs` | 14.67 (Tailwind default ratio) | uppercase labels, metric keys, pills (`0ec084f:DESIGN.md:114`); as shipped also table heads |
 | `--t-sm` | 0.75 | 12 | `text-sm` (**not 14px**) | 17.14 | table cells, dense metadata (`globals.css:104`); as shipped also shadcn buttons, labels and desktop inputs — which the stated source puts at 13px (Q-29) |
-| `--t-base` | 0.8125 | 13 | `text-base` (**not 16px**) | 19.5 | secondary prose, inputs, buttons (`0ec084f:DESIGN.md:116`); as shipped also banners, legacy controls and phone-width shadcn inputs |
-| `--t-body` | 0.875 | 14 | `text-body` | 21.7 (body 1.55) | body |
+| `--t-base` | 0.8125 | 13 | `text-base` (**not 16px**) | 19.5 | secondary prose, inputs, buttons (`0ec084f:DESIGN.md:116`); as shipped also legacy controls, phone-width shadcn inputs and the metadata line under a detail page's title, and until 2026-09-27 banners and most intros (T-11) |
+| `--t-body` | 0.9375 | 15 | `text-body` | 23.25 (body 1.55) | body prose, since OD-8 (2026-09-27); 14px and 21.7 before; running prose, banners included, since T-11 |
 | `--t-md` | 1 | 16 | `text-md` | inherited | h3, metric values |
 | `--t-lg` | 1.1875 | 19 | `text-lg` | 24.7 (1.3) | h2; h1 at ≤640px |
 | `--t-xl` | 1.4375 | 23 | `text-xl` | 28.75 (1.25) | h1 |
@@ -286,7 +366,58 @@ is not yet a rule. Line-heights come from Tailwind's defaults and element rules,
 - **T-9** — Type sizes are fixed rem: no `clamp()`, no viewport units. The ≤640px h1 step (19px) is the one
   responsive size. *Basis:* `globals.css:99-102, :883`; `0ec084f:DESIGN.md:109-110`.
 - **T-10** — System stacks, no web font. Consequence: text width and wrapping are only comparable between
-  captures made on the same OS (E-12). *Basis:* `globals.css:92-97`; REFERENCE §3.1.
+  captures made on the same OS (E-12). *Basis:* `globals.css:92-97`; REFERENCE §3.1. *Since OD-5 (2026-09-27):*
+  superseded. Geist and Geist Mono come from the `geist` package, pinned at exactly 1.7.2 (SIL Open Font License),
+  through `next/font/local`: the build emits the two variable woff2 files into `.next/static/media` and preloads them
+  from the app's own origin, and a `next build` run with no network at all succeeds. `layout.tsx` puts
+  `GeistSans.variable` and `GeistMono.variable` on `<html>`, and `--sans` and `--mono` lead with the custom properties
+  they define. The variables are load-bearing: with one missing, its token is invalid and the page falls to the
+  browser's serif rather than to the stack, which `repo:tests/unit/test_web_taste.py` guards.
+
+  What sits behind each face was first written as "these stacks". It is not only them. Each `--font-geist-*` variable
+  carries a list the package sets: `"GeistSans", "GeistSans Fallback"`, the second a local Arial with metric overrides
+  that next/font generates; and `"GeistMono", ui-monospace, SFMono-Regular, Roboto Mono, Menlo, Monaco, Liberation Mono,
+  DejaVu Sans Mono, Courier New, monospace` (`geist/dist/mono.js`, `fallback`). The former stacks follow those, so
+  behind Geist Mono the generic `monospace` comes before "SF Mono", "JetBrains Mono" and Consolas, which are reached
+  only for a character the generic's font lacks. The pre-built `GeistMono` takes no `fallback` of ours; importing it,
+  as OD-5's "through next/font" and the layout do, means taking its list.
+
+  *An exception, recorded rather than decided (Q-36).* OD-5's reason was that "every OS renders identical glyphs", and
+  the first wording here said the same glyphs and advance widths everywhere. Neither face carries ✓ (U+2713), ✕
+  (U+2715) or ■ (U+25A0) — found in review on 2026-09-27, from the character maps of the two variable fonts the build
+  serves — and those are the `settled`, `blocked` and `stopped` glyphs every chip of those states draws (A-6), the kill
+  switch's "stopped" plate and an open live gate among them. Each OS draws them from its own fonts: on the Linux
+  capture VM, DejaVu Sans Mono draws ✓ and ✕ and Liberation Mono ■, so one row of chips mixes two or three faces. The
+  other three glyphs, ?, ▲ and •, are Geist Mono's. So chip widths, and the wrap points of a row of chips, still
+  differ between machines (E-12). The remedies — glyphs the face carries (× for ✕ is one; it has no check mark and no
+  square), or a small self-hosted symbol face behind Geist Mono in `--mono` — change what every status looks like,
+  which is the owner's to choose. `repo:tests/unit/test_web_taste.py` reads Geist Mono's character map where
+  `node_modules` is installed and fails if the glyphs the chips draw and the ones this rule names as missing ever
+  disagree.
+- **T-11** — What counts as prose. OD-8 moved "body prose" to 15px and kept "tables, figures and metadata" at 12–13px,
+  and said nothing of what lies between; the second review of 2026-09-27 found OD-8 visible nowhere on the summary
+  pages — every sentence on `/system`, `/programme` and `/portfolio` was 12px (`text-sm`) or 13px (intros, banners), the
+  only 15px text there the card titles — and page intros 15px on two pages (`/`, `/backtests`, through `.subtitle`)
+  and 13px on the rest. So: a running sentence read as text is prose — a page intro, the paragraph that explains a card,
+  an empty state's explanation, a banner's text — and is `text-body`; what labels or annotates a value is not — a
+  caption, a hint tied to its control (`aria-describedby`, as the autonomy ceiling's is), a timestamp ("Read at …",
+  "last changed by … at …"), a label, a count ("5 candidates"), an identifier or metadata line (the chips under a
+  candidate's title, a run's id and universe), a table cell, a chip — and keeps its 11–13px step however much it reads
+  like a sentence. `.banner` itself moved to `--t-body`, the class being the banner's one owner (K-1), where its 13px had
+  been "secondary prose" (the first wording of `--t-base`'s job). Hierarchy stays with weight and colour (OD-8): a card
+  title is the body's size too, 600 in `--text`, and the prose under it 400, mostly `--muted`; the kill switch's halted
+  note and its sentence about the venue stay in `--text`, set apart from "Trading" by weight alone, because what they
+  say is the safety state. A card's prose keeps T-8's measure, `max-w-prose` (65ch): at 15px across the 740px main
+  column a line ran to 110 characters, and across the board's full-width card to 150. A banner is a box and runs its
+  width. *Basis:* OD-8; T-8; the review's probe of the three pages. *Today:* every intro, every banner and all running
+  prose on the three summary pages; the paragraphs in the cards of the detail and data pages (the candidate, experiment
+  and hypothesis pages, backtest detail, the daily report's cards, configuration) are still `text-sm`. Measured against
+  the production build with the API mocked: at 390px in both schemes on the three summary pages, `/login`, the report,
+  the programme's configuration, findings and hypotheses, no page wider than the device and no text under 11px; every
+  intro changed renders at 15px at 1440 and 390; card titles 15px/600 over prose 15px/400, cells 12px. *Check:* `repo:tests/unit/test_web_taste.py` reads every page's intro,
+  every banner and every paragraph of the three summary pages, and refuses `text-xs`, `text-sm` or `text-base`, a
+  legacy class sized below 15px, a title's weight, and a card paragraph with no measure; its reader is proved on a
+  synthetic page first.
 
 ## 3. Spacing, radius, borders, elevation, stacking
 
@@ -296,9 +427,9 @@ is not yet a rule. Line-heights come from Tailwind's defaults and element rules,
 |---|---|---|---|
 | `--s-1` | 4 | `1` | h1→intro (`mb-1`), metric key→value, legacy `.pill` glyph gap (`globals.css:680`; the `StatusBadge` glyph gap and chip rows are 6px, `gap-1.5`, `ui/badge.tsx:37`, `system/page.tsx:323`) |
 | `--s-2` | 8 | `2` | table cell padding, label→control (`space-y-2`) |
-| `--s-3` | 12 | `3` | **section→section**, card inner gap, metric cell padding, banner padding |
+| `--s-3` | 12 | `3` | section→section until OD-8, card inner gap, metric cell padding, banner padding |
 | `--s-4` | 16 | `4` | card padding, header→first block (`mb-4`), phone gutter |
-| `--s-5` | 24 | `6` | desktop gutter (`md:px-6`) |
+| `--s-5` | 24 | `6` | desktop gutter (`md:px-6`); **section→section** since OD-8 (S-2), and the summary grid's gaps (L-4) |
 | `--s-6` | 32 | `8` | legacy h2 top margin, which is what set the sidebar's group headings 48px apart with the nav's 16px gap; `AppNav` states it itself (`mt-8`) since K-15 scoped the rule away |
 | `--s-7` | 48 | `12` | empty-chart padding, footer bottom |
 
@@ -315,7 +446,14 @@ kept, as the token for the next sticky element, rather than deleted and re-added
   page (REFERENCE §4.2); disagrees with `0ec084f:DESIGN.md:139-140` ("sections breathe at `--s-6`") — Q-12. The two
   0px joins at `0ec084f` each involved a legacy `.card` (superseded, FX-8): both measured 12px on 2026-09-26 — the
   candidate page's gate under its Configuration card, and `/system/configuration`'s Credentials card under the "Save
-  changes" row.
+  changes" row. *Since OD-8 (2026-09-27):* 24px apart, Q-12 answered: the owner chose "more space between sections",
+  and the 24px is the target the chosen option's preview named. That preview put today's gap at 16px, which is S-3's
+  header gap, not this one, so the owner was shown a smaller step than ships (§0.5, Q-37). The rule's APPROVED text
+  once went on: "Inside a section the rhythm stays at 12px and under (S-5), so the air falls between groups, not
+  within them." Nobody decided that — OD-8 speaks of the space between sections, S-5 sets padding and not rhythm — and
+  the pages this change rebuilt keep 16px inside sections (`/programme`'s Autonomy card, `mt-4`; the candidate page's
+  Decision card, `space-y-4`; the 16px under every `.metric-grid`). It was taken out on 2026-09-27; the rhythm within a
+  section is not a rule.
 - **S-3** — Page header block → first section: 16px (`mb-4`, 11 pages); the `.subtitle` 24px margin is the
   exception to retire. *Basis:* REFERENCE §4.2.
 - **S-4** — Label → control: 8px (`space-y-2`); the legacy `label { margin-bottom: 12px }` never reaches a
@@ -329,7 +467,8 @@ kept, as the token for the next sticky element, rather than deleted and re-added
   *Basis:* REFERENCE §4.7; OD-3.
 - **S-7** — No shadows in product code: hierarchy comes from the surface steps (`bg` → `panel` → `panel-2`)
   and hairlines. Tailwind's default shadows (hard-coded black alpha) stay confined to `components/ui`. *Basis:*
-  REFERENCE §2.3, §4.7. *Check:* §13 (a).
+  REFERENCE §2.3, §4.7. *Check:* §13 (a). *Since OD-7 (2026-09-27):* the owner's. The question put this rule as "no
+  shadows (S-7)" against the taste skill's soft tinted shadows, and the answer kept it as written.
 - **S-8** — Borders are 1px; the active nav item's 2px accent rule is the only heavier one. *Basis:*
   REFERENCE §4.7.
 - **S-9** — Stacking uses the named scale, never an arbitrary number; whether to bridge it into Tailwind or
@@ -361,6 +500,16 @@ kept, as the token for the next sticky element, rather than deleted and re-added
   | Page header row | `mb-4 flex flex-wrap items-end justify-between gap-3` | h1 + intro + actions |
   | Board | horizontal scroll, 208px columns, gap 12px, `scroll-snap-type: x` | the pipeline |
 
+  *Since 2026-09-27:* a Summary grid, the owner's (OD-7) — `.summary-grid`, one column, and from `lg` (64rem, so it
+  changes over with every `lg:` utility) `minmax(0, 2fr) minmax(0, 1fr)` with 24px gaps; `.summary-main` and
+  `.summary-side` stack their sections 24px apart, main first in source order so a phone reads it first;
+  `.summary-wide` spans both. `minmax(0, …)` because a bare `fr` track will not shrink below its widest unbreakable
+  content (E-2, L-6) — the one column below `lg` included, which is spelled `minmax(0, 1fr)` rather than left
+  implicit, and every region also sets `min-width: 0`: with an implicit column, `/programme`'s board made a 390px
+  page 2018px wide. The grid carries that, so a page using it adds no `min-w-0` of its own. It starts at `lg` rather
+  than `md`, where the skill's own fallback sits, because at 768px the sidebar leaves the content 512px. The Two-up gap
+  follows S-2 to 24px (`gap-6`), since paired cards are two sections.
+
 - **L-5** — A metric grid never paints an empty track (a 766×66px `--border` block on Portfolio at
   `0ec084f`). *Basis:* O-18; ES P-16.
 - **L-6** — The document never scrolls sideways; wide content scrolls inside its own focusable, labelled
@@ -379,6 +528,9 @@ kept, as the token for the next sticky element, rather than deleted and re-added
 | Shell, navigation | `AppShell`, `AppNav` | shipped | — |
 | Section surface | `Card` (`ui/card.tsx`), hairline `--border` edge, title an `h2` | **canonical** (OD-3, K-16, C-8a) | done: the legacy `.card` and `.card-head` are gone (`/system/configuration`, `GateChecklist`; FX-8) |
 | Domain status | `StatusBadge` + its mappers (`jobStatus`, `livenessStatus`, `killSwitchStatus`, `liveGateStatus`, `promotionGateStatus`) | **canonical** (OD-3, K-16); the `stopped` state of C-12r lives here (FX-12) | done: `.pill-*` and `.badge` are gone (FX-9). Still to merge: the per-page status maps (`CANDIDATE_STATUS` ×2, `CONCLUSION_STATUS` ×2, …) into one mapper module |
+| A fail-closed switch's reading | `SafetyState` (in `StatusBadge.tsx`): the switch's chip, or the `unknown` "not read" beside "last read: …" when the page's refresh failed (G-2, E-13) | shipped; written for `/system`'s kill switch and gates (FX-23), moved beside the chip on 2026-09-27 when `/programme`'s switch needed it too | — |
+| Liveness | `lib/heartbeat.ts`: `isAlive` (fresh *and* saying `'alive'`), `livenessWord`, `byWorkerId` (G-4, M-10r) | shipped 2026-09-27 | three pages that read `stale` themselves, `/system` showing the stored word |
+| A scroller's overflow | `lib/overflow.ts`: `useOverflows`, which makes a sideways scroller a named region while it scrolls (A-7) | shipped; moved out of `ui/table.tsx` on 2026-09-27 for the pipeline board | the board's plain `overflow-x-auto` div |
 | Model-authored marker | `AiBadge` (`GateChecklist.tsx:117-124`) | shipped; renders through the one chip | `.badge` for "AI-authored" |
 | Action | `Button` (`ui/button.tsx`) | **canonical** (OD-3, K-16) | legacy `button`, `button.primary`, `.linklike`, raw `<button>` in sort headers and the reveal toggle |
 | Field | `Input`, `Label`, `Select` (`ui/`) | **canonical** (OD-3, K-16) | legacy `label > span`, native `select`, `.hint` |
@@ -408,7 +560,8 @@ kept, as the token for the next sticky element, rather than deleted and re-added
 - **K-3** — Every interactive component implements default, hover, `:focus-visible`, active and disabled,
   plus invalid (`aria-invalid`) for fields and busy (`aria-busy` + changed label) for committing actions. At `0ec084f`
   shadcn buttons had no active style, `aria-invalid` was never set, and no component had a busy state. *Basis:*
-  `0ec084f:DESIGN.md:157`; REFERENCE §6.2 / EC §5.2.
+  `0ec084f:DESIGN.md:157`; REFERENCE §6.2 / EC §5.2. *Since OD-6 (2026-09-27):* the `Button`'s active state is the
+  press, `active:translate-y-px`; a safety control's is deliberately none (M-11).
 - **K-4** — Button variant by job: `default` (filled accent) = the committing action; `outline` = other
   actions; `ghost` = navigation, back, per-row "view"; `link` = inline. Whether stopping actions are filled
   `destructive` is Q-8; whether a disabled primary keeps its fill is Q-7. *Basis:* `0ec084f:DESIGN.md:159-164`;
@@ -430,15 +583,28 @@ kept, as the token for the next sticky element, rather than deleted and re-added
     the `stopped` plate (C-12r) and `caution`, `unknown`'s classes under the ▲ glyph (C-5).
   - `button.tsx`: no focus ring (A-4); `transition-colors` instead of `transition-all`, which animated the outline in;
     a `ghost` or `outline` button rendered as a link takes the link colour (`[a&]:text-primary`), which the legacy
-    `a` rule supplied until K-15 scoped it away (as a `<button>` each keeps the text colour).
+    `a` rule supplied until K-15 scoped it away (as a `<button>` each keeps the text colour). Since 2026-09-27, the
+    press: `active:translate-y-px` in the base classes, the owner's (OD-6), the first vendored edit an owner decided
+    rather than a defect or a token. A step, not a travel, because `transition-colors` carries no `translate`; a
+    safety control undoes it with `STILL` (`lib/motion.ts`, M-11), which tailwind-merge lets replace it in `cn()`.
   - `input.tsx`: no focus ring (A-4); mono, tabular and the text colour stated in the component, where the legacy
     `input` rule used to supply them (K-15).
   - `select.tsx`: no focus ring and no suppressed outline on the trigger or an option (A-4); no `tw-animate-css`
     classes (M-4).
   - `sheet.tsx`: no enter or exit animation (M-4); the close button is a 32px target with the one focus indicator,
-    its icon `aria-hidden` (A-4, A-10).
+    its icon `aria-hidden` (A-4, A-10). Since 2026-09-27 the overlay is `bg-scrim/50`, the `--scrim` token, where it
+    was the palette literal `bg-black/50` (C-9).
   - `table.tsx`: the head is the 11px caps label ruled in `--border-strong`, rows rule in the hairline (K-6, K-15); the
     container is a focusable region, named by the `label` prop, while — and only while — the table overflows (A-7).
+    Since 2026-09-27 the `label` is required, and `DataTable` requires and passes one too: optional, it left
+    `/portfolio`'s positions, moved into the 1fr column by OD-7, a tab stop announced as nothing between 1024 and about
+    1190 CSS px, and the jobs, backtests, findings and hypotheses tables the same at phone width, as they had been
+    since the adopting change made the scroller focusable (FX-17); the daily report's workers table passed none
+    either. And the container clips its y axis (`overflow-y-hidden`): a row rising into place (M-12) overhung it by
+    4px, and `overflow-x: auto` alone makes y `auto`, so a vertical scrollbar came and went through every entrance.
+    Since the second review of 2026-09-27 the overflow hook it defined lives in `lib/overflow.ts`, imported here and by
+    the pipeline board (A-7), so the two scrollers become a region by one measure; `shadcn add` would drop the import
+    with the rest.
   - `dropdown-menu.tsx`, `tooltip.tsx` (both unused): no animation classes (M-4); no suppressed outline on a menu
     item (A-4).
 - **K-9** — Icons are lucide, `aria-hidden` when decorative (including inside `ui/`), one distinct icon per
@@ -446,7 +612,8 @@ kept, as the token for the next sticky element, rather than deleted and re-added
   (`AppNav.tsx:133`, `DataTable.tsx:155`, `SecretField.tsx:176,178`); 16px inside a `Button`, which sizes any unsized
   icon (`[&_svg:not([class*='size-'])]:size-4`, `ui/button.tsx:8`; `compiled:2654-2657`); 12px for the sort glyphs
   (`size-3`, `DataTable.tsx:196-202`). Whether these become one size is not settled. *Basis:* REFERENCE §6.1; EC §1.4(e),
-  §4.3 (`Activity` twice), §7.2.
+  §4.3 (`Activity` twice), §7.2. *Since 2026-09-27:* the taste skill requires Phosphor or Radix icons; lucide stays,
+  as the set shadcn is configured with (`components.json`, `iconLibrary`) under OD-3, until the owner answers Q-35.
 - **K-10** — Every route lights exactly one nav item; detail routes light their parent. *Basis:*
   `components/AppNav.tsx:24-28`; the candidate and experiment pages light none (REFERENCE §6.1).
 - **K-11** — Committing or raising actions confirm through `TypedConfirm`; `window.prompt` is not used.
@@ -487,7 +654,7 @@ disagrees with it. OD-3 settled what the "Open" column used to ask about the car
 | Component | Parts, in order | Measurements as shipped | Open / do not copy |
 |---|---|---|---|
 | `Card` | container → header (title, then count or chips, then right-aligned action) → content | `--panel` fill; 1px border, which is `--border` (C-8a; `currentColor` at `0ec084f`, FX-8); radius 6px; 16px vertical padding, 16px inner horizontal; 12px gap; 8px between the header's rows (`gap-2`, `ui/card.tsx:35`); title 14px/600 | title element, size and weight (T-5, Q-9) |
-| `StatusBadge` | glyph (empty alternative text) → word, 6px apart | 11px, 500, mono, lowercase as written; padding 2px 8px; about 20.7px tall; `--panel-2` fill; signal-colour text and a 40 % signal edge, except `mute`: `--border` edge, `--muted` text (`ui/badge.tsx:61-65`); fully round | `stopped` (C-12r) came after the survey: a `--stopped` plate and edge, `--stopped-ink` text at 600, glyph ■; its tokens wait on Q-34. So did `caution` (C-5): `unknown`'s amber text and edge under ▲, what `.pill-warn` drew for a gate not yet passed |
+| `StatusBadge` | glyph (empty alternative text) → word, 6px apart | 11px, 500, mono, lowercase as written; padding 2px 8px; about 20.7px tall; `--panel-2` fill; signal-colour text and a 40 % signal edge, except `mute`: `--border` edge, `--muted` text (`ui/badge.tsx:61-65`); fully round. Since 2026-09-27, given `pulse` (M-10r): a 1px ring 3px outside the chip in its text colour, on its `::after`, at 40 % still and breathing 10–60 % over 2.4s | `stopped` (C-12r) came after the survey: a `--stopped` plate and edge, `--stopped-ink` text at 600, glyph ■; its tokens wait on Q-34. So did `caution` (C-5): `unknown`'s amber text and edge under ▲, what `.pill-warn` drew for a gate not yet passed |
 | `Button` | optional icon (16px, `aria-hidden`; `ui/button.tsx:8`) → label, 8px apart (6px at `sm`, :26) | default 36px tall, `sm` 32px; 12px/500; radius 6px | text size (Q-29); disabled fill (Q-7), stop fill (Q-8); the legacy 1px `--border-strong` edge and, on `ghost`/`icon`, the `--panel-2` fill and 7px 16px padding (K-15; superseded, FX-10) |
 | Field | `Label` → control → hint → error | label 12px/500; control 36px, 12px mono at ≥768px and 13px below, padding 4px 12px, `--border-strong` edge, radius 6px; hint 12px `--muted` | control text size (Q-29, Q-16; E-4 asks for nothing under 13px); label gap (S-4, Q-13); prose in mono (Q-11); input boundary 1.87–1.97:1 (A-3) |
 | `Banner` (PROPOSED wrapper of `.banner-*`) | optional bold lead sentence → body → optional remedy link | 1px tone edge; tone surface fill; radius 6px; padding 12px; 13px text; 12px below | — |
@@ -528,11 +695,18 @@ outline at 2px offset.
   nothing over 250ms. PROPOSED: bridge Tailwind's default transition duration and curve to `--fast`/`--ease` (150ms
   and `cubic-bezier(0.4,0,0.2,1)` at `0ec084f`; the sheet *declared* 300/500ms, `ui/sheet.tsx:63`, but nothing it
   transitioned moved, REFERENCE §6.6, and the adopting change removed the declaration with the classes, FX-22). Note the source's own range, "150-250ms" (`globals.css:125`), excludes
-  `--fast` = 140ms. *Basis:* `globals.css:124-130`; `0ec084f:DESIGN.md:190-192`; REFERENCE §6.6.
+  `--fast` = 140ms. *Basis:* `globals.css:124-130`; `0ec084f:DESIGN.md:190-192`; REFERENCE §6.6. *Since OD-6
+  (2026-09-27):* the ceiling is said of what runs once, transitions included, and the loops are named: the live pulse
+  (M-10), the one decorative loop, and the skeleton's sweep, which was here all along and reports a load in flight
+  (M-8). An entrance (M-12) takes `--base`. `repo:tests/unit/test_web_taste.py` reads every duration in `globals.css`
+  and every infinite animation, and refuses a loop bound to nothing.
 - **M-2** — Easing is `--ease` (`cubic-bezier(0.16, 1, 0.3, 1)`) only: no bounce, no elastic. *Basis:*
   `globals.css:125-128`.
 - **M-3** — Motion reports a change and does nothing else: no page-load choreography. *Basis:*
-  `0ec084f:DESIGN.md:193`.
+  `0ec084f:DESIGN.md:193`. *Since OD-6 (2026-09-27):* the owner's, and reworded to the decision: motion reports a
+  state or a change. The owner admitted three movements — a press, a list's first arrival, the live pulse — and one
+  principle: nothing loops unless it reports real state. A list's first arrival is a little page-load choreography,
+  which the first wording forbade; OD-6 allows it once per mount and never on a poll (M-12).
 - **M-4** — No class that compiles to nothing. The 55 `animate-in`/`fade-*`/`zoom-*`/`slide-*` classes either
   gain their library or go (Q-17). *Basis:* REFERENCE §6.6. *Today:* they went (FX-22), and
   `repo:tests/unit/test_web_components.py` refuses one unless `tw-animate-css` is both installed and imported.
@@ -549,6 +723,78 @@ outline at 2px offset.
   *Basis:* REFERENCE §6.2; `0ec084f:DESIGN.md:184-186`.
 - **M-9** — Stopping takes one action; starting or committing takes a deliberate one (a typed phrase). The
   API enforces the asymmetry; the UI makes it visible in the control's shape. *Basis:* `repo:PRODUCT.md:88-92`.
+- **M-10** — The live pulse: the worker's heartbeat chip breathes only while that heartbeat is fresh, and goes
+  still when it is stale; one breath is `--pulse-period` (2400ms) on `--ease`. *Basis:* OD-6 ("a live dot that pulses
+  only while the worker's heartbeat is fresh and goes still when it is stale"; the preview's "breathe 2.4s
+  var(--ease) infinite; stale = still"). The rule once carried, as APPROVED text, what the owner did not choose — the
+  ring's geometry and strength, the page-refresh conjunction — which its own log row called this contract's; on
+  2026-09-27 those moved to M-10r, INFERRED, as M-12 carries the stagger's values beside M-3.
+- **M-10r** — How the pulse renders, and what a page counts as fresh. A `StatusBadge` given `pulse` breathes a faint
+  halo — a 1px ring 3px outside the chip, in the chip's text colour, drawn on its `::after` — only while the reading it
+  reports is fresh: the row's own heartbeat recent, the page's last refresh a success, *and* that reading younger than
+  two of the page's polls. A page passes the conjunction, `!worker.stale && !stale && fresh`, with `fresh` from
+  `useFresh(readAt, 2 * POLL_MS)` (`lib/fresh.ts`), never a constant. No half is enough alone. A row's `stale` is what
+  the API said when the page last heard from it, so a page whose refreshes have been failing still holds rows that
+  said "alive". A refresh that has not failed may not have come back at all: `fetch` waits as long as a connection is
+  held open, so an API that stalled instead of erroring left `/system` breathing "alive" over a minute-old reading with
+  two dozen requests pending, and `/programme` the same (found in review, 2026-09-27). The reads now time out
+  (`READ_TIMEOUT_MS`, 10s, in `lib/api.ts`), which makes a hang a failure and brings E-13's stale banner with it; the
+  age bound is what holds the pulse to the reading however the next one fails to arrive, a throttled tab or a laptop
+  asleep included. The programme runner's heartbeat breathes on the same terms; a record of a past day never: the
+  daily report shows heartbeats as they stood, and passes no pulse. The word and the glyph keep their colour and
+  opacity in every frame (A-2, A-6); the halo is no shadow (S-7); and it is faint, so a breathing "alive" is never
+  louder than a still failure beside it (C-6). Reduced motion holds the halo still at 40 %. `pulse={false}` renders
+  `data-pulse="false"`, which no rule reads, so it draws exactly what no prop draws. The halo is unlayered CSS beside
+  the chip's glyphs, because the chip clips with the `overflow-hidden` utility and only an unlayered rule outranks a
+  utility. *Basis:* OD-6 (the pulse); `repo:CLAUDE.md` "A dead worker looks dead". The ring's geometry and strength,
+  and the conjunction, are this contract's. *Check:* `repo:tests/unit/test_web_taste.py` — the halo, its
+  reduced-motion form, the chip's attribute, the expression every page passes, the age bound it reads, and the
+  timeout on reads.
+
+  *Found in the second review, 2026-09-27.* Two things the conjunction did not cover. A process that shuts down
+  cleanly writes `status='stopped', last_seen=NOW()` (`src/worker/main.py` `_mark_stopped`, `src/programme/main.py`
+  `_record_shutdown`), so its row is fresh for the next minute: `/system` showed a green "✓ stopped" with a live halo
+  and `/programme` "✓ alive (7s)" (measured 12s after stopping both). The row's own heartbeat now means alive —
+  `isAlive`, fresh *and* saying `'alive'` (G-4) — and the page check models a row by its staleness and its stored status
+  together. And the API answers heartbeats newest first, so two live processes traded places on most polls; a keyed row
+  React moves is taken out of the document and put back, which restarts its CSS animation, and the halo dropped to the
+  start of its breath on whichever row moved (4 swaps, 4 restarts in 32s). The heartbeat tables now draw their rows in
+  the order of their ids (`byWorkerId`), which no poll changes: measured over 21s and five polls with the API swapping
+  its first two rows on alternate answers, one row order and no restart. The check proves the comparator on every order
+  the rows could arrive in and every timing of their heartbeats.
+- **M-11** — A safety control never moves: no press, no pulse and no entrance on the kill switch or in the
+  card of the three live-order gates on `/system`. Every `Button` there carries `STILL` (`lib/motion.ts`,
+  `active:translate-y-0`), which replaces the press through `cn()`. A press acknowledges a click, not a result; on the
+  kill switch the only thing an operator under stress should read as "done" is the switch's own reported state — the
+  chip turning to "stopped", the sentence under it saying what became of the orders at the venue — and a control that
+  answers the hand before the system has answered is a small false reassurance at the worst moment. *Basis:* OD-6
+  (the question's condition, "I will not put movement on the kill switch or live gates", which the owner answered
+  within); C-12 (OD-2), which names the safety controls. *Check:* `repo:tests/unit/test_web_taste.py` finds the two
+  cards by their titles and by the `data-safety-control` attribute `/system` marks each with, follows the components
+  they render, and refuses a Button without `STILL`, a pulse or an entrance.
+- **M-12** — A list's first arrival. `.enter-stagger` on a container; its direct children each rise 4px and fade
+  in over `--base` (200ms) on `--ease`, the next `--stagger-step` (40ms) behind, and none after the ninth waits longer
+  than the ninth (320ms), so the whole arrival ends within 520ms — less time than the rows take to read. The fill is
+  `backwards` with no last frame, so a row lets go of the animation once it has arrived and keeps its own opacity: a
+  last frame of 1 held by `both` would pin every row there, a disabled control included. It plays when a row mounts
+  and never on a poll, because a CSS animation runs once per element and a poll that re-renders the same rows mounts
+  none of them. That holds only where the rows stay mounted, and in place, between refreshes: a list a loading state
+  replaces replays on every poll, and a keyed row a re-sort moves is re-inserted and rises again. So the class goes on
+  such a container only, and never on a safety control (M-11). Reduced motion fades every row in where it sits, all at
+  once — `!important` in `@layer base`, the layer and weight of the rule that stops everything else, or that rule
+  would cut the fade to 0.01ms. *Basis:* OD-6 ("a short staggered fade-in when a list first loads (with a
+  reduced-motion alternative)"; the preview's "rise 200ms var(--ease) with animation-delay calc(var(--i) * 40ms)").
+  The cap at the ninth row and the fill are this contract's, which is why the rule is INFERRED.
+
+  *Two things found in review, 2026-09-27.* A sort is not only the operator's: the findings register sorts blocking
+  findings first, a closed finding stops blocking, and closing one moved its row below the next — which rose again as
+  though it had just arrived, the one row the operator had just retired. `DataTable` compared its rows' order only when
+  the operator sorted or filtered. It now compares the order of the rows it already shows with the order it last
+  rendered, in the render itself (an effect would run after React had moved the row, with the class still on), and
+  drops the class from the first move on; an arrival, inserted where it belongs, moves no other row and still rises.
+  And the rise starts 4px low, so for its length the last rows overhung the table's scroller, whose `overflow-x: auto`
+  makes its y axis `auto` too: wherever scrollbars take space, a 15px vertical bar showed for about 300ms and every
+  column shifted sideways, twice. The scroller now clips its y axis (`ui/table.tsx`, K-8).
 
 ## 7. Accessibility
 
@@ -585,7 +831,17 @@ outline at 2px offset.
   sheet holds focus inside it and nothing behind it is tabbable (axe's `aria-hidden-focus` needs review there, ES
   §6.2). *Basis:* axe `scrollable-region-focusable`; REFERENCE §6.7. *Today:* the shadcn `Table` container is that
   region while its table overflows (FX-17), named where the caller passes `label` (`/system`, the candidate
-  scorecard). `DataTable` passes none, so its scrollers take focus when they overflow but are not named yet.
+  scorecard). `DataTable` passes none, so its scrollers take focus when they overflow but are not named yet. *Since
+  2026-09-27:* named everywhere. The summary grid put `/portfolio`'s positions in the 1fr column, where the table
+  overflows from 1024 to about 1190 CSS px — a 1440px screen at 125 % zoom — and Chromium exposed the stop as a
+  `generic` with no name; `Table` and `DataTable` now require `label`, so no call site can leave one out. *Found in the
+  second review, 2026-09-27:* the pipeline board on `/programme` scrolled sideways in a plain div; with a candidate on
+  it the links inside made it reachable, and with none axe reported `scrollable-region-focusable` (serious) on every
+  capture of the empty page — a state the seeded captures never reach. The board is now the region the table's
+  container is, by the same `useOverflows` (moved to `lib/overflow.ts`), named "Pipeline, scrolls sideways" while it
+  scrolls and nothing but a board where it fits (a 2560px screen). Measured: axe finds nothing on the empty board or the
+  full one at 1440 and 390, and flags the rule again when the three attributes are stripped from the live page.
+  `repo:tests/unit/test_web_taste.py` refuses any sideways scroller in `web/src` without all three.
 - **A-8** — Structure: one `h1` per page and state; no skipped heading level; a `<dl>` contains only
   `dt`/`dd` groups; every `th` has text (visually hidden where the column is actions); `aria-label` only on an element
   with a role; a dialog (the mobile sheet) has a title and a description. *Basis:* axe `definition-list`,
@@ -642,11 +898,20 @@ What changes with width at `0ec084f`, from code and the 1440 / 390 captures. Obs
 
 - **E-1** — At 390×844 no page is wider than the device, **measured against the device width**
   (`scrollWidth > innerWidth` misses it under mobile emulation). *Basis:* REFERENCE §4.9. *Check:* §13 (b). *Today:* met
-  on all 15 routes in both schemes (2026-09-26); the candidate page was the one exception (FX-21).
+  on all 15 routes in both schemes (2026-09-26); the candidate page was the one exception (FX-21). Not in a state the
+  captures do not reach: `/programme` with the programme disabled measured 436px at 390, because the enable row held a
+  224px field and its button on one line; found in review on 2026-09-27 and fixed by letting the row wrap.
 - **E-2** — Long unbroken strings — JSON, ids, hashes, error text — wrap (`overflow-wrap: anywhere`) or
   truncate with the full value reachable; they never widen the page or overprint a column. *Basis:* O-13, O-20.
   *Today:* an assumption row's value wraps anywhere (FX-21), which covers the candidate's parameters and the
-  experiment's manifest and costs; the jobs table's error text still overprints its neighbour (O-20).
+  experiment's manifest and costs; the jobs table's error text still overprints its neighbour (O-20). *Found in the
+  second review, 2026-09-27:* on `/system` the workers table, moved into the 1fr side column by OD-7, scrolled sideways
+  in its own region and hid its Age — the one figure it is there for — at every width from 1024 to about 1270px, where
+  a comment claimed it did so only "just above 1024px". Folding the last-seen instant into the Age cell alone left the
+  table 254px in a 214px box at 1024, because the status chip is 126px and does not wrap. So it has two columns: the
+  chip is a second line under the worker's id, and the instant a second line, muted, balanced and free to wrap, under
+  the age. Measured from 1024 to 1920: the table is as wide as its box at every width, each id on one line, the instant
+  on two lines to about 1180 and one from 1240.
 - **E-3** — At 390px a result's honesty fields — data source/synthetic, Sharpe ± SE, cost, effective start,
   sessions/year — are visible without horizontal scrolling. *Basis:* REFERENCE §4.9 (they start off-screen on
   `/backtests`); ES P-12. Since FX-4 the list carries effective start and session count in its Window cell rather than
@@ -666,11 +931,24 @@ What changes with width at `0ec084f`, from code and the 1440 / 390 captures. Obs
 - **E-8** — A count in a title is the total; a capped list says it is capped ("200 of 779 shown"). *Basis:*
   O-16 ("Fills (500)" beside a metric of 779 at `0ec084f`; superseded, FX-3).
 - **E-9** — A failed first load shows the error and keeps the page's `h1`; nothing waits forever on
-  "Loading…". *Basis:* REFERENCE §6.5. *Today:* `/system` does (FX-23); the other pages are unchanged.
+  "Loading…". *Basis:* REFERENCE §6.5. *Today:* `/system` does (FX-23), and `/programme` since 2026-09-27, when its
+  reading became `/system`'s (E-13); the other pages are unchanged.
 - **E-10** — Long tables paginate or window; page length is bounded (Q-27). *Basis:* ES §4.4 (8,708px).
 - **E-11** — Every screenshot run covers both schemes (C-10); a manual theme switch is Q-19.
 - **E-12** — Compare screenshots only against captures from the same OS and font stack; the capture VM renders
-  DejaVu (REFERENCE §3.1).
+  DejaVu (REFERENCE §3.1). *Since OD-5 (2026-09-27):* the face is bundled, so every machine lays text out with the same
+  advance widths, and wrap points and column widths compare across machines — the owner's "screenshot comparisons
+  stable across machines". Pixels still compare only within one OS and browser, since FreeType, DirectWrite and Core
+  Text rasterise the same outlines differently; and a capture made before the fonts have loaded shows the fallback
+  stack, since next/font sets `font-display: swap`. `tests/e2e/design_capture.py` waits for the network to go idle,
+  which covers the two preloaded font files, before it captures. *Two exceptions, found in review the same day.*
+  Neither face carries ✓, ✕ or ■ (T-10, Q-36), so a chip carrying one — every `settled`, `blocked` and `stopped` chip —
+  takes that glyph's width from each machine's own fonts, and a row of such chips wraps where that machine puts it.
+  And the live pulse (M-10r) never stops, so a capture froze its halo wherever the timing fell — 1.28–1.45s into a
+  2.4s breath on `/system`, its steepest fall — and two captures of one state differed by about 200 pixels inside the
+  worker's chip. The capture now waits for every finite animation to end (`settle`, also run by the axe scan just
+  before it scans, since a row part way through its entrance measures as low contrast) and shoots with
+  `animations="disabled"`, which cancels a loop for the shot and draws the halo still.
 - **E-13** — A figure is never shown as current when it is not. When a refresh fails, what it would have
   refreshed is marked stale with the time it was last read — on `/system` that includes the kill-switch chip and the
   three gates. When the subject changes (the `/portfolio` paper/live toggle), the previous subject's figures are cleared
@@ -678,7 +956,22 @@ What changes with width at `0ec084f`, from code and the 1440 / 390 captures. Obs
   (`Portfolio.mode`, `lib/api.ts:141`), not the one requested. *Basis:* REFERENCE §6.5 (both derived from code);
   `repo:CLAUDE.md:53-55` ("a control that defaults to 'go' when it cannot determine the answer is not a control").
   *Today:* the adopting change did `/portfolio` (FX-5) and `/system`, where the kill switch and the gates read "not
-  read" beside their last reading (FX-23); `/programme` still keeps the last good figures unmarked.
+  read" beside their last reading (FX-23); `/programme` still keeps the last good figures unmarked. *Since
+  2026-09-27:* a refresh that never comes back is a failed one. Reads time out at 10 seconds (`READ_TIMEOUT_MS`,
+  `lib/api.ts`), where `fetch` had waited for as long as a stalled API held the connection: `/system` went on showing
+  the kill switch's last state as current, with no stale banner, for as long as the API stalled (found in review).
+  Writes are left unbounded, since an unanswered write may still commit. And on `/system` and `/programme` answers
+  apply in the order their requests were made: a read that timed out after a newer one succeeded no longer marks the
+  page stale, a slow answer no longer puts an older reading back, and a switch's own answer takes a turn, so a poll
+  read before a kill and answered after it can no longer show the switch "enabled" again (measured: for about 250ms
+  on a poll delayed 2.5s). *Since the second review, 2026-09-27:* `/programme` reads as `/system` does. Its reading is
+  one answer kept whole with the time it arrived; a refresh that fails marks it stale — a banner (`role="status"`,
+  `data-stale`) with since when and as of when, the switch "not read" beside "last read: enabled" through the same
+  `SafetyState`, "stale" on the Runner and Pipeline cards, and the runner's halo still — where the page kept "✓ enabled"
+  and a breathing "✓ alive" under a bare error banner. A failed switch, ceiling or pass request is said beside the
+  controls and marks nothing stale, where one error state had carried both. Measured with the API failing after the
+  first read: the stale banner at 9.4s, the switch "not read, last read: enabled", no halo; all back within a poll of
+  the API recovering.
 
 ## 9. The honesty rules as UI rules
 
@@ -807,13 +1100,28 @@ colour of a safety control's states, which OD-2 decided (C-12). REFERENCE §7.1 
   it as unknown (E-13), never as its last value and never as "enabled". Its stopped state is the strong amber
   "stopped" of C-12, never red. *Basis:* Safety rules 2 and 7 (`repo:CLAUDE.md:53-55`, :90-94); OD-2. *Today:* the kill
   switch on `/system` does both (FX-12, FX-23): an unread switch is the `unknown` chip "not read", with its last
-  reading beside it. The programme switch on `/programme` does not yet (E-13).
+  reading beside it. The programme switch on `/programme` did not until the second review of 2026-09-27, and does now,
+  through the same `SafetyState`, moved beside the chip in `StatusBadge.tsx` so the two switches cannot drift apart.
 - **G-3** — Stopping takes one action; starting takes a typed phrase that the page never pre-fills (ENABLE
   TRADING, ENABLE PROGRAMME, PROMOTE, RAISE AUTONOMY), through `TypedConfirm` (K-11). *Basis:* `repo:PRODUCT.md:88-92`;
   `system/page.tsx:6-9`; `programme/page.tsx:208-216`.
 - **G-4** — Liveness is read from `stale`, never from a stored status, for workers and the runner alike, through
   `livenessStatus`. *Basis:* the guarantee "A dead worker looks dead" (`repo:CLAUDE.md:281`);
-  `components/StatusBadge.tsx:58-68`.
+  `components/StatusBadge.tsx:58-68`. *Reworded 2026-09-27, after the second review.* The first wording rested on the
+  stored status being "only ever written 'alive'", which `repo:CLAUDE.md`, the API, `lib/api.ts` and `/system`'s
+  docblock all said. It is not: a running process writes `'alive'` and a clean shutdown writes `'stopped'` with
+  `last_seen = NOW()`. What the column cannot do is report a crash, which is why the age stays the input — but read by
+  its age alone a process that had just shut down was alive for a minute: `/system` drew the stored word, a green
+  "✓ stopped", with a live halo, and `/programme` "✓ alive". So alive takes both, decided once (`isAlive`,
+  `lib/heartbeat.ts`) for the chip, its word, the halo, the runner's warning and "no worker is alive" — which a clean
+  stop now trips, with the kill switch's "it will not finish until one does" — on `/system`, `/programme` and the daily
+  report, whose rows now carry the status. The words are `livenessWord`'s: "alive"; "no heartbeat" for a stale row that
+  last said alive (the runner's and the report's "stale" too, since "stale" is also the page's own mark for a reading it
+  could not refresh); "shut down" for a clean stop at any age, never the stored "stopped", which is the kill switch's
+  word on the same page (C-12r); and a status nothing writes, or none from an older API, never "alive". In `src/` the
+  daily report's required actions are the one other reader that decides from a heartbeat (`reports._alive`); the API
+  reports both fields and decides nothing, and readiness reads no heartbeat. *Check:* `repo:tests/unit/test_web_taste.py`
+  reads the helper and holds every page to it; `repo:tests/unit/test_worker_liveness.py` the report.
 - **G-5** — Where a setting has a requested and an effective value (the autonomy ceiling), both are shown
   and the effective one is never presented as the requested one or the reverse. *Basis:* the guarantee "The runner
   cannot promote past its ceiling … the stored value never masquerades as the effective one" (`repo:CLAUDE.md:295`);
@@ -895,4 +1203,6 @@ rules above therefore never spell it; the Jev credential's name is `TYPESAFE_API
   breaks. They are exceptions awaiting the owner, not approved ones (Q-32). The counts only ever go down. The adopting
   change took out the four shadcn focus rings (`focus-visible:ring-[3px]`, A-4) and the colour literal
   (`button.danger`'s white, with the legacy button rules, K-15), leaving 31 arbitrary values in 34 places and the two
-  palette colours; the test holds those exact counts. Every entry added later needs its own row here.
+  palette colours; the test holds those exact counts. Every entry added later needs its own row here. On 2026-09-27
+  the sheet's `bg-black/50` became the `--scrim` token (C-9), leaving one palette colour, the destructive button's
+  `text-white`, which waits on `--blocked-ink`.

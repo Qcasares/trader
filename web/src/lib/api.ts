@@ -35,15 +35,71 @@ export class ApiError extends Error {
   }
 
   /**
-   * The request never reached the API. Status 0, because there was no
-   * response to take one from.
+   * No answer came back: the request never reached the API, or a read waited
+   * `READ_TIMEOUT_MS` and gave up. Status 0, because there was no response to
+   * take one from.
    */
   get isUnreachable(): boolean {
     return this.status === 0;
   }
 }
 
+/**
+ * How long a read waits for its answer before it counts as a failure.
+ *
+ * To `fetch`, a read that never answers has not failed: it stays pending for
+ * as long as the connection is held open — a database pool that blocks, a
+ * network path that drops packets without refusing them, a function running
+ * to its platform limit (60s for this API on Vercel, `vercel.json`; none at
+ * all for a self-hosted uvicorn). The polling pages mark a reading stale when
+ * a refresh *fails* (web/DESIGN.md E-13), so a refresh that hung marked
+ * nothing: /system went on showing the kill switch's last state as current,
+ * and the worker's live pulse went on breathing over a reading that had
+ * stopped getting newer, while each five-second poll joined the queue of
+ * requests left open. Bounded, a hang is a failure like any other, and says
+ * so.
+ *
+ * Ten seconds is far past anything this API takes when it is well, a cold
+ * start included, and two of /system's polls.
+ *
+ * Reads only. A write that gets no answer has not been withdrawn — the API
+ * may still commit it — so calling it failed would report the wrong fact; a
+ * committing button stays busy, saying its request is in flight, until an
+ * answer comes (M-8).
+ */
+export const READ_TIMEOUT_MS = 10_000;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const reads = (init?.method ?? "GET").toUpperCase() === "GET";
+  if (!reads || init?.signal) return exchange<T>(path, init ?? {});
+  // A controller and a timer rather than `AbortSignal.timeout`, which Safari
+  // before 16 lacks. What a fetch rejects with when it is aborted differs by
+  // browser and by version, so the flag, not the error, says this was the
+  // timer's doing.
+  const controller = new AbortController();
+  let expired = false;
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, READ_TIMEOUT_MS);
+  try {
+    return await exchange<T>(path, { ...init, signal: controller.signal });
+  } catch (err: unknown) {
+    // The timer can fire while the headers are awaited or while the body is
+    // still arriving; either way the read produced nothing.
+    if (!expired) throw err;
+    const which =
+      BASE === "" ? "The API, through this site's /api proxy," : `The API at ${BASE}`;
+    throw new ApiError(
+      0,
+      `${which} did not answer within ${READ_TIMEOUT_MS / 1000} seconds.`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function exchange<T>(path: string, init: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
@@ -51,7 +107,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       credentials: "include",
       headers: {
         "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
+        ...(init.headers ?? {}),
       },
     });
   } catch {
@@ -64,6 +120,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     // rejecting the origin are indistinguishable from here, so name both,
     // along with the URL actually being called: "Failed to fetch" sends people
     // looking at their password, and the address bar is where the answer is.
+    // (A read `request` gave up on lands here too, and `request` says so.)
     throw new ApiError(
       0,
       BASE === ""
@@ -319,10 +376,13 @@ export interface SystemStatus {
   broker_configured: boolean;
   jobs: Record<string, number>;
   /**
-   * Heartbeat rows. `status` is the *stored* value and is only ever written as
-   * 'alive', so it says nothing about liveness on its own — a row outlives the
-   * process that wrote it. Use `stale`, which the API derives from the
-   * heartbeat's age against the database clock.
+   * Heartbeat rows, the worker's and the programme runner's. `status` is the
+   * *stored* value: 'alive' while a process runs, 'stopped' after a clean
+   * shutdown. It cannot report a crash — a process that dies writes nothing,
+   * and its row outlives it saying 'alive' — so `stale`, which the API derives
+   * from the heartbeat's age against the database clock, is the input too.
+   * Neither alone says a process is alive: a clean shutdown stamps a fresh
+   * `last_seen`. Ask `isAlive` (`lib/heartbeat.ts`), which takes both.
    */
   workers: {
     worker_id: string;
@@ -639,7 +699,18 @@ export interface DailyReport {
     shadow_sessions: number;
     shadow_failures: number;
     jobs: Record<string, number>;
-    workers: { worker_id: string; age_seconds: number; stale: boolean }[];
+    /**
+     * Heartbeat rows as they stood when the report was built. `status` is the
+     * stored one ('alive', or 'stopped' after a clean shutdown); optional,
+     * because an API from before the report carried it sends none, and a row
+     * that does not say 'alive' is not read as alive (`lib/heartbeat.ts`).
+     */
+    workers: {
+      worker_id: string;
+      age_seconds: number;
+      stale: boolean;
+      status?: string;
+    }[];
   };
   data_health: {
     symbols: number;

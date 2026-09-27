@@ -151,7 +151,7 @@ export default function FindingsPage() {
     <>
       <div className="mb-4">
         <h1 className="mb-1">Findings</h1>
-        <p className="m-0 text-base text-ink-muted">
+        <p className="intro m-0 text-body text-ink-muted">
           A veto is a row, not an opinion. A finding blocks a promotion when it
           is open, at high or critical severity, and raised by a role holding a
           veto. Nothing reads its text to decide.
@@ -194,12 +194,27 @@ export default function FindingsPage() {
           </div>
         </CardHeader>
         <CardContent>
+          {/*
+            `stagger`: the skeleton shows only until the first read; after
+            that `page` is only ever replaced by the next read — after a
+            closure, or a change of the open-only filter — never cleared, so
+            the table stays mounted, and each finding is keyed by its ref.
+            The register rises into place once; a filter change brings in
+            only the rows it adds, and those rise because they are new here.
+            A closure can move a row the table already shows — the severity
+            sort ranks blocking findings first, and a closed one no longer
+            blocks — and a moved row would replay its entrance as though it
+            had just arrived. DataTable sees the move in the render that
+            makes it and stops staggering from then on (M-12).
+          */}
           <DataTable
+            label="Register"
             rows={page.findings}
             getRowId={(f) => f.ref}
             filterPlaceholder="Filter by ref, title or role"
             empty="Nothing on the register. That is either a clean programme or a panel that has not run."
             initialSort={[{ id: "severity", desc: false }]}
+            stagger
             columns={[
               {
                 id: "severity",
@@ -306,7 +321,7 @@ export default function FindingsPage() {
       </Card>
 
       {current ? (
-        <Card className="mt-3">
+        <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex flex-wrap items-baseline gap-2">
               <span className="font-mono text-sm">{current.ref}</span>

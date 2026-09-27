@@ -92,7 +92,7 @@ export default function HypothesisLedgerPage() {
     <>
       <div className="mb-4">
         <h1 className="mb-1">Hypothesis ledger</h1>
-        <p className="m-0 text-base text-ink-muted">
+        <p className="intro m-0 text-body text-ink-muted">
           Every idea this programme has had, including the ones that failed.
           The schema refuses to delete a row, so the record of what was tried
           cannot be tidied into a record of what worked.
@@ -133,12 +133,21 @@ export default function HypothesisLedgerPage() {
           </div>
         </CardHeader>
         <CardContent>
+          {/*
+            `stagger`: the skeleton shows only until the first read; after
+            that `rows` is only ever replaced by the next list, never cleared,
+            so the table stays mounted, and each row is keyed by its ref. The
+            ledger rises into place once; a change of status filter brings in
+            only the rows it adds, and those rise because they are new here.
+          */}
           <DataTable
+            label="Ledger"
             rows={rows}
             getRowId={(row) => row.ref}
             filterPlaceholder="Filter by ref, title or owner"
             empty="Nothing yet. Enable the programme and run a pass, or add a card yourself."
             initialSort={[{ id: "proposed", desc: true }]}
+            stagger
             columns={[
               {
                 id: "ref",

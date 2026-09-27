@@ -69,7 +69,7 @@ export default function LoginPage() {
       </div>
 
       <h1 className="mb-1">Sign in</h1>
-      <p className="mb-4 text-base text-ink-muted">
+      <p className="intro mb-4 text-body text-ink-muted">
         Operator access to the control plane.
       </p>
 

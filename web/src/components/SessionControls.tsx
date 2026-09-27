@@ -47,7 +47,10 @@ export function SessionControls() {
   };
 
   return (
-    <button onClick={signOut} disabled={busy} className="linklike">
+    // `.linklike` sets the body's size, which since the owner's decision of
+    // 2026-09-27 is 15px and for prose (OD-8). This sits at the foot of the
+    // sidebar and reads as one of its rows, so it takes their 12px.
+    <button onClick={signOut} disabled={busy} className="linklike text-sm">
       {busy ? "Signing out…" : "Sign out"}
     </button>
   );

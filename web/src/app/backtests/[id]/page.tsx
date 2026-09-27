@@ -135,7 +135,9 @@ export default function BacktestDetailPage({
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="mb-1">{run.strategy_name}</h1>
-          <p className="subtitle mono">
+          {/* Identifiers, so 13px set here rather than the body's size, which
+              since OD-8 is 15px and for prose. */}
+          <p className="subtitle mono text-base">
             {run.id} · {run.universe.join(" ")}
           </p>
         </div>
@@ -170,7 +172,7 @@ export default function BacktestDetailPage({
             </CardContent>
           </Card>
 
-          <Card className="mt-3">
+          <Card className="mt-6">
             <CardHeader>
               <CardTitle>Performance</CardTitle>
             </CardHeader>
@@ -179,7 +181,7 @@ export default function BacktestDetailPage({
             </CardContent>
           </Card>
 
-          <Card className="mt-3">
+          <Card className="mt-6">
             <CardHeader>
               <CardTitle>
                 Fills (
@@ -188,6 +190,7 @@ export default function BacktestDetailPage({
             </CardHeader>
             <CardContent>
               <DataTable
+                label="Fills"
                 rows={orders.map((order, index) => ({
                   ...order,
                   // `DataTable.getRowId` takes one argument, and fills have no
@@ -289,7 +292,7 @@ export default function BacktestDetailPage({
         </>
       )}
 
-      <p className="mt-4">
+      <p className="mt-6">
         <Button asChild variant="ghost" size="sm">
           <Link href="/backtests">
             <ArrowLeft aria-hidden="true" />

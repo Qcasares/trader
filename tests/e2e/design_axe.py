@@ -43,6 +43,7 @@ from design_capture import (
     VIEWPORTS,
     log,
     resolve,
+    settle,
     sign_in,
     wait_ready,
 )
@@ -91,6 +92,10 @@ def main() -> int:
                     wait_ready(page)
                     page.add_style_tag(content=HIDE_DEV_OVERLAY)
                     page.add_script_tag(path=str(AXE))
+                    # Again, just before the scan: a row a poll mounted since
+                    # the wait above is still fading in, and axe reads a row
+                    # part way through as low contrast (M-12).
+                    settle(page)
                     result = page.evaluate(RUN)
                     ctx.close()
                     name = f"{slug}__{vp}__{scheme}"
