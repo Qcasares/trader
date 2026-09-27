@@ -1,14 +1,17 @@
 # The Jev integration
 
 Specification and record of wiring TypeSafe AI's Jev into the AI programme.
-Owner: Quentin Casares. Phases A and B of eight are built; C to H are not.
-Phase B's code is dark: every Jev switch is seeded off, no lane is wired into
-the programme's tick, and nothing enqueues the one job that could make a call.
+Owner: Quentin Casares. Phases A and B of eight are built, and phase C is
+under way: its first pull request, C1+C2, hardens the one road every lane will
+take and closes open items 15 and 20, registering no set and switching nothing
+on. D to H are not built. The code is dark: every Jev switch is seeded off, no
+lane is wired into the programme's tick, and nothing enqueues the one job that
+could make a call.
 A TypeSafe key exists, as the `TYPESAFE_API_KEY` repository secret set on 26
 September 2026, and the dispatch-only key check proved it against TypeSafe's
 own host the same day: the listing named the aliases only, and the pinned
 `jev-1.13.0` answered the connectivity probe as expected. The programme itself
-has made no call. Last revised 26 September 2026.
+has made no call. Last revised 27 September 2026.
 
 ## What this is
 
@@ -236,15 +239,15 @@ pinned model said, it is recorded once, and asking again would not check it.
 
 | Condition | Status | Python SDK class | Handling here |
 |---|---|---|---|
-| No key sent | **403** (the docs say 401) | `TypeSafePermissionDeniedError` | Authentication failure: the lane is disabled for the day |
+| No key sent | **403** (the docs say 401) | `TypeSafePermissionDeniedError` | Authentication failure: every lane is held until 00:00 UTC, the connectivity probe's included, and a key replaced before then is held with it: only the dispatch-only key check can prove the new one sooner |
 | Invalid key | 401 | `TypeSafeAuthenticationError` | The same |
-| Request failed validation | 422 | `TypeSafeUnprocessableEntityError` | That question set is disabled |
+| Request failed validation | 422 | `TypeSafeUnprocessableEntityError` | That question set's version is held, under the pin, until a new version |
 | Rate limited | 429 | `TypeSafeRateLimitError`, with `.retry_after_ms` | Transient |
 | Overloaded, or any server error | 529, or any 5xx | `TypeSafeInternalServerError` | Transient |
 | Another 4xx, 408 for instance | | `TypeSafeAPIError` | Recorded by class |
 | No HTTP response | | `TypeSafeAPIConnectionError`, `TypeSafeAPITimeoutError` | Transient. **No request id exists** |
 | Malformed 200 | | `TypeSafeAPIResponseValidationError` | Judged by the validator from the raw body, like any 2xx; the SDK's objection is kept beside the verdict |
-| A 403 whose body is not JSON | 403 | `TypeSafePermissionDeniedError` | The document is quarantined as a possible content block. A precaution: it rests on one unverified third-party report, and the verification found no primary evidence for it |
+| A 403 whose body is not JSON | 403 | `TypeSafePermissionDeniedError` | For text — a web excerpt, a hypothesis title — the state is not sent again, and the document it came from is quarantined, as a possible content block. A precaution: it rests on one unverified third-party report, and the verification found no primary evidence for it. An enumerated state is not held: it is labels computed in code, nothing a filter could object to, so an edge's 403 page is the likelier cause, and holding it for good would take it out of the forward clock |
 
 As built in phase B, the client classes every failure by `error_kind` —
 `auth`, `content_block`, `invalid_request`, `rate_limited`, `server`,
@@ -253,8 +256,21 @@ on the request's row. There is one retry, for 429, 500, 502, 503, 504 and 529
 and for no response at all; 501 is `server` and not retried, since it will say
 the same thing again, and 408, a redirect and every other status the table
 does not name are `client`, recorded by class. The actions in the last column
-beyond recording — disabling a lane for the day or a question set,
-quarantining a document — arrive with the lanes that act, from phase C.
+beyond recording were left to phase C, and its first pull request built them
+into the road, derived from the rows these failures leave rather than from a
+switch anybody writes: an authentication failure holds every lane, not only
+the one that met it, until 00:00 UTC (`auth_held`) — the ledger records no
+trace of which key failed, so a key replaced after it is held too, and until
+midnight only the operator's dispatch-only `jev_check` can prove it (open item
+37); a 422 holds the question set's version under the pinned model until a new
+version changes its words (`set_refused`); and a 403 whose body is not JSON
+holds exactly the text it answered, in every set and every ask, a probe's
+included, and before any replay (`content_blocked`). Text only: a web excerpt
+or a hypothesis title, the states a content filter could object to. An
+enumerated state is held by nothing — its 403 is recorded, and it is asked
+again — since holding one for good would take it out of the forward clock on
+the strength of a page an edge more likely served (open item 36). Quarantining
+the document that text came from arrives with web ingest.
 
 The request id comes from the `x-typesafe-request-id` response header. Among
 the SDK's errors only `TypeSafeAPIError` and its subclasses carry
@@ -491,14 +507,15 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 
 | Module | Role |
 |---|---|
-| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance and area vocabularies and `LANE_AREA`; and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000 |
-| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1 |
-| `jev_validate.py` | Pure, and never raises. The response rules in fact 3 |
+| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000 |
+| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels |
+| `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
+| `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
 | `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
-| `jev_lane.py` | Runner-only. One ask of one question set: check the arguments, gate, pin, hash, look up, and unless the answer is on record, key, budget, size, call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
+| `jev_lane.py` | Runner-only. One ask of one question set: check the arguments and the subject, the switches, the pin, the web gate and the content block, hash, look up, and unless the answer is on record, the key, the vendor's standing refusals, the budget and the lane's slice of it, and the size; then call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
 | `web_ingest.py` | Phase C. An allow-listed `aiohttp` fetcher: the paperswithbacktest README on GitHub and the SEC EDGAR RSS feed. Stores excerpts only, strips markup and URLs, caps lengths |
 
 ### Outside `src/programme/`
@@ -575,6 +592,25 @@ row's to the moment of the restore. Restore data with `--disable-triggers`; a
 full restore creates the triggers after loading the rows, and a physical
 backup never runs them.
 
+Migration `0013_jev_model_provenance.sql`, phase C's first, is additive. Both
+provenance CHECKs gain `model`, text the programme's own generative model
+wrote, which is none of the other three: recorded as `internal` it would pass
+the one filter the phase F loader is to trust. Each CHECK keeps its name,
+because the schema suite reads the vocabulary back by it. Four indexes carry
+the road's new reads: `state_hash`, for a content block and a screen's answer;
+`(error_kind, available_at)` where `error_kind` is set, for the standing
+refusals; `(question_set, question_set_version, subject_type, subject_id)`;
+and `web_documents (content_sha256)` where `quarantined`, for the web gate's
+quarantine lookup, which the one-snapshot constraint on `(source,
+content_sha256)` cannot serve. And a CHECK,
+`web_documents_content_is_its_excerpt`, holds a document's `content_sha256` to
+the sha256 of its own `excerpt` as UTF-8 — what `jev_hash.text_sha256`
+computes — because the gate looks quarantine up by the address of exactly the
+text it is about to send, and a writer that hashed anything else would leave a
+quarantined document where the gate cannot see it. Added while `web_documents`
+is empty everywhere; over a database holding a row it refuses, 0013 fails
+whole and leaves it at 0012.
+
 ### Switches, all fail closed
 
 Seeded in `system_flags` by migration 0012 and read through `flags.py` with
@@ -587,15 +623,23 @@ the catalogue refuses means no call — the same rule `flags.model_settings`
 already applies. A switch is on only for a stored JSON `true`, not the string
 `"true"` or 1; an area needs the master switch as well as its own; and the two
 counts read as 0, which permits no request, on any failure or any value the
-catalogue refuses, rather than being clamped. The programme's Jev loop asks
+catalogue refuses, rather than being clamped. From phase C that includes a
+budget of 1 to 9: each lane spends at most its share of the budget, rounded
+down, and below 10 the probe lane's would be none while the setting read as one
+that permitted calls, so a budget is 0 or at least 10
+(`jev_catalogue.MIN_DAILY_REQUEST_BUDGET`, derived from the shares). The programme's Jev loop asks
 `programme_enabled` as well as `jev_enabled`: two independent switches, both
-required, neither derived from the other.
+required, neither derived from the other. From phase C the road asks them
+itself, on every ask, with the area of the set's own lane and, for a set that
+carries this system's own detail, `jev_send_internal_detail`, so a caller that
+forgot to is held to them anyway.
 
 ## Lanes
 
 Planned. None of these lanes exists yet. Phase B built the one road they
 will all take, `jev_lane.ask`, and registered two question sets: the
-connectivity probe, and `decision.regime` v1, which nothing asks yet. A set's
+connectivity probe, and `decision.regime` v1, which nothing asks yet. Phase
+C's first pull request moved every rule a lane could forget into that road. A set's
 version is a field of its own, pinned with its golden hash, so the sets
 below are named without one.
 
@@ -707,18 +751,35 @@ contaminated badge, the live fraction, the signal model and the threshold.
 
 ## Delivery
 
-Each phase lands as its own pull request, with CI green.
+Each phase lands with CI green: A and B as one pull request each, and C as the
+six below the table, beside a UI pull request that is not phase C's.
 
 | Phase | Contents | Status |
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | Not started |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2 done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
 | G. Shadow | A `jev_regime_allocator` candidate and its baseline twin, in shadow | Not started |
 | H. Paper direct decisions | A `forward_experiment` deployment on a second Alpaca paper account; the broker for a non-default owner hard-coded to paper; marks and reconciliation per owner | Not started |
+
+Phase C lands as six pull requests rather than one, each with its own
+subsection under "Phase C, as built" and its own CLAUDE.md rows. The design
+names nine parts, C1 to C9, and its review grouped them into these six; the
+table lists the owner's UI pull request beside them because it merges first,
+though it is not phase C.
+
+| Pull request | Contents | Depends on | Status |
+|---|---|---|---|
+| UI | The owner's design decisions OD-5 to OD-8. Not phase C; merges first | — | Outside phase C |
+| C1+C2 | The road hardened: every switch read by the road, subjects that are their content, the web gate, the vendor's standing refusals, per-lane budget slices, open item 15 and provenance `model` (migration 0013); and open item 20, the Score checks and the four-level rule | — | **Done** |
+| W | The worker's reference bars (C3), with the live ingest kept on one adjustment basis, reviewed as a live-path change | — | Not started |
+| C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | Not started |
+| C5+C6 | Web sources and the fetcher (pure), and web ingest, which calls nothing | C1+C2, C4 | Not started |
+| C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5+C6 | Not started |
+| C9 | The evaluation harness, migration 0014 | C4, C7+C8 | Not started |
 
 ### Phase A, as built
 
@@ -1284,13 +1345,7 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
     `web/src/app/system/configuration/page.tsx` tells an operator whose
     `SECRETS_KEY` is unusable that the programme falls back to
     `ANTHROPIC_API_KEY`, and does not mention `TYPESAFE_API_KEY`. Phase E.
-15. **The request hash does not name the question set.** It is the hash of
-    `{model, state, questions}`, so two sets asking identical questions about
-    an identical state would share one canonical row, and the second would be
-    answered with the first's. The two registered sets cannot collide, and
-    where it would matter the signal trigger refuses a lane that is not the
-    request's. A registry rule refusing two sets with the same questions would
-    close it; phase C, before a third set is registered.
+15. ~~**The request hash does not name the question set.**~~ *Resolved in phase C, by C1+C2:* the hash is unchanged — two sets sending identical bytes did send the same request — and attribution is checked beside it, three ways. The registry refuses a set whose questions hash equals a registered set's; `RELEASED_QUESTION_HASHES` holds every released version's pairwise distinct, words no longer registered included; and the lane raises if the answer it would read was recorded by another pack — before sending anything when it is the canonical row a replay would read, and after the call when it is the winner of a race that call lost, which is billed and dropped unrecorded like every lost race's (item 17). See Phase C, as built.
 16. **`flag_repo.get_flag` decodes any string it is given.** asyncpg hands
     `jsonb` over as text, which the reader parses. Were a JSON codec ever
     registered on a pool, a stored JSON string `"true"` would arrive as the
@@ -1308,12 +1363,7 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
     producer; until then the first live call waits on it, or on a job inserted
     by hand.
 19. ~~**Two Rule 5 enforcements planned for phase B were not built.**~~ *Resolved in phase B:* `tests/unit/test_jev_table_boundaries.py` now holds both — outside the programme only `src/db/repos/signals.py` may name a Jev table, only `jev_lane` may write `jev_signals`, and the model-holding runners never name it — each scanner proved against sources that must trip it.
-20. **What the validator does not check.** A Score's `legend`, and whether
-    `score` agrees with its own probabilities. And on a ten-level Score,
-    rounding each probability to the observed 0.01 grid can move the sum by up
-    to 0.05 on its own, past the 0.02 tolerance; measure one before
-    registering it. `test_jev_questions.py::test_no_score_set_is_registered_before_its_consistency_check`
-    fails the build the day a Score set is registered without the check.
+20. ~~**What the validator does not check.**~~ *Resolved in phase C, by C1+C2:* a Score's `legend`, where it sends one, must name the levels asked, in order (`legend_mismatch`), and its `score` must be its own probability-weighted mean within a deliberately conservative bound on what rounding to the 0.01 grid can move it, one that holds however the score is reported and admits some answers rounding alone could not produce (`score_inconsistent`). The tripwire test is replaced by a registration rule admitting a Score of at most four levels, the most for which the 0.02 sum tolerance covers that rounding. Still open: a Score of five to ten levels needs a tolerance measured from recorded answers, and the legend's wire format has not been observed (item 34).
 21. **The validator's note has no column.** `Validation.problem` — why a
     response was refused whole, which unasked answers were ignored, whether
     the usage could be read — goes to the log and nowhere else. Each answer's
@@ -1322,6 +1372,329 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
 22. **`programme sdk` is not a required check.** If branch protection lists
     required checks, it should name the new job, or a pull request can merge
     with the SDK's tests failing.
+
+### Phase C, as built
+
+Phase C lands as six pull requests (see Delivery). Each adds a subsection
+here as it lands.
+
+#### C1+C2: the road, hardened, and the Score checks
+
+Every rule a phase C lane could forget now lives in `jev_lane.ask`, the
+registry or the schema, before any lane exists to forget it. Nothing new can
+be asked: no set is registered, nothing is enqueued, every Jev switch is still
+seeded off, and every change to the road is a refusal it did not make before.
+The programme has still made no call.
+
+**The road reads every switch itself.** `ask` reads `programme_enabled`,
+`jev_enabled` and the area of the set's own lane on every ask, before the
+ledger, and for a set declaring `internal_detail` then
+`jev_send_internal_detail`, which this is the first reader of. Each goes
+through its own fail-closed reader and none is derived from another. The
+programme's loop still reads the first two before it claims a job; the road no
+longer depends on its having done so, because a planner, a harness or a job
+added later might not. `internal_detail` is part of a set's equality and not of
+its pack hash, so a copy with it cleared is not the registered set, and `ask`
+refuses it. `tests/unit/test_jev_lane.py::TestTheProgrammeSwitchBindsTheLane`,
+with the order of the reads asserted, and `::TestTheDetailSwitch`, through
+test-only sets registered for a test and gone after it; on Postgres,
+`tests/integration/test_jev_lane.py::TestNothingIsWrittenWithoutARequest`
+gains the programme's switch.
+
+**A text subject is its content.** The request hash names no subject, so the
+same excerpt filed under two ids would be answered once and recorded against
+one of them, and a label on the other would never meet its answer. Among the
+arguments, before any switch, `ask` now requires the subject type to be the
+state model's own (`jev_questions.STATE_SUBJECT`: `probe`, `session`,
+`web_excerpt`, and from C8 `hypothesis_title`), a text subject's id to be the
+sha256 of exactly the text sent (`jev_hash.text_sha256`, which migration
+0013's CHECK `web_documents_content_is_its_excerpt` makes the address every
+stored document is filed under), and a session's to be its date written
+`YYYY-MM-DD`. A state model with no subject type, or a web set whose state is
+not addressed text, is refused there too, for a set placed in the registry by
+hand. `test_jev_lane.py::TestSubjectsAreContentAddressed`;
+`test_jev_schema.py::TestADocumentIsAddressedByItsExcerpt`.
+
+**Web text is asked about only once screened, and never once quarantined.**
+Registration holds provenance `web` to `WebExcerptState`, an excerpt of 1 to
+300 characters and nothing else, and the other way round. For a web set, `ask`
+refuses text quarantined under any source as `quarantined`, the injection
+screen included; and for every web set but the screen, text without a clear
+answer from the screen as registered now under the pin — a canonical,
+non-probe answer about exactly this state whose `addressed_to_ai` Noul is
+valid and `false` — as `unscreened`. Both are checked before the replay, so an
+answer on record about text since quarantined is not read back, and they bind
+probes as well. The screen is a web set asking `addressed_to_ai`, as a Noul,
+and nothing else (`jev_questions.screen_problem`): the gate lets the screen
+alone ask about unscreened text, so a second question in it would be answered
+about exactly that text. Registration refuses any other set under the screen's
+name, and one placed in the registry by hand is no screen: it is asked nothing
+about unscreened text, and its answers clear nothing. No screen is registered
+until C7, so today every web ask is unscreened: the gate fails closed.
+`test_jev_lane.py::TestTheWebGate`, and on real `web_documents` and screen
+rows, `tests/integration/test_jev_lane.py::TestTheWebGate` and
+`test_jev_repo.py::TestTheWebReads`, where each filter of the screen's read is
+the only one barring some case the schema allows.
+
+**The vendor's standing refusals are remembered.** Fact 4's actions, derived
+from the rows the failures left, so no process writes a switch: an `auth`
+failure since 00:00 UTC, by the database's stamp, holds every lane until then
+(`auth_held`), the connectivity probe's included — and, since nothing records
+which key failed, a key replaced before midnight is held with the one it
+replaced, so the dispatch-only `jev_check` is what proves it sooner (open item
+37); a 422 holds its set, version and pinned model for good (`set_refused`),
+since the same words would be refused again and a new version is what changes
+them; and a content block holds exactly the text it answered, across every set
+and lane, a probe's included (`content_blocked`). Text only — a web excerpt or
+a hypothesis title, the states a content filter could object to. The first
+draft held any state, and the review found what that cost: an enumerated
+regime state, labels computed in code, held for good by one 403 page an edge
+served, which would take that state out of the forward clock, its canonical
+answer's free replay included, for as long as the market stayed in it. So an
+enumerated state, the connectivity probe's among them, is held by nothing: its
+failure is recorded and it is asked again (open item 36). The block is checked
+before the replay, like quarantine, because blocked text is not read back; the
+two holds after the replay and the key, since they exist to stop calls and a
+replay makes none. None of the new statuses writes a row: each is a standing
+state read from rows already written, not an event. `main.probe_verdict` fails
+the probe's job on each, without a retry, and its words for `auth_held` point
+to the key check. `test_jev_lane.py::TestStandingRefusals`;
+`tests/integration/test_jev_lane.py::TestTheVendorsStandingRefusals`, each
+refusal that would hold the tests after it on a database of its own, with
+yesterday's failure written with the stamp switched off, and blocked text in
+`::TestTheWebGate`; and `test_jev_repo.py::TestTheStandingRefusals`, the reads
+against real rows.
+
+**No lane can starve another.** `jev_catalogue.LANE_BUDGET_PERCENT` gives each
+recorded lane its share of `jev_daily_request_budget`: research and guardrail
+35%, decision 20%, probe 10%, and 0 to the lanes with no set. In code, so no
+database write can raise one, and rounded down, so the shares never exceed the
+budget: at the seeded 500 calls, 175, 175, 100 and 50. Below 10 the probe
+lane's share would be none, and below 5 the decision lane's, while the setting
+read as a budget that permitted calls, so the catalogue refuses a budget of 1
+to 9 as it refuses any unusable setting, and the runner reads it as 0
+(`MIN_DAILY_REQUEST_BUDGET`, derived from the shares; the probe job's error
+names the probe lane's share). `ask` asks the budget and then the recorded
+lane's share, and either refusal is a `refused_budget` row. A probe is
+recorded, and counted, in the probe lane whatever its set, so it spends the
+probe lane's share and is held to it. `test_jev_lane.py::TestTheLaneSlices`,
+`test_jev_catalogue.py::TestTheVocabulary` and `::TestTheSettings`, and on
+Postgres `tests/integration/test_jev_lane.py::TestTheLaneSlices`.
+
+**No answer crosses question sets (open item 15).** The request hash is
+unchanged — two sets sending identical bytes did send the same request — and
+attribution is checked beside it, three ways. `registration_problem` refuses a
+set whose `questions_hash`, the part of the request hash a set contributes,
+equals a registered set's. `RELEASED_QUESTION_HASHES`, kept in the test beside
+`RELEASED_PACK_HASHES` and append-only like it, holds every released version's
+questions hash pairwise distinct, so a retired version's words, a copy under a
+new name and a version bump that changed only a lane or a provenance are all
+refused, words no longer in code included. And `ask` raises if the answer it
+would read carries another pack hash: before anything is sent when it is the
+canonical row a replay would read, which also covers a row written by hand;
+and after the call when it is the winner of a race this call lost, since the
+race is only found when the answer is recorded — that call was made and billed,
+and like every lost race's it is dropped unrecorded and logged with its vendor
+request id (open item 17). `test_jev_questions.py::TestOpenItem15` and
+`test_jev_lane.py::TestNoAnswerCrossesSets`.
+
+**The rest of the registry's rules.** `registration_problem` runs after
+`question_set_problem` at registration, in order: one set per name; item 15;
+web text is a `WebExcerptState` and nothing else is web; a set of provenance
+`internal`, `operator` or `model` whose state could carry text beyond a plain
+`title` declares `internal_detail`; every state model has a subject type; text
+is recorded as its writer's (below); and the screen is a web set asking
+`addressed_to_ai` as a Noul and nothing else, since the road reads a valid
+`false` from it as clean and lets it alone ask about unscreened text.
+`test_jev_questions.py::TestRegistrationRules`, each half of the web rule by its
+own message.
+
+**This system's detail goes only where declared** (fact 7). The detail rule
+fails closed: a field is text unless the rule can prove otherwise — a Literal,
+a boolean, an integer, a float or `None`, a model built only from those that
+sends nothing its fields do not declare, or a container or union of them.
+Everything else counts: `str`, `bytes`, `Any`, and every shape the rule does
+not read, a dataclass, a TypedDict, a NamedTuple, a NewType, a URL, a path, a
+secret, a date, an enum, a `Decimal`, which is sent as a string; and so does a
+validator that runs after or instead of a field's type, a serializer, a
+computed field, a JSON encoder, and a nested model that keeps undeclared keys.
+The first draft read `str`, `bytes`, `Any` and nested models and nothing else,
+and the review registered a finding's full text in a pydantic dataclass as no
+detail at all, which the road then sent with `jev_send_internal_detail` off.
+The rule is read a second time on every ask, from the output rather than the
+types: `QuestionSet.dump_state` refuses, for a set of this system's own text
+without `internal_detail`, any string beyond the top-level `title` that its
+state model does not write itself — a field name, or a value one of its
+Literals allows — so no shape the first reading misses can carry detail past
+the switch; at worst such a set is refused on its first ask, before any switch
+is read. `test_jev_questions.py::TestTheDetailRuleFailsClosed`, every shape the
+review found and every shape that must still pass, and
+`::TestDumpingWhatAStateSends`; `test_jev_lane.py::TestUndeclaredDetailIsNeverSent`.
+
+**Model-written text is labelled `model`.** Migration 0013 adds the provenance
+to both tables' CHECKs, keeping each constraint's name, with the indexes the
+road's reads stand on and the content-address CHECK (see the schema section).
+Phase C will ask Jev about the titles the programme's own model writes, which
+are none of `web`, `internal` or `operator`; recorded as `internal` they would
+pass the one filter the phase F loader is to trust. The schema only admits
+`model`; what holds a set to it is registration: `TEXT_SUBJECT_PROVENANCE`
+names who writes each kind of text a set may ask about — a web excerpt the
+web, a hypothesis title the programme's model — and a set whose subject is one
+of them records that provenance and no other, a set carrying a title and more
+included, while a state model of text whose subject names no writer is
+refused. An operator's text (open item 28) will be a subject of its own.
+`test_jev_questions.py::TestTextIsRecordedAsItsWriters`; and
+`test_jev_schema.py::TestModelProvenance` applies 0013 on top of a database at
+0012 holding requests, signals and a document under each older rule, and reads
+every row back unchanged.
+
+**A request's identity is its own module.** `state_hash` and `request_hash`
+moved, verbatim, from `jev_lane` to the pure `jev_hash`, beside
+`questions_hash` and `text_sha256`, so the registry, the API and the harness
+can compute one without loading the client; `jev_lane` re-exports both. The
+worker and the decision path may import it no more than any other module of
+the programme.
+`tests/unit/test_jev_hash.py` pins the request hash to a value phase B's code
+computed, and imports the module in a fresh interpreter to show it loads
+nothing from `src` but itself, and nothing that reaches a network, a database
+or a model.
+
+**A Score answer is checked against itself (open item 20, C2).** Two reasons
+join `jev_validate.ANSWER_REASONS`, applied after the score's range and before
+the confidence. `legend_mismatch`: a `legend`, where one is sent, must name the
+levels asked, in order, as a list of them or as an object keying each by its
+index written as text; anything else, a null included, fails closed, because
+the vendor's shape has not been observed. `score_inconsistent`: the score is
+documented as the probability-weighted mean of its levels, and one further
+from that mean than `score_consistency_bound(n)` =
+0.005·(1 + n(n−1)/2) disagrees with itself, like a Choice that is not its own
+argmax, and is not measured. The bound is derived, not chosen, and
+deliberately conservative: each probability is observed on the 0.01 grid,
+within half a step of its true value, and level i's rounding moves the mean by
+up to i half steps; the score's own grid has not been observed, so it is
+allowed half a step more, as though rounded independently — 0.01 at two
+levels, 0.02 at three, 0.035 at four, compared on the decimals written. That
+refuses nothing rounding could explain, however the score turns out to be
+reported. It is not tight, and it admits answers rounding alone could not
+produce: a score rounded to the grid is the rounding of the same mean the
+probabilities were rounded from, so rounding moves it by at most 0, 0.02 and
+0.03 at two, three and four levels (0.01 at three, rounding halves up), and a
+two-level score 0.01 from its rounded top probability is accepted though no
+rounding made it. A bound as tight as rounding halves up would refuse an
+honest score reported at full precision, which can sit 0.015 away at three
+levels against its 0.01, so tightening waits on recorded answers that show how
+the score is reported. The tripwire that refused any Score set is replaced by
+the rule behind it: a Score question registers with at most four levels
+(`MAX_SCORE_LEVELS_UNMEASURED`), the most for which the 0.02 sum tolerance
+covers the grid's rounding, four half steps; more need a tolerance measured
+from recorded answers, and the vendor's own limit of ten stays the ceiling
+beyond that. No Score set is registered. `test_jev_validate.py::TestAScore` —
+the bound worked out again from its definition, how much of it each way of
+reporting the score uses, every corner of the rounding box accepted at two to
+four levels over distributions across the simplex, and the five-level corner
+the sum tolerance refuses — with the 4,000-body fuzz's independent copy of the
+rules gaining both checks;
+`test_jev_questions.py::test_a_score_question_registers_only_up_to_four_levels`.
+
+Changes to phase B's tests, each because the behaviour changed: the lane rig
+switches `programme_enabled` on, fakes the six new reads, and asks the probe
+about its own subject; two budget tests moved to budgets whose lane shares are
+not zero, and the spent-budget test from a budget of 3 to one of 10, since 3 is
+now refused as a setting; the two tests of what the ledger is asked for a
+regime state still expect no read before the answer's, since no block holds a
+regime state, and a new one expects the block read first for text; the
+storable-text test screens its text before a web set asks about it, and the
+two unstorable-text tests match their refusal's message, since the subject rule
+would refuse one of them too; the Score test that scored 0.0 for a mean of 0.1
+now scores it for a mean of 0.01; the pinned provenance vocabulary gains
+`model`, and the schema's closed-vocabulary case refuses `vendor` instead; the
+ten-level Score shape is now a refused one; the schema suite's documents are
+filed under their excerpts' addresses, as 0013's CHECK requires, so its
+one-snapshot test repeats an excerpt rather than a hash; and the probe-verdict
+table gains the new statuses and the budget's new words. The integration
+probe-job cases run on databases of their own, and the SDK suite switches the
+programme on.
+
+### Open items Phase C found
+
+Numbered on from Phase B's.
+
+23. **The live ingest stitches `adj_close`.** It refetches the last ten
+    calendar days (`INGEST_LOOKBACK_DAYS`, about seven sessions) and upserts
+    them, and Yahoo back-adjusts `Adj Close` at every distribution, so the rows
+    before that span sit on an older adjustment basis than the rows in it, and
+    a stored series drifts by roughly its distribution yield a year. Pull request W keeps the live ingest on one basis; the fix is wanted
+    before the decisions area is switched on.
+24. **`live_job._load_panel` and `shadow_job._price_map` filter no `source`,**
+    and `PricePanel.from_bars` keeps the last of a duplicate. Latent while
+    yfinance is the only source written; phase C adds none, and its forward
+    loader filters `source = 'yfinance'`.
+25. **Phase E needs an allow-list of the `jev_repo` functions the API may
+    call.** The API may import the module, and nothing yet says which of its
+    reads a route may serve.
+26. **`decision_cutoff` moves to `src/core`** with phase F's
+    `src/db/repos/signals.py`, which must compute the cutoff from the
+    calendar rather than read it from the row.
+27. **Forward coverage.** The collection window is ten minutes, the worker runs
+    one job at a time, the programme restarts on a schedule and Yahoo can be
+    late; each missing session will say why, and phase H's coverage target is
+    judged on that record.
+28. **Operator-written hypotheses are not sent, by design.** Categorising them
+    needs an `operator`-provenance set with words of its own, and a subject
+    type of its own: a hypothesis title is recorded as `model`
+    (`jev_questions.TEXT_SUBJECT_PROVENANCE`), whichever set asks about it.
+29. **The Lanes table's catalogue set is the plan's, not the design's.** It
+    names four `research.catalogue` questions, a rebalancing horizon among
+    them; the set phase C registers asks two, asset class and mechanism.
+    Corrected when that set lands (C7).
+30. **The trading calendar's end moves with the process.** `calendar.nyse`
+    passes no `end`, so `exchange_calendars` builds XNYS to its default, one
+    year from the day the library was imported (`GLOBAL_DEFAULT_END`); XNYS
+    computes its holidays by rule and has no maximum of its own. So no upgrade
+    is due by any date, and 2027-09-27 was only the end as of a process started
+    on 2026-09-27. What is true instead: a process that ran for a year would
+    reach its calendar's end, and the forward clock's planner would plan
+    nothing past it. Passing an explicit `end` widens it, holidays still right
+    years ahead. The scheduled programme runs for under six hours at a time
+    (`programme.yml`), so it is far from that today.
+    `test_calendar_bounds.py::TestTheUpperBoundMovesWithTheProcess` holds the
+    end to a year from the day the tests run.
+31. **Crafted injection positives.** Whether TypeSafe's terms (MCA 2.3, AUP
+    3.7) allow the injection screen to be evaluated on text written to trip it
+    is a question for the operator. Until it is answered none is sent, and the
+    screen is evaluated only on what the allow-list fetched and on operator
+    labels.
+32. **Operator cards posted to `POST /programme/hypotheses` never pass
+    `reject_performance_claims`.** Once C8 moves the check into the pure
+    `claims` module, the API may import it to close this.
+33. **A 422 hold is permanent per set version and pin.** A spurious 422 from
+    the vendor disables a set until a reworded version, which the released
+    questions hashes force to change its words. Deliberate: it fails closed.
+34. **The Score legend's wire format is unobserved.** The check accepts a list
+    of the levels or an object keyed by index, and refuses anything else; the
+    first recorded Score answer settles it. Until then a Score of five to ten
+    levels also waits for a measured sum tolerance.
+35. **`findings.raised_by`'s migration comment says `programme:<role>`**, and
+    the code writes the bare role key. Found in passing; unrelated to Jev.
+36. **A content block holds its text for good, on a heuristic.** The client
+    classes any 403 whose body is not JSON as `content_block`, and an edge's
+    page — a firewall's, a CDN's — is one. For text that is the design's
+    precaution: the text is never sent again, by any set, and its canonical
+    answer is not read back, with no release but a migration, since the ledger
+    refuses DELETE. It binds text only: the first draft held enumerated states
+    too, and one such page would have taken a regime state out of the forward
+    clock for good, which is why an enumerated state is now held by nothing.
+    Beside item 33's 422 hold, the other refusal that does not lift.
+37. **An authentication hold outlasts a replaced key.** The hold reads "any
+    authentication failure since 00:00 UTC", and nothing records which key
+    failed, so after an operator replaces a refused key every ask, the
+    connectivity probe's included, is `auth_held` until midnight: the
+    `jev_probe` job fails without a retry, and once the forward clock runs,
+    that day's session would be lost with it. Until then the dispatch-only
+    `jev_check` (`jev-check.yml`), which records nothing, is what proves the new
+    key; the probe's error says so. Lifting the hold on a later success would
+    need the probe exempt from it, which is the design's "every lane" undone,
+    so it is left for an operator to decide.
 
 ## Inputs needed from the operator
 

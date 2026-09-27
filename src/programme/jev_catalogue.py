@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 
 #: Where Jev answers. Passed explicitly to the SDK on every construction, so
 #: ``TYPESAFE_BASE_URL`` in an environment is never read. No path: the SDK
@@ -129,8 +130,48 @@ LANES: tuple[str, ...] = (
 
 #: Where a request's state came from. Only ``internal`` — computed in code from
 #: this system's own rows — can ever reach the decision lane; ``web`` is what an
-#: outsider can write.
-PROVENANCES: tuple[str, ...] = ("web", "internal", "operator")
+#: outsider can write; ``operator`` is what a person typed; and ``model`` is
+#: text the programme's own generative model wrote, such as a hypothesis title
+#: (migration 0013). Not ``internal``: the phase F signal loader trusts
+#: ``internal``, and must never have to know that it sometimes means text a
+#: model wrote.
+PROVENANCES: tuple[str, ...] = ("web", "internal", "operator", "model")
+
+#: What a request's state describes, one per state model
+#: (``jev_questions.STATE_SUBJECT``). A text subject — a web excerpt, a
+#: hypothesis title — is addressed by the sha256 of its text, so a replay can
+#: never answer for another subject, and a label joins its answer exactly.
+SUBJECT_TYPES: tuple[str, ...] = ("probe", "session", "web_excerpt", "hypothesis_title")
+
+#: The percent of ``jev_daily_request_budget`` each recorded lane may spend in
+#: a UTC day, beside the budget itself. A probe is recorded in the probe lane
+#: whatever its set, so it spends the probe slice. Code, not a setting: no
+#: UPDATE can raise one, and so no lane can spend another's share — the
+#: forward clock's decision slice is what stays when a research backlog has
+#: spent its own. A lane with no set gets nothing until it has one. Integer
+#: percents, rounded down, so a budget below :data:`MIN_DAILY_REQUEST_BUDGET`
+#: would leave a lane with a share no call at all, and is refused.
+LANE_BUDGET_PERCENT: Mapping[str, int] = MappingProxyType(
+    {
+        "research": 35,
+        "guardrail": 35,
+        "findings": 0,
+        "ops": 0,
+        "signals": 0,
+        "decision": 20,
+        "probe": 10,
+    }
+)
+
+#: The smallest daily request budget other than zero: the least at which every
+#: lane with a share gets at least one call once its share is rounded down —
+#: ten, for the probe lane's 10%. A budget from one to nine would leave the
+#: probe lane none and, below five, the decision lane none, while reading as a
+#: budget that permits calls; ``settings_problem`` refuses it, so it reads as
+#: zero, which says what it does. Derived from the shares, so it moves with them.
+MIN_DAILY_REQUEST_BUDGET = max(
+    -(-100 // share) for share in LANE_BUDGET_PERCENT.values() if share
+)
 
 #: The operator's area switches, one ``jev_area_<area>`` flag each.
 AREAS: tuple[str, ...] = (
@@ -299,7 +340,10 @@ def settings_problem(
 
     Zero is a legal budget and a legal state limit. Each means "make no calls",
     which is a setting an operator may choose on purpose; it is also what the
-    switches read as when the stored value cannot be read.
+    switches read as when the stored value cannot be read. A budget from one to
+    ``MIN_DAILY_REQUEST_BUDGET - 1`` is not: each lane spends at most its
+    share, rounded down, and such a budget leaves some lane none while looking
+    like one that permits calls.
     """
     problem = model_problem(model)
     if problem is not None:
@@ -309,11 +353,40 @@ def settings_problem(
     )
     if problem is not None:
         return problem
+    # An integer by now: _count_problem refused anything else.
+    if isinstance(daily_budget, int) and 0 < daily_budget < MIN_DAILY_REQUEST_BUDGET:
+        return (
+            f"jev_daily_request_budget must be 0, for no calls, or at least "
+            f"{MIN_DAILY_REQUEST_BUDGET}, got {daily_budget}: each lane spends at "
+            "most its share of the budget, rounded down, and below "
+            f"{MIN_DAILY_REQUEST_BUDGET} the probe lane's would be none"
+        )
     # A state larger than the sub-limit could never be sent with any question
     # at all, so the sub-limit is a fact about the vendor, not a policy here.
     return _count_problem(
         "jev_max_state_tokens", max_state_tokens, MAX_STATE_PLUS_LONGEST_QUESTION
     )
+
+
+def lane_budget(daily_budget: int, lane: str) -> int:
+    """
+    How many calls ``lane`` may make in a UTC day under ``daily_budget``: its
+    :data:`LANE_BUDGET_PERCENT` of the budget, rounded down.
+
+    Rounded down, never up, so the slices together never exceed the budget and
+    a small budget floors them: at a budget of 9 the probe lane's 10% is none,
+    which is why :func:`settings_problem` refuses any budget from one to
+    :data:`MIN_DAILY_REQUEST_BUDGET` less one. A lane outside the vocabulary is
+    a :class:`ValueError`, not a slice of nothing: the schema refuses to record
+    one, so asking is a caller's defect.
+    """
+    if lane not in LANE_BUDGET_PERCENT:
+        raise ValueError(f"{lane!r} is not a lane; the lanes are {list(LANES)}")
+    if isinstance(daily_budget, bool) or not isinstance(daily_budget, int):
+        raise TypeError(f"a daily budget is a count of calls, got {daily_budget!r}")
+    if daily_budget <= 0:
+        return 0
+    return daily_budget * LANE_BUDGET_PERCENT[lane] // 100
 
 
 __all__ = [
@@ -328,17 +401,21 @@ __all__ = [
     "KNOWN_MODELS",
     "LANES",
     "LANE_AREA",
+    "LANE_BUDGET_PERCENT",
     "MAX_DAILY_REQUEST_BUDGET",
     "MAX_STATE_PLUS_LONGEST_QUESTION",
     "MAX_TOTAL_TOKENS",
+    "MIN_DAILY_REQUEST_BUDGET",
     "PINNED_MODEL",
     "PROVENANCES",
     "REFUSED_ALIASES",
+    "SUBJECT_TYPES",
     "VENDOR_MAX_STATE_PLUS_LONGEST_QUESTION",
     "VENDOR_MAX_TOTAL_TOKENS",
     "VENDOR_REQUESTS_PER_MINUTE",
     "VENDOR_TOKENS_PER_SECOND",
     "estimate_tokens",
+    "lane_budget",
     "model_problem",
     "request_size_problem",
     "settings_problem",

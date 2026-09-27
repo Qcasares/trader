@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from src.programme.jev_questions import SCREEN_CLEAR_ARGMAX, SCREEN_QUESTION
+
 if TYPE_CHECKING:
     from src.programme.jev_validate import ValidatedAnswer
 
@@ -330,19 +332,160 @@ async def find_canonical(
     return _decode_request(row) if row is not None else None
 
 
-async def requests_today(conn: asyncpg.Connection) -> int:
+async def requests_today(conn: asyncpg.Connection, lane: str | None = None) -> int:
     """
-    Calls made since UTC midnight, in every lane, probes included.
+    Calls made since UTC midnight: in every lane, probes included, or in the
+    recorded ``lane`` alone.
 
-    What the daily budget is compared against, so it counts what costs: a row
-    that records a call. Refusals are not calls, and a replay writes no row.
+    What the daily budget and each lane's slice of it are compared against, so
+    it counts what costs: a row that records a call. Refusals are not calls,
+    and a replay writes no row. A probe is recorded in the probe lane whatever
+    its set, so it spends the probe lane's slice.
     """
-    count = await conn.fetchval(
-        f"SELECT COUNT(*) FROM jev_requests "
-        f"WHERE available_at >= {_TODAY} AND status = ANY($1::text[])",
-        list(CALL_STATUSES),
-    )
+    if lane is None:
+        count = await conn.fetchval(
+            f"SELECT COUNT(*) FROM jev_requests "
+            f"WHERE available_at >= {_TODAY} AND status = ANY($1::text[])",
+            list(CALL_STATUSES),
+        )
+    else:
+        count = await conn.fetchval(
+            f"SELECT COUNT(*) FROM jev_requests "
+            f"WHERE available_at >= {_TODAY} AND status = ANY($1::text[]) "
+            f"AND lane = $2",
+            list(CALL_STATUSES),
+            lane,
+        )
     return int(count or 0)
+
+
+# ---------------------------------------------------------------------------
+# Reads for the road: what the vendor has refused, and what may be sent
+# ---------------------------------------------------------------------------
+#
+# ``jev_lane.ask`` asks each of these before it sends anything. Each is
+# derived from the ledger, so nothing writes a switch when the vendor refuses
+# something: the refusal is a row, and the row is what holds. Each is answered
+# from an index migration 0013 adds, so a road that grows a check per ask does
+# not grow a scan per ask.
+
+
+async def auth_failed_today(conn: asyncpg.Connection) -> bool:
+    """
+    Whether any call since UTC midnight failed authentication.
+
+    A refused key is refused again on every call until somebody changes it, so
+    one such failure holds every lane until 00:00 UTC rather than spending the
+    day's budget learning the same thing (docs/08, fact 4). Counted from the
+    database's stamp, like the budget. Nothing records which key failed, so a
+    key replaced since is held until then as well; the operator's
+    dispatch-only ``jev_check``, which records nothing, is what proves it.
+    """
+    return bool(
+        await conn.fetchval(
+            f"SELECT EXISTS (SELECT 1 FROM jev_requests "
+            f"WHERE error_kind = 'auth' AND available_at >= {_TODAY})"
+        )
+    )
+
+
+async def set_refused(
+    conn: asyncpg.Connection, *, question_set: str, version: int, model: str
+) -> bool:
+    """
+    Whether the vendor has refused a request of this set, at this version, to
+    this model, as unprocessable (a 422).
+
+    A 422 says the request itself is malformed by the vendor's reading, and the
+    same words sent again will be refused again, so the set is held until a new
+    version changes them — or a new pin, since another model is another judge.
+    Permanent by design: a set held by a spurious 422 costs a reworded version,
+    which is the safe direction (docs/08, fact 4).
+    """
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM jev_requests "
+            "WHERE question_set = $1 AND question_set_version = $2 "
+            "AND model_requested = $3 AND error_kind = 'invalid_request')",
+            question_set,
+            version,
+            model,
+        )
+    )
+
+
+async def content_blocked(conn: asyncpg.Connection, state_hash: str) -> bool:
+    """
+    Whether a call about exactly this state was answered with a content block:
+    a 403 whose body is not JSON (docs/08, fact 4).
+
+    Matched by the state hash, across every set and lane, so text the vendor
+    blocked for one question is not sent again for another. The lane asks it
+    only about text, a web excerpt or a hypothesis title: an enumerated state
+    has nothing in it a content filter could object to. An unverified
+    precaution, resting on one third-party report; for text, holding is the
+    safe direction.
+    """
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM jev_requests "
+            "WHERE state_hash = $1 AND error_kind = 'content_block')",
+            state_hash,
+        )
+    )
+
+
+async def content_quarantined(
+    conn: asyncpg.Connection, content_sha256: str
+) -> int | None:
+    """
+    The id of a quarantined document holding exactly this content, under any
+    source, or ``None`` if there is none.
+
+    Quarantine is by content: the same words stored from a second source are
+    the same words, and a screen they could escape by moving would not be one.
+    Exact because the schema holds ``content_sha256`` to be the sha256 of the
+    document's ``excerpt`` (``web_documents_content_is_its_excerpt``, migration
+    0013), which is ``jev_hash.text_sha256`` of the text a web set asks about;
+    and indexed on quarantined documents alone, which is all this reads.
+    """
+    document_id = await conn.fetchval(
+        "SELECT id FROM web_documents "
+        "WHERE content_sha256 = $1 AND quarantined ORDER BY id LIMIT 1",
+        content_sha256,
+    )
+    return int(document_id) if document_id is not None else None
+
+
+async def screened_clean(
+    conn: asyncpg.Connection, *, state_hash: str, pack_hash: str, model: str
+) -> bool:
+    """
+    Whether the injection screen, in the version whose pack is ``pack_hash``
+    and under ``model``, found exactly this state addressed to people.
+
+    That is: a canonical request — ``ok``, outside the probe lane — about this
+    state, from that pack, answered by that model, whose screen question has a
+    valid answer whose argmax is the clear one. An answer that flagged the
+    text, that was not measured, that another version or another model gave,
+    or that a probe gave, is not clean: each leaves the text unscreened.
+    """
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS ("
+            " SELECT 1 FROM jev_requests r"
+            " JOIN jev_answers a ON a.request_id = r.id"
+            " WHERE r.state_hash = $1 AND r.pack_hash = $2"
+            " AND r.status = 'ok' AND r.lane <> 'probe'"
+            " AND r.model_answered = $3"
+            " AND a.question_key = $4 AND a.valid AND a.argmax = $5)",
+            state_hash,
+            pack_hash,
+            model,
+            SCREEN_QUESTION,
+            SCREEN_CLEAR_ARGMAX,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

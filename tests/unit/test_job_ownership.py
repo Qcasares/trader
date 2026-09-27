@@ -684,9 +684,27 @@ def test_the_programme_claims_as_itself() -> None:
         ],
         ({"status": "disabled"}, "switched off while the job ran", True),
         ({"status": "no_key"}, "no TypeSafe key is set", False),
-        ({"status": "refused_budget"}, "request budget is spent", False),
+        (
+            {"status": "refused_budget"},
+            "no call is left today in the request budget or in the probe "
+            "lane's 10% share of it",
+            False,
+        ),
         ({"status": "refused_model"}, "not a usable pin", False),
         ({"status": "refused_limits"}, "over the size limits", False),
+        # The vendor's standing refusals, remembered by the road from phase C:
+        # each holds until the day, the words or the text changes, so none is
+        # retried.
+        (
+            {"status": "auth_held"},
+            "asks resume at 00:00 UTC, and a key replaced since is proved before "
+            "then only by the dispatch-only key check (jev-check.yml)",
+            False,
+        ),
+        ({"status": "set_refused"}, "a new version is needed", False),
+        ({"status": "content_blocked"}, "blocked this state's content", False),
+        ({"status": "quarantined"}, "quarantined", False),
+        ({"status": "unscreened"}, "injection screen", False),
         ({"status": "surprising"}, "came to 'surprising'", False),
     ],
 )
@@ -703,6 +721,21 @@ def test_every_probe_outcome_but_the_expected_answer_fails_the_job(
     else:
         assert found is not None and error in found, found
     assert again is retry
+
+
+def test_every_status_that_asked_nothing_says_why() -> None:
+    """
+    Every status the road can return without a call has a reason of its own,
+    not the catch-all, and only a switch turned off mid-job is retried: every
+    other one would be refused again.
+    """
+    from src.programme.jev_lane import UNRECORDED_STATUSES
+    from src.programme.main import probe_verdict
+
+    for status in (*UNRECORDED_STATUSES, "refused_budget", "refused_limits"):
+        found, again = probe_verdict({"status": status})
+        assert found is not None and "came to" not in found, (status, found)
+        assert again is (status == "disabled"), status
 
 
 def test_shutdown_waits_for_a_jev_call_and_not_for_the_kill() -> None:

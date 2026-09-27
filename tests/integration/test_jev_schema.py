@@ -1,7 +1,8 @@
 """
 test_jev_schema.py
 ------------------
-Migration 0012, the Jev ledger and its switches, against real PostgreSQL.
+Migrations 0012 and 0013, the Jev ledger and its switches, against real
+PostgreSQL.
 
 Every rule in it is a trigger, a CHECK or an index, so none of it can be proved
 without the database that enforces it. Each refusal is asserted by attempting
@@ -25,6 +26,7 @@ already recorded. Skipped unless ``TEST_DATABASE_URL`` is set.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -89,7 +91,9 @@ BODY = json.dumps(
 )
 
 LANES = ("research", "guardrail", "findings", "ops", "signals", "decision", "probe")
-PROVENANCES = ("web", "internal", "operator")
+#: 0012's three, and 0013's ``model``: text the programme's own generative model
+#: wrote, which is none of the other three (``TestModelProvenance``).
+PROVENANCES = ("web", "internal", "operator", "model")
 REFUSED = ("refused_budget", "refused_limits", "refused_model")
 
 #: Dates no honest stamp could carry: well before the ledger existed, and well
@@ -398,13 +402,29 @@ def _evaluation_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _address(excerpt: str) -> str:
+    """
+    What a document's ``content_sha256`` must be (migration 0013): the sha256
+    of its excerpt as UTF-8, in lower-case hex. Written here with ``hashlib``
+    rather than borrowed from the lane, so the schema is held to the rule and
+    not to one module's reading of it.
+    """
+    return hashlib.sha256(excerpt.encode("utf-8")).hexdigest()
+
+
 def _document_row(**overrides: Any) -> dict[str, Any]:
+    """A document with an excerpt no other row has, addressed by it."""
+    excerpt = overrides.pop(
+        "excerpt",
+        f"Item 2.02 Results of Operations and Financial Condition "
+        f"({uuid.uuid4().hex}).",
+    )
     row: dict[str, Any] = {
         "source": "sec_edgar_rss",
         "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent",
-        "content_sha256": uuid.uuid4().hex + uuid.uuid4().hex,
+        "content_sha256": _address(excerpt),
         "title": "8-K, current report",
-        "excerpt": "Item 2.02 Results of Operations and Financial Condition.",
+        "excerpt": excerpt,
     }
     row.update(overrides)
     return row
@@ -948,7 +968,7 @@ class TestARowCarriesOnlyTheResponseItGot:
         ("column", "value", "constraint"),
         (
             ("lane", "trading", "jev_requests_lane_check"),
-            ("provenance", "model", "jev_requests_provenance_check"),
+            ("provenance", "vendor", "jev_requests_provenance_check"),
             ("status", "maybe", "jev_requests_status_check"),
         ),
     )
@@ -1322,16 +1342,117 @@ class TestQuarantineIsOneWay:
         stored = await _insert(conn, "web_documents", _document_row())
         with pytest.raises(asyncpg.UniqueViolationError):
             await _insert(
-                conn,
-                "web_documents",
-                _document_row(content_sha256=stored["content_sha256"]),
+                conn, "web_documents", _document_row(excerpt=stored["excerpt"])
             )
         # The same content from another source is another snapshot.
         await _insert(
             conn,
             "web_documents",
-            _document_row(source="pwb_readme", content_sha256=stored["content_sha256"]),
+            _document_row(source="pwb_readme", excerpt=stored["excerpt"]),
         )
+
+
+class TestADocumentIsAddressedByItsExcerpt:
+    """
+    Migration 0013: ``content_sha256`` is the sha256 of the document's own
+    excerpt, by CHECK. The web gate finds quarantined text by the address of
+    exactly the text it is about to send, so a document stored under any other
+    address — the text before normalising, its raw title, the page — would
+    be quarantined where the gate cannot see it, and the text in it sent.
+    """
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            lambda excerpt: _address(excerpt + " "),
+            lambda excerpt: _address(excerpt.lower()),
+            lambda excerpt: _address(excerpt).upper(),
+            lambda excerpt: hashlib.sha256(excerpt.encode("utf-16")).hexdigest(),
+            lambda excerpt: uuid.uuid4().hex + uuid.uuid4().hex,
+        ],
+        ids=[
+            "another-text",
+            "normalised-otherwise",
+            "spelled-in-capitals",
+            "other-bytes",
+            "anything-at-all",
+        ],
+    )
+    async def test_any_other_address_is_refused(
+        self, conn: asyncpg.Connection, address: Any
+    ) -> None:
+        row = _document_row()
+        row["content_sha256"] = address(row["excerpt"])
+        assert row["content_sha256"] != _address(row["excerpt"])
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            await _insert(conn, "web_documents", row)
+        assert refused.value.constraint_name == "web_documents_content_is_its_excerpt"
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM web_documents WHERE excerpt = $1",
+                row["excerpt"],
+            )
+            == 0
+        )
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Time-Series Momentum Effect", "café ✓ 日本 \U0001f600"],
+        ids=["ascii", "beyond-ascii"],
+    )
+    async def test_the_address_is_the_one_the_lane_computes(
+        self, conn: asyncpg.Connection, text: str
+    ) -> None:
+        """The database's sha256 of the excerpt and ``jev_hash.text_sha256`` of
+        the text agree, beyond ASCII too, so the gate's lookup finds it."""
+        from src.programme.jev_hash import text_sha256
+
+        excerpt = f"{text} {uuid.uuid4().hex}"
+        stored = await _insert(conn, "web_documents", _document_row(excerpt=excerpt))
+        assert stored["content_sha256"] == text_sha256(excerpt)
+
+    async def test_a_quarantined_text_is_found_by_an_index(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The gate's read, ``jev_repo.content_quarantined``, as it runs: among
+        many documents and one quarantined, the planner answers it from the
+        partial index on quarantined content rather than a scan of them all.
+        """
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.executemany(
+                "INSERT INTO web_documents (source, url, content_sha256, excerpt) "
+                "VALUES ('bulk', 'https://example.invalid/', $1, $2)",
+                [
+                    (_address(text), text)
+                    for text in (f"Filing {i} {uuid.uuid4().hex}" for i in range(2000))
+                ],
+            )
+            quarantined = _document_row(
+                quarantined=True, quarantine_reason="addressed to an AI"
+            )
+            await _insert(conn, "web_documents", quarantined)
+            await conn.execute("ANALYZE web_documents")
+
+            queries: list[tuple[str, tuple[Any, ...]]] = []
+
+            class _Recording:
+                async def fetchval(self, query: str, *args: Any) -> Any:
+                    queries.append((query, args))
+                    return await conn.fetchval(query, *args)
+
+            found = await jev_repo.content_quarantined(
+                _Recording(),  # type: ignore[arg-type]
+                quarantined["content_sha256"],
+            )
+            assert found is not None
+            ((query, args),) = queries
+            plan = await conn.fetchval(f"EXPLAIN (FORMAT JSON) {query}", *args)
+            assert "idx_web_documents_content_quarantined" in plan, plan
+        finally:
+            await tr.rollback()
 
 
 # ---------------------------------------------------------------------------
@@ -2068,5 +2189,197 @@ class TestTheMigration:
                 )
                 assert dict(row) == dict.fromkeys(PROVENANCE_COLUMNS), table
             assert set(await _switches(conn)) == set(SEEDED_SWITCHES)
+        finally:
+            await conn.close()
+
+
+#: The indexes 0013 adds for the lane's new reads, each as Postgres renders it.
+ROAD_INDEXES = {
+    "idx_jev_requests_state_hash": "USING btree (state_hash)",
+    "idx_jev_requests_error_kind": (
+        "USING btree (error_kind, available_at) WHERE (error_kind IS NOT NULL)"
+    ),
+    "idx_jev_requests_subject": (
+        "USING btree (question_set, question_set_version, subject_type, subject_id)"
+    ),
+    "idx_web_documents_content_quarantined": (
+        "USING btree (content_sha256) WHERE quarantined"
+    ),
+}
+
+
+async def _road_indexes(conn: asyncpg.Connection) -> dict[str, str]:
+    rows = await conn.fetch(
+        "SELECT indexname, indexdef FROM pg_indexes "
+        "WHERE tablename IN ('jev_requests', 'web_documents') "
+        "AND indexname = ANY($1::text[])",
+        list(ROAD_INDEXES),
+    )
+    return {row["indexname"]: row["indexdef"] for row in rows}
+
+
+def _migrations_up_to(tmp_path: Any, *lasts: int) -> dict[int, Any]:
+    """For each of ``lasts``, a directory holding the migrations up to it."""
+    on_disk = {m.version: m for m in migrations.discover()}
+    directories = {}
+    for last in lasts:
+        directory = tmp_path / f"{last:04d}"
+        directory.mkdir()
+        for version, migration in on_disk.items():
+            if version <= last:
+                shutil.copy(migration.path, directory / migration.path.name)
+        directories[last] = directory
+    return directories
+
+
+class TestModelProvenance:
+    """
+    Migration 0013: a fourth provenance, ``model``, for text the programme's own
+    generative model wrote — none of ``web``, ``internal`` or ``operator`` — and
+    the indexes the lane's new reads stand on. ``internal`` keeps meaning
+    computed in code from this system's own rows, which is what the phase F
+    loader is to trust, so model-written text is never recorded under it.
+    """
+
+    async def test_model_is_accepted_in_both_tables(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        request, answer = await _exchange(
+            conn, request={"lane": "research", "provenance": "model"}
+        )
+        signal = await _insert(conn, "jev_signals", _signal_for(request, answer))
+        assert (request["provenance"], signal["provenance"]) == ("model", "model")
+
+    async def test_the_vocabulary_is_still_closed(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            await _insert(conn, "jev_requests", _request_row(provenance="Model"))
+        assert refused.value.constraint_name == "jev_requests_provenance_check"
+        # No answer, so the origin check has nothing to compare, as in
+        # TestSignals::test_the_vocabularies_are_closed.
+        row = await _signal_row(conn, status="missing", value=None, answer_id=None)
+        row["provenance"] = "generated"
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            await _insert(conn, "jev_signals", row)
+        assert refused.value.constraint_name == "jev_signals_provenance_check"
+
+    async def test_the_roads_reads_are_indexed(self, conn: asyncpg.Connection) -> None:
+        indexes = await _road_indexes(conn)
+        assert set(indexes) == set(ROAD_INDEXES)
+        for name, definition in ROAD_INDEXES.items():
+            assert indexes[name].endswith(definition), indexes[name]
+
+    async def test_it_applies_on_top_of_a_database_already_at_0012(
+        self, tmp_path
+    ) -> None:
+        """
+        Production will be at 0012, with requests and signals under each older
+        provenance, and 0013 drops and adds two CHECKs that validate every row
+        they find. DDL fires no row trigger, so the append-only triggers do not
+        stand in its way, and every row it finds is left as it was.
+        """
+        on_disk = {m.version: m for m in migrations.discover()}
+        at_0012, at_0013 = tmp_path / "0012", tmp_path / "0013"
+        for directory, last in ((at_0012, 12), (at_0013, 13)):
+            directory.mkdir()
+            for version, migration in on_disk.items():
+                if version <= last:
+                    shutil.copy(migration.path, directory / migration.path.name)
+
+        dsn = await _fresh_database("jev_upgrade_0013")
+        first = await migrations.migrate(dsn, directory=at_0012)
+        assert [m.version for m in first] == list(range(1, 13))
+
+        conn = await asyncpg.connect(dsn)
+        try:
+            with pytest.raises(asyncpg.CheckViolationError):
+                await _insert(conn, "jev_requests", _request_row(provenance="model"))
+            before: list[tuple[asyncpg.Record, asyncpg.Record]] = []
+            for provenance in ("web", "internal", "operator"):
+                request, answer = await _exchange(
+                    conn, request={"provenance": provenance}
+                )
+                signal = await _insert(
+                    conn, "jev_signals", _signal_for(request, answer)
+                )
+                before.append((request, signal))
+            # A document addressed by its excerpt, which 0013's CHECK finds
+            # and keeps: the rule is new, the address is not.
+            document = await _insert(conn, "web_documents", _document_row())
+
+            applied = await migrations.migrate(dsn, directory=at_0013)
+
+            assert [str(m) for m in applied] == ["0013_jev_model_provenance"]
+            assert (
+                await conn.fetchval(
+                    "SELECT checksum FROM schema_migrations WHERE version = 13"
+                )
+                == on_disk[13].checksum
+            )
+            assert await migrations.migrate(dsn, directory=at_0013) == []
+            for request, signal in before:
+                assert (
+                    await conn.fetchrow(
+                        "SELECT * FROM jev_requests WHERE id = $1", request["id"]
+                    )
+                    == request
+                )
+                assert (
+                    await conn.fetchrow(
+                        "SELECT * FROM jev_signals "
+                        "WHERE signal = $1 AND symbol = $2 AND session = $3",
+                        signal["signal"],
+                        signal["symbol"],
+                        signal["session"],
+                    )
+                    == signal
+                )
+            for table in ("jev_requests", "jev_signals"):
+                assert await _vocabulary(conn, f"{table}_provenance_check") == set(
+                    PROVENANCES
+                )
+            request, answer = await _exchange(conn, request={"provenance": "model"})
+            await _insert(conn, "jev_signals", _signal_for(request, answer))
+            assert set(await _road_indexes(conn)) == set(ROAD_INDEXES)
+            assert (
+                await conn.fetchrow(
+                    "SELECT * FROM web_documents WHERE id = $1", document["id"]
+                )
+                == document
+            )
+        finally:
+            await conn.close()
+
+    async def test_it_refuses_a_document_stored_under_another_address(
+        self, tmp_path
+    ) -> None:
+        """
+        A database whose ``web_documents`` held a row addressed by anything but
+        its excerpt would keep the gate from finding it, so 0013 does not apply
+        over one: it fails whole, in its transaction, and the database stays
+        at 0012 for somebody to look at. Nothing writes ``web_documents`` until
+        phase C's web ingest, so no database holds such a row.
+        """
+        directories = _migrations_up_to(tmp_path, 12, 13)
+        at_0012, at_0013 = directories[12], directories[13]
+        dsn = await _fresh_database("jev_upgrade_0013_refused")
+        await migrations.migrate(dsn, directory=at_0012)
+        conn = await asyncpg.connect(dsn)
+        try:
+            row = _document_row()
+            row["content_sha256"] = _address(row["excerpt"].upper())
+            await _insert(conn, "web_documents", row)
+
+            with pytest.raises(asyncpg.CheckViolationError) as refused:
+                await migrations.migrate(dsn, directory=at_0013)
+
+            assert refused.value.constraint_name == (
+                "web_documents_content_is_its_excerpt"
+            )
+            assert (
+                await conn.fetchval("SELECT MAX(version) FROM schema_migrations") == 12
+            )
+            assert await _road_indexes(conn) == {}
         finally:
             await conn.close()

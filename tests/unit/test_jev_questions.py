@@ -33,21 +33,52 @@ import re
 import subprocess
 import sys
 import types
+import warnings
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum, StrEnum
 from pathlib import Path
-from typing import Any, Literal, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    NamedTuple,
+    NewType,
+    TypeVar,
+    get_args,
+    get_origin,
+)
 
 import pytest
 from pydantic import (
+    AfterValidator,
+    AnyUrl,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
+    Field,
+    GetCoreSchemaHandler,
+    PlainSerializer,
+    PlainValidator,
+    SecretStr,
+    StringConstraints,
     ValidationError,
+    WrapSerializer,
+    WrapValidator,
     computed_field,
+    create_model,
     field_serializer,
+    field_validator,
     model_serializer,
+    model_validator,
+    root_validator,
+    validator,
 )
+from pydantic.dataclasses import dataclass as pydantic_dataclass
+from pydantic_core import core_schema
+from typing_extensions import TypedDict
 
 from src.programme import jev_catalogue
 from src.programme import jev_questions as jq
@@ -332,6 +363,49 @@ RELEASED_PACK_HASHES: dict[tuple[str, int], str] = {
 }
 
 
+#: Every released version's questions hash (``QuestionSet.questions_hash``):
+#: the part of the request hash a set contributes, which names no set. Kept as
+#: history apart from the words, like ``RELEASED_PACK_HASHES``, append-only,
+#: and pairwise distinct, so no two released versions — of one set or of two,
+#: registered now or retired — ever send identical questions. Two that did
+#: would share one canonical answer about an identical state (docs/08 open
+#: item 15). A version bump that changed only a lane or a provenance, or only
+#: the version, would repeat its predecessor's row and is refused.
+RELEASED_QUESTION_HASHES: dict[tuple[str, int], str] = {
+    ("probe.connectivity", 1): (
+        "8bf87c9201dca8cdffc44b433a8bf729ce11b1413defbe471e934305d26bb38c"
+    ),
+    ("decision.regime", 1): (
+        "6dce8dbea5303a4836a4677ca3090272c29ae3f9a11e44387009ddc9fd815c9f"
+    ),
+}
+
+
+def _question_hash_problems(
+    registry: dict[str, QuestionSet], released: dict[tuple[str, int], str]
+) -> list[str]:
+    """How the registered sets and the released questions hashes disagree."""
+    problems: list[str] = []
+    for question_set in registry.values():
+        key = (question_set.name, question_set.version)
+        if key not in released:
+            problems.append(f"{key} is not in RELEASED_QUESTION_HASHES: append it")
+        elif released[key] != question_set.questions_hash:
+            problems.append(
+                f"{key} asks questions hashing to {question_set.questions_hash}, "
+                f"but was released as {released[key]}"
+            )
+    seen: dict[str, tuple[str, int]] = {}
+    for key, value in released.items():
+        if value in seen:
+            problems.append(
+                f"{key} asks exactly the questions {seen[value]} asked: two "
+                "released versions would share one canonical answer"
+            )
+        seen.setdefault(value, key)
+    return problems
+
+
 def _release_problems(module: types.ModuleType) -> list[str]:
     """How the registered sets in ``module`` differ from what was released."""
     problems: list[str] = []
@@ -562,6 +636,882 @@ class TestTheGoldenHashes:
         assert original.DECISION_REGIME.pack_hash == _golden(REGIME)
 
 
+class TestOpenItem15:
+    """
+    No answer crosses question sets. The request hash is the hash of the pinned
+    model, the state and the questions, and names no set, so two sets asking
+    identical questions about an identical state would share one canonical row
+    and the second would be answered with the first's. Three independent
+    mechanisms: the registry refuses a set asking a registered set's questions
+    (here); the released questions hashes are append-only and pairwise
+    distinct, which covers words no longer in code (here); and the lane raises
+    on a canonical row of another pack (``test_jev_lane.py::TestNoAnswerCrossesSets``).
+    """
+
+    def test_identical_questions_under_another_name_are_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(jq, "REGISTRY", dict(jq.REGISTRY))
+        for question_set in list(jq.REGISTRY.values()):
+            copy_of = dataclasses.replace(
+                question_set,
+                name=f"{question_set.lane}.copy",
+                purpose="The same words under another name.",
+            )
+            assert jq.question_set_problem(copy_of) is None
+            with pytest.raises(ValueError, match="open item 15"):
+                jq._register(copy_of)
+            assert copy_of.name not in jq.REGISTRY
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"lane": "research", "provenance": "model"},
+            {"provenance": "operator"},
+            {"version": 2},
+        ],
+        ids=["lane-and-provenance", "provenance", "version"],
+    )
+    def test_the_rule_reads_the_words_not_the_label(
+        self, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+    ) -> None:
+        """
+        Another lane, provenance or version is another pack and the same
+        request: what the model reads is the words, and the words are what is
+        compared.
+        """
+        monkeypatch.setattr(jq, "REGISTRY", dict(jq.REGISTRY))
+        relabelled = dataclasses.replace(
+            PROBE, name="research.sun", purpose="The same words, relabelled.", **change
+        )
+        assert relabelled.pack_hash != PROBE.pack_hash
+        problem = jq.registration_problem(relabelled, jq.REGISTRY)
+        assert problem is not None and "open item 15" in problem
+
+    def test_other_words_are_another_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(jq, "REGISTRY", dict(jq.REGISTRY))
+        key, question = PROBE.questions[0]
+        reworded = dataclasses.replace(
+            PROBE,
+            name="probe.moon",
+            questions=(
+                (key, {**question, "instructions": "Is the sentence in `text` true?"}),
+            ),
+        )
+        assert jq.registration_problem(reworded, jq.REGISTRY) is None
+
+    def test_every_registered_set_is_its_released_question_hash(self) -> None:
+        assert _question_hash_problems(jq.REGISTRY, RELEASED_QUESTION_HASHES) == []
+
+    def test_released_question_hashes_are_pairwise_distinct(self) -> None:
+        values = list(RELEASED_QUESTION_HASHES.values())
+        assert len(set(values)) == len(values)
+        assert set(RELEASED_QUESTION_HASHES) == set(RELEASED_PACK_HASHES), (
+            "every released version has both rows, and nothing else does"
+        )
+
+    def test_a_version_bump_must_change_the_words(self) -> None:
+        """
+        The bump a developer might make to move a set to another lane, with its
+        words untouched: its row would repeat its predecessor's, and the check
+        that holds every row distinct refuses it, although the predecessor is
+        no longer registered.
+        """
+        bumped = dataclasses.replace(REGIME, version=2, lane="research")
+        registry = {REGIME.name: bumped}
+        released = {
+            **RELEASED_QUESTION_HASHES,
+            (bumped.name, bumped.version): bumped.questions_hash,
+        }
+        problems = _question_hash_problems(registry, released)
+        assert any("asks exactly the questions" in p for p in problems), problems
+
+    def test_the_check_catches_a_row_that_disagrees(self) -> None:
+        wrong = {**RELEASED_QUESTION_HASHES, ("decision.regime", 1): "0" * 64}
+        problems = _question_hash_problems(jq.REGISTRY, wrong)
+        assert any("was released as" in p for p in problems), problems
+
+    def test_the_hash_is_the_part_of_the_request_a_set_contributes(self) -> None:
+        for question_set in jq.REGISTRY.values():
+            text = json.dumps(
+                question_set.as_request_questions(),
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            assert question_set.questions_hash == (
+                hashlib.sha256(text.encode("utf-8")).hexdigest()
+            )
+
+
+_TEST_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class _Titled(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+
+
+class _Detailed(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    body: str
+
+
+class _Noted(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    notes: dict[str, str] = {}
+
+
+class _Nested(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    card: _Titled
+
+
+class _Labelled(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    kind: Literal["idea", "finding"]
+    urgent: bool
+
+
+# ---------------------------------------------------------------------------
+# Shapes the detail rule must read as text, and shapes it may read as none
+# ---------------------------------------------------------------------------
+#
+# Each is a state model of a plain ``title`` and one more field, or a title of
+# another shape, built for these tests alone. The rule fails closed, so the
+# first list is every way found to carry text past a rule that read only
+# ``str`` — a dataclass, a TypedDict, a URL, a validator that stands in for its
+# type — and the second is what it must still let through, so that failing
+# closed does not become refusing everything.
+
+
+@dataclasses.dataclass(frozen=True)
+class _CardDataclass:
+    body: str
+
+
+@pydantic_dataclass(frozen=True)
+class _CardPydanticDataclass:
+    body: str
+
+
+class _CardTypedDict(TypedDict):
+    body: str
+
+
+class _CardNamedTuple(NamedTuple):
+    body: str
+
+
+class _Colour(Enum):
+    RED = "red"
+
+
+_Body = NewType("_Body", str)
+
+_T = TypeVar("_T")
+
+
+@pydantic_dataclass(frozen=True)
+class _Box(Generic[_T]):
+    """A generic container whose type argument holds no text, and whose other
+    field does: read through its argument, it would look like none."""
+
+    value: _T
+    note: str
+
+
+class _SpelledInt(int):
+    """An integer that brings a schema of its own, and is sent as words."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls,
+            handler(int),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda value: f"the number {int(value)}"
+            ),
+        )
+
+
+class _Loose(BaseModel):
+    """Labels only, but it keeps keys nobody declared."""
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+    kind: Literal["idea"]
+
+
+class _Labels(BaseModel):
+    model_config = _TEST_CONFIG
+    kind: Literal["idea", "finding"]
+    urgent: bool
+    count: int
+
+
+def _beside_a_title(name: str, annotation: Any, **config: Any) -> type[BaseModel]:
+    """A state model of a plain ``title`` and one field, ``other``."""
+    return create_model(
+        name,
+        __config__=ConfigDict(**{**_TEST_CONFIG, **config}),
+        __module__=__name__,
+        title=(str, ...),
+        other=(annotation, ...),
+    )
+
+
+def _titled_as(name: str, annotation: Any) -> type[BaseModel]:
+    """A state model whose only field is a ``title`` of another shape."""
+    return create_model(
+        name,
+        __config__=_TEST_CONFIG,
+        __module__=__name__,
+        title=(annotation, ...),
+    )
+
+
+class _ComputedField(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def summary(self) -> int:
+        return 1
+
+
+class _FieldSerializer(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_serializer("count")
+    def _spelled(self, value: int) -> int:
+        return value
+
+
+class _ModelSerializer(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+
+    @model_serializer
+    def _whole(self) -> dict[str, Any]:
+        return {"title": self.title}
+
+
+class _FieldValidatedBefore(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_validator("count", mode="before")
+    @classmethod
+    def _check(cls, value: Any) -> Any:
+        return value
+
+
+class _FieldValidatedAfter(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_validator("count", mode="after")
+    @classmethod
+    def _check(cls, value: int) -> int:
+        return value
+
+
+class _FieldValidatedWrap(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_validator("count", mode="wrap")
+    @classmethod
+    def _check(cls, value: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(value)
+
+
+class _FieldValidatedPlain(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_validator("count", mode="plain")
+    @classmethod
+    def _check(cls, value: Any) -> Any:
+        return value
+
+
+class _EveryFieldValidatedAfter(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _check(cls, value: Any) -> Any:
+        return value
+
+
+class _ModelValidatedBefore(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check(cls, data: Any) -> Any:
+        return data
+
+
+class _ModelValidatedAfter(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @model_validator(mode="after")
+    def _check(self) -> _ModelValidatedAfter:
+        return self
+
+
+class _ModelValidatedWrap(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    count: int
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _check(cls, data: Any, handler: Callable[[Any], Any]) -> Any:
+        return handler(data)
+
+
+with warnings.catch_warnings():
+    # pydantic's own validators of before version 2, which it still runs and
+    # warns about: the rule reads them as it reads their successors.
+    warnings.simplefilter("ignore")
+
+    class _DeprecatedValidator(BaseModel):
+        model_config = _TEST_CONFIG
+        title: str
+        count: int
+
+        @validator("count")
+        def _post(cls, value: int) -> int:  # noqa: N805
+            return value
+
+    class _DeprecatedRootValidator(BaseModel):
+        model_config = _TEST_CONFIG
+        title: str
+        count: int
+
+        @root_validator(skip_on_failure=True)
+        def _post(cls, values: dict[str, Any]) -> dict[str, Any]:  # noqa: N805
+            return values
+
+    _JsonEncoded = _beside_a_title(
+        "_JsonEncoded", int, json_encoders={int: lambda value: "detail"}
+    )
+
+
+#: State models that can carry text beyond a plain title, each refused without
+#: ``internal_detail`` and admitted with it.
+CARRIES_TEXT: dict[str, type[BaseModel]] = {
+    "a-str": _Detailed,
+    "a-dict-of-str": _Noted,
+    "a-model-with-a-title": _Nested,
+    "bytes": _beside_a_title("_Bytes", bytes),
+    "any": _beside_a_title("_Anything", Any),
+    "object": _beside_a_title("_Object", object),
+    "a-dataclass": _beside_a_title("_WithDataclass", _CardDataclass),
+    "a-pydantic-dataclass": _beside_a_title(
+        "_WithPydanticDataclass", _CardPydanticDataclass
+    ),
+    "a-list-of-pydantic-dataclasses": _beside_a_title(
+        "_WithFindings", list[_CardPydanticDataclass]
+    ),
+    "a-generic-dataclass": _beside_a_title("_WithBox", _Box[int]),
+    "an-int-that-spells-itself": _beside_a_title("_WithSpelledInt", _SpelledInt),
+    "a-typeddict": _beside_a_title("_WithTypedDict", _CardTypedDict),
+    "a-namedtuple": _beside_a_title("_WithNamedTuple", _CardNamedTuple),
+    "a-newtype-of-str": _beside_a_title("_WithNewType", _Body),
+    "a-url": _beside_a_title("_WithUrl", AnyUrl),
+    "a-path": _beside_a_title("_WithPath", Path),
+    "a-secret": _beside_a_title("_WithSecret", SecretStr),
+    "a-date": _beside_a_title("_WithDate", date),
+    "a-decimal-sent-as-a-string": _beside_a_title("_WithDecimal", Decimal),
+    "an-enum": _beside_a_title("_WithEnum", _Colour),
+    "a-bare-list": _beside_a_title("_WithBareList", list),
+    "the-keys-of-a-dict": _beside_a_title("_WithKeys", dict[str, int]),
+    "an-optional-str": _beside_a_title("_WithOptionalStr", str | None),
+    "a-union-with-str": _beside_a_title("_WithUnion", int | str),
+    "a-tuple-with-str": _beside_a_title("_WithTuple", tuple[int, str]),
+    "a-model-keeping-extra-keys": _beside_a_title("_WithLoose", _Loose),
+    "a-plain-serializer": _beside_a_title(
+        "_WithPlainSerializer",
+        Annotated[int, PlainSerializer(lambda value: "detail", return_type=str)],
+    ),
+    "a-wrap-serializer": _beside_a_title(
+        "_WithWrapSerializer",
+        Annotated[int, WrapSerializer(lambda value, handler: handler(value))],
+    ),
+    "an-after-validator": _beside_a_title(
+        "_WithAfterValidator", Annotated[int, AfterValidator(lambda value: value)]
+    ),
+    "a-plain-validator": _beside_a_title(
+        "_WithPlainValidator", Annotated[int, PlainValidator(lambda value: value)]
+    ),
+    "a-wrap-validator": _beside_a_title(
+        "_WithWrapValidator",
+        Annotated[int, WrapValidator(lambda value, handler: handler(value))],
+    ),
+    "a-nested-wrap-validator": _beside_a_title(
+        "_WithNestedWrapValidator",
+        list[Annotated[int, WrapValidator(lambda value, handler: handler(value))]],
+    ),
+    "a-computed-field": _ComputedField,
+    "a-field-serializer": _FieldSerializer,
+    "a-model-serializer": _ModelSerializer,
+    "a-field-validator-after": _FieldValidatedAfter,
+    "a-field-validator-wrap": _FieldValidatedWrap,
+    "a-field-validator-plain": _FieldValidatedPlain,
+    "a-field-validator-on-every-field": _EveryFieldValidatedAfter,
+    "a-model-validator-after": _ModelValidatedAfter,
+    "a-model-validator-wrap": _ModelValidatedWrap,
+    "a-deprecated-validator": _DeprecatedValidator,
+    "a-deprecated-root-validator": _DeprecatedRootValidator,
+    "a-json-encoder": _JsonEncoded,
+    "a-title-that-is-a-list": _titled_as("_TitleList", list[str]),
+    "a-title-that-is-a-dict": _titled_as("_TitleDict", dict[str, str]),
+    "a-title-that-is-a-model": _titled_as("_TitleModel", _Titled),
+    "a-title-that-is-bytes": _titled_as("_TitleBytes", bytes),
+    "a-title-with-an-after-validator": _titled_as(
+        "_TitleAfter", Annotated[str, AfterValidator(lambda value: value)]
+    ),
+}
+
+#: State models whose only text is a plain title, or none: each admitted
+#: without ``internal_detail``.
+CARRIES_NO_TEXT: dict[str, type[BaseModel]] = {
+    "a-title": _Titled,
+    "labels": _Labelled,
+    "a-title-within-limits": _titled_as(
+        "_TitleWithinLimits",
+        Annotated[str, StringConstraints(min_length=1, max_length=300)],
+    ),
+    "an-int": _beside_a_title("_WithInt", int),
+    "a-float": _beside_a_title("_WithFloat", float),
+    "a-bool": _beside_a_title("_WithBool", bool),
+    "none": _beside_a_title("_WithNone", type(None)),
+    "an-optional-int": _beside_a_title("_WithOptionalInt", int | None),
+    "a-list-of-labels": _beside_a_title("_WithLabelList", list[Literal["a", "b"]]),
+    "a-tuple-of-ints": _beside_a_title("_WithIntTuple", tuple[int, ...]),
+    "a-set-of-bools": _beside_a_title("_WithBoolSet", frozenset[bool]),
+    "a-dict-keyed-by-a-label": _beside_a_title(
+        "_WithLabelKeys", dict[Literal["a"], int]
+    ),
+    "a-model-of-labels": _beside_a_title("_WithLabels", _Labels),
+    "an-enum-member-as-a-literal": _beside_a_title(
+        "_WithEnumLiteral", Literal[_Colour.RED]
+    ),
+    "a-before-validator": _beside_a_title(
+        "_WithBeforeValidator", Annotated[int, BeforeValidator(lambda value: value)]
+    ),
+    "a-field-validator-before": _FieldValidatedBefore,
+    "a-model-validator-before": _ModelValidatedBefore,
+}
+
+#: Every state model these tests give a subject to.
+_TEST_STATES = (
+    _Titled,
+    _Detailed,
+    _Noted,
+    _Nested,
+    _Labelled,
+    *CARRIES_TEXT.values(),
+    *CARRIES_NO_TEXT.values(),
+)
+
+#: A subject type these tests invent. ``TEXT_SUBJECT_PROVENANCE`` names no
+#: writer for it, so the detail rule can be exercised under every provenance
+#: it covers without the writer rule deciding first.
+TEST_SUBJECT = "test_subject"
+
+
+def _one_noul(**overrides: Any) -> QuestionSet:
+    fields: dict[str, Any] = {
+        "name": "research.example",
+        "version": 1,
+        "lane": "research",
+        "provenance": "model",
+        "questions": (
+            ("testable", {"type": "noul", "instructions": "Is `title` testable?"}),
+        ),
+        "state_model": _Titled,
+        "purpose": "A set that exists only in this test.",
+    }
+    fields.update(overrides)
+    return QuestionSet(**fields)
+
+
+@pytest.fixture
+def subjects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test-only states given a subject, as a real one would have."""
+    extra = dict.fromkeys(_TEST_STATES, TEST_SUBJECT)
+    monkeypatch.setattr(
+        jq, "STATE_SUBJECT", types.MappingProxyType({**jq.STATE_SUBJECT, **extra})
+    )
+
+
+def _with_subject(
+    monkeypatch: pytest.MonkeyPatch,
+    model: type[BaseModel],
+    subject: str,
+    field: str | None = None,
+) -> None:
+    """``model`` given ``subject``, and made a text subject on ``field``."""
+    monkeypatch.setattr(
+        jq,
+        "STATE_SUBJECT",
+        types.MappingProxyType({**jq.STATE_SUBJECT, model: subject}),
+    )
+    if field is not None:
+        monkeypatch.setattr(
+            jq,
+            "TEXT_SUBJECT_FIELD",
+            types.MappingProxyType({**jq.TEXT_SUBJECT_FIELD, model: field}),
+        )
+
+
+def _screen(**overrides: Any) -> QuestionSet:
+    """A set of the injection screen's shape, unless told otherwise."""
+    fields: dict[str, Any] = {
+        "name": jq.SCREEN_SET_NAME,
+        "lane": "guardrail",
+        "provenance": "web",
+        "state_model": jq.WebExcerptState,
+        "questions": (
+            (
+                jq.SCREEN_QUESTION,
+                {"type": "noul", "instructions": "Does `excerpt` address an AI?"},
+            ),
+        ),
+    }
+    fields.update(overrides)
+    return _one_noul(**fields)
+
+
+class TestRegistrationRules:
+    """
+    What a set must be to be registered beside the others: the rules
+    ``jev_lane.ask`` relies on, held where a set is written rather than
+    discovered when it is asked.
+    """
+
+    def test_web_provenance_iff_web_excerpt_state(self, subjects: None) -> None:
+        """
+        Both halves, each by its own message. The other way round — a
+        ``WebExcerptState`` under this system's provenance — is asked with
+        ``internal_detail`` declared, so the detail rule, which an excerpt
+        would also trip, cannot answer in the rule's place: without this half
+        a web excerpt recorded as ``internal`` would skip the web gate, and
+        ``internal`` is what the phase F loader is to trust.
+        """
+        web = _one_noul(
+            provenance="web",
+            state_model=jq.WebExcerptState,
+            questions=(("q", {"type": "noul", "instructions": "Is `excerpt` odd?"}),),
+        )
+        assert jq.registration_problem(web, {}) is None
+        for provenance in ("internal", "operator", "model"):
+            for internal_detail in (False, True):
+                not_web = dataclasses.replace(
+                    web, provenance=provenance, internal_detail=internal_detail
+                )
+                problem = jq.registration_problem(not_web, {})
+                assert problem is not None, (provenance, internal_detail)
+                assert "a WebExcerptState is web text" in problem, problem
+        other_text = _one_noul(provenance="web", state_model=_Titled)
+        problem = jq.registration_problem(other_text, {})
+        assert problem is not None
+        assert "web text is asked about as a WebExcerptState" in problem, problem
+
+    @pytest.mark.parametrize("model", [_Detailed, _Noted, _Nested])
+    @pytest.mark.parametrize("provenance", ["internal", "operator", "model"])
+    def test_a_set_carrying_detail_must_declare_it(
+        self, subjects: None, model: type[BaseModel], provenance: str
+    ) -> None:
+        undeclared = _one_noul(provenance=provenance, state_model=model)
+        problem = jq.registration_problem(undeclared, {})
+        assert problem is not None and "internal_detail" in problem
+        declared = dataclasses.replace(undeclared, internal_detail=True)
+        assert jq.registration_problem(declared, {}) is None
+
+    @pytest.mark.parametrize("model", [_Titled, _Labelled])
+    def test_a_title_and_labels_are_not_detail(
+        self, subjects: None, model: type[BaseModel]
+    ) -> None:
+        assert jq.registration_problem(_one_noul(state_model=model), {}) is None
+
+    def test_the_registered_states_carry_no_detail(self) -> None:
+        for question_set in jq.REGISTRY.values():
+            assert question_set.internal_detail is False
+            assert jq.registration_problem(question_set, {}) is None
+
+    def test_detail_is_a_boolean(self, subjects: None) -> None:
+        problem = jq.registration_problem(_one_noul(internal_detail=1), {})
+        assert problem is not None and "boolean" in problem
+
+    def test_every_state_model_has_a_subject_type(self) -> None:
+        problem = jq.registration_problem(_one_noul(state_model=_Titled), {})
+        assert problem is not None and "subject" in problem
+        assert set(jq.STATE_SUBJECT.values()) <= set(jev_catalogue.SUBJECT_TYPES)
+        for question_set in jq.REGISTRY.values():
+            assert question_set.state_model in jq.STATE_SUBJECT
+
+    def test_every_text_subject_names_a_field_of_its_model(self) -> None:
+        for model, field in jq.TEXT_SUBJECT_FIELD.items():
+            assert model in jq.STATE_SUBJECT
+            assert field in model.model_fields
+
+    def test_the_screen_is_a_web_noul(self) -> None:
+        screen = _screen()
+        assert jq.registration_problem(screen, {}) is None
+        assert jq.screen_problem(screen) is None
+        as_choice = dataclasses.replace(
+            screen,
+            questions=(
+                (
+                    jq.SCREEN_QUESTION,
+                    {
+                        "type": "choice",
+                        "instructions": "Whom does `excerpt` address?",
+                        "criteria": {
+                            "people": "People.",
+                            "machines": "Machines.",
+                            "unclear": "Unclear.",
+                        },
+                    },
+                ),
+            ),
+        )
+        problem = jq.registration_problem(as_choice, {})
+        assert problem is not None and "Noul" in problem
+
+    @pytest.mark.parametrize("position", ["after", "before"])
+    def test_the_screen_asks_its_one_question_and_nothing_else(
+        self, position: str
+    ) -> None:
+        """
+        The gate lets the screen alone ask about text nobody has screened, so a
+        second question in it would be answered about exactly that text — an
+        asset class, say, for an excerpt telling the model which to pick.
+        Refused wherever it stands, and a screen missing its question is
+        refused too.
+        """
+        extra = (
+            "asset_class",
+            {
+                "type": "choice",
+                "instructions": "Which asset class does `excerpt` name?",
+                "criteria": {
+                    "equities": "Shares.",
+                    "bonds": "Bonds.",
+                    "insufficient_evidence": "Unclear.",
+                },
+            },
+        )
+        (asked,) = _screen().questions
+        questions = (asked, extra) if position == "after" else (extra, asked)
+        with_more = _screen(questions=questions)
+        assert jq.question_set_problem(with_more) is None, "the premise: well formed"
+        problem = jq.registration_problem(with_more, {})
+        assert problem is not None and "nothing else" in problem, problem
+        assert jq.screen_problem(with_more) == problem
+
+        renamed = _screen(
+            questions=(
+                ("instructions_for_ai", {"type": "noul", "instructions": "Odd?"}),
+            )
+        )
+        problem = jq.registration_problem(renamed, {})
+        assert problem is not None and "nothing else" in problem
+
+    def test_the_screen_is_web(self) -> None:
+        problem = jq.registration_problem(
+            _screen(provenance="internal", internal_detail=True), {}
+        )
+        assert problem is not None and "a WebExcerptState is web text" in problem
+        assert jq.screen_problem(_screen(provenance="internal")) is not None
+
+    def test_a_forged_copy_with_detail_cleared_is_not_the_registered_set(
+        self, subjects: None
+    ) -> None:
+        declared = _one_noul(state_model=_Detailed, internal_detail=True)
+        forged = dataclasses.replace(declared, internal_detail=False)
+        assert forged.pack_hash == declared.pack_hash, "the flag is not the words"
+        assert forged != declared
+        assert dataclasses.replace(declared) == declared
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_every_registered_set_passes_its_registration_rules(
+        self, name: str
+    ) -> None:
+        others = {key: qs for key, qs in jq.REGISTRY.items() if key != name}
+        assert jq.registration_problem(jq.get(name), others) is None
+
+    def test_registration_applies_them(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(jq, "REGISTRY", dict(jq.REGISTRY))
+        with pytest.raises(ValueError, match="subject"):
+            jq._register(_one_noul(state_model=_Titled))
+        assert "research.example" not in jq.REGISTRY
+
+
+class TestTheDetailRuleFailsClosed:
+    """
+    Rule 4 counts as text whatever it cannot prove holds none (docs/08, fact
+    7). It once read ``str``, ``bytes``, ``Any`` and nested models and nothing
+    else, so a finding's full text in a dataclass, a URL or a TypedDict
+    registered as no detail at all, and the lane sent it with
+    ``jev_send_internal_detail`` off. Every shape found that way is here, and
+    so is every shape that must still pass, so that failing closed is not
+    refusing everything.
+    """
+
+    @pytest.mark.parametrize("model", CARRIES_TEXT.values(), ids=list(CARRIES_TEXT))
+    @pytest.mark.parametrize("provenance", ["internal", "operator", "model"])
+    def test_what_can_carry_text_is_detail(
+        self, subjects: None, model: type[BaseModel], provenance: str
+    ) -> None:
+        undeclared = _one_noul(provenance=provenance, state_model=model)
+        problem = jq.registration_problem(undeclared, {})
+        assert problem is not None and "internal_detail" in problem, problem
+        declared = dataclasses.replace(undeclared, internal_detail=True)
+        assert jq.registration_problem(declared, {}) is None
+
+    @pytest.mark.parametrize(
+        "model", CARRIES_NO_TEXT.values(), ids=list(CARRIES_NO_TEXT)
+    )
+    def test_what_cannot_is_not(self, subjects: None, model: type[BaseModel]) -> None:
+        assert jq.registration_problem(_one_noul(state_model=model), {}) is None
+
+    def test_the_registered_states_still_pass(self) -> None:
+        """The regime's labels and the probe's fixed sentence are not detail."""
+        for question_set in jq.REGISTRY.values():
+            assert not jq._model_carries_text(
+                question_set.state_model, set(), exempt=()
+            ), question_set.name
+
+    def test_a_web_set_is_not_held_to_it(self) -> None:
+        """Web text is an outsider's, not this system's detail: the web gate is
+        what holds it."""
+        web = _one_noul(
+            provenance="web",
+            state_model=jq.WebExcerptState,
+            questions=(("q", {"type": "noul", "instructions": "Is `excerpt` odd?"}),),
+        )
+        assert jq.registration_problem(web, {}) is None
+
+
+class TestTextIsRecordedAsItsWriters:
+    """
+    Rule 6. ``internal`` means computed in code, and the phase F loader is to
+    trust it; text the programme's own model wrote, a hypothesis title, is
+    recorded as ``model`` whichever set asks about it, and a kind of text
+    nobody has said who writes cannot be registered.
+    """
+
+    @pytest.mark.parametrize(
+        ("provenance", "admitted"),
+        [("model", True), ("internal", False), ("operator", False)],
+    )
+    @pytest.mark.parametrize("text_subject", [True, False], ids=["text", "a-card"])
+    def test_a_hypothesis_title_is_the_models(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        provenance: str,
+        admitted: bool,
+        text_subject: bool,
+    ) -> None:
+        """
+        Keyed on what the state describes, so a card that carries a title and
+        more is held to it as the title alone is.
+        """
+        model = _Titled if text_subject else _Detailed
+        _with_subject(
+            monkeypatch, model, "hypothesis_title", "title" if text_subject else None
+        )
+        question_set = _one_noul(
+            provenance=provenance, state_model=model, internal_detail=True
+        )
+        problem = jq.registration_problem(question_set, {})
+        if admitted:
+            assert problem is None, problem
+        else:
+            assert problem is not None and "recorded as 'model'" in problem, problem
+
+    def test_text_nobody_has_said_who_writes_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _with_subject(monkeypatch, _Titled, "finding_title", "title")
+        problem = jq.registration_problem(_one_noul(state_model=_Titled), {})
+        assert problem is not None and "names nobody" in problem, problem
+
+    def test_every_text_subject_has_its_writer(self) -> None:
+        assert dict(jq.TEXT_SUBJECT_PROVENANCE) == {
+            "web_excerpt": "web",
+            "hypothesis_title": "model",
+        }
+        assert set(jq.TEXT_SUBJECT_PROVENANCE) <= set(jev_catalogue.SUBJECT_TYPES)
+        assert set(jq.TEXT_SUBJECT_PROVENANCE.values()) <= set(
+            jev_catalogue.PROVENANCES
+        )
+        for model in jq.TEXT_SUBJECT_FIELD:
+            assert jq.STATE_SUBJECT[model] in jq.TEXT_SUBJECT_PROVENANCE
+
+    def test_the_table_cannot_be_changed_at_runtime(self) -> None:
+        with pytest.raises(TypeError):
+            jq.TEXT_SUBJECT_PROVENANCE["hypothesis_title"] = "internal"  # type: ignore[index]
+
+
+class TestTheWebExcerpt:
+    """
+    The one state web text is asked about: 1 to 300 characters. The cap is the
+    worst case the size limits were checked against, and phase C's web sets
+    write it into their words; an excerpt over it is quarantined where it is
+    stored, never cut.
+    """
+
+    def test_the_cap_is_300_characters(self) -> None:
+        assert jq.EXCERPT_MAX_CHARS == 300
+
+    @pytest.mark.parametrize("excerpt", ["x", "x" * 300, "é" * 300])
+    def test_an_excerpt_within_the_cap_is_a_state(self, excerpt: str) -> None:
+        """Characters, not bytes: 300 two-byte characters fit."""
+        assert jq.WebExcerptState(excerpt=excerpt).excerpt == excerpt
+
+    @pytest.mark.parametrize(
+        "excerpt",
+        ["", "x" * 301, "é" * 301, 3, None, b"x"],
+        ids=["empty", "one-over", "one-over-beyond-ascii", "a-number", "null", "bytes"],
+    )
+    def test_anything_else_is_refused(self, excerpt: Any) -> None:
+        with pytest.raises(ValidationError):
+            jq.WebExcerptState(excerpt=excerpt)
+
+    def test_it_is_closed_and_frozen(self) -> None:
+        with pytest.raises(ValidationError):
+            jq.WebExcerptState(excerpt="x", source="elsewhere")  # type: ignore[call-arg]
+        state = jq.WebExcerptState(excerpt="x")
+        with pytest.raises(ValidationError):
+            state.excerpt = "y"  # type: ignore[misc]
+
+
 class TestPercentagesAreWrittenExactly:
     @pytest.mark.parametrize(
         ("fraction", "text"),
@@ -757,8 +1707,8 @@ ACCEPTED: list[tuple[str, tuple[tuple[str, Any], ...]]] = [
         (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(2)}),),
     ),
     (
-        "score-10",
-        (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(10)}),),
+        "score-4",
+        (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(4)}),),
     ),
     ("choice-3", _choice(_options(3))),
     ("choice-255", _choice(_options(jq.MAX_CHOICE_OPTIONS))),
@@ -812,6 +1762,16 @@ REFUSED: list[tuple[str, tuple[tuple[str, Any], ...], str]] = [
         "score-1",
         (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(1)}),),
         "levels",
+    ),
+    (
+        "score-5",
+        (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(5)}),),
+        "measured from recorded answers",
+    ),
+    (
+        "score-10",
+        (("q", {"type": "score", "instructions": "Rate.", "criteria": _levels(10)}),),
+        "measured from recorded answers",
     ),
     (
         "score-11",
@@ -1440,6 +2400,141 @@ class TestDumpingAState:
             REGIME.dump_state(forged)
 
 
+@pydantic_dataclass(frozen=True)
+class _Finding:
+    detail: str
+
+
+class _FindingState(BaseModel):
+    """The state the review built: a title, and findings in a dataclass."""
+
+    model_config = _TEST_CONFIG
+    title: str
+    findings: list[_Finding]
+
+
+class _Smuggled(BaseModel):
+    """An integer whose validator lets anything through, and so holds text."""
+
+    model_config = _TEST_CONFIG
+    title: str
+    count: Annotated[int, WrapValidator(lambda value, handler: value)]
+
+
+class _Tallied(BaseModel):
+    model_config = _TEST_CONFIG
+    title: str
+    tally: dict[str, int]
+
+
+class _Aliased(BaseModel):
+    """Sent under an alias, which its own code wrote."""
+
+    model_config = ConfigDict(**_TEST_CONFIG, serialize_by_alias=True)
+    title: str
+    kind: Literal["idea", "finding"] = Field(alias="kind_of_card")
+
+
+class _Shade(StrEnum):
+    DARK = "dark"
+
+
+class _Shaded(BaseModel):
+    """A Literal of a str enum's member, which is sent as its value."""
+
+    model_config = _TEST_CONFIG
+    title: str
+    shade: Literal[_Shade.DARK]
+
+
+#: States that would send this system's detail through a shape the state
+#: model does not declare as text, each with the detail spelled ``FULL TEXT``.
+UNDECLARED_DETAIL: dict[str, tuple[type[BaseModel], Callable[[], BaseModel]]] = {
+    "in-a-dataclass": (
+        _FindingState,
+        lambda: _FindingState(
+            title="Look-ahead in the loader",
+            findings=[_Finding(detail="FULL TEXT of an internal finding")],
+        ),
+    ),
+    "past-a-validator": (_Smuggled, lambda: _Smuggled(title="t", count="FULL TEXT")),
+    "as-a-key": (_Tallied, lambda: _Tallied(title="t", tally={"FULL TEXT": 1})),
+    "as-a-nested-title": (
+        _Nested,
+        lambda: _Nested(title="t", card=_Titled(title="FULL TEXT")),
+    ),
+    "in-a-title-that-is-a-list": (
+        CARRIES_TEXT["a-title-that-is-a-list"],
+        lambda: CARRIES_TEXT["a-title-that-is-a-list"](title=["FULL TEXT"]),
+    ),
+}
+
+
+class TestDumpingWhatAStateSends:
+    """
+    The second reading of rule 4, from the output rather than the types. A set
+    of this system's own text that has not declared ``internal_detail`` sends
+    no string beyond its top-level ``title`` but the words its state model
+    writes itself — field names, and the values its Literals allow — so no
+    shape, validator or serializer the registration rule misread can carry
+    detail past ``jev_send_internal_detail``. Each set here is built by hand
+    and never registered, as a set placed in the registry past its rules
+    would be.
+    """
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    @pytest.mark.parametrize(
+        ("model", "build"), UNDECLARED_DETAIL.values(), ids=list(UNDECLARED_DETAIL)
+    )
+    @pytest.mark.parametrize("provenance", ["internal", "operator", "model"])
+    def test_undeclared_detail_is_not_dumped(
+        self,
+        model: type[BaseModel],
+        build: Callable[[], BaseModel],
+        provenance: str,
+    ) -> None:
+        question_set = _one_noul(provenance=provenance, state_model=model)
+        with pytest.raises(ValueError, match="internal_detail") as refused:
+            question_set.dump_state(build())
+        assert "FULL TEXT" not in str(refused.value), "the text reached the error"
+        declared = dataclasses.replace(question_set, internal_detail=True)
+        assert "FULL TEXT" in json.dumps(declared.dump_state(build()))
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            _Titled(title="Any words the title holds, FULL TEXT included"),
+            _Labelled(title="t", kind="finding", urgent=False),
+            _Aliased(title="t", kind_of_card="idea"),
+            _Shaded(title="t", shade=_Shade.DARK),
+            CARRIES_NO_TEXT["a-model-of-labels"](
+                title="t", other=_Labels(kind="idea", urgent=True, count=3)
+            ),
+        ],
+        ids=["a-title", "labels", "an-alias", "an-enum-literal", "a-nested-model"],
+    )
+    def test_a_title_field_names_and_literals_are_what_it_writes(
+        self, state: BaseModel
+    ) -> None:
+        question_set = _one_noul(provenance="model", state_model=type(state))
+        assert question_set.dump_state(state) == state.model_dump(mode="json")
+
+    def test_the_registered_states_are_dumped_as_before(self) -> None:
+        """The regime and the probe are this system's own, and all labels."""
+        state = _any_regime_state()
+        assert REGIME.dump_state(state) == state.model_dump(mode="json")
+        assert PROBE.dump_state(jq.ProbeState()) == {"text": jq.PROBE_TEXT}
+
+    def test_web_text_is_not_this_systems_detail(self) -> None:
+        web = _one_noul(
+            provenance="web",
+            state_model=jq.WebExcerptState,
+            questions=(("q", {"type": "noul", "instructions": "Is `excerpt` odd?"}),),
+        )
+        text = "An outsider's words, FULL TEXT and all"
+        assert web.dump_state(jq.WebExcerptState(excerpt=text)) == {"excerpt": text}
+
+
 def _unlabelled_values(model: type[BaseModel]) -> list[str]:
     """Literal values that are not a lowercase word or an ordinal up to 100."""
     found = []
@@ -1705,13 +2800,48 @@ def test_the_api_importable_modules_load_no_client_and_no_io() -> None:
     assert result.stdout.strip() == "[]", result.stdout
 
 
-def test_no_score_set_is_registered_before_its_consistency_check() -> None:
+@pytest.mark.parametrize("levels", range(1, 12))
+def test_a_score_question_registers_only_up_to_four_levels(levels: int) -> None:
     """
-    The validator checks a Score's range and its distribution, and not whether
-    ``score`` agrees with its own probabilities or ``legend`` with the levels
-    asked (docs/08 open item 20). No Score set is registered, so nothing reads
-    a Score yet. The first one must bring that check with it, its tolerance
-    measured from real answers rather than guessed; this fails until it does.
+    Open item 20, closed. The validator now checks a Score's legend and that
+    its score is its own probability-weighted mean
+    (``test_jev_validate.py::TestAScore``), so the tripwire that refused any
+    Score set is replaced by the rule that stood behind it: a Score registers
+    with at most four levels, where the 0.02 sum tolerance covers rounding to
+    the observed 0.01 grid (four times 0.005).
+    More levels need a tolerance measured from recorded answers; the vendor's
+    own limit of ten is refused beyond as before.
+    """
+    question = {"type": "score", "instructions": "Rate.", "criteria": _levels(levels)}
+    problem = jq.question_set_problem(_set((("q", question),)))
+    if jq.MIN_SCORE_LEVELS <= levels <= jq.MAX_SCORE_LEVELS_UNMEASURED:
+        assert problem is None, problem
+    else:
+        assert problem is not None and "levels" in problem, problem
+    if jq.MAX_SCORE_LEVELS_UNMEASURED < levels <= jq.MAX_SCORE_LEVELS:
+        assert "measured from recorded answers" in problem
+        assert f"up to {jq.MAX_SCORE_LEVELS}" in problem
+
+
+def test_the_four_level_rule_is_the_sum_tolerance_over_the_grid() -> None:
+    """
+    Four, because rounding each of n probabilities to the 0.01 grid moves the
+    sum by up to 0.005 n, and the tolerance is 0.02: n = 4 fits and n = 5 does
+    not. The two numbers live in two modules, so the arithmetic is held here.
+    """
+    from src.programme import jev_validate
+
+    step = jev_validate.GRID_ROUNDING
+    tolerance = jev_validate.PROBABILITY_SUM_TOLERANCE
+    assert jq.MAX_SCORE_LEVELS_UNMEASURED * step <= tolerance
+    assert (jq.MAX_SCORE_LEVELS_UNMEASURED + 1) * step > tolerance
+    assert jq.MAX_SCORE_LEVELS == 10, "the vendor's documented limit"
+
+
+def test_no_score_set_is_registered_yet() -> None:
+    """
+    Phase C builds the checks and registers no Score set (design R11). One that
+    arrives later meets the four-level rule above, and records its own words.
     """
     scores = [
         (question_set.name, key)
@@ -1719,7 +2849,4 @@ def test_no_score_set_is_registered_before_its_consistency_check() -> None:
         for key, question in question_set.questions
         if question["type"] == "score"
     ]
-    assert scores == [], (
-        f"{scores} are Score questions. Build the score-consistency and legend "
-        "checks in jev_validate first (docs/08 open item 20), then remove this."
-    )
+    assert scores == []

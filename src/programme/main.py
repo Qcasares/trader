@@ -59,7 +59,7 @@ import asyncpg
 from src.config import get_settings, require_database_url
 from src.db.repos import jobs as job_repo
 from src.db.repos import secrets as secret_repo
-from src.programme import jev_lane, repo
+from src.programme import jev_catalogue, jev_lane, repo
 from src.programme.flags import (
     PROGRAMME_WORKER_ID,
     jev_enabled,
@@ -130,13 +130,31 @@ class JobFailedError(Exception):
 #: be refused again.
 PROBE_RETRIED_KINDS = frozenset({"connection", "timeout", "rate_limited", "server"})
 
-#: Why each outcome that made no call made none.
+#: Why each outcome that made no call made none. Only ``disabled`` is retried:
+#: a switch turned off mid-job waits for the switch. Each of the vendor's
+#: standing refusals holds until something changes — the day, the words, the
+#: text — and asking again before then would be refused again.
 _PROBE_NOT_ASKED = {
     "disabled": "Jev was switched off while the job ran",
     "no_key": "no TypeSafe key is set (System > Configuration, or TYPESAFE_API_KEY)",
-    "refused_budget": "today's request budget is spent",
+    "refused_budget": (
+        "no call is left today in the request budget or in the probe lane's "
+        f"{jev_catalogue.LANE_BUDGET_PERCENT['probe']}% share of it (a budget "
+        "of 0, or one that cannot be used, allows none)"
+    ),
     "refused_model": "the model setting is not a usable pin",
     "refused_limits": "the request is over the size limits",
+    "auth_held": (
+        "an authentication failure was recorded today; asks resume at 00:00 UTC, "
+        "and a key replaced since is proved before then only by the "
+        "dispatch-only key check (jev-check.yml)"
+    ),
+    "set_refused": (
+        "the vendor refused this set's request with a 422; a new version is needed"
+    ),
+    "content_blocked": "the vendor blocked this state's content; it is not sent again",
+    "quarantined": "the text is quarantined, and nothing asks about it again",
+    "unscreened": "the text has no clean answer from the injection screen",
 }
 
 

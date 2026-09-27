@@ -112,10 +112,14 @@ def dsn() -> str:
 
 @pytest.fixture
 async def conn(dsn: str) -> AsyncIterator[asyncpg.Connection]:
-    """Jev switched on for the decision set, every setting at its seed."""
+    """
+    The programme and Jev switched on for the decision set, every setting at
+    its seed. The lane reads ``programme_enabled`` itself, on every ask.
+    """
     connection = await asyncpg.connect(dsn)
     try:
         for key, value in {
+            flags.PROGRAMME_ENABLED: True,
             flags.JEV_ENABLED: True,
             f"{flags.JEV_AREA_PREFIX}decisions": True,
             flags.JEV_MODEL: MODEL,

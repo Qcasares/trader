@@ -53,6 +53,22 @@ dates, containers, and Literal values that do not look like labels. What a
 label means is a reviewer's control, not the rule's: a ticker or a date spelled
 as a lowercase label passes it.
 
+What a set may be registered beside
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+:func:`question_set_problem` judges a set on its own; :func:`registration_problem`
+judges it against the sets already registered and the rules the lane relies on.
+The request hash names no set — two sets sending identical words about an
+identical state send the same request — so a second set asking exactly another's
+questions would be answered with the first's canonical answer, and is refused by
+its :attr:`QuestionSet.questions_hash` (docs/08 open item 15). A web set's state
+is :class:`WebExcerptState`, the one text model the injection screen reads too,
+so what was screened is exactly what is asked; a set carrying this system's own
+detail says so, and the lane then needs ``jev_send_internal_detail`` — read from
+the state model to fail closed, and read again from what each dump would send;
+every state model names the subject it describes, so the lane can hold a
+subject to its content; and text is recorded as its writer's, a hypothesis
+title as ``model`` and never as ``internal``.
+
 The API may import this module to show the catalogue of questions. It holds no
 client and names no host, so it can.
 """
@@ -63,14 +79,25 @@ import copy
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Annotated, Any, Literal, get_args, get_origin
+from types import MappingProxyType, UnionType
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    PlainSerializer,
+    PlainValidator,
+    StringConstraints,
+    WrapSerializer,
+    WrapValidator,
+    field_validator,
+)
 
-from src.programme import jev_catalogue
+from src.programme import jev_catalogue, jev_hash
 
 # ---------------------------------------------------------------------------
 # Rules a question set is held to
@@ -87,6 +114,17 @@ ESCAPE_OPTIONS: tuple[str, ...] = ("none_of_these", "insufficient_evidence", "un
 MAX_CHOICE_OPTIONS = 255
 MIN_SCORE_LEVELS = 2
 MAX_SCORE_LEVELS = 10
+
+#: The most levels a Score may be registered with until a tolerance for more
+#: has been measured. Values are observed on a 0.01 grid, and rounding each
+#: probability to it moves a sum by up to 0.005 a level, so the validator's
+#: 0.02 sum tolerance covers the rounding of at most four levels; at ten it
+#: could reach 0.05 on rounding alone, and an honest answer would be refused
+#: as malformed. A tolerance for more levels is measured from recorded answers
+#: and written into ``jev_validate`` with its evidence, and this rises with it
+#: (docs/08 open item 20). ``tests/unit/test_jev_validate.py`` holds the two
+#: together.
+MAX_SCORE_LEVELS_UNMEASURED = 4
 
 #: A Choice needs this many options besides its escape. With one, it is a Noul
 #: asked in a more expensive shape.
@@ -214,6 +252,81 @@ class ProbeState(BaseModel):
     text: Literal[PROBE_TEXT] = PROBE_TEXT
 
 
+#: The longest excerpt of web text a web state may carry, in characters. An
+#: excerpt over it is quarantined where it is stored, never truncated: a cut
+#: excerpt is words nobody published, and a cut made mid-instruction would pass
+#: the screen as something it is not. Phase C's web sets write this number into
+#: their own words, so changing it changes their pack hashes.
+EXCERPT_MAX_CHARS = 300
+
+
+class WebExcerptState(BaseModel):
+    """
+    The only state a web-provenance set may be asked about: one excerpt of text
+    from an allow-listed public page, and nothing else.
+
+    One model for every web set, the injection screen included, so the text the
+    screen judged and the text a later set is asked about have one state hash:
+    "screened" is a fact about the exact state sent, not about a document it
+    was cut from. No set uses it until the screen is registered, and until then
+    the lane refuses every web ask.
+    """
+
+    model_config = _STATE_CONFIG
+
+    excerpt: Annotated[
+        str, StringConstraints(min_length=1, max_length=EXCERPT_MAX_CHARS)
+    ]
+
+
+#: The state models a ``web``-provenance set may take, and the only sets that
+#: may take them. Held both ways at registration: web text in any other shape
+#: would reach no screen, and a web state under another provenance would be
+#: text an outsider wrote, recorded as though this system had.
+WEB_STATE_MODELS: frozenset[type[BaseModel]] = frozenset({WebExcerptState})
+
+#: The subject type each state model describes. The lane requires a request's
+#: ``subject_type`` to be its state model's, so a subject cannot be mislabelled,
+#: and a state model without one cannot be registered.
+STATE_SUBJECT: Mapping[type[BaseModel], str] = MappingProxyType(
+    {
+        ProbeState: "probe",
+        RegimeState: "session",
+        WebExcerptState: "web_excerpt",
+    }
+)
+
+#: For a text state, the field whose text is its subject. The lane requires the
+#: subject id to be ``jev_hash.text_sha256`` of that field's text as sent, so a
+#: replay can never answer for another subject, the same words from two sources
+#: are one subject, and a label joins its answer exactly.
+TEXT_SUBJECT_FIELD: Mapping[type[BaseModel], str] = MappingProxyType(
+    {WebExcerptState: "excerpt"}
+)
+
+#: Who writes each kind of text subject, as the provenance every set asking
+#: about it records. A web excerpt is an outsider's. A hypothesis title is
+#: written by the programme's own generative model, so it is recorded as
+#: ``model`` and never as ``internal``, which means computed in code and is
+#: what the phase F signal loader is to trust. A state model whose subject is
+#: text is registered only if its subject has a writer here, so a new kind of
+#: text cannot arrive without somebody saying who wrote it; an operator's text
+#: (docs/08 open item 28) is a subject of its own.
+TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
+    {"web_excerpt": "web", "hypothesis_title": "model"}
+)
+
+#: The injection screen: the set, its one question, and the answer that means
+#: the text is addressed to people. A web set is asked about text only once the
+#: registered screen, under the pinned model, has answered this question about
+#: exactly that text with a valid ``false``. Until a set of this name is
+#: registered, which design part C7 does in the C7+C8 pull request, every web
+#: ask is refused: the gate fails closed.
+SCREEN_SET_NAME = "guardrail.injection"
+SCREEN_QUESTION = "addressed_to_ai"
+SCREEN_CLEAR_ARGMAX = "false"
+
+
 # ---------------------------------------------------------------------------
 # The question set
 # ---------------------------------------------------------------------------
@@ -230,6 +343,15 @@ class QuestionSet:
     caller still holds cannot change a set after it is built, and
     :meth:`as_request_questions` deep-copies on the way out, so a request
     cannot change the set it was built from.
+
+    ``internal_detail`` says the state carries more of this system's own text
+    than a title — a hypothesis card's body, a finding's detail — which is sent
+    only while ``jev_send_internal_detail`` is on. Part of the set's equality,
+    so a copy with it cleared is not the registered set and the lane refuses
+    it; not part of the pack hash, which is the words the model reads. Held
+    twice: at registration, from the state model's declarations
+    (:func:`registration_problem`), and on every dump, from what would be sent
+    (:meth:`dump_state`).
     """
 
     name: str
@@ -239,6 +361,7 @@ class QuestionSet:
     questions: tuple[tuple[str, dict], ...]
     state_model: type[BaseModel]
     purpose: str
+    internal_detail: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.questions, Mapping):
@@ -266,6 +389,7 @@ class QuestionSet:
             self.pack_hash == other.pack_hash
             and self.state_model is other.state_model
             and self.purpose == other.purpose
+            and self.internal_detail == other.internal_detail
         )
 
     def __hash__(self) -> int:
@@ -294,6 +418,15 @@ class QuestionSet:
         which skips validation, cannot send a value its fields forbid. From
         the JSON rather than the dict because a strict model reads a date only
         from JSON text, and a research lane's state may carry one.
+
+        And for a set of this system's own text that has not declared
+        ``internal_detail``, what would be sent may hold no string beyond its
+        top-level ``title`` but the words its state model writes itself: a
+        field name, or a value one of its Literals allows. :class:`ValueError`
+        otherwise, naming neither the text nor where it was. This reads the
+        output, not the types, so no annotation, validator or serializer that
+        :func:`registration_problem` failed to read can carry detail past the
+        switch (docs/08, fact 7): at worst the set is refused on its first ask.
         """
         if type(state) is not self.state_model:
             raise TypeError(
@@ -302,6 +435,18 @@ class QuestionSet:
             )
         dumped = state.model_dump(mode="json")
         self.state_model.model_validate_json(json.dumps(dumped, ensure_ascii=False))
+        if (
+            self.provenance in _OWN_TEXT_PROVENANCES
+            and not self.internal_detail
+            and _sends_undeclared_text(dumped, _declared_words(self.state_model))
+        ):
+            raise ValueError(
+                f"{self.name} v{self.version} would send text beyond a title that "
+                f"{self.state_model.__name__} does not declare, under provenance "
+                f"{self.provenance!r}. This system's detail goes only while "
+                "jev_send_internal_detail is on, so a set that sends it is "
+                "registered with internal_detail=True (docs/08, fact 7)"
+            )
         return dumped
 
     @property
@@ -326,6 +471,20 @@ class QuestionSet:
         }
         text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @property
+    def questions_hash(self) -> str:
+        """
+        sha256 of the questions exactly as a request carries them: the part of
+        the request hash this set contributes (``jev_hash.questions_hash``).
+
+        Unlike the pack hash it names no set, version, lane or provenance,
+        because the request hash names none either. Two sets with the same
+        questions hash send the same request about the same state, and would
+        share its one canonical answer; :func:`registration_problem` refuses
+        the second (docs/08 open item 15).
+        """
+        return jev_hash.questions_hash(self.as_request_questions())
 
     @property
     def escape_options(self) -> dict[str, str]:
@@ -395,6 +554,15 @@ def _score_problem(where: str, criteria: object) -> str | None:
         return (
             f"{where} has {len(criteria)} levels; the vendor's documentation "
             f"allows {MIN_SCORE_LEVELS} to {MAX_SCORE_LEVELS}"
+        )
+    if len(criteria) > MAX_SCORE_LEVELS_UNMEASURED:
+        # The vendor's limit is the one above; this is ours, until measured.
+        return (
+            f"{where} has {len(criteria)} levels. The validator's 0.02 sum "
+            "tolerance covers rounding to the observed 0.01 grid for at most "
+            f"{MAX_SCORE_LEVELS_UNMEASURED} levels; more needs a tolerance "
+            "measured from recorded answers, recorded in code with its "
+            f"evidence (the vendor's documentation allows up to {MAX_SCORE_LEVELS})"
         )
     for index, level in enumerate(criteria):
         problem = _text_problem(level, f"{where}'s level {index}")
@@ -632,6 +800,325 @@ def question_set_problem(question_set: QuestionSet) -> str | None:
     return state_model_problem(qs.state_model, qs.lane)
 
 
+#: Provenances whose state is this system's own text, as opposed to the open
+#: web's. Detail of it — anything beyond a title — goes to the vendor only
+#: while ``jev_send_internal_detail`` is on (docs/08, fact 7).
+_OWN_TEXT_PROVENANCES = frozenset({"internal", "operator", "model"})
+
+#: The one field of this system's own text that may be sent without the detail
+#: switch: a title, as fact 7's default sends hypothesis cards and findings.
+_TITLE_FIELD = "title"
+
+#: The annotations whose values cannot spell a word, besides a Literal's, which
+#: are written in code. Compared by identity, not ``issubclass``: a subclass can
+#: bring a schema or a serializer of its own. ``Decimal`` is not among them,
+#: because pydantic sends one as a string.
+_NOT_TEXT: tuple[object, ...] = (bool, int, float, type(None))
+
+#: Containers and unions, which can hold text exactly when one of their
+#: arguments can. Anything else with arguments is not read through.
+_READ_THROUGH: frozenset[object] = frozenset(
+    {list, tuple, set, frozenset, dict, Union, UnionType}
+)
+
+#: Field metadata that decides what a field holds or sends in place of its
+#: type: a validator that runs after or instead of the type's own, and a
+#: serializer. A field carrying one is not what its annotation says.
+_REPLACING_METADATA: tuple[type, ...] = (
+    AfterValidator,
+    PlainValidator,
+    WrapValidator,
+    PlainSerializer,
+    WrapSerializer,
+)
+
+#: The validator modes that run after or instead of a field's own validation,
+#: and so decide what it holds. A ``before`` validator is followed by the
+#: field's own, which still decides.
+_REPLACING_MODES = frozenset({"after", "wrap", "plain"})
+
+
+def _carries_text(annotation: object, seen: set[type]) -> bool:
+    """
+    Whether a field annotated ``annotation`` could carry free text.
+
+    It fails closed: text, unless the annotation is one this rule can read and
+    prove holds none. Proved: a Literal, whose values are written in code; a
+    boolean, an integer, a float or ``None``; a model whose fields are each of
+    these and which sends nothing no field declares; and a list, tuple, set,
+    dict or union of them. Everything else counts — ``str``, ``bytes``,
+    ``Any`` and ``object``, and every shape the rule does not read: a
+    dataclass, a TypedDict, a NamedTuple, a NewType, a URL, a path, a secret,
+    a date, an enum, a ``Decimal``, a bare container. Reading too much costs a
+    declaration, ``internal_detail=True``; reading too little sends this
+    system's detail with the switch off. And a validator or serializer in the
+    metadata decides what the field holds, so it counts as well.
+    """
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        base, *metadata = get_args(annotation)
+        return _replaces_its_type(metadata) or _carries_text(base, seen)
+    if origin is Literal:
+        return False
+    if any(annotation is kind for kind in _NOT_TEXT):
+        return False
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if annotation in seen:
+            return False
+        seen.add(annotation)
+        return _model_carries_text(annotation, seen, exempt=())
+    arguments = [arg for arg in get_args(annotation) if arg is not Ellipsis]
+    if origin in _READ_THROUGH and arguments:
+        return any(_carries_text(arg, seen) for arg in arguments)
+    return True
+
+
+def _replaces_its_type(metadata: Sequence[object]) -> bool:
+    """Whether ``metadata`` holds a validator or serializer that stands in for
+    the annotated type."""
+    return any(isinstance(item, _REPLACING_METADATA) for item in metadata)
+
+
+def _validated_in_place(model: type[BaseModel]) -> set[str]:
+    """
+    The fields a decorated validator decides the value of, after or instead of
+    their type: pydantic's own validators and the deprecated ones alike. A
+    validator of ``"*"`` names every field.
+    """
+    decorators = model.__pydantic_decorators__
+    named: set[str] = set()
+    for table in (decorators.field_validators, decorators.validators):
+        for decorator in table.values():
+            if decorator.info.mode in _REPLACING_MODES:
+                named.update(decorator.info.fields)
+    return named
+
+
+def _model_carries_text(
+    model: type[BaseModel], seen: set[type], exempt: tuple[str, ...]
+) -> bool:
+    """
+    Whether ``model`` could send free text other than the ``exempt`` fields,
+    each exempt only when it is plain text: a ``str`` with no validator or
+    serializer standing in for it.
+
+    What a model can send past its annotations counts as text, since no
+    annotation shows it: a computed field, a serializer, a JSON encoder, a
+    key it does not forbid, and a model validator that runs after or instead
+    of the fields' own validation, which can put anything in any field.
+    """
+    decorators = model.__pydantic_decorators__
+    model_validators = (
+        *decorators.model_validators.values(),
+        *decorators.root_validators.values(),
+    )
+    if (
+        model.model_computed_fields
+        or decorators.field_serializers
+        or decorators.model_serializers
+        or model.model_config.get("json_encoders")
+        or model.model_config.get("extra") != "forbid"
+        or any(v.info.mode in _REPLACING_MODES for v in model_validators)
+    ):
+        return True
+    validated = _validated_in_place(model)
+    for name, field in model.model_fields.items():
+        if name in validated or "*" in validated:
+            return True
+        if _replaces_its_type(field.metadata):
+            return True
+        if name in exempt and field.annotation is str:
+            continue
+        if _carries_text(field.annotation, seen):
+            return True
+    return False
+
+
+def _declared_words(model: type[BaseModel]) -> frozenset[str]:
+    """
+    Every string ``model`` writes into what it sends by itself: the names of
+    its fields and of its nested models' fields, their aliases, and each
+    value a Literal among them allows. Nothing a dataclass, a TypedDict or any
+    other shape declares is included, so what they send reads as undeclared.
+    """
+    words: set[str] = set()
+    _collect_words(model, words, set())
+    return frozenset(words)
+
+
+def _collect_words(annotation: object, words: set[str], seen: set[type]) -> None:
+    if get_origin(annotation) is Literal:
+        # A str enum's member is a str equal to its value. Any other enum's
+        # does not survive the read-back in dump_state, so never gets here.
+        words.update(value for value in get_args(annotation) if isinstance(value, str))
+        return
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if annotation in seen:
+            return
+        seen.add(annotation)
+        for name, field in annotation.model_fields.items():
+            for word in (name, field.alias, field.serialization_alias):
+                if isinstance(word, str):
+                    words.add(word)
+            _collect_words(field.annotation, words, seen)
+        return
+    for argument in get_args(annotation):
+        _collect_words(argument, words, seen)
+
+
+def _sends_undeclared_text(
+    value: object, words: frozenset[str], top: bool = True
+) -> bool:
+    """
+    Whether ``value``, a state as it is sent, holds a string — a key or a value,
+    at any depth — that is not one of ``words``, the value of the top-level
+    ``title`` excepted when it is a string. Numbers, booleans and nulls spell
+    nothing.
+    """
+    if isinstance(value, str):
+        return value not in words
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if key not in words:
+                return True
+            if top and key == _TITLE_FIELD and isinstance(item, str):
+                continue
+            if _sends_undeclared_text(item, words, top=False):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_sends_undeclared_text(item, words, top=False) for item in value)
+    return False
+
+
+def screen_problem(question_set: QuestionSet) -> str | None:
+    """
+    Why ``question_set`` cannot be the injection screen, or ``None`` if it can.
+
+    The lane reads the screen's one answer as the verdict on a text, and asks
+    the screen itself about text nothing has screened. So the screen is a web
+    set asking exactly one question, :data:`SCREEN_QUESTION`, as a Noul, whose
+    valid ``false`` is clear: a second question in it would be answered about
+    unscreened text by the one set the gate lets through. Which way its
+    ``true`` and ``false`` point is its words', which a reviewer reads and the
+    golden hash then pins.
+    """
+    keys = [key for key, _ in question_set.questions]
+    question = dict(question_set.questions).get(SCREEN_QUESTION)
+    if (
+        question_set.provenance != "web"
+        or keys != [SCREEN_QUESTION]
+        or not (isinstance(question, dict) and question.get("type") == "noul")
+    ):
+        return (
+            f"the injection screen {SCREEN_SET_NAME!r} screens web text and asks "
+            f"{SCREEN_QUESTION!r}, as a Noul, and nothing else: the lane reads a "
+            f"valid {SCREEN_CLEAR_ARGMAX!r} to it as clean, and asks the screen "
+            f"about text nothing has screened; it asks {keys}"
+        )
+    return None
+
+
+def registration_problem(
+    question_set: QuestionSet, registry: Mapping[str, QuestionSet]
+) -> str | None:
+    """
+    Why ``question_set`` may not be registered beside ``registry``, or ``None``.
+
+    :func:`question_set_problem` judges a set on its own. These judge it
+    against the sets already registered and the rules ``jev_lane.ask`` relies
+    on, in this order:
+
+    1. **One set per name.** A second version is a new set of words under the
+       same name, and is registered in place of the first, not beside it.
+    2. **No set asks another's questions** (docs/08 open item 15). The request
+       hash names no set, so two sets sending identical questions about an
+       identical state share one canonical answer, and the second would be
+       answered with the first's. Refused by :attr:`QuestionSet.questions_hash`;
+       ``tests/unit/test_jev_questions.py`` holds every released version's hash
+       distinct as well, which covers words no longer registered.
+    3. **Web text is a** :class:`WebExcerptState` **and nothing else is web.**
+       The screen reads that model, so web text in any other shape would reach
+       no screen; and a web state under another provenance would be an
+       outsider's text recorded as this system's.
+    4. **This system's own detail is declared.** A set whose provenance is
+       ``internal``, ``operator`` or ``model`` and whose state could carry text
+       other than a plain ``title`` is registered with ``internal_detail=True``,
+       and the lane then asks ``jev_send_internal_detail`` before sending it.
+       Read to fail closed (:func:`_carries_text`): a shape the rule cannot
+       prove holds no text counts as text. :meth:`QuestionSet.dump_state` reads
+       what is actually sent as well, so a shape this misreads is refused on
+       its first ask rather than sent.
+    5. **Every state model has a subject type** (:data:`STATE_SUBJECT`), which
+       the lane holds each request's subject to.
+    6. **Text is recorded as its writer's.** A set whose subject is text of a
+       kind :data:`TEXT_SUBJECT_PROVENANCE` names takes that provenance — a
+       hypothesis title is ``model``, never ``internal`` — and a text subject
+       it does not name cannot be registered.
+    7. **The screen is a web set asking** ``addressed_to_ai`` **as a Noul, and
+       nothing else** (:func:`screen_problem`), since the lane reads a valid
+       ``false`` to it as clean and lets the screen alone ask about unscreened
+       text.
+    """
+    qs = question_set
+    if qs.name in registry:
+        return f"{qs.name!r} is registered twice"
+    mine = qs.questions_hash
+    for other in registry.values():
+        if other.questions_hash == mine:
+            return (
+                f"it asks exactly the questions {other.name!r} "
+                f"v{other.version} asks (questions hash {mine[:12]}). The "
+                "request hash names no set, so the two would share every "
+                "canonical answer and the second would be answered with the "
+                "first's (docs/08 open item 15); change the words"
+            )
+    web_state = qs.state_model in WEB_STATE_MODELS
+    if (qs.provenance == "web") != web_state:
+        return (
+            f"provenance {qs.provenance!r} with state {qs.state_model.__name__}: "
+            "web text is asked about as a WebExcerptState, the state the "
+            "injection screen reads, and a WebExcerptState is web text"
+        )
+    if not isinstance(qs.internal_detail, bool):
+        return f"internal_detail must be a boolean, got {qs.internal_detail!r}"
+    if (
+        qs.provenance in _OWN_TEXT_PROVENANCES
+        and not qs.internal_detail
+        and _model_carries_text(qs.state_model, set(), exempt=(_TITLE_FIELD,))
+    ):
+        return (
+            f"{qs.state_model.__name__} carries this system's own text beyond a "
+            f"title, under provenance {qs.provenance!r}: register it with "
+            "internal_detail=True, so it is sent only while "
+            "jev_send_internal_detail is on (docs/08, fact 7)"
+        )
+    if qs.state_model not in STATE_SUBJECT:
+        return (
+            f"{qs.state_model.__name__} has no subject type in STATE_SUBJECT; "
+            "the lane holds every request's subject to its state model's"
+        )
+    subject = STATE_SUBJECT[qs.state_model]
+    writer = TEXT_SUBJECT_PROVENANCE.get(subject)
+    if writer is None and qs.state_model in TEXT_SUBJECT_FIELD:
+        return (
+            f"{qs.state_model.__name__} is text about a {subject!r}, and "
+            "TEXT_SUBJECT_PROVENANCE names nobody who writes one: say who "
+            "writes it before any set asks about it"
+        )
+    if writer is not None and qs.provenance != writer:
+        return (
+            f"{qs.state_model.__name__} describes a {subject!r}, which is "
+            f"recorded as {writer!r} whoever asks about it, not as "
+            f"{qs.provenance!r}: 'internal' means computed in code, which the "
+            "phase F loader is to trust, and text written by a model or an "
+            "outsider is never that"
+        )
+    if qs.name == SCREEN_SET_NAME:
+        return screen_problem(qs)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The sets
 # ---------------------------------------------------------------------------
@@ -724,14 +1211,14 @@ REGISTRY: dict[str, QuestionSet] = {}
 
 
 def _register(question_set: QuestionSet) -> QuestionSet:
-    problem = question_set_problem(question_set)
+    problem = question_set_problem(question_set) or registration_problem(
+        question_set, REGISTRY
+    )
     if problem is not None:
         raise ValueError(
             f"question set {question_set.name!r} v{question_set.version} is "
             f"refused: {problem}"
         )
-    if question_set.name in REGISTRY:
-        raise ValueError(f"question set {question_set.name!r} is registered twice")
     REGISTRY[question_set.name] = question_set
     return question_set
 
@@ -818,11 +1305,13 @@ __all__ = [
     "DRAWDOWN_SHALLOW",
     "ENUMERATED_LANES",
     "ESCAPE_OPTIONS",
+    "EXCERPT_MAX_CHARS",
     "GOLDEN_PACK_HASHES",
     "LABELLED_LANES",
     "MAX_CHOICE_OPTIONS",
     "MAX_ENUMERATED_INT",
     "MAX_SCORE_LEVELS",
+    "MAX_SCORE_LEVELS_UNMEASURED",
     "MIN_CHOICE_OPTIONS",
     "MIN_SCORE_LEVELS",
     "MOMENTUM_FLAT_BAND",
@@ -831,11 +1320,18 @@ __all__ = [
     "PROBE_TEXT",
     "QUESTION_TYPES",
     "REGISTRY",
+    "SCREEN_CLEAR_ARGMAX",
+    "SCREEN_QUESTION",
+    "SCREEN_SET_NAME",
     "SLEEVES",
+    "STATE_SUBJECT",
+    "TEXT_SUBJECT_FIELD",
+    "TEXT_SUBJECT_PROVENANCE",
     "TREND_AVERAGE_SESSIONS",
     "TREND_NEAR_BAND",
     "VOLATILITY_HISTORY_SESSIONS",
     "VOLATILITY_SESSIONS",
+    "WEB_STATE_MODELS",
     "Drawdown",
     "Momentum",
     "ProbeState",
@@ -844,7 +1340,10 @@ __all__ = [
     "SleeveState",
     "Trend",
     "VolatilityQuintile",
+    "WebExcerptState",
     "get",
     "question_set_problem",
+    "registration_problem",
+    "screen_problem",
     "state_model_problem",
 ]

@@ -49,10 +49,14 @@ def bounds(start: str = CALENDAR_START) -> tuple[date, date]:
     from the calendar — three retries later, under an error message that never
     mentions dates.
 
-    The upper bound is not ours: ``exchange_calendars`` publishes holidays a
-    couple of years ahead and stops. It therefore moves when the library is
-    upgraded, which is exactly why it is read from the calendar here rather
-    than written down as a literal somewhere it would quietly go stale.
+    The upper bound is not ours, and it is not the library release's either.
+    :func:`nyse` passes no ``end``, so ``exchange_calendars`` builds the
+    calendar to its default, one year from the day the library was imported
+    (``GLOBAL_DEFAULT_END``); XNYS computes its holidays by rule and sets no
+    maximum of its own. The bound therefore moves with every process start,
+    and a process running for a year would reach it — which is exactly why it
+    is read from the calendar here rather than written down as a literal
+    somewhere it would quietly go stale. Passing an ``end`` would widen it.
     """
     calendar = nyse(start)
     return calendar.first_session.date(), calendar.last_session.date()

@@ -323,6 +323,34 @@ class TestTheSettings:
     def test_zero_is_a_setting_meaning_no_calls(self) -> None:
         assert catalogue.settings_problem(catalogue.DEFAULT_MODEL, 0, 0) is None
 
+    @pytest.mark.parametrize("budget", range(1, 10))
+    def test_a_budget_that_leaves_a_lane_no_call_is_refused(self, budget: int) -> None:
+        """
+        Each lane spends at most its share, rounded down, so from one to nine
+        the probe lane's is none — and, below five, the decision lane's —
+        while the setting reads like a budget that permits calls. Refused,
+        with the reason, so the runner reads it as the 0 it amounts to.
+        """
+        problem = catalogue.settings_problem(catalogue.DEFAULT_MODEL, budget, 8_000)
+        assert problem is not None and "jev_daily_request_budget" in problem
+        assert "at least 10" in problem and "probe lane" in problem, problem
+
+    def test_the_smallest_budget_but_zero_gives_every_lane_with_a_share_a_call(
+        self,
+    ) -> None:
+        """
+        Derived from the shares rather than written down, and held to them
+        here both ways: at the minimum every lane with a share has a call, and
+        one below it some lane has none.
+        """
+        least = catalogue.MIN_DAILY_REQUEST_BUDGET
+        assert least == 10
+        assert catalogue.settings_problem(catalogue.DEFAULT_MODEL, least, 0) is None
+        shares = catalogue.LANE_BUDGET_PERCENT
+        shared = [lane for lane, share in shares.items() if share]
+        assert all(catalogue.lane_budget(least, lane) >= 1 for lane in shared)
+        assert any(catalogue.lane_budget(least - 1, lane) == 0 for lane in shared)
+
     def test_the_ceilings_are_inclusive(self) -> None:
         assert (
             catalogue.settings_problem(
@@ -372,7 +400,85 @@ class TestTheVocabulary:
         )
 
     def test_the_provenances(self) -> None:
-        assert catalogue.PROVENANCES == ("web", "internal", "operator")
+        """
+        Migration 0013 adds ``model``: text the programme's own model wrote,
+        kept apart from ``internal``, which the phase F loader is to trust.
+        """
+        assert catalogue.PROVENANCES == ("web", "internal", "operator", "model")
+
+    def test_subject_types(self) -> None:
+        assert catalogue.SUBJECT_TYPES == (
+            "probe",
+            "session",
+            "web_excerpt",
+            "hypothesis_title",
+        )
+
+    def test_the_lane_slices_cover_every_lane_and_sum_to_at_most_100(self) -> None:
+        """
+        One share per lane, no lane left out and none invented, and together at
+        most the whole budget, so no lane's spending can reach into another's.
+        """
+        slices = catalogue.LANE_BUDGET_PERCENT
+        assert set(slices) == set(catalogue.LANES)
+        assert all(
+            type(share) is int and 0 <= share <= 100 for share in slices.values()
+        )
+        assert sum(slices.values()) <= 100
+
+    def test_the_slices_are_the_designed_ones(self) -> None:
+        """
+        Pinned lane by lane: the decision lane's twenty is the forward clock's
+        reserve, and a lane with no set yet has none.
+        """
+        assert dict(catalogue.LANE_BUDGET_PERCENT) == {
+            "research": 35,
+            "guardrail": 35,
+            "findings": 0,
+            "ops": 0,
+            "signals": 0,
+            "decision": 20,
+            "probe": 10,
+        }
+
+    def test_the_slices_cannot_be_changed_at_runtime(self) -> None:
+        with pytest.raises(TypeError):
+            catalogue.LANE_BUDGET_PERCENT["research"] = 100  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        ("budget", "lane", "share"),
+        [
+            (500, "decision", 100),
+            (500, "guardrail", 175),
+            (500, "research", 175),
+            (500, "probe", 50),
+            (500, "ops", 0),
+            (9, "probe", 0),
+            (10, "probe", 1),
+            (19, "probe", 1),
+            (1, "decision", 0),
+            (0, "research", 0),
+            (catalogue.MAX_DAILY_REQUEST_BUDGET, "probe", 1_000),
+        ],
+    )
+    def test_a_lanes_share_is_rounded_down(
+        self, budget: int, lane: str, share: int
+    ) -> None:
+        assert catalogue.lane_budget(budget, lane) == share
+
+    def test_the_shares_never_exceed_the_budget(self) -> None:
+        for budget in range(0, 1_001):
+            total = sum(catalogue.lane_budget(budget, lane) for lane in catalogue.LANES)
+            assert total <= budget, budget
+
+    def test_a_lane_that_does_not_exist_has_no_share_to_give(self) -> None:
+        with pytest.raises(ValueError, match="lane"):
+            catalogue.lane_budget(500, "decisions")
+
+    @pytest.mark.parametrize("budget", [True, 500.0, "500", None])
+    def test_a_budget_is_a_count(self, budget: object) -> None:
+        with pytest.raises(TypeError):
+            catalogue.lane_budget(budget, "probe")  # type: ignore[arg-type]
 
     def test_the_areas(self) -> None:
         assert catalogue.AREAS == (

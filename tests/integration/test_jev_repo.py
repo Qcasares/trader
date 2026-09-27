@@ -47,6 +47,7 @@ import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
 from src.programme import jev_repo  # noqa: E402
+from src.programme.jev_hash import text_sha256  # noqa: E402
 
 TEST_DSN = os.environ.get("TEST_DATABASE_URL", "")
 
@@ -343,10 +344,11 @@ async def _backdated(
                 request_hash, state_hash, question_set, question_set_version,
                 pack_hash, lane, provenance, subject_type, subject_id, as_of,
                 state, questions, model_requested, model_answered, http_status,
-                status, raw_body, latency_ms, requested_at, available_at
+                status, raw_body, latency_ms, requested_at, available_at,
+                error_class, error_kind
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
-                    $12::json, $13, $14, $15, $16, $17, $18, $19, $20)
+                    $12::json, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
             RETURNING id
             """,
             fields["request_hash"],
@@ -369,6 +371,8 @@ async def _backdated(
             fields["latency_ms"],
             fields["requested_at"],
             available_at,
+            fields.get("error_class"),
+            fields.get("error_kind"),
         )
     finally:
         await conn.execute(f"ALTER TABLE jev_requests ENABLE TRIGGER {STAMP_TRIGGER}")
@@ -856,6 +860,327 @@ class TestRequestsToday:
             conn, midnight - timedelta(hours=1), requested_at=datetime.now(UTC)
         )
         assert await jev_repo.requests_today(conn) == 2
+
+    async def test_a_lane_counts_its_own_calls(self, conn: asyncpg.Connection) -> None:
+        """
+        Each lane's slice of the budget is compared against its own count: the
+        calls recorded in it, a probe in the probe lane whatever set it asked.
+        """
+        for lane in ("research", "research", "decision", "probe"):
+            await _record(conn, lane=lane)
+        await _record(conn, "error", lane="research")
+        await _record(conn, "refused_budget", lane="research")
+        await _record(conn, lane="probe", question_set="decision.regime")
+
+        assert await jev_repo.requests_today(conn, "research") == 3
+        assert await jev_repo.requests_today(conn, "decision") == 1
+        assert await jev_repo.requests_today(conn, "probe") == 2
+        assert await jev_repo.requests_today(conn, "guardrail") == 0
+        assert await jev_repo.requests_today(conn) == 6
+
+    async def test_a_lane_counts_from_utc_midnight(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        midnight = await _utc_midnight(conn)
+        await _backdated(conn, midnight - timedelta(seconds=1), lane="research")
+        await _backdated(conn, midnight + timedelta(seconds=1), lane="research")
+        assert await jev_repo.requests_today(conn, "research") == 1
+
+
+# ---------------------------------------------------------------------------
+# Reads for the road: what the vendor refused, and what may be sent
+# ---------------------------------------------------------------------------
+
+#: How the client records each failure (``jev_client.ERROR_KINDS``): the status
+#: and the body that came back, and the class of what the SDK raised.
+FAILURES: dict[str, tuple[int | None, str | None, str]] = {
+    "auth": (401, '{"detail":"invalid key"}', "TypeSafeAuthenticationError"),
+    "content_block": (403, "<html>blocked</html>", "TypeSafePermissionDeniedError"),
+    "invalid_request": (422, '{"detail":[]}', "TypeSafeUnprocessableEntityError"),
+    "rate_limited": (429, '{"detail":"slow down"}', "TypeSafeRateLimitError"),
+    "server": (503, '{"error":"busy"}', "TypeSafeInternalServerError"),
+    "timeout": (None, None, "TypeSafeAPITimeoutError"),
+}
+
+
+def _failed(kind: str, **overrides: Any) -> dict[str, Any]:
+    """An ``error`` row's fields for a call that failed as ``kind``."""
+    http_status, raw_body, error_class = FAILURES[kind]
+    return {
+        "http_status": http_status,
+        "raw_body": raw_body,
+        "error_class": error_class,
+        "error_kind": kind,
+        **overrides,
+    }
+
+
+REGIME_V1 = {"question_set": "decision.regime", "version": 1, "model": MODEL}
+
+
+class TestTheStandingRefusals:
+    """
+    ``auth_failed_today``, ``set_refused`` and ``content_blocked``: what the
+    vendor has refused and would refuse again, read from the rows its refusals
+    left (docs/08, fact 4). Nothing writes a switch when the vendor refuses; the
+    row is what holds.
+    """
+
+    async def test_an_authentication_failure_in_any_lane_holds_today(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        assert await jev_repo.auth_failed_today(conn) is False
+        await _record(conn, "error", lane="research", **_failed("auth"))
+        assert await jev_repo.auth_failed_today(conn) is True
+
+    @pytest.mark.parametrize("kind", sorted(set(FAILURES) - {"auth"}))
+    async def test_no_other_failure_is_an_authentication_failure(
+        self, conn: asyncpg.Connection, kind: str
+    ) -> None:
+        await _record(conn, "error", **_failed(kind))
+        assert await jev_repo.auth_failed_today(conn) is False
+
+    async def test_an_authentication_failure_holds_until_utc_midnight(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Counted from UTC midnight by the database's stamp, like the budget, and
+        in a session fourteen hours from UTC, where the session's own midnight
+        would disagree about one of the two rows either side of it.
+        """
+        await conn.execute("SET LOCAL TIME ZONE 'Pacific/Kiritimati'")
+        midnight = await _utc_midnight(conn)
+        await _backdated(
+            conn, midnight - timedelta(seconds=1), "error", **_failed("auth")
+        )
+        assert await jev_repo.auth_failed_today(conn) is False
+        await _backdated(
+            conn, midnight + timedelta(seconds=1), "error", **_failed("auth")
+        )
+        assert await jev_repo.auth_failed_today(conn) is True
+
+    async def test_an_authentication_failure_is_dated_by_the_stamp(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """A failure recorded today that claims yesterday still holds today."""
+        yesterday = await _utc_midnight(conn) - timedelta(hours=1)
+        await _record(conn, "error", requested_at=yesterday, **_failed("auth"))
+        assert await jev_repo.auth_failed_today(conn) is True
+
+    async def test_a_422_holds_its_set_version_and_model_and_nothing_else(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        await _record(conn, "error", **_failed("invalid_request"))
+        assert await jev_repo.set_refused(conn, **REGIME_V1) is True
+        for other in (
+            {"version": 2},
+            {"question_set": "probe.connectivity"},
+            {"model": "jev-1.14.0"},
+        ):
+            assert await jev_repo.set_refused(conn, **{**REGIME_V1, **other}) is False
+
+    async def test_a_422_holds_for_good(self, conn: asyncpg.Connection) -> None:
+        """Not for the day: the same words would be refused again tomorrow."""
+        long_ago = await _utc_midnight(conn) - timedelta(days=90)
+        await _backdated(conn, long_ago, "error", **_failed("invalid_request"))
+        assert await jev_repo.set_refused(conn, **REGIME_V1) is True
+
+    @pytest.mark.parametrize("kind", sorted(set(FAILURES) - {"invalid_request"}))
+    async def test_only_a_422_refuses_a_set(
+        self, conn: asyncpg.Connection, kind: str
+    ) -> None:
+        await _record(conn, "error", **_failed(kind))
+        assert await jev_repo.set_refused(conn, **REGIME_V1) is False
+
+    async def test_a_content_block_holds_its_state_for_every_set(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Matched by the state alone, whichever set's call was blocked, a probe's
+        included: what was blocked is the text, not the question about it.
+        """
+        blocked, other = _hash(), _hash()
+        await _record(
+            conn,
+            "error",
+            state_hash=blocked,
+            lane="probe",
+            question_set="research.excerpt",
+            **_failed("content_block"),
+        )
+        assert await jev_repo.content_blocked(conn, blocked) is True
+        assert await jev_repo.content_blocked(conn, other) is False
+
+    @pytest.mark.parametrize("kind", sorted(set(FAILURES) - {"content_block"}))
+    async def test_no_other_failure_blocks_a_state(
+        self, conn: asyncpg.Connection, kind: str
+    ) -> None:
+        state_hash = _hash()
+        await _record(conn, "error", state_hash=state_hash, **_failed(kind))
+        assert await jev_repo.content_blocked(conn, state_hash) is False
+
+
+#: The injection screen's words, as a pack hash, and its answers about a text:
+#: addressed to people, addressed to an AI, and a tie, which is no answer.
+SCREEN_PACK = "5" * 64
+CLEAR = Answer("addressed_to_ai", "noul", noul=0.03, argmax="false", margin=0.94)
+FLAGGED = Answer("addressed_to_ai", "noul", noul=0.97, argmax="true", margin=0.94)
+TIED = Answer(
+    "addressed_to_ai",
+    "noul",
+    noul=0.5,
+    margin=0.0,
+    valid=False,
+    invalid_reason="tie",
+)
+
+
+def _text() -> str:
+    """An excerpt no other test has stored."""
+    return f"Item 2.02 Results of Operations, filing {uuid.uuid4().hex}."
+
+
+async def _document(
+    conn: asyncpg.Connection, text: str, source: str = "sec_edgar_rss"
+) -> int:
+    """A document holding ``text``, addressed by it, as the schema requires."""
+    return await conn.fetchval(
+        "INSERT INTO web_documents (source, url, content_sha256, excerpt) "
+        "VALUES ($1, 'https://example.invalid/filing', $2, $3) "
+        "RETURNING id",
+        source,
+        text_sha256(text),
+        text,
+    )
+
+
+async def _quarantine(conn: asyncpg.Connection, document_id: int) -> None:
+    await conn.execute(
+        "UPDATE web_documents SET quarantined = TRUE, "
+        "quarantine_reason = 'addressed to an AI' WHERE id = $1",
+        document_id,
+    )
+
+
+async def _screened(
+    conn: asyncpg.Connection,
+    state_hash: str,
+    answer: Answer = CLEAR,
+    status: str = "ok",
+    **overrides: Any,
+) -> int:
+    """The screen's recorded answer about the text whose state is ``state_hash``."""
+    fields = {
+        "state_hash": state_hash,
+        "question_set": "guardrail.injection",
+        "pack_hash": SCREEN_PACK,
+        "lane": "guardrail",
+        "provenance": "web",
+        "subject_type": "web_excerpt",
+        "subject_id": _hash(),
+        **overrides,
+    }
+    return await _record(conn, status, answers=(answer,), **fields)
+
+
+class TestTheWebReads:
+    """
+    ``content_quarantined`` and ``screened_clean``: whether text may be asked
+    about at all, and whether the injection screen has cleared it.
+    """
+
+    async def test_content_is_quarantined_by_its_hash_under_any_source(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text, other = _text(), _text()
+        await _document(conn, text)
+        assert await jev_repo.content_quarantined(conn, text_sha256(text)) is None
+
+        from_elsewhere = await _document(conn, text, source="another_feed")
+        await _quarantine(conn, from_elsewhere)
+        await _document(conn, other)
+
+        found = await jev_repo.content_quarantined(conn, text_sha256(text))
+        assert found == from_elsewhere
+        assert await jev_repo.content_quarantined(conn, text_sha256(other)) is None
+        assert await jev_repo.content_quarantined(conn, _hash()) is None
+
+    async def test_the_lookup_is_by_the_address_the_lane_computes(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The lane looks quarantine up by ``jev_hash.text_sha256`` of the text it
+        is about to send, and a document is stored under the sha256 of its
+        excerpt, by CHECK: so text beyond ASCII, stored and quarantined, is
+        found by exactly the address the lane computes.
+        """
+        text = f"Momentum été ✓ 日本 {uuid.uuid4().hex}"
+        document = await _document(conn, text)
+        await _quarantine(conn, document)
+        assert await jev_repo.content_quarantined(conn, text_sha256(text)) == document
+
+    async def test_a_clear_canonical_answer_is_clean(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        state_hash = _hash()
+        await _screened(conn, state_hash)
+        assert await jev_repo.screened_clean(
+            conn, state_hash=state_hash, pack_hash=SCREEN_PACK, model=MODEL
+        )
+
+    @pytest.mark.parametrize(
+        "recorded",
+        [
+            {"answer": FLAGGED},
+            {"answer": TIED},
+            {"answer": dataclasses.replace(CLEAR, question_key="about_trading")},
+            {"lane": "probe"},
+            {
+                "status": "invalid",
+                "answer": _invalid(CLEAR, "model_mismatch"),
+            },
+            # A request refused whole whose answer still reads as clear: only
+            # the request's status keeps it from counting.
+            {"status": "invalid", "answer": CLEAR},
+            # An answer not measured that still names the clear argmax: only
+            # its validity keeps it from counting.
+            {"answer": _invalid(CLEAR, "noul_invalid")},
+            {"pack_hash": "6" * 64},
+            {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+            {"state_hash": "other"},
+        ],
+        ids=[
+            "flagged",
+            "a-tie",
+            "another-question",
+            "a-probe",
+            "a-response-refused-whole",
+            "a-response-refused-whole-with-a-clear-answer",
+            "an-invalid-answer-with-the-clear-argmax",
+            "another-version-of-the-screen",
+            "another-model",
+            "another-text",
+        ],
+    )
+    async def test_nothing_else_is_clean(
+        self, conn: asyncpg.Connection, recorded: dict[str, Any]
+    ) -> None:
+        """
+        Flagged, not measured, about another question, a probe's, refused
+        whole, from other words, from another judge, or about other text: each
+        leaves the text unscreened. Each case is barred by one filter of the
+        query alone where the schema allows it, so dropping any one of them
+        lets a case through: a response refused whole with a clear answer on
+        it, and an invalid answer that still names ``false``, among them.
+        """
+        state_hash = _hash()
+        overrides = dict(recorded)
+        if overrides.get("state_hash") == "other":
+            overrides["state_hash"] = _hash()
+        await _screened(conn, overrides.pop("state_hash", state_hash), **overrides)
+        assert not await jev_repo.screened_clean(
+            conn, state_hash=state_hash, pack_hash=SCREEN_PACK, model=MODEL
+        )
 
 
 # ---------------------------------------------------------------------------
