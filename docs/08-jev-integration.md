@@ -516,7 +516,9 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
 | `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
 | `jev_lane.py` | Runner-only. One ask of one question set: check the arguments and the subject, the switches, the pin, the web gate and the content block, hash, look up, and unless the answer is on record, the key, the vendor's standing refusals, the budget and the lane's slice of it, and the size; then call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
-| `web_ingest.py` | Phase C. An allow-listed `aiohttp` fetcher: the paperswithbacktest README on GitHub and the SEC EDGAR RSS feed. Stores excerpts only, strips markup and URLs, caps lengths |
+| `web_sources.py` | Phase C5. Pure, and importable by the API. The allow-list, one page written out in full, checked when the module loads and recorded as written; the README parser, which keeps titles and refuses a page that has changed shape, a line it cannot read among them; the excerpt normaliser, idempotent; the code screen, version 1, its rules and readings data and its hash pinned beside them and in a released history; `screen_cell`, what becomes of a row; the labeller a source's grouping is recorded as |
+| `web_fetch.py` | Phase C5. Runner-only, and the only module in `src/programme` that imports `aiohttp`. Fetches an allow-list entry, by identity and as written, once: no redirects, no environment, global addresses only, verified TLS, fixed headers, a size cap as declared, received and inflated, strict type and UTF-8, 200 only, one attempt. Imported by nothing until the ingest job |
+| `web_ingest.py` | Phase C6, not yet built. The ingest job: fetch through `web_fetch`, parse, screen and store excerpts, and call nothing. The SEC EDGAR feed the plan also named is not planned for phase C |
 
 ### Outside `src/programme/`
 
@@ -758,27 +760,29 @@ six below the table, beside a UI pull request that is not phase C's.
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2 and W done |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W and C5 done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
 | G. Shadow | A `jev_regime_allocator` candidate and its baseline twin, in shadow | Not started |
 | H. Paper direct decisions | A `forward_experiment` deployment on a second Alpaca paper account; the broker for a non-default owner hard-coded to paper; marks and reconciliation per owner | Not started |
 
-Phase C lands as six pull requests rather than one, each with its own
+Phase C lands as seven pull requests rather than one, each with its own
 subsection under "Phase C, as built" and its own CLAUDE.md rows. The design
-names nine parts, C1 to C9, and its review grouped them into these six; the
-table lists the owner's UI pull request beside them because it merges first,
-though it is not phase C.
+names nine parts, C1 to C9, and its review grouped them into six; C5, the
+one part that reaches the open web, was then built on its own, ahead of the
+ingest job that follows the forward clock. The table lists the owner's UI
+pull request beside them because it merges first, though it is not phase C.
 
 | Pull request | Contents | Depends on | Status |
 |---|---|---|---|
 | UI | The owner's design decisions OD-5 to OD-8. Not phase C; merges first | — | Outside phase C |
 | C1+C2 | The road hardened: every switch read by the road, subjects that are their content, the web gate, the vendor's standing refusals, per-lane budget slices, open item 15 and provenance `model` (migration 0013); and open item 20, the Score checks and the four-level rule | — | **Done** |
-| W | The worker's reference bars (C3), with the live ingest kept on one adjustment basis, reviewed as a live-path change | — | Not started |
+| W | The worker's reference bars (C3), with the live ingest kept on one adjustment basis, reviewed as a live-path change | — | **Done** |
 | C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | Not started |
-| C5+C6 | Web sources and the fetcher (pure), and web ingest, which calls nothing | C1+C2, C4 | Not started |
-| C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5+C6 | Not started |
+| C5 | Web sources (pure: the allow-list, the parser, the normaliser and the code screen) and the fetcher, dark | C1+C2 | **Done** |
+| C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | Not started |
+| C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | Not started |
 | C9 | The evaluation harness, migration 0014 | C4, C7+C8 | Not started |
 
 ### Phase A, as built
@@ -1375,7 +1379,7 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
 
 ### Phase C, as built
 
-Phase C lands as six pull requests (see Delivery). Each adds a subsection
+Phase C lands as seven pull requests (see Delivery). Each adds a subsection
 here as it lands.
 
 #### C1+C2: the road, hardened, and the Score checks
@@ -1863,6 +1867,265 @@ refused, the priority is a constant every enqueue must name, the job runs only
 in its session's window, a backfill never enters the live ingest's lookback,
 and a sleeve without its session's close fails the job.
 
+#### C5: web sources and the fetcher
+
+The one egress phase C adds, reviewed on its own. It was to land with the
+ingest job as C5+C6; it lands first, alone, so that the one part of phase C
+that reaches the open web is read without the rest around it, and the ingest
+job (C6), which also needs the forward clock, follows. Nothing imports the
+fetcher, nothing is enqueued, no switch moves and no table is written: the
+programme has made no call to Jev and fetches no page.
+`src/programme/web_sources.py` is pure, and the API may import it;
+`src/programme/web_fetch.py` is runner-only, and the only module in
+`src/programme` that imports `aiohttp`.
+
+**One page, written out, and fetched as written.** `web_sources.ALLOWED_SOURCES`
+holds one source, the paperswithbacktest README at its raw address on GitHub,
+with the rules its response is held to: `text/plain` in UTF-8, at most 512 KiB
+(the page is 90,734 bytes), read by the parser `pwb_readme_strategies/v1`.
+Each entry is checked when the module loads — `https`, the host written out
+and equal to the entry's own, a DNS name and not an address, no port, user,
+query or fragment, no empty or dot segment and no escape in the path, printable
+ASCII, and unchanged by being split and joined again — so a malformed entry
+fails every import rather than the first fetch; and the module then records
+each entry as written, the object and its values in a tuple nothing can edit
+(`web_sources.as_written`). The entries are frozen, but a frozen dataclass is
+edited anyway, by `object.__setattr__` or a slot's descriptor, and checking an
+entry's rules again at each fetch refused only an edit that broke one: review
+pointed the entry at another well-formed https page and the fetcher fetched it.
+The fetcher now refuses any entry that is not exactly as written — another
+page, a larger cap, another type, or a list rebound to hold a new entry — and
+fetches with the values recorded rather than the live entry's, so what is
+checked is what is fetched.
+`test_web_sources.py::TestTheAllowList::test_the_allow_list_is_pinned` pins the
+entry field by field and holds its host clear of every model vendor's host, of
+fact 9's lookalikes and of any TypeSafe name; `::test_the_list_is_checked_when_the_module_loads`
+loads the module with its URL made plain http and requires the import to fail;
+`::test_each_rule_refuses_on_its_own` gives each of five rules an input only it
+refuses, `127.1` among them, which `ipaddress` does not read as an address and
+a resolver reads as 127.0.0.1; and
+`::TestNothingInSrcWritesToTheAllowList` refuses the spellings of an edit it can
+read: a write to the list or its record under any alias, `vars()`, `globals()`
+and `locals()`, a computed `setattr`, a new `AllowedSource` under any name,
+`object.__setattr__` naming an entry's field or a name not written out, a
+descriptor's `__set__` or `__delete__`, `__dict__`, and the `gc` walks that
+reach the mapping inside a `MappingProxyType`. It reads spellings and is not a
+sandbox; the fetcher's own comparison is what holds whatever it misses.
+
+**Titles, and nothing else.** `parse_pwb_readme` reads only between the
+generator's markers — exactly one of each, as whole lines, in that order — so
+the README's second `## Crypto`, under its books, is never read. Every line
+inside must be blank, one of the seven level-two headings `HEADING_LABELS`
+names, a table row, or the generator's note in italics before the first
+heading; anything else refuses the snapshot. Review found the parser reading
+lines where a renderer reads blocks: a setext heading, an `<h2>`, a heading
+in a quote or a list, or an italic line after a heading, all of which a reader
+takes for a heading, were skipped, and the rows under each filed under the
+heading before; and the rows inside a comment, a code fence or `<details>`,
+which a reader never sees, were kept. A row is kept only if it matches
+`ROW_PATTERN` in full, digits in ASCII. Only
+its title survives: the link and the four figures, a Sharpe among them, are
+dropped, and are never stored or quoted. A table's header and delimiter rows
+are told apart by Markdown's own rule, the row before the delimiter, and every
+other line that opens with a pipe is a row, counted, then kept or dropped. No
+line inside the block may be longer than 4,096 characters, measured before any
+pattern reads one — the page's longest is 465 — and the heading pattern reads
+a line once: it paired a lazy group with a trailing run of spaces, which
+backtracked quadratically, and one heading line of spaces inside the size cap
+held the parser for about seventeen minutes. A page that has changed shape is
+refused rather than guessed at: `SnapshotRefused` for missing or repeated
+markers, a line over the bound, an unknown heading, a line it cannot read, no
+row kept, more than half the rows dropped, more than 20 under one heading or
+more than 150 in all, each with a message of counts and line numbers that
+carries none of the page's text, since it will become a job's error.
+`test_web_sources.py::TestTheParser`, `::TestARefusedSnapshot`,
+`::TestNoLineHoldsTheParser`, and `::TestTheParserUnderFuzz`, where 2,000
+seeded mutations of the page raise nothing else.
+
+**One normal form.** `normalise_excerpt` decodes HTML references and
+Markdown's backslash escapes, applies NFKC, and removes control, format,
+private-use, surrogate and unassigned characters and every other character the
+code screen's `hidden_characters` names, by the same explicit ranges — so the
+reserved default-ignorable code points, unassigned and therefore missed by a
+removal by category, go too — reading whitespace, and the blank-glyph fillers a
+renderer draws as a blank, as a space. It replaces a Markdown image or link
+with its text, removes whole any token that is or holds an address — a scheme's
+`://`, `www.`, a protocol-relative `//host`, an email, `mailto:`, `xmpp:`,
+`javascript:`, `vbscript:`, a `data:` URI, or a host followed by a path — and
+collapses whitespace. The removal reads each token once: the pattern it
+replaces backtracked quadratically on a run with no space in it, and a title
+NFKC expands and that never settles cost half a second, a page of them over a
+minute. It is idempotent by construction rather than by the order of its steps:
+one step can uncover work for another — removing a zero-width space can join
+`&` to `lt;`, or `http:` to `//` — so the pass repeats until the text settles,
+and text still changing after 16 passes, or longer than 2,000 characters as
+given or once NFKC has expanded it, is no excerpt at all. It keeps HTML and
+never truncates, both on purpose: a tag is the code screen's to find, and an
+overlong excerpt is quarantined whole. `test_web_sources.py::TestTheNormaliser`,
+whose seeded fuzz of hostile fragments holds idempotence, and that no address,
+Markdown link, control, format, private-use, unassigned or hidden character,
+or NUL survives; `::test_what_the_screen_calls_hidden_never_reaches_an_excerpt`
+reads every default-ignorable code point Unicode lists, raw and by reference.
+
+**The code screen, version 1.** `code_screen` returns the first of six rules a
+text trips: `hidden_characters` (every default-ignorable code point Unicode
+lists, plane 14's reserved block whole, every control and private-use
+character, and the blank-glyph characters Unicode does not call ignorable — the
+Braille blank, the Khitan filler, the musical null notehead — by explicit
+ranges, so the rule is the same under any Unicode database, and checked against
+Unicode's own list by `::test_hidden_characters_names_every_default_ignorable_code_point`),
+`markup_in_cell`, `instruction_phrase`, `encoded_payload` (40 base64 or
+base64url characters in a run, two runs of 16 split by whitespace, or 64 hex),
+`mixed_script_word` (a Latin letter beside a letter of any other script or
+block in one word, read after NFKC so a ligature or a fullwidth letter is the
+Latin it stands for) and `overlong` (past the 300 characters a web state may
+hold). `instruction_phrase` reads a skeleton of the text: marks dropped after
+NFKD, 254 lookalike letters of other scripts and Latin letters no
+decomposition reaches (`CONFUSABLES`, after Unicode's UTS #39) read as the
+ASCII letter they are drawn like, before casefolding and after, and Markdown's
+emphasis markers read as spaces; its keywords are bounded by the ASCII letters
+around them, not by `\b`. So `__Ignore__`, `İgnore`, `Ignöre`, a dotless i, a
+script g, and a Jev spelled in Cyrillic, Armenian, Coptic, Cherokee or Lisu
+letters — each of which passed v1 as first written — are the plain words, and
+a digit or another script's letter beside a keyword no longer hides it. Beside
+the design's phrases it reads "ignore your instructions", "ignore the above",
+"do not follow … instructions", "system prompt" however it is joined, a role
+opening the text or a sentence, `human:` among the roles, and a dictated answer
+("answer false", "respond with insufficient evidence"). The rules and how they
+read are data (`CODE_SCREEN_RULES`, `SCREEN_READINGS`, `CONFUSABLES`,
+`SKELETON_SPACES`), hashed by `code_screen_sha256`, pinned beside the rules by
+`GOLDEN_CODE_SCREEN_SHA256`, and every released version's hash is pinned,
+append-only, in `test_web_sources.py`, as the question sets' are: re-recording
+the module's golden after a change, the edit a failing hash test invites, still
+fails against the released history
+(`::TestTheCodeScreen::test_changing_a_released_rule_with_its_golden_redone_is_refused`),
+so "v1" names one rule set for as long as a row says it. v1's hash was
+re-recorded once, in review, before any row could say v1. It is a keyword
+baseline with false positives by design — a paper naming Claude Shannon is
+quarantined — whose only cost is that Jev is not asked about that title; the
+page's 61 titles trip none of it. Every pattern reads a bounded stretch or runs
+once per word, so text as long as the normaliser produces is screened at once
+(`::test_no_text_holds_the_screen`).
+
+**What becomes of a row.** `screen_cell` screens a title as written in its
+cell, normalises it, screens the excerpt, and decides: `keep`, `quarantine`
+under the rule its excerpt trips, or `drop`. Quarantine is by content, one-way
+and across sources (C6), and the design had ingest quarantine on a hit from the
+cell or the excerpt. Review found the flaw in that: the decorations the
+normaliser removes — a hidden character, an address — leave the clean title's
+own words and so its own content address, so anyone who could decorate one row
+could have a clean title quarantined everywhere. Only words that trip the
+screen themselves are now quarantined; a row whose decoration alone tripped it
+is dropped, counted and its rule named, and an excerpt that normalises to
+nothing is dropped too, which closes open item 45. The rule lives here, pure
+and tested, so the ingest job stores what it decides rather than deciding.
+`test_web_sources.py::TestWhatBecomesOfARow`, whose seeded fuzz holds that a
+quarantined excerpt trips the screen on its own; `::TestTheAdversarialCorpus`
+pins each of 46 cases to its fate: dropped by the parser, dropped or quarantined
+by a named rule, or the snapshot refused. `dataset_labeller` names the
+README's grouping as a labeller, `source:pwb-readme@<sha12>`, from the distinct
+pairs of heading label and excerpt, so it changes when a title moves between
+headings and not when a figure moves; `content_sha256` is
+`jev_hash.text_sha256`, the address migration 0013's CHECK files every
+document under.
+
+**The fetcher.** `web_fetch.fetch(source, *, session_factory=None)` fetches
+once and returns `Fetched` — the text, the sha256 and size of the body, and
+when it arrived — or `FetchFailure(kind, http_status)`, with neither body nor
+exception text in either. Each control, and the test in
+`tests/unit/test_web_fetch.py` that fails without it, over real local HTTPS
+against a server with a certificate authority of its own
+(`tests/fakes/web_server.py`):
+
+| Control | Rule | Held by |
+|---|---|---|
+| Input | an `ALLOWED_SOURCES` entry, by identity, its rules checked again and its values compared with those `web_sources` recorded as it loaded, or `ValueError` before any session exists; the fetch uses the recorded values; no function takes a URL | `TestOnlyTheAllowListIsFetched` |
+| Redirects | `GET` with `allow_redirects=False`; any 3xx is `redirect` and is never followed — not to a listener, a lookalike host or the metadata address | `TestNoRedirectIsFollowed` |
+| Environment | `trust_env=False`: no proxy variable and no `.netrc` applies | `TestTheEnvironmentAppliesToNothing` |
+| Addresses | `GlobalOnlyResolver` refuses the whole answer if any address in it is not global — loopback, private, link-local, multicast, reserved, or one of those carried inside an IPv6 address, whatever a release's tables say of the prefix — before any connection; aiohttp connects to exactly the addresses it returned, so nothing is looked up twice | `TestOnlyGlobalAddressesAreReached` |
+| TLS | aiohttp's default, verified against the system's trust store. Nothing in `src/programme` passes `ssl`, `ssl_context`, `verify`, `verify_ssl`, `check_hostname` or `cert_reqs` anything but `True`, `None`, a default context or a keyword-only test seam, builds an `SSLContext` without `PROTOCOL_TLS_CLIENT`, sets a context's `check_hostname` or `verify_mode`, spreads arguments into a call that makes a connection, or names `CERT_NONE`, `CERT_OPTIONAL` or an unverified context. The scan first read only a literal `False`, and `verify=ssl.SSLContext()` planted in the Jev client passed every suite; the client is now also called with no transport, as production calls it, against a server nobody trusts | `TestTLSIsVerified`, `TestTLSIsNeverTurnedOff`, `tests/sdk/test_jev_client.py::TestTLSIsVerifiedWithNoTransport` |
+| Headers | `User-Agent: trader-research/1`, `Accept: text/plain`, `Accept-Encoding: gzip`, each written out in the test rather than compared with the module's own table, which pinned nothing; a `DummyCookieJar`; no credential | `TestASuccess::test_the_request_is_fixed` |
+| Size | a declared length over the cap refused before reading; the body counted as it arrives and again as it inflates, gzip inflated here a bounded amount at a time; a gzip stream that does not end with the body is `protocol` | `TestTheSizeIsCapped`, a gzip bomb of 64 times the cap among them |
+| Type, encoding | one `Content-Type` the source allows, declaring `charset=utf-8`; no coding but gzip; strict UTF-8 | `TestTheTypeAndTheEncodingAreStrict` |
+| Status | 200 only | `TestOnly200IsRead` |
+| Time | 5 s to connect and 20 s in all, inside the programme's 35 s shutdown grace; one attempt, with aiohttp's own resend of an idempotent request after a dropped connection switched off | `TestTime` |
+| Output | never raises for the network or the server; cancellation propagates; logs the status, the size and the hash, never the body | `TestTime::test_cancellation_propagates`, `TestNothingFetchedReachesALog` |
+| Test seam | `session_factory`, and the session builder's `resolver` and `ssl_context`, which production never passes, read from `src/` by the scan that holds `jev_client`'s transport, generalised to take any seam | `TestTheSeam` |
+
+Each control above was removed in turn and a test failed each time, and each
+boundary scan below was run against an offence planted in the real tree; so
+was each fix review asked for, twenty-nine mutations in all, each caught.
+
+**Boundaries.** `web_fetch` joins `RUNNER_ONLY`, so neither the API nor
+anything that can move money may load it, and CLAUDE.md's Safety rule 5 names
+it; `test_import_boundaries.py::test_safety_rule_5_names_every_runner_only_module`
+now holds that list to the tuple, so open item 11 cannot recur.
+`::test_only_the_web_fetcher_imports_aiohttp_in_the_programme`;
+`::test_no_programme_module_reaches_aiohttp_but_through_the_fetcher`, since the
+first counted only names beginning `aiohttp`, and a module that took it from
+`src.bankr_client`, or would from the fetcher itself, built a bare session with
+every test green; `::test_nothing_imports_the_web_fetcher_yet`, which C6 is to
+turn into "only the ingest job"; `::test_the_web_sources_reach_nothing_that_fetches_stores_or_asks`
+and `::test_the_web_fetcher_reaches_no_model_no_database_and_no_runner`, each
+walking its module's closure; `test_web_sources.py::test_web_sources_loads_nothing_heavy`,
+in a fresh interpreter; and
+`test_dependency_boundaries.py::test_the_web_fetcher_imports_only_what_the_programme_declares`,
+which keeps `aiohttp` in what the programme's lock installs.
+
+**Checked against the page, and nothing kept from it.** Every fixture is
+synthetic: the repository publishes no licence, so the tests hold invented
+titles in the README's shape, beside figures that are sentinels. The parser
+was run once, read-only, against the page as it was served on 2026-09-27 —
+90,734 bytes, sha256 `456caf19…` — and nothing from it was committed: 61 rows
+under 7 headings (12, 12, 3, 4, 8, 10 and 12), none dropped, no code-screen
+hit on any cell or excerpt, no title under two headings, the longest excerpt
+137 characters, one title changed by normalising (a doubled space), and the
+labeller `source:pwb-readme@6d424588c995`, the value the design computed from
+the same page. Fetched once more on 2026-09-28, read-only, it was byte for byte
+the same page, and read after review's changes it gives the same 61 rows, every
+one kept by `screen_cell`, and the same labeller; its block holds blank lines,
+the seven headings, their tables and the one italic note, so the stricter
+reading refuses nothing on it.
+
+**Where C5 departs from the design.** Markdown's backslash escapes are
+decoded, which the design's steps left out: a literal pipe in a table cell must
+be written `\|`, and without the step an excerpt would not be the title as it
+reads, and the same words from another source would be another subject.
+Idempotence comes from repeated passes, bounded, rather than from the order of
+the steps. The normaliser removes more than the design's categories — every
+character the screen calls hidden and every unassigned code point — reads the
+blank-glyph fillers as spaces, removes every address form a renderer links or a
+browser acts on rather than only a `://` or `www.`, and gives up on text past
+2,000 characters. `hidden_characters` covers every default-ignorable code point
+rather than the design's five kinds, and the blank glyphs beside them.
+`instruction_phrase` reads a skeleton rather than the NFKC casefold, adds the
+prototype's variants and review's phrasings to the design's, asks for an
+article in "you are … an AI" so that a title like "You Are What You Trade"
+passes, and leaves out the prototype's `llm` as a name, which the design did
+not list and a paper's title may name. `mixed_script_word` compares Latin with
+any other script, not Cyrillic and Greek alone, and base64url and whitespace-split
+base64 are payloads too. A decision the design left to C6 is made here:
+`screen_cell` quarantines only words that trip the screen, where the design
+quarantined on a hit from the cell as well. The limit under a heading counts
+the rows under each heading line rather than each label, since seven labels at
+20 would leave the limit of 150 unreachable. A heading of any level inside the
+block must be a known level-two one, and every other line blank, a row, or the
+note. `FetchFailure` carries the HTTP status beside its kind, and `Fetched`
+keeps its text out of its `repr`. gzip is inflated by the fetcher rather than
+by aiohttp, so that no more than the cap is ever held; a coding other than gzip
+is refused as `content_encoding`. aiohttp's resend after a dropped connection,
+a second attempt the design's "no retry" did not see, is switched off. The
+address check also refuses multicast, reserved and unspecified addresses, and
+an IPv6 address for the IPv4 one it carries. The session builder's two test
+parameters are seams as well, and the transport-seam scan was generalised to
+take them rather than copied. The fetcher compares the entry with what
+`web_sources` recorded, not only its identity and rules, so an entry edited in
+place to any page is refused. The code screen's rule set is pinned by its hash
+now, beside the rules and in a released history, not first by C7's analysis
+plan. `web_fetch` imports `aiohttp` at module level, since it is installed
+everywhere, and names aiohttp's threaded resolver, so installing `aiodns` would
+change nothing.
+
 ### Open items Phase C found
 
 Numbered on from Phase B's.
@@ -1972,6 +2235,41 @@ Numbered on from Phase B's.
     `ingest_bars:{S}` has succeeded, treating it as a missing close: retry
     until the cutoff, then leave the session absent, the job's error its
     reason.
+41. **The web fetcher ignores the environment's proxies,** by design, so it
+    cannot fetch where the only way out is a proxy — the development sandbox
+    C5 was built in is such a place. The scheduled programme connects
+    directly. A proxy the fetcher had to use would be named in code, like the
+    allow-list, and never read from the environment.
+42. **The address check sees names only.** aiohttp connects to an address
+    written in a URL without resolving it. Nothing today can hand the fetcher
+    one — the allow-list refuses an address as a host, and no redirect is
+    followed — but a change to either reopens the route to the metadata
+    service, and should arrive with its own check.
+43. **HTML's legacy references are decoded without their semicolon.**
+    `html.unescape` reads `&notes` as `¬es`, which GitHub's renderer does
+    not, so a title holding such text would be stored a little differently
+    from how it reads. No title on today's page has one.
+44. **The code screen quarantines a paper that names Claude, GPT or OpenAI in
+    its title.** Friction only — Jev is not asked about it — and how often it
+    happens is measured once C7's injection screen is evaluated against the
+    code screen as its baseline.
+45. ~~**An excerpt can normalise to nothing.**~~ *Closed in C5's review:* a
+    title that was only an address, text that never settles, or text past the
+    normaliser's bound has no excerpt, and `web_sources.screen_cell`, whose
+    decision C6 stores, drops such a row as it drops one whose decoration alone
+    tripped the code screen, rather than leaving the rule to the ingest job.
+46. **The code screen's skeleton reads the lookalikes it lists.** 254 letters
+    of other scripts and Latin letters no decomposition reaches, after UTS #39,
+    and not the whole confusables table, so a keyword spelled with a lookalike
+    it does not list passes the keyword rules and meets only the mixed-script
+    rule, which a word of lookalikes from one script does not trip. A baseline's
+    known limit rather than a defence's: Jev's own injection screen (C7) is
+    measured against it, and a longer table is a new version of the screen.
+47. **Two runs of 16 split by whitespace is the shortest base64 the screen
+    reads as split.** A payload broken into shorter runs passes
+    `encoded_payload`; reading shorter runs would read ordinary titles, whose
+    words are runs of letters, as payloads. Recorded so C7's evaluation counts
+    it against the baseline rather than for it.
 
 ## Inputs needed from the operator
 
