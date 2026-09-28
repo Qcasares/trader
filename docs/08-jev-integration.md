@@ -473,9 +473,12 @@ belongs to phase H.
 ## Architecture
 
 Phase B built the programme's half of this, dark: the ledger, the pure
-modules, `jev_client`, `jev_lane` and the programme's job loop. `web_ingest.py`,
-the signal loader and everything on the engine's side are what phases C to H
-build. Every switch named here reads as off when it cannot be read.
+modules, `jev_client`, `jev_lane` and the programme's job loop. Phase C6
+built `web_ingest.py`, which stores what it reads and asks nothing: the arrow
+from it to the lane below is C7's, whose jobs ask about the excerpts it
+stored. The signal loader and everything on the engine's side are what the
+later phases build. Every switch named here reads as off when it cannot be
+read.
 
 ```
    web content, allow-listed          daily_bars
@@ -514,11 +517,11 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
 | `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state. From C4, `regime_state_problem` says why it would be `None`, for a job's error |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals` |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined` |
 | `jev_clock.py` | C4. Holds no client and is not runner-only, so phase E may read the cutoff. The forward clock's times — the reference bars at a session's close plus 45 minutes (the worker's ingest time), the collection at plus 50, the cutoff at plus 60 (the worker's decision time) — the sessions the planner plans, the signal's and the jobs' names, `sleeve_symbol`, and the bar loader, which reads `adj_close` from `yfinance` alone |
 | `jev_forward.py` | C4, runner-only. `collect`, the `jev_regime` job: one session's regime, asked before the cutoff by the database's clock, at most one call an attempt — an attempt whose call got no response is retried and asks again — and one answer recorded at most once; never a backfill and never a `missing` row |
 | `jev_jobs.py` | C4, runner-only. `ask_verdict`, what an ask came to as a job's error and retry, and `run_reask`, the `jev_reask` job |
-| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else |
+| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area |
 | `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test |
 | `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the rest |
 | `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client |
@@ -527,8 +530,8 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
 | `jev_lane.py` | Runner-only. One ask of one question set: check the arguments and the subject, the switches, the pin, the web gate and the content block, hash, look up, and unless the answer is on record, the key, the vendor's standing refusals, the budget and the lane's slice of it, and the size; then call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
 | `web_sources.py` | Phase C5. Pure, and importable by the API. The allow-list, one page written out in full, checked when the module loads and recorded as written; the README parser, which keeps titles and refuses a page that has changed shape, a line it cannot read among them; the excerpt normaliser, idempotent; the code screen, version 1, its rules and readings data and its hash pinned beside them and in a released history; `screen_cell`, what becomes of a row; the labeller a source's grouping is recorded as |
-| `web_fetch.py` | Phase C5. Runner-only, and the only module in `src/programme` that imports `aiohttp`. Fetches an allow-list entry, by identity and as written, once: no redirects, no environment, global addresses only, verified TLS, fixed headers, a size cap as declared, received and inflated, strict type and UTF-8, 200 only, one attempt. Imported by nothing until the ingest job |
-| `web_ingest.py` | Phase C6, not yet built. The ingest job: fetch through `web_fetch`, parse, screen and store excerpts, and call nothing. The SEC EDGAR feed the plan also named is not planned for phase C |
+| `web_fetch.py` | Phase C5. Runner-only, and the only module in `src/programme` that imports `aiohttp`. Fetches an allow-list entry, by identity and as written, once: no redirects, no environment, global addresses only, verified TLS, fixed headers, a size cap as declared, received and inflated, strict type and UTF-8, 200 only, one attempt. Imported by `web_ingest` alone |
+| `web_ingest.py` | Phase C6, runner-only, and the one importer of `web_fetch`. The `jev_web_ingest` job: re-read the programme's switch, the research area and the pin, and run only while a key is set (read in `main`'s wrapper for that and nothing else), fetch the allow-listed page outside any transaction, parse it with the source's parser, store what `web_sources.screen_cell` decides for each row in one transaction through `jev_repo`, its locks taken in content order, quarantine by content, and call nothing; no key reaches it. Its result is counts and hashes. The SEC EDGAR feed the plan also named is not planned for phase C |
 
 ### Outside `src/programme/`
 
@@ -545,8 +548,9 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
   `shadow_job`, `src/api/drain.py` and `src/cli.py` — and a test proves each
   site uses it.
 - The programme's `main.py` runs a Jev loop beside the heartbeat, built in
-  phase B. It claims only the kinds in `JEV_HANDLERS` — `jev_probe`, and from
-  C4 `jev_regime` and `jev_reask` — and only while `programme_enabled` and
+  phase B. It claims only the kinds in `JEV_HANDLERS` — `jev_probe`, from C4
+  `jev_regime` and `jev_reask`, and from C6 `jev_web_ingest`, which calls
+  nothing — and only while `programme_enabled` and
   `jev_enabled` are both on, and it extends a running job's lease every 60
   seconds. From C4 it runs the planner before each drain, at most once a
   minute, in a `try` of its own. The worker already claims only its own kinds
@@ -772,7 +776,7 @@ six below the table, beside a UI pull request that is not phase C's.
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W, C5 and C4 done |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W, C5, C4 and C6 done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
@@ -793,7 +797,7 @@ pull request beside them because it merges first, though it is not phase C.
 | W | The worker's reference bars (C3), with the live ingest kept on one adjustment basis, reviewed as a live-path change | — | **Done** |
 | C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | **Done** |
 | C5 | Web sources (pure: the allow-list, the parser, the normaliser and the code screen) and the fetcher, dark | C1+C2 | **Done** |
-| C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | Not started |
+| C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | **Done** |
 | C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | Not started |
 | C9 | The evaluation harness, migration 0014 | C4, C7+C8 | Not started |
 
@@ -2529,6 +2533,278 @@ the stratum and the plan it was sampled under — the design's payload was the
 request id alone, which is still all the handler reads — so the harness can
 keep each figure to the plan that registered it.
 
+#### C6: web ingest, calling nothing
+
+The job that takes C5's road: `src/programme/web_ingest.py`, the
+`jev_web_ingest` job, fetches the one allow-listed page, reads its titles,
+screens them, stores them, and asks nothing. It is dark twice over: the
+planner plans it only while the programme, Jev, a usable pin, a key and the
+research area all allow it, and the research area is seeded off; and nothing
+reads what it stores until C7's injection screen, the first set to be asked
+about web text. No page has been fetched: the switches are off, and this
+environment's only way out is a proxy the fetcher ignores (open item 41).
+
+**What each attempt does.** In order, the first that applies deciding. A
+payload that is anything but `{"source": <a name on the allow-list>}` —
+another key beside it, a URL, a name not on the list — is refused before a
+switch is read, since the page fetched is the allow-list's entry and never one
+a payload names. The programme's switch and the research area are read again,
+each through its own fail-closed reader, the area's reading Jev's master
+switch too; either off, nothing is fetched. The pin is read again too, by
+`flags.jev_model`, and, in `main`'s wrapper before `run_job` is called at all,
+whether a key is set, by the road's own test, a blank key being none: the
+planner plans the job only under both (design R28, a page fetched for a lane
+that cannot ask about it being a fetch for nothing), and a job it queued can
+be claimed after either went (open item 53), so without them the job fails for
+good, as the probe does, and fetches nothing. The first cut read neither, and
+C6's review found such a job fetching the page and storing eight documents
+with no key and with an alias where the pin was; the key still goes no further
+than the wrapper (`tests/unit/test_web_ingest.py::TestThePin`,
+`tests/unit/test_job_ownership.py::TestTheProgrammeRunsWhatItClaims::test_the_ingest_job_is_not_run_without_a_key`,
+`tests/integration/test_jev_dark.py::TestAJobQueuedBeforeTheKeyOrThePinWentFetchesNothing`).
+A connection inside a transaction is refused, so that no transaction is held
+open across up to 20 seconds on the network; the programme's loop hands a
+handler a pooled connection with none open, and
+`tests/integration/test_web_ingest.py::TestTheFetchIsOutsideAnyTransaction`
+watches `pg_stat_activity` from another connection while the page is in flight
+and finds no backend of the database in a transaction. Then
+`web_fetch.fetch(ALLOWED_SOURCES[name])`, looked up on the module so a test
+can stand in for it; a `FetchFailure` fails the job, its error the source's
+name, the failure's kind and its HTTP status, and nothing else. The source's
+parser from `web_sources.PARSERS` reads the page; a `SnapshotRefused` fails
+the job as "the parser needs review", with the refusal's reason, which is
+counts and line numbers the parser wrote. None of these is retried: each would
+come to the same thing again that day, and the next UTC day's job fetches the
+page afresh. Only a failure while storing is retried, and it is reported by
+its class, SQLSTATE and constraint alone, because a driver's message can quote
+the value it could not take: asyncpg's `DataError` repeats the argument, a
+title among them, and
+`::TestTheSnapshotIsOneWrite::test_a_failure_part_way_leaves_nothing_stored`
+provokes exactly that. Nothing is written before the store, and the store is
+one transaction, so a failed job leaves the table as it found it.
+`tests/unit/test_web_ingest.py` holds each step against fakes.
+
+**What is stored.** Each row the parser kept is decided by
+`web_sources.screen_cell`, and the job stores what it decides: `keep`, the
+excerpt in use; `quarantine`, the excerpt quarantined for
+`quarantine_reason(rule)`; `drop`, nothing, counted under its rule, or
+`empty` for a row whose excerpt normalised to nothing. The same excerpt twice
+in one snapshot, under two headings, is one document. A document holds the
+text in `excerpt` and nowhere else: `jev_repo.insert_documents` writes
+`title` and `published_at` NULL by the statement, whatever a caller would
+have passed; `url` is the allow-listed URL as `web_sources` wrote it;
+`content_sha256` is `web_sources.content_sha256` of the excerpt, which is
+`jev_hash.text_sha256`, the address `jev_lane.ask` recomputes for a
+`web_excerpt` subject — `TestAFirstIngest::test_the_address_is_the_one_the_lane_asks_by`
+asks the lane about each stored excerpt by its stored address, which it
+accepts, and its web gate refuses the quarantined one as quarantined. And
+`fetched_at` is the database's clock as the storing transaction begins,
+`now()`, not the fetcher's stamp: the ledger's other stamps are the
+database's, a writer's clock can run early, and later is the safe direction;
+the transaction begins once the page has arrived, so the stamp is never
+earlier than the fetch, and it is one value for every row of a snapshot.
+`insert_documents` is `ON CONFLICT (source, content_sha256) DO NOTHING`,
+which fires no update trigger, so a page read again stores nothing
+(`TestASecondIngest`), and a title that changed is a new snapshot, the old
+document kept as it was read. What it hands back is `(id, content_sha256,
+inserted)` for each row in the order given, a row already stored under the id
+it was stored under and `inserted` false, which C7's labels are to key by
+(`tests/integration/test_jev_repo.py::TestTheDocumentWriter`, added in C6's
+review, which found no test of that half of the contract, nor any call of
+`get_document`). The job returns counts and hashes only —
+`source`, `bytes`, `sha256`, `rows` (kept by the parser), `unparsed` (rows the
+parser could not read), `distinct` (distinct excerpts among the rows not
+dropped), `new`, `dropped` by rule, `quarantined_by_code` and
+`quarantined_earlier` (distinct excerpts of the snapshot) and
+`quarantined_now` (documents already stored that it quarantined) — and logs
+the same.
+
+**Quarantine is by content, one-way and across sources.**
+`jev_repo.quarantine_content` is the only update of `web_documents` in
+`src/`, and `jev_repo` the only module that writes the table
+(`tests/unit/test_jev_table_boundaries.py::test_only_the_repo_writes_web_documents`
+and `::test_the_one_update_of_web_documents_is_quarantine_content`). The
+writes are read by the scanner that holds `daily_bars` to the worker,
+`test_import_boundaries._table_writes`, with the table as its argument:
+literals, f-strings — a literal interpolated read as its text — and statements
+assembled by `+` or `str.join`, read whole; an insert, an update, a delete, a
+copy, a truncate, a merge, a drop or an alter of the table, and the bare name
+a bulk writer takes; an insert that goes on `ON CONFLICT … DO UPDATE` as an
+update too, since it rewrites the row it meets; and a write whose table the
+scan cannot read — interpolated, formatted, a verb whose table is joined on
+from elsewhere, a bulk writer handed a name — as a write of this one, since it
+could be. Each spelling is proved to trip it, what is not a write is proved
+not to, and the function each write is in is read from the tree around it.
+The first cut read each literal on its own, and C6's review assembled a second
+quarantine in `jev_jobs`, a release in the API and an insert in the worker by
+`+`, and turned `insert_documents`' `DO NOTHING` into a `DO UPDATE` that
+quarantined, each with every test green; each now fails a rule, and the
+`jev_signals` scan, which predates C6 and read literals the same way, reads
+through the same scanner. It reads spellings, and is not a sandbox.
+
+`quarantine_content` quarantines every document holding exactly that content,
+under any source, that is not quarantined already, which is also what makes a
+concurrent second call harmless: under READ COMMITTED it waits on the first's
+row locks, reads the rows again once the first commits, finds them
+quarantined, updates nothing and raises nothing
+(`TestQuarantineIsOneWay::test_two_concurrent_quarantines_raise_nothing`,
+which holds the second on the first's lock and watches it wait). Migration
+0012's trigger refuses a release, a new reason for a quarantined document and
+an edit of its text, and the document reads as it was
+(`::test_a_release_is_refused_by_the_trigger`). The ingest applies it three
+ways (`TestQuarantineIsByContent`): an excerpt the screen quarantines is
+stored quarantined and quarantined wherever else it is stored; an excerpt the
+screen passes that any document of any source holds quarantined is stored
+quarantined for `content quarantined earlier (document N)`, N the earliest
+such document, read in one query by `jev_repo.earliest_quarantined`; and a
+stored document the screen now flags — a rule added since it was stored — or
+whose content another document holds quarantined is quarantined when the page
+is read again.
+
+Two writers at once take their locks in one order. An insert holds its key in
+the unique index until it commits, and waits on another writer's uncommitted
+insert of the same key; a quarantine holds every row of its content. As first
+built, the job wrote a snapshot's documents in page order and its quarantines
+in page order, the screen's before the earlier ones, so two ingests at once —
+yesterday's job left queued beside today's (open item 53), or two versions of
+the page listing the same titles in different orders — each held what the
+other waited for, and PostgreSQL ended one with a deadlock (SQLSTATE 40P01),
+failing that attempt: ten rounds of ten in C6's review. Nothing partial was
+stored, since the loser rolled back whole, but the attempt, a second fetch and
+an error on the jobs page were spent. Now `insert_documents` writes a batch in
+the unique index's order, `(source, content_sha256)`, and hands its tuples
+back in the order given, and the job makes its quarantines, the screen's and
+the earlier ones together, in one pass in content order: each writer waits
+only on a key or a content below every one it holds, so none waits on another
+that waits on it. `TestTwoWritersAtOnce` holds another writer, which takes its
+locks in content order, at a known point beside the job and shows each order
+— the documents, the screen's quarantines, and the screen's with the earlier
+ones in one order — rather than racing for them; with the first cut's orders
+each ends in the deadlock. A job's documents are therefore numbered in content
+order, not the page's.
+
+**It asks nothing, and no key reaches it.** `main` registers
+`jev_web_ingest` through `_jev_web_ingest`, which has the signature every Jev
+handler has and drops the key the loop resolves before calling
+`web_ingest.run_job(conn, payload)`, which has no parameter to take one; the
+wrapper is marked as wrapping `run_job` and nothing else of it copied, so the
+one-call scans, which unwrap each handler, read `web_ingest`, where the work
+is (`tests/unit/test_job_ownership.py::TestTheProgrammeRunsWhatItClaims::test_the_ingest_job_is_handed_no_key`,
+through the drain with a key in the vault and another in the environment).
+`TestEveryJevHandlerMakesAtMostOneCall` now holds each kind to its own count,
+one for the three that ask and none for this one, whose run through every
+outcome of the road must reach its end so that none is a count and not a
+handler that stopped early; its module holds no call to the road at all.
+`web_ingest` joins `RUNNER_ONLY`, and Safety rule 5 in CLAUDE.md names it;
+its closure reaches no lane, client, model runner, vault or decryption
+(`test_import_boundaries.py::test_the_ingest_job_reaches_no_model_and_no_key`);
+and C5's `test_nothing_imports_the_web_fetcher_yet` is now
+`::test_only_the_ingest_job_imports_the_web_fetcher`. Its scan reads what
+`_aiohttp_routes` reads for `aiohttp`: an edge to the fetcher, which the graph
+draws for every spelling of an import it reads — `import`, `from … import`,
+relative, inside a function, a loader with a literal name, a star import
+through a literal `__all__`; a name the ingest job binds to the fetcher, or to
+anything of it, taken from the ingest job (`from src.programme.web_ingest
+import web_fetch`); and the fetcher read off anything by its name, as an
+attribute (`web_ingest.web_fetch.fetch`, `src.programme.web_fetch.fetch`) or a
+literal handed to `getattr`, `attrgetter`, a loader or a subscript
+(`vars(web_ingest)["web_fetch"]`, `sys.modules[...]`), each of which reaches
+the fetcher with no import of it once the ingest job is loaded. The first cut
+read the edges alone, and C6's review put `from src.programme.web_ingest
+import web_fetch` into `jev_jobs`, which holds the road to Jev, and read
+`web_ingest.web_fetch.fetch` in `main`, with every test green; each spelling
+is now in the scan's own tests (`::test_the_fetcher_importer_scan_finds_each_spelling`,
+`::test_the_fetcher_scan_finds_what_is_taken_from_its_importer`), beside what
+it must not read as one, `main`'s loading of the ingest job among them. It
+reads spellings, and a name computed at run time is a reviewer's. And the
+roads to Jev reach neither the fetcher nor the ingest job through anything
+they load — the lane, its client and the two handlers that ask — and the
+forward clock no web module at all, the limits design section 9 marked tested
+and no test yet held (`::test_no_road_to_jev_reaches_the_road_to_the_web`).
+The job reaches the fake server in its tests by a stand-in
+for `web_fetch.fetch`, never through a seam of its own, so production still
+never passes `session_factory` (C5's scan reads `src/`).
+
+**The planner.** One rule, beside C4's:
+
+| Rule | Area | Kind | When | Key | Priority / attempts |
+|---|---|---|---|---|---|
+| Web ingest | research | `jev_web_ingest` | now | `jev_web_ingest:{source}:{UTC date}` | 10 / 3 |
+
+Once a UTC day for each source on the allow-list, keyed by the UTC date of the
+pass, so no past day is ever planned and a job already under today's key,
+finished or not, is never joined by a second; the payload is the source's
+name and nothing else. Its kind is spelled as a literal at its one enqueue,
+where `test_job_ownership.py`'s scan holds it to the planner; from C6's
+review that scan also counts `enqueue` taken by name — the literal
+`"enqueue"` handed to `getattr`, a `vars()` or `__dict__` subscript or
+`attrgetter`, and the jobs module, however imported, read by a computed name
+or as a whole namespace — as a kind it cannot read, since `getattr(job_repo,
+"enqueue")(conn, "jev_web_ingest", …)` anywhere in `src/` was a second
+producer of the kind with every ownership test green
+(`TestTheEnqueueScan`). It makes no call, so it takes nothing from a lane's
+share and is planned on a budget of 0, like the reference bars. Without a key
+it is not planned, though it asks Jev nothing (design R28). Priority 10 puts
+it behind the forward clock and the probe and ahead of the re-asks.
+`tests/unit/test_jev_plan.py::TestTheWebIngest`, and the planner's dark
+matrix now with the research area in it; `tests/integration/test_jev_dark.py`
+turns four switches in all sixteen combinations, the programme and Jev with
+the research area planning the day's ingest, which fetches once and asks
+nothing, and `::TestTheResearchAreaAloneFetchesNothing`: with research on and
+the programme or Jev off, or with no key, no job is planned and no page
+fetched; and `::TestAJobQueuedBeforeTheKeyOrThePinWentFetchesNothing`: a job
+already queued, claimed with no key or with an alias where the pin was, fails
+for good and fetches nothing.
+
+**The canary, ingest half** (invariant I7).
+`tests/integration/test_web_ingest.py::TestTheCanary` serves a synthetic page
+over local HTTPS to the shipped fetcher, every control of it the shipped one
+but the three C5's own tests change (the route to the local server, the
+authority it trusts, and the address check, which admits 127.0.0.1, where the
+server listens, and refuses whatever else it refuses), runs the job through
+the programme's loop — enqueued, claimed and run, a key available — and looks
+for a token one title carried: in `web_documents.excerpt`, one row, and in no
+other text or JSON column of any table in `public`, read from
+`information_schema` so a column a later migration adds is read too, a column
+of a type the test has not sorted into text or not text failing it; in no log
+record at DEBUG, message, arguments or traceback; and in no job's payload,
+result or error. A token in a line the parser refuses is found nowhere at all,
+the failed job's error included; so is one in a row the parser cannot read,
+one in an address inside a kept title, which the normaliser removes, and one
+in a row whose decoration alone trips the screen, which is dropped. Every
+title of the page carries a token of its own, each beginning with one marker,
+and the marker is looked for too, so a title that leaves by any road is found,
+not only the watched one's: the first cut watched a single title, and the
+mutation check put the page's first title in the job's result and passed it.
+Until C7 asks, that one column is the only one: CLAUDE.md's row says one
+column for now.
+
+**Where C6 departs from the design and its scope.** C5 changed the contract
+first: the job stores what `screen_cell` decides, rather than screening the
+cell and the excerpt itself and quarantining on either (C5 above). The job
+reads the programme's switch as well as the research area before it fetches,
+as the road reads all three, where the design named the area alone; and, from
+C6's review, the pin and whether a key is set, which the design's section 8
+left to the planner and its section 6.2 ("handlers re-check every
+precondition") did not. It refuses a connection inside a transaction rather
+than only fetching outside one. It quarantines an unquarantined stored copy of
+content another document holds quarantined, as well as one the screen now
+flags, the scope's one case: quarantine is by content, and two writers a
+moment apart could otherwise leave a copy in use (open item 52). The result
+adds `unparsed` to the scope's counts, since a row the parser drops was
+otherwise visible nowhere, and counts `quarantined_by_code` and
+`quarantined_earlier` over the snapshot's distinct excerpts, so a second read
+of an unchanged page reports what the screen decides rather than nothing. A
+failure while storing is retried, and reported by its class, SQLSTATE and
+constraint; every other failure is not. `fetched_at` is the database's clock,
+chosen as above. `DocumentRow` computes its own content address from its
+excerpt, so no caller can file a row under another text's. The one-call scan's
+rule changed from exactly one call a handler module to each kind's own count,
+zero for this one, and `main`'s wrapper is marked as wrapping `run_job` so the
+scan reads the module that holds the work. The design's `jev_labels` writes
+wait for C7, which records the README's grouping as labels with the catalogue
+set.
+
 ### Open items Phase C found
 
 Numbered on from Phase B's.
@@ -2716,6 +2992,27 @@ Numbered on from Phase B's.
     design-token, component and formatting tests pass, but the route was not
     captured or scanned with axe (`web/CLAUDE.md`), the change being words in
     an existing `Absent`.
+52. **A copy stored as another writer quarantines its content stays in use
+    until the page is read again.** The ingest reads which of a snapshot's
+    excerpts are quarantined anywhere and then inserts, in one transaction
+    under READ COMMITTED; a quarantine another writer commits between the two
+    — C7's injection screen, or a second source's ingest — cannot see a copy
+    not yet committed, and that copy is stored in use. The next read of the
+    page quarantines it, naming the earliest quarantine (C6 above), and until
+    then the web gate, which looks quarantine up by content at the moment of
+    asking, refuses it all the same, so no set is asked about it. Serializable
+    isolation would close the gap at the price of a retry on every conflict;
+    not taken.
+53. **A day whose fetch failed waits for the next day.** A failed fetch and a
+    refused page fail the job without a retry, so a transient network fault
+    costs that day's snapshot, and the next UTC day's job fetches afresh. A job
+    left queued past its day — the programme or Jev switched off between the
+    plan and the claim — runs beside the next day's once they are back on,
+    fetching the page twice in a day, the second storing nothing, unless the
+    key or the pin went in the meantime, when it fails without fetching; and
+    two such jobs run at once take their locks in one order, so neither ends
+    in a deadlock (both from C6's review). Neither changes what is stored, and
+    both are on the jobs' rows.
 
 ## Inputs needed from the operator
 

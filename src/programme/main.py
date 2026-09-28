@@ -43,16 +43,25 @@ so a queued job waits, its attempts untouched, for both to be on, rather than
 failing while an operator has them off.
 
 Before each drain, at most once a minute, the planner puts whatever Jev work is
-due in the queue (``jev_plan``): the daily probe, the forward clock's jobs and
-the re-asks. On its own connection and inside its own ``try``, so a planner
-that fails costs a minute of planning and never a drain; and dark on its own
-terms, planning nothing unless the programme, Jev, a usable pin and a key all
-allow it. The drain and its one claim are what they were.
+due in the queue (``jev_plan``): the daily probe, the forward clock's jobs, the
+re-asks and, from phase C6, the daily web ingest. On its own connection and
+inside its own ``try``, so a planner that fails costs a minute of planning and
+never a drain; and dark on its own terms, planning nothing unless the
+programme, Jev, a usable pin and a key all allow it. The drain and its one
+claim are what they were.
+
+The web ingest (``web_ingest``) is the one kind here that asks Jev nothing: it
+fetches a page and stores what it reads. It needs no key to do that, so the
+key the loop resolves for every job stops at its wrapper,
+:func:`_jev_web_ingest`, which reads only whether one is set: the planner
+plans the ingest only then, and a job queued before the key went runs
+without fetching.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import signal
@@ -74,6 +83,7 @@ from src.programme import (
     jev_lane,
     jev_plan,
     repo,
+    web_ingest,
 )
 from src.programme.flags import (
     PROGRAMME_WORKER_ID,
@@ -205,6 +215,45 @@ async def _jev_probe(
     return result
 
 
+#: Why a web ingest was not run: it asks Jev nothing, but it fetches only what
+#: a lane could ask about, and none can without a key (design R28).
+WEB_INGEST_NO_KEY = (
+    "no TypeSafe key is set (System > Configuration, or TYPESAFE_API_KEY), so "
+    "nothing could be asked about the page; nothing was fetched"
+)
+
+
+async def _jev_web_ingest(
+    conn: asyncpg.Connection, payload: dict[str, Any], api_key: str | None
+) -> dict[str, Any]:
+    """
+    The web ingest job, ``web_ingest.run_job``, which fetches one page and asks
+    Jev nothing. The loop resolves a TypeSafe key for every Jev job; this one
+    has no use for it, so it stops here, and ``run_job`` has no parameter it
+    could arrive by: no key can reach the fetch, the parser or a stored row.
+    ``tests/unit/test_job_ownership.py::TestTheProgrammeRunsWhatItClaims::test_the_ingest_job_is_handed_no_key``.
+
+    It is read for one thing first: whether it is there, by the road's own
+    test, a blank key being none. The planner plans the ingest only while a
+    key exists, since a page fetched for a lane that cannot ask about it is a
+    fetch for nothing (design R28), and a job it queued can be claimed after
+    the key went (docs/08 open item 53); such a job is refused for good, as
+    the probe is, and ``run_job`` reads the pin again for the same reason
+    (``::test_the_ingest_job_is_not_run_without_a_key``,
+    ``tests/integration/test_jev_dark.py::TestAJobQueuedBeforeTheKeyOrThePinWentFetchesNothing``).
+    """
+    if not api_key or not api_key.strip():
+        raise JobFailedError(WEB_INGEST_NO_KEY, retry=False)
+    del api_key
+    return await web_ingest.run_job(conn, payload)
+
+
+# Marked as wrapping ``run_job`` and copying nothing else of it, so what reads a
+# kind's handler through ``inspect.unwrap`` — the one-call scans of
+# ``test_job_ownership.py`` — reads the module that holds the work.
+functools.update_wrapper(_jev_web_ingest, web_ingest.run_job, assigned=(), updated=())
+
+
 #: The dispatch table, and also the claim filter: this process claims exactly
 #: these kinds and leaves every other row in ``jobs`` for whoever owns it. Read
 #: at claim time rather than copied into a second list, so the filter and the
@@ -217,6 +266,9 @@ JEV_HANDLERS: dict[str, JevHandler] = {
     # A canonical answer asked again, as a probe, to measure how often answers
     # flip (jev_jobs); the pre-registered sample, planned by jev_plan.
     "jev_reask": jev_jobs.run_reask,
+    # One allow-listed page, fetched, read, screened and stored, calling
+    # nothing (web_ingest); planned once a UTC day per source by jev_plan.
+    "jev_web_ingest": _jev_web_ingest,
 }
 
 

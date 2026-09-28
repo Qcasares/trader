@@ -11,8 +11,11 @@ rows and knows nothing about how an answer was obtained: ``jev_client``, which
 holds the SDK, and ``jev_lane``, which calls it, sit above it, and nothing here
 imports either.
 
-The tables are append-only by trigger (migration 0012), so there is no update
-and no delete here to find. Three conventions carry the weight:
+The tables are append-only by trigger (migration 0012), so there is no delete
+here to find, and one update: the one change the schema allows, a web document
+quarantined, one-way, by its content (:func:`quarantine_content`, from phase
+C6), which ``tests/unit/test_jev_table_boundaries.py`` holds to being the only
+update of that table in ``src/``. Three conventions carry the weight:
 
 * **A request and its answers are one write.** :func:`record_exchange` writes
   both in one transaction, which inside a caller's transaction is a savepoint.
@@ -36,11 +39,13 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from src.programme.jev_hash import text_sha256
 from src.programme.jev_questions import SCREEN_CLEAR_ARGMAX, SCREEN_QUESTION
 
 if TYPE_CHECKING:
@@ -309,6 +314,203 @@ async def record_label(
         note,
     )
     return int(label_id)
+
+
+# ---------------------------------------------------------------------------
+# Web documents (phase C6): the one writer, and the one-way quarantine
+# ---------------------------------------------------------------------------
+#
+# ``web_ingest`` is the caller, and web text reaches the table through these
+# two functions alone (``tests/unit/test_jev_table_boundaries.py``). A document
+# holds its text in ``excerpt`` and nowhere else: ``title`` is written NULL by
+# the statement itself, so no caller can put a second copy of an outsider's
+# words in a second column.
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentRow:
+    """
+    One excerpt to store: the allow-listed source it came from, that source's
+    URL as the allow-list wrote it, the excerpt in its one normal form, and
+    the reason it is quarantined, ``None`` for a document in use.
+
+    Its content address is computed from the excerpt, never passed, so a row
+    cannot be filed under another text's address; the schema holds the same
+    rule (``web_documents_content_is_its_excerpt``, migration 0013). The
+    excerpt is kept out of the ``repr``, so a row that is logged logs no web
+    text.
+    """
+
+    source: str
+    url: str
+    excerpt: str = field(repr=False)
+    quarantine_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("source", "url", "excerpt"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"a document's {name} is non-empty text")
+        reason = self.quarantine_reason
+        if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+            raise ValueError("a quarantine says why, in words")
+
+    @property
+    def content_sha256(self) -> str:
+        """``jev_hash.text_sha256`` of the excerpt: the address the lane asks by."""
+        return text_sha256(self.excerpt)
+
+    @property
+    def quarantined(self) -> bool:
+        return self.quarantine_reason is not None
+
+
+async def insert_documents(
+    conn: asyncpg.Connection, rows: Sequence[DocumentRow]
+) -> list[tuple[int, str, bool]]:
+    """
+    Store each row unless its source already holds its content, and return,
+    in the order given, ``(id, content_sha256, inserted)``: the new document's
+    id, or the id of the one already there.
+
+    ``INSERT … ON CONFLICT (source, content_sha256) DO NOTHING`` on the
+    one-snapshot constraint, so a page read again stores only what changed, and
+    a document already stored is never touched: ``DO NOTHING`` fires no update
+    trigger, where ``DO UPDATE`` would ask the table's quarantine-only trigger
+    to pass an edit, and be refused. ``title`` and ``published_at`` are NULL by
+    the statement, whatever a caller would have written; ``fetched_at`` is the
+    database's ``now()``, the start of the transaction that stores the
+    snapshot, which begins once the page has arrived: one stamp for every row
+    of the snapshot, on the clock the ledger's other stamps are read against,
+    and never earlier than the fetch.
+
+    One transaction, a savepoint inside a caller's, so a failure part-way
+    leaves none of these rows. Under READ COMMITTED, the default and what the
+    ingest job runs, a row another writer inserted first is found by the
+    ``SELECT`` that follows, once that writer has committed.
+
+    The rows are written in the unique index's order, ``(source,
+    content_sha256)``, whatever order they came in, and the result is put back
+    in theirs. An insert waits on another writer's uncommitted insert of the
+    same key, and holds its own key until it commits; two writers inserting
+    overlapping snapshots in page order — two versions of the page listing the
+    same titles differently, or the same page twice at once — each held a key
+    the other waited for, and PostgreSQL ended one with a deadlock. In one
+    order, each waits only for a key below every key it holds, so no two can
+    wait on each other
+    (``tests/integration/test_web_ingest.py::TestTwoWritersAtOnce``).
+    """
+    order = sorted(
+        range(len(rows)), key=lambda i: (rows[i].source, rows[i].content_sha256)
+    )
+    stored: dict[int, tuple[int, str, bool]] = {}
+    async with conn.transaction():
+        for index in order:
+            row = rows[index]
+            content = row.content_sha256
+            document_id = await conn.fetchval(
+                """
+                INSERT INTO web_documents (
+                    source, url, fetched_at, published_at, content_sha256,
+                    title, excerpt, quarantined, quarantine_reason
+                )
+                VALUES ($1, $2, now(), NULL, $3, NULL, $4, $5, $6)
+                ON CONFLICT (source, content_sha256) DO NOTHING
+                RETURNING id
+                """,
+                row.source,
+                row.url,
+                content,
+                row.excerpt,
+                row.quarantined,
+                row.quarantine_reason,
+            )
+            if document_id is not None:
+                stored[index] = (int(document_id), content, True)
+                continue
+            existing = await conn.fetchval(
+                "SELECT id FROM web_documents "
+                "WHERE source = $1 AND content_sha256 = $2",
+                row.source,
+                content,
+            )
+            if existing is None:  # pragma: no cover - a conflict names a row
+                raise RuntimeError(
+                    f"a document of {row.source} conflicted on its content and "
+                    "then could not be found"
+                )
+            stored[index] = (int(existing), content, False)
+    return [stored[index] for index in range(len(rows))]
+
+
+async def quarantine_content(
+    conn: asyncpg.Connection, content_sha256: str, reason: str
+) -> int:
+    """
+    Quarantine every document holding exactly this content, under any source,
+    that is not quarantined already, with ``reason``; return how many were.
+
+    The only update of ``web_documents`` in ``src/``
+    (``tests/unit/test_jev_table_boundaries.py``), and the one change the
+    table's trigger allows: ``quarantined`` from false to true, with a reason,
+    nothing else of the row touched. By content, because the same words stored
+    from a second source are the same words, and a screen they could escape by
+    moving would not be one. One-way: nothing here or anywhere releases one,
+    and the trigger refuses it.
+
+    ``AND NOT quarantined`` is what makes a second call harmless: a document
+    already quarantined keeps its first reason and is not written again, so
+    the trigger, which refuses any change to a quarantined row, is never asked.
+    Two concurrent calls under READ COMMITTED: the second waits on the first's
+    row locks, reads the rows again once it commits, finds them quarantined,
+    updates none and raises nothing
+    (``tests/integration/test_web_ingest.py::TestQuarantineIsOneWay``). The
+    locks are held until the caller commits, so a caller quarantining several
+    contents in one transaction takes them in content order, as the ingest job
+    does, for the reason :func:`insert_documents` writes in its index's order:
+    two writers taking them in two orders could each wait on the other
+    (``::TestTwoWritersAtOnce``).
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("a quarantine says why, in words")
+    status = await conn.execute(
+        "UPDATE web_documents SET quarantined = TRUE, quarantine_reason = $2 "
+        "WHERE content_sha256 = $1 AND NOT quarantined",
+        content_sha256,
+        reason,
+    )
+    return int(status.rsplit(" ", 1)[-1])
+
+
+async def get_document(
+    conn: asyncpg.Connection, document_id: int
+) -> dict[str, Any] | None:
+    """One stored document, every column, or ``None``."""
+    row = await conn.fetchrow("SELECT * FROM web_documents WHERE id = $1", document_id)
+    return dict(row) if row is not None else None
+
+
+async def earliest_quarantined(
+    conn: asyncpg.Connection, content_sha256s: Sequence[str]
+) -> dict[str, int]:
+    """
+    For each of ``content_sha256s`` quarantined under any source, the id of the
+    earliest document holding it quarantined; content quarantined nowhere is
+    not in the result.
+
+    One statement for a whole snapshot, answered from the index migration 0013
+    added on quarantined content. What the ingest job names in the reason a
+    newly stored copy is quarantined for.
+    """
+    if not content_sha256s:
+        return {}
+    rows = await conn.fetch(
+        "SELECT content_sha256, MIN(id) AS id FROM web_documents "
+        "WHERE content_sha256 = ANY($1::text[]) AND quarantined "
+        "GROUP BY content_sha256",
+        list(content_sha256s),
+    )
+    return {row["content_sha256"]: int(row["id"]) for row in rows}
 
 
 # ---------------------------------------------------------------------------

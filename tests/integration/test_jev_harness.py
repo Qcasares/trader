@@ -343,6 +343,7 @@ async def _write_the_ledger(
     # The next session in the same state: a replay, recorded live.
     later = jev_clock.collect_at(ledger.first) + timedelta(minutes=1)
     planned = await jev_plan.plan(conn, now=later, key_available=True)
+    planned_later = planned
     second_key = jev_clock.regime_job_key(DECISION_REGIME, ledger.second)
     assert second_key in planned
     await _only_due(conn, second_key)
@@ -355,7 +356,14 @@ async def _write_the_ledger(
     other = await _ask_about(conn, OTHER_STATE, calendar.bounds()[1])
     ledger.canonical["other"] = other.request_row_id
 
-    # The next UTC day the planner samples the day's canonical answers.
+    # The next UTC day the planner samples the day's canonical answers. The
+    # pass above can already be on that day, whatever the hour the test runs
+    # at: ``ledger.first`` is the last session the clock plans at ``now``,
+    # tomorrow's while today's cutoff is ahead, and its collection then falls
+    # on the UTC day after the answers, so that pass queued the re-asks of the
+    # answers on record by then. Each re-ask is one the planner queued, by one
+    # pass or the other; the first cut looked in this pass's alone, and failed
+    # on a weekday from New York's midnight to the day's cutoff.
     answered_on = {
         (await jev_repo.get_request(conn, request_id))["available_at"].date()
         for request_id in ledger.canonical.values()
@@ -363,13 +371,14 @@ async def _write_the_ledger(
     (day,) = answered_on
     tomorrow = datetime.combine(day + timedelta(days=1), time(0, 10), UTC)
     planned = await jev_plan.plan(conn, now=tomorrow, key_available=True)
+    reasks = {*planned_later, *planned}
     for name, respond in (
         ("first", _answering("neutral")),  # measured, and flipped
         ("late", _answering("risk_on", model="jev-latest")),  # refused whole
         ("other", _timing_out),  # no response
     ):
         key = jev_eval.reask_job_key(ledger.canonical[name])
-        assert key in planned, (name, planned)
+        assert key in reasks, (name, sorted(reasks))
         client.respond = respond
         await _only_due(conn, key)
         await _drain(dsn)

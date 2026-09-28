@@ -123,6 +123,40 @@ def _name(node: ast.AST) -> str | None:
     return None
 
 
+#: The module ``enqueue`` is defined in, as an import names it.
+JOBS_MODULE = JOBS_REPO.removesuffix(".py").replace("/", ".")
+
+
+def _modules_bound(relative: str, tree: ast.AST) -> dict[str, str]:
+    """Each name an import in ``tree`` binds, and the dotted name it binds."""
+    package = list(pathlib.PurePosixPath(relative).with_suffix("").parts[:-1])
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                head = alias.name.partition(".")[0]
+                bound[alias.asname or head] = alias.name if alias.asname else head
+        elif isinstance(node, ast.ImportFrom):
+            up = node.level - 1 if node.level else 0
+            base = (package[: len(package) - up] if node.level else []) + (
+                node.module.split(".") if node.module else []
+            )
+            for alias in node.names:
+                if alias.name != "*":
+                    bound[alias.asname or alias.name] = ".".join([*base, alias.name])
+    return bound
+
+
+def _dotted(node: ast.AST, bound: dict[str, str]) -> str | None:
+    """The dotted name an expression reads, where imports alone say it."""
+    if isinstance(node, ast.Name):
+        return bound.get(node.id)
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value, bound)
+        return f"{head}.{node.attr}" if head is not None else None
+    return None
+
+
 def _enqueues(relative: str, source: str) -> tuple[set[str], list[str]]:
     """
     The kinds ``source`` enqueues by literal name, and every use of ``enqueue``
@@ -131,11 +165,39 @@ def _enqueues(relative: str, source: str) -> tuple[set[str], list[str]]:
     A call's kind is its second positional argument or its ``kind=``. Anything
     else — a computed kind, ``enqueue`` bound to another name, handed on
     uncalled or imported under an alias — is reported, because a kind this
-    scan cannot see is a kind nobody has checked has an owner.
+    scan cannot see is a kind nobody has checked has an owner. So is the
+    function taken by its name rather than spelled: the literal
+    ``"enqueue"`` wherever it stands — ``getattr(job_repo, "enqueue")``,
+    ``vars(job_repo)["enqueue"]``, ``attrgetter("enqueue")`` — and the jobs
+    module, however it was imported, read by a name computed at run time or
+    as a whole namespace (``getattr(job_repo, name)``, ``vars(job_repo)``,
+    ``job_repo.__dict__``). The first cut read the spelled calls alone, so a
+    second producer of ``jev_web_ingest`` through ``getattr`` passed every
+    ownership test (C6's review). It reads spellings, and is not a sandbox.
     """
     kinds: set[str] = set()
     unread: list[str] = []
     tree = ast.parse(source)
+    bound = _modules_bound(relative, tree)
+
+    def the_jobs_module(node: ast.AST) -> bool:
+        return _dotted(node, bound) == JOBS_MODULE
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == "enqueue":
+            unread.append(f"{relative}:{node.lineno}: 'enqueue', looked up by name")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "getattr" and len(node.args) >= 2:
+                name = node.args[1]
+                if the_jobs_module(node.args[0]) and not (
+                    isinstance(name, ast.Constant) and isinstance(name.value, str)
+                ):
+                    unread.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+            elif node.func.id == "vars" and node.args and the_jobs_module(node.args[0]):
+                unread.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+        elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            if the_jobs_module(node.value):
+                unread.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
     called = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _name(node.func) == "enqueue":
@@ -189,6 +251,44 @@ class TestTheEnqueueScan:
             ("from src.db.repos.jobs import enqueue as add", set(), 1),
             ("from src.db.repos.jobs import enqueue", set(), 0),
             ('await job_repo.claim(conn, "w", kinds=["x"])', set(), 0),
+            # Looked up by its name, as a literal (C6's review): each finds the
+            # function with no call or attribute the scan reads spelled
+            # "enqueue", so the kind it is called with is never read.
+            (
+                'await getattr(job_repo, "enqueue")(conn, "jev_web_ingest", {})',
+                set(),
+                1,
+            ),
+            ('await vars(job_repo)["enqueue"](conn, "jev_web_ingest", {})', set(), 1),
+            ('await job_repo.__dict__["enqueue"](conn, "jev_probe", {})', set(), 1),
+            ('add = operator.attrgetter("enqueue")(job_repo)', set(), 1),
+            # ...or by a name computed at run time, off the jobs module however
+            # it was imported: every attribute of it read by a name the scan
+            # cannot, or the whole of its namespace.
+            (
+                "from src.db.repos import jobs as job_repo\n"
+                'NAME = "enq" + "ueue"\n'
+                'await getattr(job_repo, NAME)(conn, "jev_web_ingest", {})',
+                set(),
+                1,
+            ),
+            (
+                "import src.db.repos.jobs as queue\nadd = getattr(queue, NAME)",
+                set(),
+                1,
+            ),
+            ("from src.db.repos import jobs\nfunctions = vars(jobs)", set(), 1),
+            ("from src.db import repos\nfunctions = repos.jobs.__dict__", set(), 1),
+            ("import src.db.repos.jobs\nadd = getattr(src.db.repos.jobs, N)", set(), 1),
+            # ...and what reads another name, or another module, is not one.
+            (
+                "from src.db.repos import jobs as job_repo\n"
+                'lease = getattr(job_repo, "DEFAULT_LEASE")',
+                set(),
+                0,
+            ),
+            ("value = getattr(settings, name)", set(), 0),
+            ('"""Calls enqueue once, by name."""', set(), 0),
         ],
     )
     def test_it_reads_what_it_claims(
@@ -250,7 +350,11 @@ FLAG_QUERY = "SELECT value FROM system_flags WHERE key = $1"
 
 
 class _Conn:
-    """Answers the switches' one query from ``rows``; nothing else."""
+    """
+    Answers the switches' one query from ``rows``; nothing else. It says it is
+    in no transaction, as a pooled connection the loop hands over is, and
+    opens one that does nothing, for a handler that writes through fakes.
+    """
 
     def __init__(self, rows: dict[str, str]) -> None:
         self.rows = rows
@@ -259,6 +363,20 @@ class _Conn:
         assert query == FLAG_QUERY, f"unexpected SQL: {query!r}"
         (key,) = args
         return {"value": self.rows[key]} if key in self.rows else None
+
+    def is_in_transaction(self) -> bool:
+        return False
+
+    def transaction(self, **options: object) -> _NoTransaction:
+        return _NoTransaction()
+
+
+class _NoTransaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
 
 
 class _Acquired:
@@ -282,11 +400,13 @@ class _Pool:
         return _Acquired(self.conn)
 
 
-def _job(kind: str = "jev_probe") -> job_repo.Job:
+def _job(
+    kind: str = "jev_probe", payload: dict[str, Any] | None = None
+) -> job_repo.Job:
     return job_repo.Job(
         id=uuid.uuid4(),
         kind=kind,
-        payload={},
+        payload={} if payload is None else payload,
         status="running",
         attempts=1,
         max_attempts=3,
@@ -528,6 +648,96 @@ class TestTheProgrammeRunsWhatItClaims:
         await programme._drain_jev()
         assert handler.seen[0][2] == "env-key"
 
+    async def test_the_ingest_job_is_handed_no_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The web ingest asks Jev nothing, so it needs no key (docs/08, C6). The
+        loop resolves one for every Jev job; ``main._jev_web_ingest`` drops it,
+        and ``web_ingest.run_job`` has no parameter it could arrive by. Run
+        through the drain with a key in the vault and another in the
+        environment, the job is handed its connection and its payload and
+        nothing else, and neither key is in either.
+        """
+        from src.programme import web_ingest
+
+        assert list(inspect.signature(web_ingest.run_job).parameters) == [
+            "conn",
+            "payload",
+        ]
+        source = (SRC / "programme" / "web_ingest.py").read_text("utf-8")
+        assert "api_key" not in source and "secret" not in source.lower()
+
+        vault_key, env_key = "ts-vault-key-0123456789", "ts-env-key-9876543210"
+        seen: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        async def run_job(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            seen.append((args, kwargs))
+            return {"source": "pwb-readme"}
+
+        monkeypatch.setattr(web_ingest, "run_job", run_job)
+        job = _job("jev_web_ingest", {"source": "pwb-readme"})
+        queue = _Queue(job)
+        programme = _programme(
+            monkeypatch, queue, _on(), vault_key=vault_key, env_key=env_key
+        )
+
+        assert await programme._drain_jev() is True
+
+        ((args, kwargs),) = seen
+        assert kwargs == {}, "the ingest job was handed a keyword"
+        conn, payload = args
+        assert conn is programme._pool.conn  # type: ignore[union-attr]
+        assert payload == {"source": "pwb-readme"}
+        assert all(key not in repr(args) for key in (vault_key, env_key))
+        assert queue.completed == [(job.id, {"source": "pwb-readme"})]
+
+    @pytest.mark.parametrize(
+        ("vault_key", "env_key"),
+        [
+            pytest.param(None, None, id="none-anywhere"),
+            pytest.param("", None, id="an-empty-vault-entry"),
+            pytest.param(None, "  \n", id="a-blank-environment"),
+        ],
+    )
+    async def test_the_ingest_job_is_not_run_without_a_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_key: str | None,
+        env_key: str | None,
+    ) -> None:
+        """
+        The planner plans the ingest only while a key is set, since a page
+        fetched for a lane that cannot ask about it is a fetch for nothing
+        (design R28), and a job queued before the key went is claimed after
+        it (open item 53). The wrapper reads the key for whether it is there,
+        as the road reads it, and refuses the job for good without running it,
+        as the probe refuses; the key still goes no further.
+        """
+        from src.programme import web_ingest
+
+        ran: list[Any] = []
+
+        async def run_job(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            ran.append((args, kwargs))
+            return {}
+
+        monkeypatch.setattr(web_ingest, "run_job", run_job)
+        job = _job("jev_web_ingest", {"source": "pwb-readme"})
+        queue = _Queue(job)
+        programme = _programme(
+            monkeypatch, queue, _on(), vault_key=vault_key, env_key=env_key
+        )
+
+        assert await programme._drain_jev() is True
+
+        assert ran == [], "the ingest ran with no key to ask about what it fetched"
+        ((failed_id, error, retry),) = queue.failed
+        assert (failed_id, retry) == (job.id, False)
+        assert error.startswith("no TypeSafe key is set")
+        assert error.endswith("nothing was fetched")
+        assert queue.completed == []
+
     async def test_a_handler_that_raises_fails_the_job_for_a_retry(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -756,18 +966,37 @@ def _road_calls_in_loops(tree: ast.AST) -> list[str]:
 
 
 def _handler_modules() -> dict[str, pathlib.Path]:
+    """
+    The module holding each kind's work: its handler's, unwrapped, so a
+    handler ``main`` wraps only to drop the key is read where its work is.
+    """
     return {
         kind: pathlib.Path(inspect.getfile(inspect.unwrap(handler)))
         for kind, handler in JEV_HANDLERS.items()
     }
 
 
+#: How many calls to the road each kind makes an attempt, at most. The web
+#: ingest (phase C6) fetches a page and stores it, and calls nothing.
+ROAD_CALLS: dict[str, int] = {
+    "jev_probe": 1,
+    "jev_regime": 1,
+    "jev_reask": 1,
+    "jev_web_ingest": 0,
+}
+
+
 class TestEveryJevHandlerMakesAtMostOneCall:
     """
-    One call an attempt, which is what the shutdown grace covers. Not one call
-    a job: an attempt whose call got no response is retried and asks again
-    (``jev_jobs.ask_verdict``), since an ``error`` row is no answer to replay.
+    One call an attempt, which is what the shutdown grace covers, and none
+    for a job that calls nothing. Not one call a job: an attempt whose call got
+    no response is retried and asks again (``jev_jobs.ask_verdict``), since an
+    ``error`` row is no answer to replay.
     """
+
+    def test_every_kind_says_how_many_calls_it_makes(self) -> None:
+        assert set(ROAD_CALLS) == set(JEV_HANDLERS)
+        assert all(calls in (0, 1) for calls in ROAD_CALLS.values())
 
     def test_no_handler_module_calls_the_road_in_a_loop(self) -> None:
         modules = set(_handler_modules().values()) | {SRC / "programme" / "jev_lane.py"}
@@ -777,12 +1006,18 @@ class TestEveryJevHandlerMakesAtMostOneCall:
 
     def test_each_handler_module_takes_the_road_once(self) -> None:
         """
-        One call site per module holding a handler, and one ``ask`` in the
-        probe: two sites in one module is a job that can take both.
+        One call site per module holding a handler that asks, and one ``ask``
+        in the probe: two sites in one module is a job that can take both. None
+        in the ingest job's module, which asks nothing.
         """
-        for kind, path in _handler_modules().items():
+        modules = _handler_modules()
+        assert modules["jev_web_ingest"] == SRC / "programme" / "web_ingest.py"
+        for kind, path in modules.items():
             calls = _road_calls(ast.parse(path.read_text("utf-8")))
-            assert len(calls) == 1, (kind, [ast.unparse(c) for c in calls])
+            assert len(calls) == ROAD_CALLS[kind], (
+                kind,
+                [ast.unparse(c) for c in calls],
+            )
         lane = ast.parse((SRC / "programme" / "jev_lane.py").read_text("utf-8"))
         (run_probe,) = [
             node
@@ -806,7 +1041,9 @@ class TestEveryJevHandlerMakesAtMostOneCall:
     ) -> None:
         """
         Every outcome the road can return, with every error kind, run through
-        every handler, counted: never more than one ask. The shutdown grace is
+        every handler, counted: never more than one ask, and none from a job
+        that calls nothing, which must then have run to its end, so that none
+        is not a count of a handler that stopped early. The shutdown grace is
         sized for one call (``JEV_SHUTDOWN_GRACE_SECONDS``), and a job that
         asked twice is two answers with an equal claim to be right.
         """
@@ -839,12 +1076,23 @@ class TestEveryJevHandlerMakesAtMostOneCall:
                     error_kind=_kind,
                 )
 
+            async def probe(conn: Any, *args: Any, _asked=asked, **kwargs: Any) -> Any:
+                _asked.append({"run_probe": args})
+                raise AssertionError("the probe was run from another kind's handler")
+
+            async def client_ask(*args: Any, _asked=asked, **kwargs: Any) -> Any:
+                _asked.append({"client": kwargs})
+                raise AssertionError("the client was called around the road")
+
             monkeypatch.setattr(jev_lane, "ask", ask)
+            if kind != "jev_probe":
+                monkeypatch.setattr(jev_lane, "run_probe", probe)
+            monkeypatch.setattr(jev_client, "ask", client_ask)
             try:
                 await handler(_Conn(_all_on()), dict(_PAYLOADS[kind]), "ts-key")
             except JobFailedError:
-                pass
-            assert len(asked) == 1, (kind, status, error_kind, len(asked))
+                assert ROAD_CALLS[kind], f"{kind} calls nothing and must run to its end"
+            assert len(asked) == ROAD_CALLS[kind], (kind, status, error_kind, asked)
 
     def test_every_handler_has_a_counted_run(self) -> None:
         assert set(_PAYLOADS) == set(JEV_HANDLERS)
@@ -855,11 +1103,16 @@ _PAYLOADS: dict[str, dict[str, Any]] = {
     "jev_probe": {},
     "jev_regime": {"session": "2026-09-28", "set": "decision.regime", "version": 1},
     "jev_reask": {"request_id": 41},
+    "jev_web_ingest": {"source": "pwb-readme"},
 }
 
 
 def _all_on() -> dict[str, str]:
-    return {**_on(), f"{flags.JEV_AREA_PREFIX}decisions": "true"}
+    return {
+        **_on(),
+        f"{flags.JEV_AREA_PREFIX}decisions": "true",
+        f"{flags.JEV_AREA_PREFIX}research": "true",
+    }
 
 
 def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
@@ -940,6 +1193,32 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
         monkeypatch.setattr(jev_repo, "get_request", canonical)
         monkeypatch.setattr(flags, "jev_model", pin)
         monkeypatch.setattr(jev_repo, "answers_for", no_answers)
+    elif kind == "jev_web_ingest":
+        from src.programme import web_fetch
+        from tests.fakes import pwb_readme
+
+        page = pwb_readme.fetched(pwb_readme.readme())
+
+        async def fetch(source: Any) -> Any:
+            return page
+
+        async def none_quarantined(conn: Any, contents: Any) -> dict[str, int]:
+            return {}
+
+        async def stored(conn: Any, rows: Any) -> list[tuple[int, str, bool]]:
+            return [(n, row.content_sha256, True) for n, row in enumerate(rows, 1)]
+
+        async def quarantined(conn: Any, content: str, reason: str) -> int:
+            return 0
+
+        async def usable_pin(conn: Any) -> str:
+            return "jev-1.13.0"
+
+        monkeypatch.setattr(web_fetch, "fetch", fetch)
+        monkeypatch.setattr(flags, "jev_model", usable_pin)
+        monkeypatch.setattr(jev_repo, "earliest_quarantined", none_quarantined)
+        monkeypatch.setattr(jev_repo, "insert_documents", stored)
+        monkeypatch.setattr(jev_repo, "quarantine_content", quarantined)
     elif kind != "jev_probe":
         raise AssertionError(f"{kind} has no counted run: add one")
 
@@ -970,11 +1249,23 @@ def test_job_failed_error_is_one_class_wherever_it_is_imported() -> None:
 
 
 def test_the_programme_owns_the_forward_clock_and_the_reasks() -> None:
-    assert set(JEV_HANDLERS) == {"jev_probe", "jev_regime", "jev_reask"}
+    assert set(JEV_HANDLERS) == {
+        "jev_probe",
+        "jev_regime",
+        "jev_reask",
+        "jev_web_ingest",
+    }
     kinds, _ = _every_enqueue()
-    for kind in ("jev_probe", "jev_regime", "jev_reask", "ingest_reference_bars"):
+    for kind in (
+        "jev_probe",
+        "jev_regime",
+        "jev_reask",
+        "ingest_reference_bars",
+        "jev_web_ingest",
+    ):
         assert kinds.get(kind) == {"src/programme/jev_plan.py"}, (kind, kinds.get(kind))
     assert "ingest_reference_bars" in HANDLERS
+    assert "jev_web_ingest" not in HANDLERS, "the web ingest is the programme's"
 
 
 def test_the_programme_claims_as_itself() -> None:

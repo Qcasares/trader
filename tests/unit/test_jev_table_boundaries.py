@@ -25,16 +25,32 @@ an import scan cannot see: a query is a string, and a module that never imports
 * **Inside the programme, one writer and one reader.** ``jev_lane`` writes the
   signals and reads none of them; ``jev_repo`` reads them and writes none; no
   other module of ``src/programme`` names the table.
+* **Web text is written by one module, and quarantined by one statement.**
+  From phase C6, only ``jev_repo`` writes ``web_documents`` — its
+  ``insert_documents``, for the ingest job, and ``quarantine_content``, the
+  one update the table's trigger allows — and no other function anywhere
+  updates it, so quarantine stays one-way and by content wherever it is
+  decided.
 
-The scan reads string literals, f-string parts included, because that is where
-SQL lives; a table named in an identifier or a comment is not a query. A
-literal that is the signals table's name and nothing else counts as a write,
-because asyncpg's bulk writers take the table as a bare argument and build the
-SQL inside the driver. It reads ``src/`` and the protected processes' entry
-points outside it — ``api/``, ``scripts/`` and ``tests/e2e/broker_check.py`` —
-the trees ``test_import_boundaries`` walks. Each scanner is also run over
-synthetic sources that must trip it, so a scanner that quietly finds nothing
-fails its own test first.
+The scan reads strings, because that is where SQL lives: literals, f-strings,
+and the one text a chain of ``+`` or a ``str.join`` of literals assembles,
+since a statement assembled that way names its table in no literal of its own;
+a table named in an identifier or a comment is not a query. The writes are read
+by ``test_import_boundaries._table_writes``, the scanner that holds
+``daily_bars`` to the worker, with the table as its argument: a write whose
+table it cannot read — interpolated, formatted, a verb whose table is joined
+on from elsewhere, a bulk writer handed a name — counts as a write of the
+table, since it could be one; an insert that goes on ``ON CONFLICT … DO
+UPDATE`` counts as an update; and a string that is the table's name and
+nothing else counts as a write, because asyncpg's bulk writers take the table
+as a bare argument and build the SQL inside the driver. The first cut read
+each literal on its own, and a second writer of ``web_documents``, or a second
+update of it, assembled by ``+`` passed both of its rules (C6's review). It
+reads ``src/`` and the protected processes' entry points outside it —
+``api/``, ``scripts/`` and ``tests/e2e/broker_check.py`` — the trees
+``test_import_boundaries`` walks. Each scanner is also run over synthetic
+sources that must trip it, so a scanner that quietly finds nothing fails its
+own test first. It reads spellings, and is not a sandbox.
 """
 
 from __future__ import annotations
@@ -44,6 +60,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from tests.unit.test_import_boundaries import _assembled, _table_writes
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -81,23 +99,24 @@ MODEL_RUNNERS = tuple(
 
 _TABLE = re.compile(r"\b(" + "|".join(JEV_TABLES) + r")\b")
 
-#: A string that is the signals table's name and nothing else. asyncpg's bulk
-#: writers take the table as a bare argument and build the SQL inside the
-#: driver — ``copy_records_to_table("jev_signals", ...)``, ``copy_to_table`` —
-#: and a constant interpolated into an f-string is the same string, so outside
-#: the writer the name alone is read as a write.
-_SIGNALS_NAME = re.compile(r'^\s*(?:"?\w+"?\.)?"?jev_signals"?\s*$', re.IGNORECASE)
-_SIGNAL_WRITE = re.compile(
-    r"\b(?:insert\s+into|update|delete\s+from|copy|truncate(?:\s+table)?|merge\s+into)"
-    r"\s+(?:only\s+)?(?:\"?\w+\"?\.)?\"?jev_signals\"?(?![\w])",
-    re.IGNORECASE,
-)
-
 
 def _strings(source: str) -> list[tuple[int, str]]:
-    """Every string literal in ``source``, with f-string parts joined."""
+    """
+    Every string literal in ``source``, f-string parts joined, and the one
+    text each chain of ``+`` or ``str.join`` of literals assembles
+    (``test_import_boundaries._assembled``), since a query assembled that way
+    names its table in no literal of its own.
+    """
+    tree = ast.parse(source)
+    inner = {
+        id(side)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+        for side in (node.left, node.right)
+        if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add)
+    }
     found: list[tuple[int, str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
             text = "".join(
                 part.value
@@ -107,6 +126,8 @@ def _strings(source: str) -> list[tuple[int, str]]:
             found.append((node.lineno, text))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             found.append((node.lineno, node.value))
+        elif id(node) not in inner and (assembled := _assembled(node)) is not None:
+            found.append((node.lineno, assembled))
     return found
 
 
@@ -119,12 +140,44 @@ def _tables_named(source: str) -> list[str]:
 
 
 def _signal_writes(source: str) -> list[str]:
-    found = []
-    for line, text in _strings(source):
-        found += [f"line {line}: {m.group(0)}" for m in _SIGNAL_WRITE.finditer(text)]
-        if _SIGNALS_NAME.match(text):
-            found.append(f"line {line}: the table's name, as a bulk write takes it")
-    return found
+    """
+    Every write of ``jev_signals`` in ``source``, and every write whose table
+    the scan cannot read, which could be one (``_table_writes``). A string
+    that is the table's name and nothing else counts too: asyncpg's bulk
+    writers take the table bare — ``copy_records_to_table("jev_signals",
+    ...)``, ``copy_to_table`` — and build the SQL inside the driver.
+    """
+    return [
+        f"line {write.line}: {write.verb} {write.shown}"
+        for write in _table_writes(source, "jev_signals", bare_name=True)
+    ]
+
+
+#: The one module that may write ``web_documents``, and the one function in it
+#: that may update the table: the one-way quarantine by content.
+DOCUMENTS_WRITER = PROGRAMME / "jev_repo.py"
+QUARANTINE_FUNCTION = "quarantine_content"
+
+#: Every write ``jev_repo`` makes to ``web_documents``: the function it is in
+#: and the statement's verb. Nothing else, there or anywhere.
+DOCUMENTS_WRITES = frozenset(
+    {("insert_documents", "insert into"), (QUARANTINE_FUNCTION, "update")}
+)
+
+
+def _document_writes(source: str) -> list[tuple[int, str, str | None]]:
+    """
+    Every write of ``web_documents`` in ``source``, and every write whose
+    table the scan cannot read, which could be one: its line, its verb, and
+    the function it is in (``_table_writes``). An insert that goes on
+    ``ON CONFLICT ... DO UPDATE`` is an update as well, and a string that is
+    the table's name and nothing else counts, verb ``bulk``, as asyncpg's bulk
+    writers take the table bare.
+    """
+    return [
+        (write.line, write.verb, write.function)
+        for write in _table_writes(source, "web_documents", bare_name=True)
+    ]
 
 
 def _python_files(root: Path) -> list[Path]:
@@ -167,7 +220,8 @@ def test_only_the_lane_writes_signals() -> None:
         for write in _signal_writes(path.read_text(encoding="utf-8"))
     ]
     assert not offenders, (
-        "a module other than src/programme/jev_lane.py writes jev_signals:\n"
+        "a module other than src/programme/jev_lane.py writes jev_signals, or "
+        "writes a table this scan cannot read; name the table in the SQL:\n"
         + "\n".join(offenders)
     )
 
@@ -252,6 +306,43 @@ def test_the_gates_and_the_programmes_rows_name_no_jev_table() -> None:
         assert _tables_named(path.read_text(encoding="utf-8")) == [], _label(path)
 
 
+def test_only_the_repo_writes_web_documents() -> None:
+    """
+    Web text reaches ``web_documents`` through ``jev_repo`` alone: the ingest
+    job hands it rows, and a module that wrote the table itself would store
+    text by rules nobody reviewed — a second column, a title, a quarantine
+    decided somewhere else. Across ``src/`` and the protected entry points.
+    """
+    offenders = [
+        f"{_label(path)} line {line}: {verb} web_documents"
+        for path in _scanned()
+        if path != DOCUMENTS_WRITER
+        for line, verb, _ in _document_writes(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "a module other than src/programme/jev_repo.py writes web_documents, or "
+        "writes a table this scan cannot read; name the table in the SQL:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_one_update_of_web_documents_is_quarantine_content() -> None:
+    """
+    The repo's writes of the table are exactly its insert and its quarantine,
+    and the one update is ``quarantine_content``'s, which quarantines by
+    content, one-way, and touches nothing else: with the test above, it is
+    the only update of ``web_documents`` in ``src/``. A second update, even
+    one the trigger would pass, would be a quarantine decided by other rules —
+    an ``ON CONFLICT … DO UPDATE`` on the insert among them, which the first
+    cut read as an insert alone — and a write whose table the scan cannot
+    read, here, would be one it cannot rule out.
+    """
+    writes = _document_writes(DOCUMENTS_WRITER.read_text(encoding="utf-8"))
+    assert {(function, verb) for _, verb, function in writes} == DOCUMENTS_WRITES
+    updates = [write for write in writes if write[1] == "update"]
+    assert [function for _, _, function in updates] == [QUARANTINE_FUNCTION], updates
+
+
 @pytest.mark.parametrize(
     ("source", "reads"),
     [
@@ -306,6 +397,8 @@ def test_the_scans_read_the_tree_they_claim() -> None:
         'q = f"SELECT {cols} FROM jev_requests WHERE lane = {lane!r}"',
         'await conn.execute("DELETE FROM web_documents")',
         '"""Reads jev_labels."""',
+        'q = "SELECT * FROM jev_" + "answers"',
+        'q = "".join(["SELECT value FROM ", "jev_", "signals"])',
     ],
 )
 def test_the_table_scan_finds_each_spelling(source: str) -> None:
@@ -340,6 +433,14 @@ def test_the_table_scan_ignores_what_is_not_a_query(source: str) -> None:
         'await conn.copy_to_table("jev_signals", source=f, schema_name="public")',
         'T = "jev_signals"\nawait conn.execute(f"INSERT INTO {T} VALUES ($1)")',
         'await conn.copy_records_to_table("public.jev_signals", records=r)',
+        # Assembled, the table named in no literal alone, or not read at all.
+        '_S = "INSERT INTO" + " jev_signals (signal) VALUES ($1)"',
+        'q = "".join(("UPDATE ", "jev_", "signals SET value = 1"))',
+        'q = "DELETE FROM jev_" + "signals"',
+        'q = " ".join(["INSERT INTO", "jev_signals", "VALUES ($1)"])',
+        'T = "jev_" + "signals"\nawait conn.execute(f"INSERT INTO {T} VALUES ($1)")',
+        'await conn.execute("INSERT INTO " + table + " VALUES ($1)")',
+        "await conn.copy_records_to_table(TABLE, records=r)",
     ],
 )
 def test_the_write_scan_finds_each_spelling(source: str) -> None:
@@ -357,3 +458,142 @@ def test_the_write_scan_finds_each_spelling(source: str) -> None:
 )
 def test_the_write_scan_ignores_what_does_not_write_signals(source: str) -> None:
     assert _signal_writes(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.execute("UPDATE web_documents SET quarantined = TRUE")',
+        'await conn.execute("update public.web_documents set quarantined = true")',
+        "await conn.execute('UPDATE \"web_documents\" SET quarantined = TRUE')",
+        'await conn.execute("UPDATE ONLY web_documents SET quarantined = TRUE")',
+        'q = f"INSERT INTO web_documents ({columns}) VALUES ($1)"',
+        'await conn.execute("DELETE FROM web_documents WHERE id = $1")',
+        'await conn.execute("TRUNCATE TABLE web_documents")',
+        'q = "COPY web_documents FROM STDIN"',
+        'q = "MERGE INTO web_documents d USING x ON true WHEN MATCHED THEN DELETE"',
+        'await conn.copy_records_to_table("web_documents", records=r)',
+        'T = "web_documents"\nawait conn.execute(f"UPDATE {T} SET quarantined = TRUE")',
+        'await conn.execute("DROP TABLE IF EXISTS web_documents")',
+        'await conn.execute("ALTER TABLE web_documents DISABLE TRIGGER ALL")',
+        # Assembled from literals, the table named in none of them alone:
+        # test_import_boundaries' daily_bars spellings, the table swapped.
+        '_DOCS = " ".join(["INSERT INTO", "web_documents", "VALUES ($1)"])',
+        '_DOCS = "INSERT INTO" + " web_documents (source) VALUES ($1)"',
+        'q = "UPDATE" + " " + "web_documents SET quarantined = TRUE"',
+        'q = "".join(("MERGE INTO ", "web_", "documents USING s ON true"))',
+        'q = "".join(("UPDATE ", "web", "_documents SET quarantined = TRUE"))',
+        'q = "UPDATE web_" + "documents SET quarantined = TRUE"',
+        'q = "DELETE FROM " + f"{schema}.web_documents"',
+        'q = "update" + " web_documents set quarantined = true"',
+        'q = " ".join(["copy", "web_documents", "from stdin"])',
+        'q = "WITH s AS (SELECT 1) INSERT INTO" + " web_documents SELECT * FROM s"',
+        'Q = "INSERT INTO "\nawait conn.execute(Q + "web_documents VALUES ($1)")',
+        'T = "web_" + "documents"\nawait conn.execute(f"UPDATE {T} SET x = 1")',
+        # A table the scan cannot read: interpolated, formatted, handed on.
+        'await conn.execute(f"UPDATE {schema}.web_documents SET quarantined = TRUE")',
+        "await conn.execute(f\"UPDATE {'web_documents'} SET quarantined = TRUE\")",
+        'await conn.execute("INSERT INTO " + table + " VALUES ($1)")',
+        'await conn.execute("UPDATE %s SET quarantined = TRUE" % table)',
+        'await conn.execute("UPDATE {} SET quarantined = TRUE".format(table))',
+        "await conn.copy_records_to_table(TABLE, records=r)",
+        'PARTS = ["UPDATE", TABLE, "SET quarantined = TRUE"]',
+        'VERB = "TRUNCATE"',
+        'await conn.execute("INSERT INTO" + TABLE + " VALUES ($1)")',
+        'note = "copied " + conn.copy_records_to_table(TABLE, records=r)',
+        # The bare name a bulk writer takes, however it is handed on.
+        'TABLE = "public.web_documents"',
+    ],
+)
+def test_the_documents_write_scan_finds_each_spelling(source: str) -> None:
+    """
+    Every spelling of a write to ``web_documents``, and of a write whose table
+    the scan cannot read, which could be one: the first cut read each literal
+    on its own, and a statement assembled by ``+`` or ``str.join`` named the
+    table in none of them (C6's review).
+    """
+    assert _document_writes(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.fetch("SELECT * FROM web_documents WHERE quarantined")',
+        'await conn.execute("UPDATE web_documents_audit SET x = 1")',
+        '"""What web_documents holds, and why."""',
+        'constraint = "web_documents_one_snapshot"',
+        'q = "SELECT * FROM " + "web_documents"',
+        'label = "Documents: " + "web_documents"',
+        'note = "the next " + "update"',
+        'await conn.execute("INSERT INTO jev_answers " + "VALUES ($1)")',
+        'await conn.execute("INSERT INTO web_documents_audit" + " VALUES ($1)")',
+        'await conn.copy_records_to_table("jev_labels", records=r)',
+        '"""Where ``DO UPDATE`` would ask the trigger, and ``INSERT`` would not."""',
+    ],
+)
+def test_the_documents_write_scan_ignores_what_does_not_write(source: str) -> None:
+    assert _document_writes(source) == []
+
+
+@pytest.mark.parametrize(
+    ("conflict", "verbs"),
+    [
+        ("DO UPDATE SET quarantined = TRUE", {"insert into", "update"}),
+        ("DO NOTHING", {"insert into"}),
+    ],
+)
+def test_an_upsert_of_web_documents_is_an_update(conflict: str, verbs: set) -> None:
+    """
+    ``INSERT … ON CONFLICT … DO UPDATE`` on the table updates a stored document,
+    which the trigger would pass for a quarantine: a second quarantine, by
+    rules nobody reviewed, that the one-update rule must count. The first cut
+    counted it as an insert only (C6's review). ``DO NOTHING`` updates nothing.
+    """
+    source = (
+        "async def insert_documents(conn):\n"
+        "    await conn.execute(\n"
+        '        "INSERT INTO web_documents (source) VALUES ($1) "\n'
+        f'        "ON CONFLICT (source, content_sha256) {conflict}"\n'
+        "    )\n"
+    )
+    found = {(verb, function) for _, verb, function in _document_writes(source)}
+    assert found == {(verb, "insert_documents") for verb in verbs}
+
+
+@pytest.mark.parametrize(
+    ("source", "verbs"),
+    [
+        ('q = "INSERT INTO" + " web_documents VALUES ($1)"', {"insert into"}),
+        ('q = "".join(("UPDATE ", "web", "_documents SET x = 1"))', {"update"}),
+        ("q = f\"UPDATE {'web_documents'} SET x = 1\"", {"update"}),
+        ('q = f"UPDATE {schema}.web_documents SET x = 1"', {"update", "unread"}),
+        ('q = "DROP TABLE IF EXISTS web_documents"', {"drop table if exists"}),
+        ('await c.copy_records_to_table("public.web_documents", records=r)', {"bulk"}),
+        ("await c.copy_records_to_table(T, records=r)", {"unread"}),
+        ('q = "INSERT INTO " + table + " VALUES ($1)"', {"unread"}),
+    ],
+)
+def test_the_documents_write_scan_reads_each_verb(source: str, verbs: set) -> None:
+    """
+    What each write is: a statement assembled from literals is read whole, as
+    one statement, and a literal interpolated into an f-string as its text; a
+    table the scan cannot read is ``unread``, whatever else it reads.
+    """
+    assert {verb for _, verb, _ in _document_writes(source)} == verbs
+
+
+def test_the_documents_write_scan_names_the_function_it_is_in() -> None:
+    source = (
+        "async def quarantine_content(conn):\n"
+        "    await conn.execute('UPDATE web_documents SET quarantined = TRUE')\n"
+        "async def elsewhere(conn):\n"
+        "    def nested():\n"
+        "        return 'UPDATE web_documents SET quarantined = TRUE'\n"
+        "    return nested()\n"
+        "QUERY = 'DELETE FROM web_documents'\n"
+    )
+    assert [(verb, function) for _, verb, function in _document_writes(source)] == [
+        ("update", "quarantine_content"),
+        ("update", "nested"),
+        ("delete from", None),
+    ]
