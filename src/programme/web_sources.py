@@ -48,7 +48,7 @@ from a page to a stored excerpt is narrow, written down and tested:
 
 What becomes of a row — kept, quarantined by the screen, or dropped — is
 decided here, by :func:`screen_cell`, and nothing here stores anything: the
-ingest job (design part C6) stores what it decides.
+ingest job, ``web_ingest`` (phase C6), stores what it decides.
 """
 
 from __future__ import annotations

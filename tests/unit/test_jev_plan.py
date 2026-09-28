@@ -38,6 +38,7 @@ from src.programme import (
     jev_plan,
     jev_prereg,
     jev_repo,
+    web_sources,
 )
 from src.programme.jev_questions import DECISION_REGIME
 from src.worker.scheduling import PRIORITY
@@ -45,6 +46,7 @@ from src.worker.scheduling import PRIORITY
 FLAG_QUERY = "SELECT value FROM system_flags WHERE key = $1"
 MODEL = jev_catalogue.DEFAULT_MODEL
 AREA_DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
+AREA_RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
 
 #: Monday 2026-09-28, 14:00 UTC: before the day's cutoff.
 MORNING = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
@@ -158,14 +160,15 @@ async def _plan(
 PROGRAMME = ["true", "false", '"true"', None]
 JEV = ["true", "false", None]
 DECISIONS = ["true", "false", None]
+RESEARCH = ["true", "false", '"true"', None]
 PIN = [json.dumps(MODEL), json.dumps("jev-latest"), None]
 KEY = [True, False]
 
 
 class TestItIsDark:
     @pytest.mark.parametrize(
-        ("programme", "jev", "decisions", "pin", "key"),
-        list(itertools.product(PROGRAMME, JEV, DECISIONS, PIN, KEY)),
+        ("programme", "jev", "decisions", "research", "pin", "key"),
+        list(itertools.product(PROGRAMME, JEV, DECISIONS, RESEARCH, PIN, KEY)),
     )
     async def test_nothing_unless_every_switch_the_pin_and_a_key_allow_it(
         self,
@@ -173,6 +176,7 @@ class TestItIsDark:
         programme: str | None,
         jev: str | None,
         decisions: str | None,
+        research: str | None,
         pin: str | None,
         key: bool,
     ) -> None:
@@ -181,6 +185,7 @@ class TestItIsDark:
                 flags.PROGRAMME_ENABLED: programme,
                 flags.JEV_ENABLED: jev,
                 AREA_DECISIONS: decisions,
+                AREA_RESEARCH: research,
                 flags.JEV_MODEL: pin,
             }
         )
@@ -190,10 +195,12 @@ class TestItIsDark:
             assert planned == [] and queue.jobs == {}
             return
         kinds = {queue.jobs[k]["kind"] for k in planned}
+        expected = {"jev_probe"}
         if decisions == "true":
-            assert kinds == {"jev_probe", "ingest_reference_bars", "jev_regime"}
-        else:
-            assert kinds == {"jev_probe"}, "a rule planned without its area"
+            expected |= {"ingest_reference_bars", "jev_regime"}
+        if research == "true":
+            expected.add("jev_web_ingest")
+        assert kinds == expected, "a rule planned without its area, or not with it"
 
     async def test_with_no_key_not_even_a_switch_is_read(self, queue: Queue) -> None:
         conn = _Conn(_switches())
@@ -344,6 +351,66 @@ class TestTheForwardClock:
             "ingest_reference_bars:2026-09-28",
             "ingest_reference_bars:2026-09-29",
         ], "the reference bars make no call and are planned regardless"
+
+
+class TestTheWebIngest:
+    """
+    Phase C6: once a UTC day for each allowed source, behind the research
+    area, due now, and never for a day but today.
+    """
+
+    RESEARCH_ON = {AREA_DECISIONS: "false", AREA_RESEARCH: "true"}
+
+    async def test_once_a_utc_day_for_each_allowed_source(self, queue: Queue) -> None:
+        planned = await _plan(_switches(**self.RESEARCH_ON))
+        assert planned == [
+            "jev_probe:2026-09-28",
+            "jev_web_ingest:pwb-readme:2026-09-28",
+        ]
+        job = queue.jobs["jev_web_ingest:pwb-readme:2026-09-28"]
+        assert job["kind"] == "jev_web_ingest"
+        assert job["payload"] == {"source": "pwb-readme"}
+        assert job["scheduled_for"] == MORNING
+        assert (job["priority"], job["max_attempts"]) == (10, 3)
+        ingests = [k for k in queue.jobs if k.startswith("jev_web_ingest")]
+        assert len(ingests) == len(web_sources.ALLOWED_SOURCES)
+
+    async def test_the_day_is_the_utc_days(self, queue: Queue) -> None:
+        """
+        At 01:00 UTC on the 29th it is still the 28th in New York; the key is
+        the UTC day's, and the 28th, a past day, is not planned.
+        """
+        night = datetime(2026, 9, 29, 1, 0, tzinfo=UTC)
+        planned = await _plan(_switches(**self.RESEARCH_ON), now=night)
+        assert "jev_web_ingest:pwb-readme:2026-09-29" in planned
+        assert not [k for k in queue.jobs if k.endswith("2026-09-28")]
+
+    async def test_planning_again_the_same_day_adds_nothing(
+        self, queue: Queue
+    ) -> None:
+        rows = _switches(**self.RESEARCH_ON)
+        await _plan(rows)
+        for status in ("queued", "running", "succeeded", "failed"):
+            queue.jobs["jev_web_ingest:pwb-readme:2026-09-28"]["status"] = status
+            later = MORNING + timedelta(hours=9, minutes=59)
+            assert await _plan(rows, now=later) == [], status
+        assert await _plan(rows, now=MORNING + timedelta(hours=10)) == [
+            "jev_probe:2026-09-29",
+            "jev_web_ingest:pwb-readme:2026-09-29",
+        ]
+
+    async def test_it_is_planned_on_a_budget_of_nothing_since_it_calls_nothing(
+        self, queue: Queue
+    ) -> None:
+        rows = _switches(**self.RESEARCH_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "0"})
+        assert await _plan(rows) == ["jev_web_ingest:pwb-readme:2026-09-28"]
+
+    async def test_the_research_area_is_read_by_its_own_reader(
+        self, queue: Queue
+    ) -> None:
+        conn = _Conn(_switches(**self.RESEARCH_ON))
+        await jev_plan.plan(conn, now=MORNING, key_available=True)
+        assert AREA_RESEARCH in conn.asked
 
 
 class TestTheReferenceJobsAttempts:

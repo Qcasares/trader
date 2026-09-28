@@ -5,8 +5,10 @@ The programme's one road to the web: fetch one allow-listed page, once, and
 return its text or the reason it could not. Runner-only — nothing in
 ``src/api``, ``src/worker`` or the decision path may import it
 (``RUNNER_ONLY`` in ``tests/unit/test_import_boundaries.py``) — and the only
-module in ``src/programme`` that imports ``aiohttp``. Nothing imports it yet:
-the ingest job that will (design part C6) lands after the forward clock.
+module in ``src/programme`` that imports ``aiohttp``. One module imports it,
+the ingest job, ``web_ingest``, which stores what the page holds and calls
+nothing, and no other takes it from there, by name, attribute or lookup
+(``test_import_boundaries.py::test_only_the_ingest_job_imports_the_web_fetcher``).
 
 It fetches exactly the allow-list and follows nothing. Each control is here
 rather than trusted to a default, and each is held by a test in

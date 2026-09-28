@@ -216,10 +216,11 @@ ORDER_CAPABLE_MODULES = ("src.execution", "src.worker")
 #: the harness, which holds no client but is the runner's command, not the
 #: API's. ``web_fetch`` holds no model client: it is the programme's road to
 #: the open web, and the API, which commands the worker and holds the broker
-#: keys, has no business fetching a page an outsider wrote. Matching is on the
-#: *imported name*, not on a file being present, which is how
-#: ``from src.programme import jev_client`` was refused in phase A, before the
-#: module existed.
+#: keys, has no business fetching a page an outsider wrote. From phase C6,
+#: ``web_ingest`` is the job that takes that road and stores what the page
+#: holds, for the same reason. Matching is on the *imported name*, not on a
+#: file being present, which is how ``from src.programme import jev_client``
+#: was refused in phase A, before the module existed.
 RUNNER_ONLY = (
     "src.programme.tick",
     "src.programme.author",
@@ -233,6 +234,7 @@ RUNNER_ONLY = (
     "src.programme.jev_plan",
     "src.programme.jev_eval",
     "src.programme.web_fetch",
+    "src.programme.web_ingest",
 )
 
 #: The commentary layer. It imports its client lazily, so it is a route to a
@@ -1896,18 +1898,36 @@ def test_shadow_mode_lives_in_the_worker_because_of_that_boundary() -> None:
 # The programme reads prices; it never writes them
 # ---------------------------------------------------------------------------
 
-#: A write verb, in SQL — the statements that change rows, and the ones that
-#: drop or alter the table itself, which change every row at once.
-_WRITE_VERB = (
-    r"\b(?:insert\s+into|update|delete\s+from|copy|truncate(?:\s+table)?"
+#: The SQL verbs that write — the statements that change rows, and the ones
+#: that drop or alter the table itself, which change every row at once.
+_WRITE_VERBS = (
+    r"insert\s+into|update|delete\s+from|copy|truncate(?:\s+table)?"
     r"|merge\s+into|drop\s+table(?:\s+if\s+exists)?"
-    r"|alter\s+table(?:\s+if\s+exists)?)\s+(?:only\s+)?"
+    r"|alter\s+table(?:\s+if\s+exists)?"
 )
 
+#: A write verb, and the ``ONLY`` a table may follow it with.
+_WRITE_VERB = r"\b(?:" + _WRITE_VERBS + r")\s+(?:only\s+)?"
+
+#: The schema a table's name may be qualified by: a name, or a NUL where an
+#: f-string interpolates one (``f"UPDATE {schema}.web_documents ..."``).
+_SCHEMA = r"""(?:"?(?:\w+|\x00)"?\.)?"""
+
+
+def _write_of(table: str) -> re.Pattern[str]:
+    """A write to ``table``, schema-qualified or quoted, its verb as ``verb``."""
+    return re.compile(
+        r"\b(?P<verb>"
+        + _WRITE_VERBS
+        + r")\s+(?:only\s+)?"
+        + _SCHEMA
+        + rf'"?{re.escape(table)}"?(?![\w])',
+        re.IGNORECASE,
+    )
+
+
 #: A write to the price table, schema-qualified or quoted.
-_PRICE_WRITE = re.compile(
-    _WRITE_VERB + r"""(?:"?\w+"?\.)?"?daily_bars"?(?![\w])""", re.IGNORECASE
-)
+_PRICE_WRITE = _write_of("daily_bars")
 
 #: A literal that is a write verb and at most the start of a table name — a
 #: schema, or a name broken at an underscore — so the table is concatenated on
@@ -1943,29 +1963,76 @@ _WRITE_PLACEHOLDER = re.compile(
 BULK_WRITERS = frozenset({"copy_records_to_table", "copy_to_table"})
 
 
-def _price_writes(source: str) -> list[str]:
-    """
-    Every write to ``daily_bars`` spelled in ``source``, and every write whose
-    table the scan cannot read.
+#: An insert that rewrites the stored row it meets, which is an update of it.
+_UPSERT = re.compile(r"\bon\s+conflict\b[\s\S]*?\bdo\s+update\b", re.IGNORECASE)
 
-    SQL is a string, so this reads string literals rather than imports: an
-    ``INSERT``, ``UPDATE``, ``DELETE``, ``COPY``, ``TRUNCATE`` or ``MERGE`` on
-    the table, or a ``DROP`` or ``ALTER`` of it; a write verb whose table is
-    interpolated, formatted or concatenated on; a statement assembled from
-    literals by ``+`` or ``str.join``, read as the one text it makes; a write
-    verb standing alone, whose table is joined on from somewhere the scan
-    cannot follow; and a bulk writer handed the table, or handed anything it
-    cannot read. Reads are allowed. A label, a docstring or a ``SELECT`` naming
-    the table is not a write. It reads spellings, and is not a sandbox.
+#: The verb :func:`_table_writes` records for a write whose table it cannot
+#: read, and for the table handed to a bulk writer, or named bare where one
+#: would take it.
+UNREAD = "unread"
+BULK = "bulk"
+
+
+@dataclass(frozen=True)
+class TableWrite:
+    """One write a scan found, and where."""
+
+    line: int
+    #: The SQL verb, lower case and one-spaced (``insert into``, ``update``,
+    #: ``truncate table``...), or :data:`BULK` or :data:`UNREAD`.
+    verb: str
+    #: The innermost function it is written in, ``None`` at module level.
+    function: str | None
+    #: The statement or call, as the scan read it.
+    shown: str
+
+
+def _enclosing_functions(tree: ast.AST) -> dict[int, str | None]:
+    """The innermost function each node of ``tree`` is written in, by ``id``."""
+    owner: dict[int, str | None] = {}
+
+    def visit(node: ast.AST, function: str | None) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            function = node.name
+        owner[id(node)] = function
+        for child in ast.iter_child_nodes(node):
+            visit(child, function)
+
+    visit(tree, None)
+    return owner
+
+
+def _table_writes(
+    source: str, table: str, *, bare_name: bool = False
+) -> list[TableWrite]:
     """
-    found: list[str] = []
+    Every write to ``table`` spelled in ``source``, and every write whose table
+    the scan cannot read, each with its verb and the function it is in, in the
+    order they are written.
+
+    SQL is a string, so this reads strings rather than imports: a literal; an
+    f-string, each interpolation marked by a NUL unless it is itself a literal;
+    and the one text a chain of ``+`` or a ``str.join`` of a literal sequence
+    assembles, since a statement assembled that way names its table in no
+    piece of it, each piece read as part of it rather than on its own. A write
+    is an ``INSERT``, ``UPDATE``, ``DELETE``, ``COPY``, ``TRUNCATE`` or
+    ``MERGE`` on the table, or a ``DROP`` or ``ALTER`` of it, and an insert
+    that goes on ``ON CONFLICT … DO UPDATE`` is an update as well, since it
+    rewrites the row it meets. A write whose table the scan cannot read is
+    :data:`UNREAD`: a write verb followed by an interpolation, a piece it
+    cannot read, or a ``%`` or ``str.format`` placeholder; a literal that is a
+    write verb alone, or a verb and the start of a name, whose table is joined
+    on from somewhere the scan cannot follow; and a bulk writer handed anything
+    but a literal. A bulk writer handed the table is :data:`BULK`, and with
+    ``bare_name`` so is a string that is the table's name and nothing else,
+    the argument such a writer takes. Reads are allowed: a label, a docstring
+    or a ``SELECT`` naming the table writes nothing. It reads spellings, and
+    is not a sandbox.
+    """
     tree = ast.parse(source)
-    parts = {
-        id(part)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.JoinedStr)
-        for part in node.values
-    }
+    owner = _enclosing_functions(tree)
+    written = _write_of(table)
+    named = re.compile(rf'\s*{_SCHEMA}"?{re.escape(table)}"?\s*', re.IGNORECASE)
     inner = {
         id(side)
         for node in ast.walk(tree)
@@ -1973,61 +2040,128 @@ def _price_writes(source: str) -> list[str]:
         for side in (node.left, node.right)
         if isinstance(side, ast.BinOp) and isinstance(side.op, ast.Add)
     }
-    for node in ast.walk(tree):
-        assembled = None if id(node) in inner else _assembled(node)
-        if assembled is not None and (
-            _PRICE_WRITE.search(assembled)
-            or _WRITE_INTERPOLATED.search(assembled)
-            or _WRITE_PLACEHOLDER.search(assembled)
-        ):
-            found.append(f"line {node.lineno}: {ast.unparse(node)[:80]}")
-        if isinstance(node, ast.JoinedStr):
-            text = "".join(
-                part.value
-                if isinstance(part, ast.Constant) and isinstance(part.value, str)
-                else "\x00"
-                for part in node.values
-            )
-            if _PRICE_WRITE.search(text) or _WRITE_INTERPOLATED.search(text):
-                found.append(f"line {node.lineno}: {ast.unparse(node)}")
-        elif (
+    assembled = {
+        id(node): (node, text)
+        for node in ast.walk(tree)
+        if id(node) not in inner and (text := _assembled(node)) is not None
+    }
+    # A piece of an assembled statement is read in the statement's text. Where
+    # the statement has a piece the scan cannot read, a piece that is a write
+    # verb alone is still read as one on its own, since the table may be in
+    # the piece it cannot read: "INSERT INTO" + TABLE + " VALUES".
+    read_whole: set[int] = set()
+    verbs_alone: set[int] = set()
+    for node, text in assembled.values():
+        pieces = _added(node) if isinstance(node, ast.BinOp) else node.args[0].elts
+        read_whole.update(id(piece) for piece in pieces)
+        if "\x00" in text:
+            verbs_alone.update(id(piece) for piece in pieces)
+    # An f-string's parts, and a literal it interpolates, are read in the
+    # f-string's text rather than on their own.
+    read_whole |= {
+        id(read)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        for part in node.values
+        for read in (
+            part,
+            *(
+                [part.value]
+                if isinstance(part, ast.FormattedValue) and _part_text(part) != "\x00"
+                else []
+            ),
+        )
+    }
+    found: dict[tuple[int, str], tuple[tuple[int, int], TableWrite]] = {}
+
+    def record(node: ast.AST, verb: str, shown: str) -> None:
+        key = (node.lineno, node.col_offset)
+        write = TableWrite(node.lineno, verb, owner[id(node)], shown)
+        found.setdefault((id(node), verb), (key, write))
+
+    def read(node: ast.AST, text: str, shown: str) -> None:
+        for match in written.finditer(text):
+            verb = " ".join(match.group("verb").lower().split())
+            record(node, verb, shown)
+            if verb == "insert into" and _UPSERT.search(text, match.end()):
+                record(node, "update", shown)
+        if _WRITE_INTERPOLATED.search(text) or _WRITE_PLACEHOLDER.search(text):
+            record(node, UNREAD, shown)
+        if bare_name and named.fullmatch(text):
+            record(node, BULK, shown)
+
+    def a_verb_alone(node: ast.AST) -> bool:
+        return (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
-            and id(node) not in parts
-        ):
-            if (
-                _PRICE_WRITE.search(node.value)
-                or _WRITE_PREFIX.fullmatch(node.value)
+            and bool(
+                _WRITE_PREFIX.fullmatch(node.value)
                 or _WRITE_VERB_ALONE.fullmatch(node.value)
-                or _WRITE_PLACEHOLDER.search(node.value)
-            ):
-                found.append(f"line {node.lineno}: {node.value.strip()[:80]!r}")
+            )
+        )
+
+    for node, text in assembled.values():
+        read(node, text, ast.unparse(node)[:80])
+    for node in ast.walk(tree):
+        if id(node) in read_whole and isinstance(node, ast.Constant | ast.JoinedStr):
+            if id(node) in verbs_alone and a_verb_alone(node):
+                record(node, UNREAD, repr(node.value.strip()[:80]))
+            continue
+        if isinstance(node, ast.JoinedStr):
+            read(node, _literal_text(node) or "", ast.unparse(node))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            shown = repr(node.value.strip()[:80])
+            read(node, node.value, shown)
+            if a_verb_alone(node):
+                record(node, UNREAD, shown)
         elif isinstance(node, ast.Call) and _name_of(node.func) in BULK_WRITERS:
-            table = _argument(node, 0, "table_name")
-            if not (
-                isinstance(table, ast.Constant)
-                and isinstance(table.value, str)
-                and not re.search(r'(?:^|\.)"?daily_bars"?$', table.value)
-            ):
-                found.append(f"line {node.lineno}: {ast.unparse(node.func)}(...)")
-    return found
+            target = _argument(node, 0, "table_name")
+            shown = f"{ast.unparse(node.func)}(...)"
+            if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+                record(node, UNREAD, shown)
+            elif named.fullmatch(target.value):
+                record(node, BULK, shown)
+    return [write for _, write in sorted(found.values(), key=lambda item: item[0])]
+
+
+def _price_writes(source: str) -> list[str]:
+    """
+    Every write to ``daily_bars`` spelled in ``source``, and every write whose
+    table the scan cannot read (:func:`_table_writes`). A label naming the
+    table is not a write here, since nothing that writes it takes it bare.
+    """
+    return [
+        f"line {write.line}: {write.shown}"
+        for write in _table_writes(source, "daily_bars")
+    ]
 
 
 def _literal_text(node: ast.expr) -> str | None:
     """
     The text a string literal holds, or an f-string with each interpolation
-    marked by a NUL; ``None`` for anything else.
+    marked by a NUL, unless it interpolates a literal, which is read as its
+    text (``f"UPDATE {'daily_bars'} ..."``); ``None`` for anything else.
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
-        return "".join(
-            part.value
-            if isinstance(part, ast.Constant) and isinstance(part.value, str)
-            else "\x00"
-            for part in node.values
-        )
+        return "".join(_part_text(part) for part in node.values)
     return None
+
+
+def _part_text(part: ast.expr) -> str:
+    """One part of an f-string: its text, or a NUL for what cannot be read."""
+    if isinstance(part, ast.Constant) and isinstance(part.value, str):
+        return part.value
+    if (
+        isinstance(part, ast.FormattedValue)
+        and part.conversion == -1
+        and part.format_spec is None
+        and isinstance(part.value, ast.Constant)
+        and isinstance(part.value.value, str)
+    ):
+        return part.value.value
+    return "\x00"
 
 
 def _added(node: ast.BinOp) -> list[ast.expr]:
@@ -2151,6 +2285,8 @@ def test_the_price_write_scan_sees_the_workers_own_writes() -> None:
         # A verb alone, its table joined on from where the scan cannot follow.
         'PARTS = ["INSERT INTO", TABLE, "VALUES ($1)"]',
         'VERB = "TRUNCATE"',
+        'await conn.execute("INSERT INTO" + TABLE + " VALUES ($1)")',
+        'q = " ".join(["UPDATE", TABLE, "SET close = 1"])',
     ],
 )
 def test_the_price_write_scan_finds_each_spelling(source: str) -> None:
@@ -2917,7 +3053,7 @@ def test_the_aiohttp_route_scan_finds_each_spelling(source: str) -> None:
     ],
 )
 def test_the_aiohttp_route_scan_lets_the_fetcher_be_imported(source: str) -> None:
-    """The ingest job (C6) is to import the fetcher, and that is its road."""
+    """The ingest job (C6) imports the fetcher, and that is its road."""
     graph = _build_graph(
         {
             "src.programme.web_ingest": (source, False),
@@ -2928,21 +3064,323 @@ def test_the_aiohttp_route_scan_lets_the_fetcher_be_imported(source: str) -> Non
     assert _aiohttp_routes(graph) == []
 
 
-def test_nothing_imports_the_web_fetcher_yet() -> None:
+#: The one module that may load the web fetcher: the ingest job (phase C6),
+#: which stores what the page holds and asks nothing.
+WEB_INGEST = "src.programme.web_ingest"
+
+
+#: The fetcher's own name, as an attribute or a key a lookup would take.
+_FETCHER_NAME = WEB_FETCHER.rpartition(".")[2]
+
+#: The calls that fetch an attribute or a module by a name they are handed.
+_NAME_LOOKUPS = frozenset({"getattr", "attrgetter"}) | NAME_LOADERS
+
+
+def _bound_to_the_fetcher(graph: ImportGraph, holder: str) -> set[str]:
     """
-    The fetcher lands dark (docs/08, "Phase C, as built", C5): nothing in the
-    tree or its entry points loads it. The ingest job (C6) is to be its one
-    importer, and this test is where that becomes a rule rather than an
-    absence.
+    The names ``holder`` binds to the fetcher or to anything it takes from it
+    — ``from src.programme.web_fetch import fetch as get`` binds ``get`` —
+    which any other module could then take from ``holder`` by name.
     """
-    graph = _real_graph()
-    assert WEB_FETCHER in graph.names, "the scan no longer sees the fetcher"
-    importers = sorted(
+    is_package = graph.paths[holder].endswith("/__init__.py")
+    package = holder if is_package else holder.rpartition(".")[0]
+    bound: set[str] = set()
+    for node in ast.walk(ast.parse(graph.sources[holder])):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _matches(alias.name, (WEB_FETCHER,)):
+                    bound.add(alias.asname or alias.name.partition(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            base = _resolve_from(node, package)
+            if base is None:
+                continue
+            for alias in node.names:
+                if alias.name == "*" and base == WEB_FETCHER:
+                    bound.update(_exported_names(graph.sources[WEB_FETCHER]) or ())
+                elif _matches(f"{base}.{alias.name}", (WEB_FETCHER,)):
+                    bound.add(alias.asname or alias.name)
+    return bound
+
+
+def _looked_up_by_name(source: str) -> bool:
+    """
+    Whether ``source`` reads the fetcher off something by its name: as an
+    attribute (``web_ingest.web_fetch``, ``src.programme.web_fetch``), or as a
+    literal handed to a lookup — ``getattr``, ``attrgetter``, a loader, or a
+    subscript such as ``vars(x)[...]``, ``x.__dict__[...]`` or
+    ``sys.modules[...]``. A string that merely is the name — in an
+    ``__all__``, a message, a logger's name — looks nothing up.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == _FETCHER_NAME:
+            return True
+        if isinstance(node, ast.Call) and _name_of(node.func) in _NAME_LOOKUPS:
+            keys = [*node.args, *(keyword.value for keyword in node.keywords)]
+        elif isinstance(node, ast.Subscript):
+            keys = [node.slice]
+        else:
+            continue
+        for key in keys:
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value.rpartition(".")[2] == _FETCHER_NAME
+            ):
+                return True
+    return False
+
+
+def _fetcher_importers(graph: ImportGraph) -> list[str]:
+    """
+    Every module of the tree, or entry point, that loads the fetcher or takes
+    it from one that has: an edge to it, which the graph draws for every
+    spelling of an import it reads — ``import``, ``from … import``, relative,
+    inside a function, through a package ``__init__`` or a literal
+    ``__all__``, or a loader called with a literal name; a name the importer
+    binds to it, taken from the importer (``from src.programme.web_ingest
+    import web_fetch``); and the fetcher read off anything by its name, as an
+    attribute or a literal lookup (``web_ingest.web_fetch.fetch``,
+    ``getattr(web_ingest, "web_fetch")``), which reaches it with no import of
+    it once the ingest job is loaded. ``_aiohttp_routes``' three readings, for
+    the fetcher. The first cut read the edges alone, and a module that took
+    the fetcher off ``web_ingest`` passed it (C6's review). It reads
+    spellings, and is not a sandbox: a name computed at run time is a
+    reviewer's to catch.
+    """
+    importers = {
         module
         for module, targets in graph.edges.items()
         if WEB_FETCHER in targets and module != WEB_FETCHER
+    }
+    taken = tuple(
+        f"{holder}.{name}"
+        for holder in sorted(importers)
+        for name in sorted(_bound_to_the_fetcher(graph, holder))
     )
-    assert importers == [], importers
+    for module, names in graph.names.items():
+        if module == WEB_FETCHER:
+            continue
+        if any(_matches(name, taken) for name in names) or _looked_up_by_name(
+            graph.sources[module]
+        ):
+            importers.add(module)
+    return sorted(importers)
+
+
+def test_only_the_ingest_job_imports_the_web_fetcher() -> None:
+    """
+    The fetcher landed dark in C5, imported by nothing; from C6 the ingest job
+    is its one importer, and this test is where that is a rule rather than an
+    absence. A second importer would be a second road to the web: a fetch
+    nobody planned, outside the job loop's switches, and text stored, or not,
+    by rules the ingest job does not hold it to.
+    """
+    graph = _real_graph()
+    assert WEB_FETCHER in graph.names, "the scan no longer sees the fetcher"
+    assert WEB_INGEST in graph.names, "the scan no longer sees the ingest job"
+    assert _fetcher_importers(graph) == [WEB_INGEST]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.programme import web_fetch",
+        "import src.programme.web_fetch",
+        "import src.programme.web_fetch as fetcher",
+        "from src.programme.web_fetch import fetch",
+        "from src.programme.web_fetch import fetch as get",
+        "from . import web_fetch",
+        "from .web_fetch import fetch",
+        "def f():\n    from src.programme import web_fetch",
+        "import importlib\nm = importlib.import_module('src.programme.web_fetch')",
+        "m = __import__('src.programme.web_fetch', fromlist=['fetch'])",
+        "from src.programme import *",
+        # Taken from the ingest job, which holds it, with no import of it:
+        # re-exported, read as an attribute, or looked up by its name.
+        "from src.programme.web_ingest import web_fetch",
+        "from src.programme.web_ingest import web_fetch as fetcher",
+        "from .web_ingest import web_fetch",
+        "from src.programme import web_ingest\nF = web_ingest.web_fetch.fetch",
+        "import src.programme.web_ingest as w\nF = w.web_fetch.fetch",
+        "import src.programme\nF = src.programme.web_fetch.fetch",
+        "from src.programme import web_ingest\nF = getattr(web_ingest, 'web_fetch')",
+        "from src.programme import web_ingest\nF = vars(web_ingest)['web_fetch']",
+        "from src.programme import web_ingest\nF = web_ingest.__dict__['web_fetch']",
+        "import sys\nF = sys.modules['src.programme.web_fetch']",
+    ],
+)
+def test_the_fetcher_importer_scan_finds_each_spelling(source: str) -> None:
+    """
+    Each spelling of an import, from a module that is not the ingest job, and
+    each way of taking the fetcher from the ingest job without one: the first
+    cut read the graph's edges alone, and a module that took the fetcher off
+    ``web_ingest`` drew none, so a second road to the web passed every test
+    (C6's review).
+    """
+    graph = _build_graph(
+        {
+            "src.programme": ('__all__ = ["web_fetch"]', True),
+            "src.programme.jev_plan": (source, False),
+            WEB_INGEST: ("from src.programme import web_fetch", False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    assert _fetcher_importers(graph) == ["src.programme.jev_plan", WEB_INGEST]
+
+
+@pytest.mark.parametrize(
+    ("ingest", "source"),
+    [
+        (
+            "from src.programme.web_fetch import fetch",
+            "from src.programme.web_ingest import fetch",
+        ),
+        (
+            "from src.programme.web_fetch import fetch as get",
+            "from src.programme.web_ingest import get",
+        ),
+        (
+            "from .web_fetch import fetch",
+            "def f():\n    from src.programme.web_ingest import fetch",
+        ),
+        (
+            "import src.programme.web_fetch as page",
+            "from src.programme.web_ingest import page",
+        ),
+        (
+            "from src.programme.web_fetch import *",
+            "from src.programme.web_ingest import fetch",
+        ),
+    ],
+)
+def test_the_fetcher_scan_finds_what_is_taken_from_its_importer(
+    ingest: str, source: str
+) -> None:
+    """Whatever the ingest job binds to the fetcher, taken from it by name."""
+    graph = _build_graph(
+        {
+            "src.programme": ("", True),
+            "src.programme.jev_plan": (source, False),
+            WEB_INGEST: (ingest, False),
+            WEB_FETCHER: ('__all__ = ["fetch"]\nimport aiohttp', False),
+        }
+    )
+    assert _fetcher_importers(graph) == ["src.programme.jev_plan", WEB_INGEST]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.programme import web_ingest\nRUN = web_ingest.run_job",
+        "from src.programme.web_ingest import run_job",
+        '"""Takes nothing from ``web_fetch``; ``web_ingest.web_fetch`` is prose."""',
+        '__all__ = ["web_fetch"]',
+        "web_fetch_count = 0",
+        "note = 'web_fetch'",
+        "import logging\nlog = logging.getLogger('src.programme.web_fetch')",
+    ],
+)
+def test_the_fetcher_scan_does_not_invent_an_importer(source: str) -> None:
+    """``main`` loads the ingest job and runs it; that takes nothing of the fetcher."""
+    graph = _build_graph(
+        {
+            "src.programme": ("", True),
+            "src.programme.jev_plan": (source, False),
+            WEB_INGEST: ("from src.programme import web_fetch", False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    assert _fetcher_importers(graph) == [WEB_INGEST]
+
+
+#: What the ingest job may never load: every road to a model — the lane and
+#: both clients, the two handlers that ask, what prompts the other model, the
+#: runner — and the vault and its decryption. It fetches a page and stores
+#: what it holds, and needs no key to do either.
+INGEST_MUST_NOT_REACH = (
+    "src.programme.jev_lane",
+    "src.programme.jev_client",
+    "src.programme.jev_forward",
+    "src.programme.jev_jobs",
+    "src.programme.client",
+    "src.programme.author",
+    "src.programme.panel",
+    "src.programme.tick",
+    "src.programme.main",
+    "src.db.repos.secrets",
+    "src.crypto",
+)
+
+
+def test_the_ingest_job_reaches_no_model_and_no_key() -> None:
+    """
+    ``web_ingest`` calls nothing (docs/08, phase C6): its whole closure
+    reaches neither the lane nor either client, no module that prompts a
+    generative model, and neither the vault nor the decryption, so no path
+    from it could ask Jev about what it stores or hold the key it is never
+    handed. The walk is the whole closure, so a module it loads that grew such
+    an import is found too.
+    """
+    graph = _real_graph()
+    assert WEB_INGEST in graph.names, "the ingest job is not in the tree"
+    reached = _walk(graph, [WEB_INGEST])
+    assert WEB_FETCHER in reached, "the walk is reading nothing"
+    offenders = _reachable_offences(
+        graph, [WEB_INGEST], FORBIDDEN_PREFIXES + INGEST_MUST_NOT_REACH
+    )
+    assert not offenders, "the ingest job reaches a model or a key:\n" + "\n".join(
+        offenders
+    )
+
+
+#: The roads to Jev — the lane, its client and the two handlers that ask
+#: through it — and what each may never load (design section 9): the road to
+#: the web and the job that takes it, so no module that holds the key can also
+#: fetch a page, with none of the ingest's rules between the page and the
+#: vendor; and, for the forward clock, which asks only about prices, no web
+#: module at all. The fetcher scan above finds a module taking the fetcher off
+#: the ingest job; these find one that reaches either through what it loads.
+JEV_ROADS_MUST_NOT_REACH: dict[str, tuple[str, ...]] = {
+    "src.programme.jev_lane": (WEB_FETCHER, WEB_INGEST),
+    "src.programme.jev_client": (WEB_FETCHER, WEB_INGEST),
+    "src.programme.jev_jobs": (WEB_FETCHER, WEB_INGEST),
+    "src.programme.jev_forward": (WEB_SOURCES, WEB_FETCHER, WEB_INGEST),
+}
+
+
+@pytest.mark.parametrize("road", sorted(JEV_ROADS_MUST_NOT_REACH))
+def test_no_road_to_jev_reaches_the_road_to_the_web(road: str) -> None:
+    graph = _real_graph()
+    assert road in graph.names, f"{road} is not in the tree"
+    offenders = _reachable_offences(graph, [road], JEV_ROADS_MUST_NOT_REACH[road])
+    assert not offenders, f"{road} reaches the web:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.programme import web_ingest",
+        "from src.programme.web_ingest import web_fetch",
+        "from src.programme import helper",
+    ],
+)
+def test_the_road_walk_finds_the_web_however_it_is_reached(source: str) -> None:
+    """Directly, by a name taken off the ingest job, or through a module between."""
+    graph = _build_graph(
+        {
+            "src.programme": ("", True),
+            "src.programme.jev_jobs": (source, False),
+            "src.programme.helper": ("from src.programme import web_fetch", False),
+            WEB_INGEST: ("from src.programme import web_fetch", False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    offenders = _reachable_offences(
+        graph,
+        ["src.programme.jev_jobs"],
+        JEV_ROADS_MUST_NOT_REACH["src.programme.jev_jobs"],
+    )
+    assert offenders, source
 
 
 def test_the_web_sources_reach_nothing_that_fetches_stores_or_asks() -> None:

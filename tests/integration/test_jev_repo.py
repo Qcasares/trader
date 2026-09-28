@@ -1184,6 +1184,79 @@ class TestTheWebReads:
         )
 
 
+def _row(text: str, source: str = "sec_edgar_rss") -> jev_repo.DocumentRow:
+    return jev_repo.DocumentRow(
+        source=source, url="https://example.invalid/feed", excerpt=text
+    )
+
+
+class TestTheDocumentWriter:
+    """
+    What ``insert_documents`` hands back, and ``get_document`` reads: the id a
+    document is stored under, which a caller that labels a document or keys a
+    job by one (phase C7) is to trust, whether this call stored it or an
+    earlier one did (the scope of phase C6, item 5).
+    """
+
+    async def test_a_document_already_stored_comes_back_under_its_own_id(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        A row stored before comes back with the id it was stored under and
+        ``inserted`` false, a new one with an id of its own, each tuple in the
+        order the rows were given, which is not the order they are written in.
+        """
+        high, middle, low = sorted(
+            (_text(), _text(), _text()), key=text_sha256, reverse=True
+        )
+        first = await jev_repo.insert_documents(conn, [_row(high), _row(low)])
+        assert [(content, inserted) for _, content, inserted in first] == [
+            (text_sha256(high), True),
+            (text_sha256(low), True),
+        ]
+        ids = {content: document_id for document_id, content, _ in first}
+
+        again = await jev_repo.insert_documents(
+            conn, [_row(high), _row(middle), _row(low)]
+        )
+
+        assert again[0] == (ids[text_sha256(high)], text_sha256(high), False)
+        assert again[2] == (ids[text_sha256(low)], text_sha256(low), False)
+        new_id, content, inserted = again[1]
+        assert (content, inserted) == (text_sha256(middle), True)
+        assert new_id not in ids.values()
+
+    async def test_a_batch_is_written_in_the_unique_indexs_order(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Given the higher content address first, the lower is written first:
+        the lock order that keeps two writers from waiting on each other
+        (``test_web_ingest.py::TestTwoWritersAtOnce``), read here off the ids.
+        """
+        high, low = sorted((_text(), _text()), key=text_sha256, reverse=True)
+        stored = await jev_repo.insert_documents(conn, [_row(high), _row(low)])
+        (high_id, _, _), (low_id, _, _) = stored
+        assert low_id < high_id
+
+    async def test_each_id_reads_back_as_the_document_it_names(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        texts = [_text(), _text()]
+        stored = await jev_repo.insert_documents(
+            conn, [_row(texts[0]), _row(texts[1], source="another_feed")]
+        )
+        for (document_id, content, _), text in zip(stored, texts, strict=True):
+            document = await jev_repo.get_document(conn, document_id)
+            assert document is not None
+            assert document["id"] == document_id
+            assert (document["content_sha256"], document["excerpt"]) == (content, text)
+            assert document["title"] is None and document["published_at"] is None
+            assert document["quarantined"] is False
+        missing = max(document_id for document_id, _, _ in stored) + 1_000
+        assert await jev_repo.get_document(conn, missing) is None
+
+
 # ---------------------------------------------------------------------------
 # Reads for the control plane
 # ---------------------------------------------------------------------------

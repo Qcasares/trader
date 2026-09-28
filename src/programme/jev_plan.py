@@ -4,10 +4,15 @@ jev_plan.py
 The planner: what Jev work is due, put in the queue, and nothing else.
 
 Runner-only. It runs in the programme's Jev loop, before each drain, at most
-once a minute (``main.JEV_PLAN_SECONDS``), and all it does is enqueue: every
-job's handler checks every one of its own preconditions again when it runs,
-because a planner is only a scheduler, and a job planned while a switch was on
-may run after it went off.
+once a minute (``main.JEV_PLAN_SECONDS``), and all it does is enqueue: each of
+the programme's handlers reads again, when it runs, what the planner read for
+it — the road reads the switches, the pin and the key on every ask, and the
+web ingest, which asks nothing, reads the programme's switch, its area and
+the pin itself, and ``main``'s wrapper whether a key is set — because a
+planner is only a scheduler, and a job planned while they held may run after
+one went. The worker's reference job reads no switch: what it checks is its
+session's window, by the database's clock, and it stores prices only the
+forward clock reads.
 
 Dark unless everything says otherwise
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -15,9 +20,11 @@ Dark unless everything says otherwise
 on, ``jev_model`` is a usable pin and a TypeSafe key exists, each read through
 its own fail-closed reader, none derived from another; and each rule also needs
 its own area. Without a key it plans nothing at all, the worker's reference
-bars included, since nothing downstream could use them and a ``no_key`` failure
-a day would pile up saying so. Seeded as migration 0012 seeds the switches, it
-plans nothing (``tests/integration/test_jev_dark.py``).
+bars and the web ingest included, though neither calls Jev: nothing downstream
+could use them, a ``no_key`` failure a day would pile up saying so, and a page
+fetched for a lane that cannot ask about it is a fetch for nothing (design
+R28). Seeded as migration 0012 seeds the switches, it plans nothing
+(``tests/integration/test_jev_dark.py``).
 
 The rules
 ~~~~~~~~~
@@ -31,6 +38,11 @@ Each with the area it needs, what it enqueues, when, and under which key:
   under ``jev_regime:{set}@{version}:{S}``.
 * **The re-asks** — the set's own area; ``jev_reask``, at least 24 hours after
   the canonical answer, under ``jev_reask:{request id}``.
+* **The web ingest** (phase C6) — research; ``jev_web_ingest``, now, once a
+  UTC day for each source on the allow-list, under
+  ``jev_web_ingest:{source}:{UTC date}``, with the payload ``{"source":
+  <name>}`` and nothing else: the page fetched is the allow-list's, never one a
+  payload names.
 
 The daily probe proves each day, on a fixed state whose answer is known, that
 the key, the pin and the validator still work, and gives a daily series of the
@@ -47,7 +59,7 @@ Spend
 A job that makes a call is enqueued only while its lane's share of the day's
 budget (``jev_catalogue.LANE_BUDGET_PERCENT``) has a call left once the calls
 already made today and the jobs already waiting are counted. The reference job
-makes no call. Every enqueue names its kind as a literal, so
+and the web ingest make no call. Every enqueue names its kind as a literal, so
 ``tests/unit/test_job_ownership.py`` can hold each to exactly one owner, and the
 reference job's priority by name (``REFERENCE_PRIORITY``), which a test holds
 below every kind on the live path, so the worker claims the live ingest first.
@@ -80,6 +92,7 @@ from src.programme import (
     jev_prereg,
     jev_questions,
     jev_repo,
+    web_sources,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,6 +104,16 @@ PROBE_ATTEMPTS = 3
 #: A re-ask waits behind everything: it measures, and nothing waits on it.
 REASK_PRIORITY = -10
 REASK_ATTEMPTS = 3
+
+#: The daily web ingest: behind the forward clock and the probe, ahead of the
+#: re-asks. It makes no call, so it takes nothing from a lane's share; three
+#: attempts, since only a failure to store is retried, and a failed fetch or a
+#: refused page waits for the next day's job.
+INGEST_PRIORITY = 10
+INGEST_ATTEMPTS = 3
+
+#: The area the web ingest needs.
+INGEST_AREA = "research"
 
 #: The forward clock's job: above the probe and every research ask, since a
 #: session missed is missed for good; and with the queue's backoff, 20
@@ -185,6 +208,8 @@ async def plan(
     planned = await _plan_probe(conn, now, room)
     if await flags.jev_area_enabled(conn, "decisions"):
         planned += await _plan_clock(conn, now, room)
+    if await flags.jev_area_enabled(conn, INGEST_AREA):
+        planned += await _plan_ingest(conn, now)
     planned += await _plan_reasks(conn, now, model, room)
     if planned:
         logger.info("Jev planner queued %s", ", ".join(planned))
@@ -256,6 +281,37 @@ async def _plan_clock(
         room.take("decision")
         if added is not None:
             planned.append(regime)
+    return planned
+
+
+async def _plan_ingest(conn: asyncpg.Connection, now: datetime) -> list[str]:
+    """
+    One web ingest a UTC day for each source on the allow-list, due now.
+
+    Keyed by the UTC date of ``now``, so no day but today is ever planned —
+    nothing is caught up — and a job already under today's key, finished or
+    not, is never joined by a second: the key holds across every status. The
+    names come from the allow-list, and the payload names the source and
+    nothing else, since the handler refuses anything more. It makes no call,
+    so it takes nothing from a lane's share.
+    """
+    day = now.astimezone(UTC).date().isoformat()
+    planned: list[str] = []
+    for name in web_sources.ALLOWED_SOURCES:
+        key = f"jev_web_ingest:{name}:{day}"
+        if await _queued(conn, key):
+            continue
+        added = await job_repo.enqueue(
+            conn,
+            "jev_web_ingest",
+            {"source": name},
+            priority=INGEST_PRIORITY,
+            max_attempts=INGEST_ATTEMPTS,
+            scheduled_for=now,
+            dedupe_key=key,
+        )
+        if added is not None:
+            planned.append(key)
     return planned
 
 
@@ -342,6 +398,9 @@ async def _queued(conn: asyncpg.Connection, key: str) -> bool:
 
 
 __all__ = [
+    "INGEST_AREA",
+    "INGEST_ATTEMPTS",
+    "INGEST_PRIORITY",
     "LANE_KINDS",
     "PROBE_ATTEMPTS",
     "PROBE_PRIORITY",
