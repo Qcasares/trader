@@ -33,9 +33,15 @@ close for the state to describe it.
 ``None`` means missing, never a guess. A sleeve short of history, a symbol with
 no bar on the session itself (a failed ingest would otherwise describe the
 previous session as this one), or a price that is not a positive, finite number
-makes the whole state ``None``, and the lane records the question as not
-measured. A partial state would be a guess at the missing sleeve, and an answer
-to a guessed state looks like evidence.
+makes the whole state ``None``, and nothing is asked. A partial state would be
+a guess at the missing sleeve, and an answer to a guessed state looks like
+evidence. Nor is a row written for it: the forward clock's job fails, its error
+saying why (:func:`regime_state_problem`), and is retried until the session's
+cutoff, since a late bar can still land before it; a session it never measured
+has no signal at all, the job's error its reason (``jev_forward``).
+Phase B's docstring said the lane recorded such a question as not measured,
+which nothing built; a ``missing`` row, once written, would also be final, and
+would bar the measurement a bar landing two minutes later made possible.
 
 Pure: no I/O, no clock, no randomness.
 """
@@ -46,7 +52,7 @@ import logging
 import math
 from collections.abc import Mapping
 from datetime import date
-from typing import cast
+from typing import NamedTuple, cast
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
@@ -213,43 +219,62 @@ def _sleeves_problem(sleeves: object) -> str | None:
     return None
 
 
+class _Window(NamedTuple):
+    """A sleeve's trailing closes, or why there are none and how loudly to say so."""
+
+    closes: np.ndarray | None
+    problem: str | None = None
+    level: int = logging.INFO
+
+
+def _trailing_window(
+    view: PricePanel, session: date, sleeve: str, symbol: str
+) -> _Window:
+    """
+    The sleeve's last :data:`MIN_HISTORY_SESSIONS` closes, or why they cannot
+    be had.
+
+    The one place the checks are made, in the one order they are made, so
+    :func:`regime_state` and :func:`regime_state_problem` cannot disagree about
+    what is missing: the first builds the state and the second only says why
+    it could not be built. A symbol missing from the panel and a price that is
+    not one are defects upstream, said as warnings; a late bar or a short
+    history is a state of the world, said more quietly.
+    """
+    if symbol not in view.symbols:
+        return _Window(
+            None, f"{sleeve} ({symbol}) is not in the panel", logging.WARNING
+        )
+    if view.value_on(symbol, session) is None:
+        return _Window(
+            None, f"{sleeve} ({symbol}) has no close on {session.isoformat()}"
+        )
+    series = view.series(symbol, "adj_close")
+    if len(series) < MIN_HISTORY_SESSIONS:
+        return _Window(
+            None,
+            f"{sleeve} ({symbol}) has {len(series):,} of the "
+            f"{MIN_HISTORY_SESSIONS:,} closes it needs",
+        )
+    closes = series.to_numpy(dtype=float)[-MIN_HISTORY_SESSIONS:]
+    if not (np.all(np.isfinite(closes)) and np.all(closes > 0)):
+        return _Window(
+            None,
+            f"{sleeve} ({symbol}) has a close that is not a positive finite "
+            "number in its trailing window",
+            logging.WARNING,
+        )
+    return _Window(closes)
+
+
 def _trailing_closes(
     view: PricePanel, session: date, sleeve: str, symbol: str
 ) -> np.ndarray | None:
     """The sleeve's last :data:`MIN_HISTORY_SESSIONS` closes, or ``None``."""
-    if symbol not in view.symbols:
-        logger.warning(
-            "regime state missing: %s (%s) is not in the panel", sleeve, symbol
-        )
-        return None
-    if view.value_on(symbol, session) is None:
-        logger.info(
-            "regime state missing: %s (%s) has no close on %s",
-            sleeve,
-            symbol,
-            session,
-        )
-        return None
-    series = view.series(symbol, "adj_close")
-    if len(series) < MIN_HISTORY_SESSIONS:
-        logger.info(
-            "regime state missing: %s (%s) has %d of the %d closes it needs",
-            sleeve,
-            symbol,
-            len(series),
-            MIN_HISTORY_SESSIONS,
-        )
-        return None
-    closes = series.to_numpy(dtype=float)[-MIN_HISTORY_SESSIONS:]
-    if not (np.all(np.isfinite(closes)) and np.all(closes > 0)):
-        logger.warning(
-            "regime state missing: %s (%s) has a close that is not a positive "
-            "finite number in its trailing window",
-            sleeve,
-            symbol,
-        )
-        return None
-    return closes
+    window = _trailing_window(view, session, sleeve, symbol)
+    if window.problem is not None:
+        logger.log(window.level, "regime state missing: %s", window.problem)
+    return window.closes
 
 
 def regime_state(
@@ -263,7 +288,8 @@ def regime_state(
     the state. A mapping that names other sleeves, or gives two sleeves one
     symbol, is a caller's error and raises :class:`ValueError`; a ``session``
     past the panel's cutoff raises :class:`~src.core.panel.LookAheadError`.
-    Everything the data cannot support returns ``None``.
+    Everything the data cannot support returns ``None``, and
+    :func:`regime_state_problem` says why.
     """
     problem = _sleeves_problem(sleeves)
     if problem is not None:
@@ -278,12 +304,39 @@ def regime_state(
     return RegimeState(**described)
 
 
+def regime_state_problem(
+    panel: PricePanel, session: date, sleeves: Mapping[str, str]
+) -> str | None:
+    """
+    Why :func:`regime_state` returns ``None`` for these arguments, as the first
+    reason it meets — "bonds (IEF) has no close on 2026-09-28", "commodities
+    (GSG) has 1,102 of the 1,280 closes it needs" — or ``None`` when it builds
+    a state.
+
+    For the forward clock's job, whose error is the durable record of why a
+    session went unmeasured (``jev_forward``). The same checks in the same
+    order as the state's own, through one helper, and it builds nothing:
+    ``tests/unit/test_jev_features.py::TestTheProblemIsTheStatesOwn`` holds the
+    two to agree on every fixture here. Raises as :func:`regime_state` does.
+    """
+    problem = _sleeves_problem(sleeves)
+    if problem is not None:
+        raise ValueError(problem)
+    view = panel.at(session)
+    for sleeve in SLEEVES:
+        window = _trailing_window(view, session, sleeve, sleeves[sleeve])
+        if window.problem is not None:
+            return window.problem
+    return None
+
+
 __all__ = [
     "MIN_HISTORY_SESSIONS",
     "describe",
     "drawdown_label",
     "momentum_label",
     "regime_state",
+    "regime_state_problem",
     "trend_label",
     "volatility_quintile",
 ]

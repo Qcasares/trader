@@ -2,7 +2,9 @@
 jev_repo.py
 -----------
 Every query the Jev ledger answers: what the lanes write, and what the control
-plane will read.
+plane will read; and, for the forward clock, its planner and the harness, what
+the queue says about their jobs, since a job's error is the durable record of
+why a session went unmeasured.
 
 No SDK and no model client, so ``src/api`` may import it. It reads and writes
 rows and knows nothing about how an answer was obtained: ``jev_client``, which
@@ -34,7 +36,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
@@ -611,6 +613,285 @@ async def status_summary(conn: asyncpg.Connection) -> dict[str, Any]:
         "valid_answers": valid,
         "validity_rate": valid / answered if answered else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reads for the forward clock, the planner and the harness (phase C4)
+# ---------------------------------------------------------------------------
+#
+# Inside the programme only ``jev_lane`` writes ``jev_signals`` and only this
+# module reads it (``tests/unit/test_jev_table_boundaries.py``), so every
+# question anything asks of a signal is one of these.
+
+
+async def signal_exists(
+    conn: asyncpg.Connection, *, signal: str, symbol: str, session: date
+) -> bool:
+    """Whether a signal is recorded for this series and session, of any status."""
+    return bool(
+        await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM jev_signals "
+            "WHERE signal = $1 AND symbol = $2 AND session = $3)",
+            signal,
+            symbol,
+            session,
+        )
+    )
+
+
+async def get_signal(
+    conn: asyncpg.Connection, *, signal: str, symbol: str, session: date
+) -> dict[str, Any] | None:
+    """The signal recorded for this series and session, or ``None``."""
+    row = await conn.fetchrow(
+        "SELECT * FROM jev_signals WHERE signal = $1 AND symbol = $2 AND session = $3",
+        signal,
+        symbol,
+        session,
+    )
+    return dict(row) if row is not None else None
+
+
+async def signals_between(
+    conn: asyncpg.Connection,
+    *,
+    signal: str,
+    symbol: str,
+    start: date,
+    end: date,
+) -> list[dict[str, Any]]:
+    """
+    Every signal of one series with a session from ``start`` to ``end``
+    inclusive, in session order, each with the answer it rests on and the
+    request that answer came from: the request's id, hash, state hash, subject
+    and state, and the answer's validity, reason, argmax and margin.
+
+    A replayed session's request is the one first asked about another
+    session, whose subject is that session: the harness reads a replay off
+    exactly that. ``backfilled`` is the database's, generated from its own
+    stamp, never a writer's.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT s.signal, s.symbol, s.session, s.status, s.value, s.answer_id,
+               s.lane, s.provenance, s.pack_hash, s.model, s.decision_cutoff,
+               s.available_at, s.backfilled,
+               a.question_key, a.valid, a.invalid_reason, a.argmax, a.margin,
+               r.id AS request_id, r.request_hash, r.state_hash, r.subject_type,
+               r.subject_id, r.state, r.status AS request_status,
+               r.available_at AS answered_at
+        FROM jev_signals s
+        LEFT JOIN jev_answers a ON a.id = s.answer_id
+        LEFT JOIN jev_requests r ON r.id = a.request_id
+        WHERE s.signal = $1 AND s.symbol = $2
+          AND s.session >= $3 AND s.session <= $4
+        ORDER BY s.session
+        """,
+        signal,
+        symbol,
+        start,
+        end,
+    )
+    found = []
+    for row in rows:
+        record = dict(row)
+        record["state"] = _loads(record["state"])
+        found.append(record)
+    return found
+
+
+async def canonical_requests_between(
+    conn: asyncpg.Connection, *, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """
+    The canonical requests — ``ok``, outside the probe lane — made readable
+    from ``start`` up to but not including ``end``, by the database's stamp,
+    each with the margins of its valid answers, which is what the re-ask
+    sample's low-margin stratum reads (``jev_prereg.reask_stratum``).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT r.id, r.request_hash, r.state_hash, r.question_set,
+               r.question_set_version, r.pack_hash, r.lane, r.provenance,
+               r.subject_type, r.subject_id, r.model_requested,
+               r.model_answered, r.as_of, r.available_at,
+               COALESCE(
+                   array_agg(a.margin ORDER BY a.id)
+                       FILTER (WHERE a.valid AND a.margin IS NOT NULL),
+                   '{}'::double precision[]
+               ) AS valid_margins
+        FROM jev_requests r
+        LEFT JOIN jev_answers a ON a.request_id = r.id
+        WHERE r.status = 'ok' AND r.lane <> 'probe'
+          AND r.available_at >= $1 AND r.available_at < $2
+        GROUP BY r.id
+        ORDER BY r.id
+        """,
+        start,
+        end,
+    )
+    return [
+        {**dict(row), "valid_margins": [float(m) for m in row["valid_margins"]]}
+        for row in rows
+    ]
+
+
+async def probe_pairs(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    version: int,
+    question_key: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """
+    Each canonical answer to one question that was asked again, beside the
+    re-ask: a probe of the same request hash and pack, asked of the model that
+    answered, later. One row per canonical request, whatever became of its
+    re-ask — answered and valid, refused whole, failed or refused before it
+    was sent — since a flip rate counts the pairs whose two answers were both
+    measured and says how many were not, and a re-ask left out of both would
+    make a vendor that malformed every re-ask read as though none had been
+    made. Where a re-ask job left more than one row (a failed attempt and a
+    retry), the row that carries a response is the pair's, and otherwise the
+    first.
+
+    ``probe_status`` is the re-ask's request status; ``probe_valid`` and
+    ``probe_argmax`` are ``None`` where it recorded no answer to this
+    question. ``lag_seconds`` is the probe's stamp less the canonical one, both
+    the database's.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (c.id)
+               c.id AS canonical_request_id, c.request_hash,
+               p.id AS probe_request_id, p.status AS probe_status,
+               EXTRACT(EPOCH FROM (p.available_at - c.available_at))
+                   AS lag_seconds,
+               ca.valid AS canonical_valid, ca.argmax AS canonical_argmax,
+               ca.margin AS canonical_margin,
+               pa.valid AS probe_valid, pa.argmax AS probe_argmax
+        FROM jev_requests c
+        JOIN jev_answers ca ON ca.request_id = c.id AND ca.question_key = $3
+        JOIN jev_requests p
+          ON p.request_hash = c.request_hash AND p.pack_hash = c.pack_hash
+         AND p.lane = 'probe'
+         AND p.model_requested = c.model_answered
+         AND p.available_at > c.available_at
+        LEFT JOIN jev_answers pa ON pa.request_id = p.id AND pa.question_key = $3
+        WHERE c.status = 'ok' AND c.lane <> 'probe'
+          AND c.question_set = $1 AND c.question_set_version = $2
+          AND c.model_answered = $4
+        ORDER BY c.id, (p.status IN ('ok', 'invalid')) DESC, p.id
+        """,
+        question_set,
+        version,
+        question_key,
+        model,
+    )
+    return [{**dict(row), "lag_seconds": float(row["lag_seconds"])} for row in rows]
+
+
+async def probe_series(
+    conn: asyncpg.Connection, *, question_set: str, since: datetime
+) -> list[dict[str, Any]]:
+    """
+    Every probe of ``question_set`` recorded since ``since``, by the database's
+    stamp, with its answers: the daily connectivity probe's series, a request
+    that failed included, since a day it did not answer is part of the series.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT r.id, r.available_at, r.status, r.question_set_version,
+               r.model_requested, r.model_answered, r.error_kind,
+               a.question_key, a.valid, a.noul, a.argmax, a.invalid_reason
+        FROM jev_requests r
+        LEFT JOIN jev_answers a ON a.request_id = r.id
+        WHERE r.question_set = $1 AND r.lane = 'probe' AND r.available_at >= $2
+        ORDER BY r.id, a.id
+        """,
+        question_set,
+        since,
+    )
+    return [dict(row) for row in rows]
+
+
+async def job_outcomes(
+    conn: asyncpg.Connection, dedupe_keys: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """
+    The job row behind each of ``dedupe_keys`` that has one: its kind, status,
+    attempts, error, times and result.
+
+    A job's error is the durable record of why its work did not happen — for
+    the forward clock, why a session is absent — since no row is written for
+    a session it did not measure. A key with no job is not in the result.
+    """
+    if not dedupe_keys:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT dedupe_key, kind, status, attempts, max_attempts, error, payload,
+               result, scheduled_for, started_at, finished_at, created_at
+        FROM jobs WHERE dedupe_key = ANY($1::text[])
+        """,
+        list(dedupe_keys),
+    )
+    found = {}
+    for row in rows:
+        job = dict(row)
+        job["payload"] = _loads(job["payload"])
+        job["result"] = _loads(job["result"])
+        found[job["dedupe_key"]] = job
+    return found
+
+
+async def pending_jobs(conn: asyncpg.Connection, kinds: Sequence[str]) -> int:
+    """How many jobs of ``kinds`` are queued or running: calls already coming."""
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE kind = ANY($1::text[]) AND status IN ('queued', 'running')",
+        list(kinds),
+    )
+    return int(count or 0)
+
+
+async def first_job_session(
+    conn: asyncpg.Connection,
+    kind: str,
+    *,
+    question_set: str | None = None,
+    version: int | None = None,
+) -> date | None:
+    """
+    The earliest session any job of ``kind`` was planned for, read from its
+    payload, or ``None``: where the forward report's count of sessions starts.
+
+    With ``question_set`` and ``version``, only the jobs whose payload names
+    that set and version count: a version bump starts a new series, whose
+    sessions begin at its own first job, not at the first job of the version
+    before it, which would count every session between them as absent. A
+    payload whose session is not a date, which only a hand-written row could
+    carry, is skipped rather than allowed to fail the read.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT payload->>'session' AS session FROM jobs
+        WHERE kind = $1
+          AND ($2::text IS NULL OR payload->>'set' = $2)
+          AND ($3::int IS NULL OR payload->>'version' = $3::text)
+        """,
+        kind,
+        question_set,
+        version,
+    )
+    sessions = []
+    for row in rows:
+        try:
+            sessions.append(date.fromisoformat(str(row["session"])))
+        except ValueError:
+            continue
+    return min(sessions, default=None)
 
 
 async def list_evaluations(

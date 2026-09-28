@@ -32,6 +32,8 @@ from typing import Any
 
 import asyncpg
 
+from src.programme import repo
+
 logger = logging.getLogger(__name__)
 
 #: Sections §8.11 asks for that this system cannot produce, and the reason.
@@ -247,26 +249,7 @@ async def build_daily_report(
         ],
     }
 
-    bars = await conn.fetchrow(
-        """
-        SELECT COUNT(*) AS n, COUNT(DISTINCT symbol) AS symbols,
-               MAX(session) AS latest
-        FROM daily_bars WHERE session <= $1
-        """,
-        session,
-    )
-    latest = bars["latest"] if bars else None
-    data_health = {
-        "symbols": int(bars["symbols"]) if bars else 0,
-        "rows": int(bars["n"]) if bars else 0,
-        "latest_session": latest.isoformat() if latest else None,
-        "sessions_behind": (session - latest).days if latest else None,
-        "note": (
-            None
-            if latest
-            else "no market data has been ingested; nothing can decide"
-        ),
-    }
+    data_health = await _data_health(conn, session)
 
     actions = _required_actions(portfolio, risk, programme, operations, data_health)
     return DailyReport(
@@ -279,6 +262,75 @@ async def build_daily_report(
         actions=actions,
         unavailable=dict(UNAVAILABLE_SECTIONS),
     )
+
+
+async def _data_health(conn: asyncpg.Connection, session: date) -> dict[str, Any]:
+    """
+    What is stored in ``daily_bars``, and how current the bars the live
+    decision reads are.
+
+    The count of rows and symbols is the whole table's. The latest session is
+    the traded universe's alone — every symbol an enabled deployment of the
+    operator's trades, read as the live ingest reads it
+    (``repo.traded_universe``) — and it is the stalest of them: the newest
+    session every traded symbol has reached, since a decision needs a close
+    for each. It used to be the newest session across every symbol, so once
+    the forward clock's reference job writes IEF and GSG each session, a fresh
+    reference row would have read as current data while the live ingest for
+    the traded universe had failed, and ``sessions_behind`` said 0 of a stale
+    panel (docs/08 open item 38). A universe that cannot be read is said to
+    be unknown, never measured as current.
+    """
+    bars = await conn.fetchrow(
+        "SELECT COUNT(*) AS n, COUNT(DISTINCT symbol) AS symbols "
+        "FROM daily_bars WHERE session <= $1",
+        session,
+    )
+    rows = int(bars["n"]) if bars else 0
+    traded = await repo.traded_universe(conn)
+    newest = await conn.fetch(
+        "SELECT symbol, MAX(session) AS latest FROM daily_bars "
+        "WHERE symbol = ANY($1::text[]) AND session <= $2 GROUP BY symbol",
+        sorted(traded.symbols),
+        session,
+    )
+    per_symbol = {row["symbol"]: row["latest"] for row in newest}
+    missing = sorted(traded.symbols - set(per_symbol))
+    latest = (
+        min(per_symbol.values())
+        if per_symbol and not missing and not traded.unreadable
+        else None
+    )
+    if rows == 0:
+        note: str | None = "no market data has been ingested; nothing can decide"
+    elif traded.unreadable:
+        note = (
+            f"deployment(s) {', '.join(traded.unreadable)} cannot be built from "
+            "their stored parameters, so the traded universe, and how current "
+            "its bars are, is unknown"
+        )
+    elif not traded.symbols:
+        note = (
+            "no deployment of the operator's is enabled, so no symbol is traded "
+            "and nothing reads these bars for a decision"
+        )
+    elif missing:
+        note = (
+            f"no bar is stored for {', '.join(missing)}, which an enabled "
+            "deployment trades; the live decision has nothing to read for it"
+        )
+    else:
+        note = None
+    return {
+        "symbols": int(bars["symbols"]) if bars else 0,
+        "rows": rows,
+        "traded_symbols": sorted(traded.symbols),
+        "missing_symbols": missing,
+        "unreadable_deployments": list(traded.unreadable),
+        "latest_session": latest.isoformat() if latest else None,
+        "sessions_behind": (session - latest).days if latest else None,
+        "note": note,
+    }
 
 
 def _required_actions(
@@ -315,11 +367,24 @@ def _required_actions(
         )
     if data_health["sessions_behind"] and data_health["sessions_behind"] > 3:
         actions.append(
-            f"market data is {data_health['sessions_behind']} day(s) behind; "
-            "the live decision path reads daily_bars"
+            f"the traded universe's market data is "
+            f"{data_health['sessions_behind']} day(s) behind; the live decision "
+            "path reads daily_bars"
         )
-    if data_health["latest_session"] is None:
+    if data_health["rows"] == 0:
         actions.append("no market data ingested at all")
+    elif data_health["unreadable_deployments"]:
+        actions.append(
+            f"deployment(s) {', '.join(data_health['unreadable_deployments'])} "
+            "cannot be built from their stored parameters; the live ingest and "
+            "the live decision fail on them too"
+        )
+    elif data_health["missing_symbols"]:
+        actions.append(
+            f"no market data ingested for "
+            f"{', '.join(data_health['missing_symbols'])}, which an enabled "
+            "deployment trades"
+        )
     if operations["jobs"].get("failed"):
         actions.append(f"{operations['jobs']['failed']} job(s) failed today")
     return actions

@@ -76,6 +76,22 @@ function Figure({
   return <>{format(value)}</>;
 }
 
+/**
+ * Why the report has no latest session. It is the traded universe's, not the
+ * table's (docs/08 open item 38), so bars can be stored and it still be
+ * absent: nothing is traded, a deployment cannot be read, or a traded symbol
+ * has no bar. The note above names the deployment or the symbol. An API from
+ * before the traded universe sends none of those fields, and there it was
+ * absent only when nothing had been ingested.
+ */
+function noLatestSession(health: DailyReport["data_health"]): string {
+  if (health.rows === 0) return "nothing has been ingested";
+  if (health.unreadable_deployments?.length) return "the traded universe is unknown";
+  if (health.traded_symbols?.length === 0) return "no symbol is traded";
+  if (health.missing_symbols?.length) return "a traded symbol has no bar";
+  return "the note above says why";
+}
+
 export default function DailyReportPage() {
   const router = useRouter();
   const [report, setReport] = useState<DailyReport | null>(null);
@@ -331,7 +347,10 @@ export default function DailyReportPage() {
               <dt>Latest session</dt>
               <dd>
                 {report.data_health.latest_session ?? (
-                  <Absent kind="no-data" reason="nothing has been ingested" />
+                  <Absent
+                    kind="no-data"
+                    reason={noLatestSession(report.data_health)}
+                  />
                 )}
               </dd>
             </div>

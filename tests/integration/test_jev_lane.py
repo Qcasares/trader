@@ -1327,7 +1327,10 @@ class TestTheProgrammeLoop:
         """
         ``Programme.start`` as shipped, with the tick loop held idle: this is
         about what runs beside the tick, and a tick on this database would do
-        work of its own.
+        work of its own. The Jev planner plans nothing either: with every
+        switch here on it would queue a daily probe of its own beside the one
+        each test queues, and what it plans is ``test_jev_dark.py``'s and
+        ``test_jev_forward.py``'s to check.
         """
         monkeypatch.setenv("DATABASE_URL", dsn)
         get_settings.cache_clear()
@@ -1336,7 +1339,11 @@ class TestTheProgrammeLoop:
         async def idle(self: Programme) -> None:
             await self._stopping.wait()
 
+        async def plan_nothing(self: Programme) -> list[str]:
+            return []
+
         monkeypatch.setattr(Programme, "_loop", idle)
+        monkeypatch.setattr(Programme, "_plan_jev", plan_nothing)
         return programme, asyncio.create_task(programme.start())
 
     async def test_start_runs_the_jev_loop(

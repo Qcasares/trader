@@ -129,6 +129,22 @@ The transport
 ``transport`` is a test seam, handed through to ``jev_client.ask`` unchanged so
 the SDK's tests can drive this module over real HTTP to a local server. Nothing
 in ``src/`` passes one: ``tests/unit/test_jev_lane.py`` reads every call site.
+
+The one writer of signals
+~~~~~~~~~~~~~~~~~~~~~~~~~
+:func:`record_signal` holds the only ``INSERT INTO jev_signals`` in ``src/``
+(``tests/unit/test_jev_table_boundaries.py``). A signal is where a Jev answer
+would one day reach the engine (phase F), so what one says about its origin is
+never its caller's to say: the lane, the provenance, the pack and the model are
+copied from the request its answer came from, the status and value are
+computed from the recorded answer (:func:`signal_outcome`), and only a
+decision-lane set of internal provenance may record one at all. The database
+checks the same again (``jev_signals_rest_on_their_answer``) and decides for
+itself whether the row was live (``backfilled``). A session is recorded once:
+a second write for it changes nothing and reads the first back. Nothing is
+recorded for a session that was not answered: no ``missing`` row is written in
+phase C, since a first row is final and would bar the measurement a late bar
+still made possible; the forward clock's job says why instead (``jev_forward``).
 """
 
 from __future__ import annotations
@@ -213,6 +229,33 @@ UNRECORDED_STATUSES: frozenset[str] = frozenset(
         "set_refused",
     }
 )
+
+
+#: What a recorded signal says about its session. The schema's vocabulary also
+#: holds ``missing``, which phase C never writes: a session nothing measured
+#: has no row (see the module docstring).
+SignalStatus = Literal["measured", "abstain", "invalid"]
+
+#: The validator's reasons that are the model's own answer declined, not a
+#: malformed one: no single most probable option, or a choice that is not its
+#: own argmax (SDK issue #15). ``jev_validate`` calls them abstentions, and a
+#: signal resting on one abstains.
+ABSTAINING_REASONS: frozenset[str] = frozenset({"tie", "choice_not_argmax"})
+
+
+@dataclass(frozen=True)
+class SignalRecord:
+    """
+    The signal recorded for a session: its status, its value (only a
+    ``measured`` one has one), the answer it rests on, whether the database
+    found it backfilled, and whether this write inserted it or found it there.
+    """
+
+    status: str
+    value: str | None
+    answer_id: int | None
+    backfilled: bool
+    inserted: bool
 
 
 @dataclass(frozen=True)
@@ -499,6 +542,175 @@ async def run_probe(
         "answers": {key: _summary(answer) for key, answer in result.answers.items()},
         "as_expected": _as_expected(result.answers, expected),
     }
+
+
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+
+
+def signal_outcome(
+    answer: ValidatedAnswer, escape: str | None
+) -> tuple[SignalStatus, str | None]:
+    """
+    What one recorded answer says about its session, as a signal's status and
+    value.
+
+    A valid answer whose argmax is not the question's escape is ``measured``,
+    with that argmax as its value. A valid escape is an ``abstain``: the model
+    said the evidence was mixed. So is an answer the validator declined as the
+    model's own abstention (:data:`ABSTAINING_REASONS`). Every other invalid
+    answer is ``invalid``: not measured, and never a default. Only a
+    ``measured`` signal carries a value, as the schema requires both ways.
+    """
+    if answer.valid and answer.argmax is not None:
+        if answer.argmax == escape:
+            return "abstain", None
+        return "measured", answer.argmax
+    if not answer.valid and answer.invalid_reason in ABSTAINING_REASONS:
+        return "abstain", None
+    return "invalid", None
+
+
+async def record_signal(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    question_key: str,
+    result: AskResult,
+    signal: str,
+    symbol: str,
+    session: date,
+    decision_cutoff: datetime,
+) -> SignalRecord:
+    """
+    Record, once, the signal ``result`` gave ``session``: the only write of
+    ``jev_signals`` in ``src/``.
+
+    Refused (:class:`ValueError`, nothing written) unless the set is the
+    registered one, of the decision lane and internal provenance — the only
+    signals the phase F loader could ever be pointed at, and the only ones
+    whose state no outsider can write; unless ``result`` recorded a response,
+    ``ok`` or ``invalid``, in a row this can read back; and unless that row is
+    the set's own — its name, version and pack — and not a probe's, since a
+    probe re-asks on purpose and its answer is never anybody's measurement.
+
+    The answer the signal rests on is read back from the ledger by
+    ``question_key``, and the status and value are computed from it
+    (:func:`signal_outcome`). The lane, provenance and pack hash are copied
+    from the request row, and the model is the one that answered, or the one
+    asked when nothing named itself — none of them is a parameter, because none
+    of them is the caller's to claim. ``decision_cutoff`` is the calendar's for
+    the session (``jev_clock.decision_cutoff``); the database stamps
+    ``available_at`` and derives ``backfilled`` from the two, and this writes
+    neither. A replayed answer is recorded like a fresh one, so two sessions
+    with one state rest on one answer.
+
+    ``ON CONFLICT DO NOTHING``: a session already recorded keeps its first
+    row, which is read back and returned with ``inserted`` false.
+    """
+    if jev_questions.REGISTRY.get(question_set.name) != question_set:
+        raise ValueError(
+            f"{question_set.name} v{question_set.version} is not the registered "
+            "set; only a registered set's answers are recorded as signals"
+        )
+    if question_set.lane != "decision" or question_set.provenance != "internal":
+        raise ValueError(
+            f"{question_set.name} is of lane {question_set.lane!r} and provenance "
+            f"{question_set.provenance!r}: only a decision-lane set of internal "
+            "provenance records a signal, the one kind whose state is computed "
+            "in code where no outsider can write it"
+        )
+    if question_key not in dict(question_set.questions):
+        raise ValueError(f"{question_set.name} asks no question {question_key!r}")
+    if result.status not in ("ok", "invalid") or result.request_row_id is None:
+        raise ValueError(
+            f"only a recorded response, ok or invalid, is a signal; this ask came "
+            f"to {result.status!r}, and recorded {result.request_row_id!r}"
+        )
+    if not isinstance(session, date) or isinstance(session, datetime):
+        raise TypeError(f"session is a date, got {session!r}")
+    if decision_cutoff.tzinfo is None or decision_cutoff.utcoffset() is None:
+        raise ValueError("decision_cutoff must be timezone-aware")
+
+    request = await jev_repo.get_request(conn, result.request_row_id)
+    if request is None:
+        raise ValueError(f"request {result.request_row_id} is not in the ledger")
+    own = (question_set.name, question_set.version, question_set.pack_hash)
+    recorded = (
+        request["question_set"],
+        request["question_set_version"],
+        request["pack_hash"],
+    )
+    if recorded != own:
+        raise ValueError(
+            f"request {request['id']} was recorded by {recorded[0]} v{recorded[1]} "
+            f"(pack {str(recorded[2])[:12]}), not by {question_set.name} "
+            f"v{question_set.version}; a signal rests on its own set's answer"
+        )
+    if request["lane"] != question_set.lane or request["status"] not in (
+        "ok",
+        "invalid",
+    ):
+        raise ValueError(
+            f"request {request['id']} is a {request['status']} row in lane "
+            f"{request['lane']!r}; a probe's answer, or a request that recorded "
+            "no response, is nobody's measurement"
+        )
+    answers = await jev_repo.answers_for(conn, request["id"])
+    row = next((a for a in answers if a["question_key"] == question_key), None)
+    if row is None:
+        raise ValueError(f"request {request['id']} holds no answer to {question_key!r}")
+    answer = ValidatedAnswer(**{name: row[name] for name in jev_repo.ANSWER_FIELDS})
+    status, value = signal_outcome(
+        answer, question_set.escape_options.get(question_key)
+    )
+
+    written = await conn.fetchrow(
+        """
+        INSERT INTO jev_signals (
+            signal, symbol, session, status, value, answer_id, lane,
+            provenance, pack_hash, model, decision_cutoff
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (signal, symbol, session) DO NOTHING
+        RETURNING status, value, answer_id, backfilled
+        """,
+        signal,
+        symbol,
+        session,
+        status,
+        value,
+        row["id"],
+        request["lane"],
+        request["provenance"],
+        request["pack_hash"],
+        request["model_answered"] or request["model_requested"],
+        decision_cutoff,
+    )
+    if written is not None:
+        return SignalRecord(
+            status=written["status"],
+            value=written["value"],
+            answer_id=written["answer_id"],
+            backfilled=bool(written["backfilled"]),
+            inserted=True,
+        )
+    first = await jev_repo.get_signal(
+        conn, signal=signal, symbol=symbol, session=session
+    )
+    if first is None:
+        raise RuntimeError(
+            f"{signal} {symbol} {session}: the insert met a conflict and no row "
+            "can be read back"
+        )
+    return SignalRecord(
+        status=first["status"],
+        value=first["value"],
+        answer_id=first["answer_id"],
+        backfilled=bool(first["backfilled"]),
+        inserted=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -964,14 +1176,19 @@ def _as_expected(
 
 
 __all__ = [
+    "ABSTAINING_REASONS",
     "MAX_INT_COLUMN",
     "PROBE_EXPECTED",
     "PROBE_LANE",
     "UNRECORDED_STATUSES",
     "AskResult",
     "AskStatus",
+    "SignalRecord",
+    "SignalStatus",
     "ask",
+    "record_signal",
     "request_hash",
     "run_probe",
+    "signal_outcome",
     "state_hash",
 ]

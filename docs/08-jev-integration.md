@@ -2,11 +2,13 @@
 
 Specification and record of wiring TypeSafe AI's Jev into the AI programme.
 Owner: Quentin Casares. Phases A and B of eight are built, and phase C is
-under way: its first pull request, C1+C2, hardens the one road every lane will
-take and closes open items 15 and 20, registering no set and switching nothing
-on. D to H are not built. The code is dark: every Jev switch is seeded off, no
-lane is wired into the programme's tick, and nothing enqueues the one job that
-could make a call.
+under way: C1+C2 hardened the one road every lane takes, W gave the worker the
+forward clock's reference bars, and C4 starts the forward clock — a planner,
+the `jev_regime` job, a daily connectivity probe, flip re-asks, the
+pre-registered analysis plan and a read-only harness. D to H are not built.
+The code is dark: every Jev switch is seeded off, no lane is wired into the
+programme's tick, and the planner, the only producer of a job that can make a
+call, plans nothing until an operator switches the programme and Jev on.
 A TypeSafe key exists, as the `TYPESAFE_API_KEY` repository secret set on 26
 September 2026, and the dispatch-only key check proved it against TypeSafe's
 own host the same day: the listing named the aliases only, and the pinned
@@ -511,8 +513,16 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels |
 | `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
 | `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
-| `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text |
+| `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state. From C4, `regime_state_problem` says why it would be `None`, for a job's error |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals` |
+| `jev_clock.py` | C4. Holds no client and is not runner-only, so phase E may read the cutoff. The forward clock's times — the reference bars at a session's close plus 45 minutes (the worker's ingest time), the collection at plus 50, the cutoff at plus 60 (the worker's decision time) — the sessions the planner plans, the signal's and the jobs' names, `sleeve_symbol`, and the bar loader, which reads `adj_close` from `yfinance` alone |
+| `jev_forward.py` | C4, runner-only. `collect`, the `jev_regime` job: one session's regime, asked before the cutoff by the database's clock, at most one call an attempt — an attempt whose call got no response is retried and asks again — and one answer recorded at most once; never a backfill and never a `missing` row |
+| `jev_jobs.py` | C4, runner-only. `ask_verdict`, what an ask came to as a job's error and retry, and `run_reask`, the `jev_reask` job |
+| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else |
+| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test |
+| `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the rest |
+| `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client |
+| `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS` |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
 | `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
 | `jev_lane.py` | Runner-only. One ask of one question set: check the arguments and the subject, the switches, the pin, the web gate and the content block, hash, look up, and unless the answer is on record, the key, the vendor's standing refusals, the budget and the lane's slice of it, and the size; then call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
@@ -535,11 +545,13 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
   `shadow_job`, `src/api/drain.py` and `src/cli.py` — and a test proves each
   site uses it.
 - The programme's `main.py` runs a Jev loop beside the heartbeat, built in
-  phase B. It claims only the kinds in `JEV_HANDLERS`, today `jev_probe`, and
-  only while `programme_enabled` and `jev_enabled` are both on, and it extends
-  a running job's lease every 60 seconds. The worker already claims only its
-  own kinds (Phase A), so the two dispatch tables are disjoint, one per
-  process, and every kind has exactly one owner.
+  phase B. It claims only the kinds in `JEV_HANDLERS` — `jev_probe`, and from
+  C4 `jev_regime` and `jev_reask` — and only while `programme_enabled` and
+  `jev_enabled` are both on, and it extends a running job's lease every 60
+  seconds. From C4 it runs the planner before each drain, at most once a
+  minute, in a `try` of its own. The worker already claims only its own kinds
+  (Phase A), so the two dispatch tables are disjoint, one per process, and
+  every kind has exactly one owner.
 
 ### Keys and dependencies
 
@@ -760,7 +772,7 @@ six below the table, beside a UI pull request that is not phase C's.
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W and C5 done |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W, C5 and C4 done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
@@ -779,7 +791,7 @@ pull request beside them because it merges first, though it is not phase C.
 | UI | The owner's design decisions OD-5 to OD-8. Not phase C; merges first | — | Outside phase C |
 | C1+C2 | The road hardened: every switch read by the road, subjects that are their content, the web gate, the vendor's standing refusals, per-lane budget slices, open item 15 and provenance `model` (migration 0013); and open item 20, the Score checks and the four-level rule | — | **Done** |
 | W | The worker's reference bars (C3), with the live ingest kept on one adjustment basis, reviewed as a live-path change | — | **Done** |
-| C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | Not started |
+| C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | **Done** |
 | C5 | Web sources (pure: the allow-list, the parser, the normaliser and the code screen) and the fetcher, dark | C1+C2 | **Done** |
 | C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | Not started |
 | C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | Not started |
@@ -1362,10 +1374,10 @@ Numbered on from Phase A's, so a reference to either list is unambiguous.
     In the other direction, an `error` row for a call that sent nothing — a key
     the SDK refused, a defect on this side — counts against it: a conservative
     over-count, kept deliberately.
-18. **Nothing enqueues `jev_probe`.** The programme claims and runs it, and
-    only tests put one in the queue. Phase E's `POST /jev/probe` is the first
-    producer; until then the first live call waits on it, or on a job inserted
-    by hand.
+18. ~~**Nothing enqueues `jev_probe`.**~~ *Closed by C4:* the planner
+    enqueues one a UTC day, under `jev_probe:{date}`, once the programme and
+    Jev are both on with a usable pin and a key; seeded, it plans nothing.
+    Phase E's `POST /jev/probe` will be a second producer, by hand.
 19. ~~**Two Rule 5 enforcements planned for phase B were not built.**~~ *Resolved in phase B:* `tests/unit/test_jev_table_boundaries.py` now holds both — outside the programme only `src/db/repos/signals.py` may name a Jev table, only `jev_lane` may write `jev_signals`, and the model-holding runners never name it — each scanner proved against sources that must trip it.
 20. ~~**What the validator does not check.**~~ *Resolved in phase C, by C1+C2:* a Score's `legend`, where it sends one, must name the levels asked, in order (`legend_mismatch`), and its `score` must be its own probability-weighted mean within a deliberately conservative bound on what rounding to the 0.01 grid can move it, one that holds however the score is reported and admits some answers rounding alone could not produce (`score_inconsistent`). The tripwire test is replaced by a registration rule admitting a Score of at most four levels, the most for which the 0.02 sum tolerance covers that rounding. Still open: a Score of five to ten levels needs a tolerance measured from recorded answers, and the legend's wire format has not been observed (item 34).
 21. **The validator's note has no column.** `Validation.problem` — why a
@@ -2126,6 +2138,397 @@ plan. `web_fetch` imports `aiohttp` at module level, since it is installed
 everywhere, and names aiohttp's threaded resolver, so installing `aiodns` would
 change nothing.
 
+#### C4: the forward clock starts
+
+The first pull request that can make a call nobody queued by hand, and it is
+dark: every switch it reads is seeded off, so nothing is planned, claimed or
+asked until an operator turns the programme and Jev on
+(`tests/integration/test_jev_dark.py` runs the shipped loop for several passes
+at the seeds, with a key available, and finds no job, no request and no Jev
+row). What it adds: the planner, the `jev_regime` job that records
+`decision.regime` v1 every session and consumes nothing, a daily connectivity
+probe, flip re-asks, the pre-registered analysis plan with the regime's
+baseline rule, the harness's three read-only commands, the daily report's data
+health on the traded universe, and restart schedules moved clear of the close.
+
+**The clock's times are the worker's.** `jev_clock` holds them: the reference
+bars at a session's close plus 45 minutes, `scheduler.INGEST_AFTER_CLOSE`; the
+collection at plus 50; the cutoff at plus 60, `scheduler.DECIDE_AFTER_CLOSE`,
+the moment the live decision is planned, so a signal counts as live exactly
+when it could have been read by that session's decision. Each is read off the
+calendar, early closes and daylight saving included, and the cutoff always
+falls on the session's New York day, as the schema's CHECK requires.
+`sessions_to_plan` is today's session while its cutoff is ahead and the next
+session, never a past one and nothing past the calendar's reach, so the planner
+builds no backlog. The bar loader reads `adj_close` and nothing else, from
+`REFERENCE_SOURCE` alone, over `REFERENCE_WINDOW_DAYS` up to the session, and
+cuts the panel at the session; `test_daily_bars_readers.py` names it among the
+table's readers. The instruments are recorded once, in the signal's symbol
+(`equities=SPY;bonds=IEF;commodities=GSG`), since the state holds no ticker.
+`tests/unit/test_jev_clock.py::TestTheTimes`, `::TestSessionsToPlan` and
+`::TestTheNames`; `tests/unit/test_jev_forward.py::TestTheLoader`.
+
+**The forward clock never backfills and never writes a missing row.**
+`jev_forward.collect` is the `jev_regime` handler. A payload that names no
+session the calendar holds, or another set, fails without a retry; a version
+that is no longer registered completes `superseded`; a session already
+recorded completes `recorded_before`. Then the database's clock: at or past
+the cutoff, nothing is asked, the job fails for good, and its error says when
+the clock read and quotes the reason the attempt before the cutoff met, from
+the job's own row, since that reason and not the clock is why the session is
+absent. Before the cutoff, whatever can still change fails the job for a
+retry and writes nothing: the decisions area off; a sleeve the live ingest
+owns whose `ingest_bars:{S}` has not succeeded (below); no bar stored; or no
+state, with `jev_features.regime_state_problem`'s reason — the first check
+`regime_state` would fail, named with its sleeve and symbol, in the same order,
+and held to agree with it on every case that returns `None`. The clock is read
+again after the bars have loaded and before the one ask, which goes through
+`jev_lane.ask` looked up on the module with every keyword spelled. An `ok` or
+`invalid` ask is recorded; anything else fails the job as `ask_verdict` says.
+Twenty attempts back off `attempts × 10 s`, about 32 minutes, so retries
+outlast the ten-minute window and the first after the cutoff ends the job.
+The result holds labels, counts and ids, never a state or a price. Phase B's
+docstring promised a `missing` row for an unmeasured session; nothing built it,
+and a `missing` row, once written, would be final and bar the measurement a
+bar landing two minutes later made possible, so the docstring now says what is
+built. `tests/unit/test_jev_forward.py`, every row of the state machine,
+`::TestItNeverBackfills` and `::TestOneAskPerJob` among them.
+
+**A live-owned sleeve waits for the live ingest** (open item 40, closed here).
+When an enabled operator deployment trades a sleeve's instrument, the live
+ingest owns it, and its history is on one adjustment basis only once
+`ingest_bars:{S}` has succeeded. Until then the session is treated as a
+missing close: retried until the cutoff, then absent, the error naming the
+sleeve, the job and its state, the ingest's own error quoted. The programme may
+not import the worker, so it reads the traded universe again,
+`repo.traded_universe`, by the worker's rule — enabled, the operator's, each
+strategy built from its stored parameters and asked for its universe — and a
+deployment it cannot build makes every sleeve possibly the live ingest's.
+Owned now is not owned when the ingest ran, as C4's review found: an attempt
+that failed its span refetch while a deployment traded a sleeve still wrote
+that sleeve's ten-day window, and if the deployment is disabled before the
+regime job runs, the sleeve reads as nobody's, a later attempt that succeeds no
+longer fetches it, and the reference job for S, run while the live ingest
+owned it, left it alone — the first cut measured such a session over the
+stitched history. So once an attempt of `ingest_bars:{S}` has not succeeded,
+or is still running, a sleeve nobody trades now is read only if the reference
+job for S re-based it whole, its result naming it among those it upserted;
+otherwise the session waits, the error naming the sleeve and both jobs.
+`tests/integration/test_jev_forward.py::TestTheTradedUniverseIsTheWorkers`
+holds the two readings to one answer on the same rows, and
+`::TestALiveOwnedSleeveWaitsForTheLiveIngest` waits through an unplanned and a
+failed ingest on Postgres and asks once it has succeeded, and waits for a
+sleeve disabled after a failed attempt through a retry that fetched nothing;
+`tests/unit/test_jev_forward.py::TestASleeveTheLiveIngestHeldWhenItFailedWaitsToo`
+holds each case.
+
+**A signal rests on its answer, once.** `jev_lane.record_signal` is the one
+`INSERT INTO jev_signals` in `src/`. It refuses, writing nothing, a set that is
+not the registered one or not of the decision lane and internal provenance, a
+question the set does not ask, an ask that recorded no response, a session
+that is not a date and a cutoff without a timezone — both of which asyncpg
+would store without a word, the one under the next day, the other four hours
+early (tests for both added in C4's review) — and a request row that is
+another set's, another version's, a probe's or one that recorded no response.
+Status and value come from the answer read back by its question
+key (`signal_outcome`: a valid answer is measured unless it is the escape; the
+escape, a tie and a choice that is not its own argmax abstain; every other
+invalid answer is invalid). Lane, provenance, pack and model are copied from
+the request row, never taken from the caller, and the database stamps
+`available_at` and derives `backfilled`. `ON CONFLICT DO NOTHING`; a session
+already recorded is read back through `jev_repo.get_signal`, so inside the
+programme the lane writes the signals and reads none, and `jev_repo` reads
+them and writes none. Two sessions in one state rest on one answer, and
+`answer_id → request → state` gives every session's exact state.
+`tests/unit/test_jev_lane.py::TestSignalOutcome`, `::TestRecordSignalRefuses`
+and `::TestTheSignalIsItsAnswers`; on Postgres,
+`tests/integration/test_jev_forward.py::TestEveryStatusPassesTheRealTrigger`,
+`::TestASignalIsWrittenOnce`, `::TestLateIsTheDatabasesWord` and
+`::TestAReplayedSessionRestsOnTheFirstAnswer`; over real HTTP,
+`tests/sdk/test_jev_forward_over_http.py`.
+
+**The planner plans only what its switches allow.** `jev_plan.plan` runs in
+the programme's Jev loop before each drain, at most once a minute
+(`JEV_PLAN_SECONDS`), on a connection of its own and inside a `try` of its
+own, so a planner that fails costs a minute of planning and never a drain;
+`_drain_jev` and its one claim are unchanged. It is told whether a TypeSafe
+key exists, never the key. It plans nothing without a key, and nothing unless
+`programme_enabled`, `jev_enabled` and a usable `jev_model` hold, each through
+its own fail-closed reader; each rule then needs its area. It enqueues through
+`job_repo.enqueue` with literal kinds and nothing else, under dedupe keys that
+hold across statuses, so planning again adds nothing:
+
+| Rule | Area | Kind | When | Key | Priority / attempts |
+|---|---|---|---|---|---|
+| Daily probe | the master switch | `jev_probe` | now | `jev_probe:{UTC date}` | 40 / 3 |
+| Reference bars | decisions | `ingest_reference_bars` (the worker's) | close + 45 min | `ingest_reference_bars:{S}` | `REFERENCE_PRIORITY` (1) / 14 |
+| Regime | decisions | `jev_regime` | close + 50 min | `jev_regime:decision.regime@1:{S}` | 50 / 20 |
+| Re-asks | the set's own | `jev_reask` | 24 h after the answer | `jev_reask:{request id}` | −10 / 3 |
+
+A job that makes a call is planned only while its lane's share of the day's
+budget has a call left once the day's calls and the jobs already waiting are
+counted, and each job planned in a pass takes its call from what is left, so
+one call left plans one session and not two
+(`tests/unit/test_jev_plan.py::TestTheForwardClock::test_one_call_left_plans_one_session_not_two`);
+a job that has finished is history, not a call coming, and never counts
+against a share (`tests/integration/test_jev_repo.py::TestPendingJobs` and
+`::TestThePlannerOnAQueueWithHistory`, on Postgres, where the planner's own
+reads run: the unit rig fakes them). The daily probe closes open item 18: it
+proves the key, the pin and the validator each day, and its `p(true)` is a
+series the harness reports. The
+reference job's attempts close open item 39: `attempts_spanning` finds the
+fewest attempts whose backoff reaches the cutoff from the minute the bars
+settle, fifteen minutes, which is 14. `tests/unit/test_jev_plan.py`: the whole
+switch matrix, the key read before any switch, the probe once per UTC day, no
+backlog, the calendar's end, the shares, and the re-ask sample;
+`tests/integration/test_jev_dark.py`: each switch alone and every pair but one
+plan and send nothing, the programme and Jev together plan and send exactly
+the daily probe, and with the decisions area the clock's jobs are planned;
+`tests/unit/test_job_ownership.py::TestThePlannerStep`. The planner asks
+nothing itself: its import closure reaches no lane, client, handler that asks,
+model runner, vault or decryption, so every call goes through the job loop's
+claim, its one-call count and its shutdown grace
+(`test_import_boundaries.py::test_the_planner_reaches_no_road_to_a_model_and_no_key`,
+added in C4's review; the design required it and the first cut tested only
+the harness's closure).
+
+**Re-asks measure the noise.** The sample is pre-registered
+(`jev_prereg.reask_sample`): the previous UTC day's canonical requests, the
+uniform stratum by the request hash (`int(hash[:8], 16) % 20 == 0`), then the
+low-margin stratum (any valid answer leading by less than 0.20), each in hash
+order, at most ten a day and never beyond the probe lane's share, less any
+whose set was reworded, whose model is not the pin, whose area is off or whose
+text is quarantined. The ten are the day's, not a pass's: the re-asks already
+queued for the day's answers count against them, so an area switched on or a
+pin changed during the day cannot draw a second sample from the answers the
+first left out, as C4's review found it could
+(`tests/unit/test_jev_plan.py::TestTheReasks::test_the_cap_is_the_days_whatever_becomes_eligible`).
+Each re-ask's payload records the stratum and the plan it was sampled under,
+which the harness reads and the handler does not.
+`jev_jobs.run_reask` asks the canonical row's exact state,
+rebuilt through the set's own model, about its own subject and instant, once,
+as a probe: recorded in the probe lane, never replayed and never canonical. It
+completes `superseded`, asking nothing, when the words or the pin have changed,
+since an answer to other words or from another judge measures nothing about
+this one; no usable pin is not another pin, and fails the job through the
+road's own refusal. It reports, per question, whether the argmax moved, and
+`None` where either answer was not measured. `tests/unit/test_jev_jobs.py`.
+
+**A job's verdict is its status.** `ask_verdict` gives every Jev ask the
+probe's rule: an answer succeeds; a response refused whole fails for good, since
+asking again would buy a second answer rather than check the first; a failed
+call is retried only for no response, a rate limit or a vendor fault; a switch
+turned off mid-job waits for the switch; every other status fails for good with
+a reason of its own. `JobFailedError` moved to `job_errors`, beside the one set
+of retried kinds, so the handlers outside `main` can raise it; `main`
+re-exports it. `tests/unit/test_jev_jobs.py::TestAskVerdict`;
+`tests/unit/test_job_ownership.py::TestEveryJevHandlerMakesAtMostOneCall` runs
+every handler through every status the road can return and every error kind,
+counting asks, and reads each handler's module for a call to the road inside a
+loop or a second call site.
+
+**The analysis is registered before the answers.** `jev_prereg` is data and
+pure functions, the standard library alone: the development and test split by
+content, the size floors, the margin grid, each lane's target, the confidence
+levels (95% two-sided to report, 99.5% one-sided to gate, Bonferroni over up to
+ten set-and-question pairs), the bootstrap and its seed rule, the calibration
+bins, the flip limits, the re-ask sample and the regime's baseline rule.
+`plan_hash()` is sha256 of the whole as compact JSON with mappings' keys
+sorted; `GOLDEN_PLAN_HASH` pins it beside the plan, and
+`tests/unit/test_jev_prereg.py` holds both to `RELEASED_PLAN_HASHES`, an
+append-only history kept in the test, so re-recording the golden after an edit
+still fails. Every constant is in the hash — the test moves each and watches it
+change — and the split, the strata and the rule are checked against copies
+written in the test with their numbers as literals. Every lane's target is
+met by the Wilson lower bound of its statistic, one-sided at the gate level,
+never by a point estimate: the first cut registered the research lane's as a
+bare 0.80, which 24 of the 30 covered items a threshold needs would have met
+with a lower bound of 0.57, against the design's metric definition; C4's review
+added the bound and re-pinned version 1 before the plan merged or any answer
+existed (`tests/unit/test_jev_prereg.py::TestTheLaneTargets`). Plan version 1
+hashes to `f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf7caf`.
+
+**The regime's baseline and the sleeves are the agent's defaults.**
+`REGIME_BASELINE_RULE` reads the equities sleeve alone: `risk_off` when its
+trend is below, its momentum down and either its drawdown deep or severe or its
+volatility in the top quintile; `risk_on` when its trend is above, its momentum
+up, its drawdown none or shallow and its volatility in the lower three
+quintiles; `neutral` otherwise. It is total over all 180 equities states and
+never answers the escape, and it reads only fields and labels of the regime
+state (`test_the_baseline_rule_is_total_and_never_abstains`,
+`test_the_rule_reads_only_state_labels`). The sleeves, SPY, IEF and GSG, are
+`src/data/reference.py`'s, held equal to the plan's copy. **Neither the rule nor
+the sleeves is a choice the operator has reviewed: both are the defaults the
+agent that built C4 chose.** Before the first regime answer exists — the
+decisions area is seeded off, so none does — a change to either is a new
+`PLAN_VERSION` with its hash appended, and costs nothing; a changed sleeve also
+changes `src/data/reference.py` and starts a new signal series, since the
+signal's symbol names the instruments. After it, the same bump, recorded as a
+change of plan: the regime job writes the plan in force into its result as it
+asks and the planner writes it into each re-ask's payload, so `forward` scores
+agreement only over answers first recorded under the plan it runs and counts
+the rest apart by the plan they were recorded under, and a flip rate counts
+only the pairs sampled under it; the report names its plan, no answer is
+scored by a rule registered after it, and the old rule is never rewritten to
+match. The first cut said all this and built none of it.
+
+**The harness reads, and holds no key.** `python -m src.programme.jev_eval`
+runs `status`, `forward` and `forward-audit`, each in one read-only,
+repeatable-read transaction on `DATABASE_URL`, the one variable it reads. Its
+import closure reaches no lane, no client, no model runner, neither handler
+that asks, and neither the vault nor the decryption
+(`test_import_boundaries.py::test_the_harness_holds_no_key_and_reaches_no_client`).
+`forward` accounts for every session since the first job of the registered
+set's version whose cutoff has passed — a version bump starts a series of its
+own, rather than counting every session since the old version's first job as
+absent — as live measured, abstain or invalid, late (the database's
+`backfilled`), or absent with its job's error or "not planned". Absent
+sessions stay in the denominator of coverage; a late row is never live. Each
+figure is quoted as the design's section 10.3 says it may be. Coverage carries
+a Wilson interval (`jev_stats`), and so does each stratum's flip rate, each
+pair a request of its own, with its n and median lag, never pooled. The share
+served by a replay, the regimes' shares and agreement with the baseline rule
+over sessions are counted, with the distinct states they rest on beside them,
+and carry no interval: every session in one state replays one answer, so an
+interval over sessions narrows with how often one judgement repeats, and the
+first cut quoted a lower bound of 0.84 for twenty sessions resting on a single
+answer. Agreement over distinct states, each one judgement, carries the
+interval. Each model's answers are reported apart and named, since a
+signal's name holds its set and version but not the model, and the first cut
+pooled two pins' answers and kept only the first model's judgement of a
+state. And each answer is scored under the plan that registered it: the
+regime job writes the plan in force into its result when it asks, agreement
+is scored only over answers first recorded under the plan the report runs, a
+replay under the plan its answer was asked under, and the rest are counted by
+the plan they were recorded under; the planner writes the stratum and the plan
+into each re-ask's payload, and a flip rate counts a pair only in the stratum
+it was sampled in and only under that plan. A re-ask refused whole, failed or
+refused before it was sent is a pair that could not be compared, counted as
+such (`jev_repo.probe_pairs` once joined only answered re-asks). The daily
+probe's series closes it. Its field list is pinned by
+`tests/unit/test_jev_eval.py`, which refuses a return, a P&L or a hit rate by
+any name. A figure over nothing is `None`, printed as "not measured", and a
+genuine zero prints as zero. `tests/integration/test_jev_harness.py` builds
+all three reports on PostgreSQL from rows the planner, the forward job through
+the programme's drain, the re-ask job and the daily probe wrote, with a late
+session and an expired job among them, and `tests/integration/test_jev_repo.py`
+holds each read beneath them to what it counts; the first cut ran none of
+them on a database. `forward-audit` rebuilds each recorded state
+from the bars stored now, with the sleeves the signal's symbol names, and says
+agree, drift with the descriptors that moved, or why it cannot rebuild. A
+re-basing cannot cause drift, since every descriptor is invariant under it, so
+drift is data trouble in the history the answer was computed on (open item
+48).
+`jev_stats.wilson` returns exactly 0 at 0 of n and exactly 1 at n of n, where
+the float formula left a residue that put the bound on the wrong side of its
+own estimate; its test found it.
+
+**No Jev output reaches a generative model's prompt** (invariant I8). The
+model runners — `client`, `author`, `panel` and `tick` — name no Jev table
+(`test_jev_table_boundaries.py::test_the_model_runners_name_no_jev_table`),
+and, since a runner could read the ledger through `jev_repo`'s functions
+without naming one, their whole import closures load no `jev_*` or `web_*`
+module but `jev_catalogue`, the pin and vocabulary `flags` reads to answer a
+Jev switch, which itself loads none
+(`test_import_boundaries.py::test_no_model_runner_loads_a_jev_or_web_module`,
+added in C4's review: the first cut's name scan alone let `tick` import
+`jev_repo` with every test green).
+
+**The daily report's data health reads the traded universe** (open item 38,
+closed here). The latest session is the stalest traded symbol's newest, read
+with `repo.traded_universe`; a universe that cannot be read, a traded symbol
+with no bar, or nothing traded at all leaves it absent with a note saying which,
+and the required actions name the first two. The row and symbol counts are
+still the whole table's. The report page's absent latest session says why in
+the same terms (`web/src/app/programme/report/page.tsx`).
+`tests/unit/test_report_data_health.py` builds the case the item names: the
+reference sleeves current and a traded symbol ten sessions behind.
+
+**Restarts moved clear of the close** (the review's schedule change). Both
+long-running workflows stopped each run after a fixed 5h45m while their crons
+fired every five hours — `programme.yml` at `"30 */5 * * *"`, `worker.yml` at
+`"0 */5 * * *"` — so a successor was always queued, each restart came 5h45m
+after the last, and the restarts drifted 45 minutes a run round the clock:
+every few days one landed between 20:30 and 22:15 UTC, where the live ingest
+and the reference bars (close + 45), the collection (+ 50), the cutoff and the
+live decision (+ 60) and the marks (+ 75) sit in both regimes of daylight
+saving, and the programme's own cron fired at 20:30. Now each run stops at the
+next of five slots — 02:30, 07:30, 12:30, 17:00 and 22:30 UTC — at least ten
+minutes away and never later than 5h45m; the slots are at most 5h30m apart, so
+a run always reaches one, and the process restarts at a slot and nowhere else.
+
+The first cut of this fired the crons at the slots themselves, and the
+review of C4 found what that cost: a trigger at the moment a run stops finds
+nothing running to queue behind, so no successor was ever waiting, and every
+restart lasted as long as GitHub was late with the event — late most at the
+top of the hour, where `"0 17 * * *"` fired, and under load not at all. A
+17:00 event lost on a summer half day, which closes at 17:00 UTC, would have
+left neither process running from 17:00 to 22:30, through that day's ingest,
+collection, cutoff, decision and marks. So each slot now has two triggers,
+neither at the slot nor on the hour: 41 minutes before it
+(`"49 1,6,11,21 * * *"`, `"19 16 * * *"`), while the run that stops there
+still runs, so its successor waits pending in the `concurrency` group and
+starts as it exits; and 3 minutes after it (`"33 2,7,12,22 * * *"`,
+`"3 17 * * *"`), which ordinarily waits pending behind the successor until the
+next slot's earlier trigger replaces it — five runs a day end "cancelled", by
+design — stands in when that trigger is late past its slot or lost, and starts
+the chain again when nothing is running at all. A restart is then the minutes
+a runner takes to start, not a wait on the schedule. The review also suggested
+a lone early trigger with runs skipping any slot closer than its lead; that
+was not taken, because a run started cold by the early trigger would then
+reach past the next slot, and across the 5h30m gap from 17:00 to 22:30 past
+the 5h45m cap, stopping off the slots at about 22:00 — inside the winter
+evening's working hours. The step works out today's UTC midnight as `now` less
+its remainder of a day, since Unix time counts no leap seconds, so it no longer
+depends on GNU `date` to parse one.
+
+`tests/unit/test_jev_clock.py` holds it. `::TestTheRunsStopAtTheSlots` runs the
+step's own lines under bash for a run starting at every minute of a day, in
+four time zones and across both changes of the clocks, and each must stop at a
+slot ten minutes to 5h45m ahead, where the Python model says.
+`::TestASuccessorIsQueuedBeforeEveryStop` models GitHub's schedule and the
+concurrency group from nothing running: with every event late by up to two
+hours, each late by its own draw up to an hour, any one event of three days
+lost with the rest up to 40 minutes late, and a cold start every seven
+minutes round the clock, every stop after the first day finds its successor
+queued and the process back within fifteen minutes; no trigger fires on the
+hour. The fixed cron-equals-slot test it replaces enforced the defect.
+`::TestTheRestartsLandOutsideTheWorkingHours` holds every slot, with those
+fifteen minutes, outside every session's working hours — around the open and
+from a quarter of an hour before the ingest to the marks — for every session
+from 2007-03-12, the first under the daylight-saving rules in force, to the
+calendar's end, so each kind of day those rules produce is checked, the summer
+half days that close at 17:00 UTC among them (open item 50).
+
+**Where C4 departs from the design.** The loader selects `adj_close` alone
+rather than every price column, so no raw price can reach a state, and takes
+the sleeves' symbols as an argument, so the audit reads a series with its own.
+The handler reads the clock a second time before the one ask, quotes the last
+pre-cutoff reason in its `expired` error, refuses a payload naming another
+set, and waits for the live ingest (open item 40, which the task added).
+`record_signal` also refuses an unregistered copy of a set, an unknown
+question, a request of another lane, a session that is not a date and a naive
+cutoff. The reference job gets 14 attempts where the design had 3 (open item
+39). The planner counts the jobs already waiting against a lane's share, as
+well as the calls made, for the probe and the regime as for the re-asks, and
+reads the key before any switch. A re-ask with no usable pin fails through the
+road rather than completing `superseded`. `GOLDEN_PLAN_HASH` sits in the module
+beside the plan, as `GOLDEN_PACK_HASHES` does for the words, and `job_errors`
+is in the pure-module check beside `jev_hash`, `jev_prereg` and `jev_stats`.
+Each harness command takes `--json`, and the harness closure also excludes the
+vault and `src.crypto`. The dark test's matrix: the design said each switch
+alone and in pairs sends nothing, which its own daily-probe rule contradicts
+for the programme and Jev together; the test holds that pair to exactly the
+probe. Additions: `jev_repo.get_signal`, `probe_series`, `pending_jobs` and
+`first_job_session` beside the design's five reads; `jev_stats`' exact ends;
+the daily report on the traded universe (open item 38) with its page's
+reason; `tests/fakes/reference_prices.py` for the tests that drive the clock
+on a database; and the restart schedules. C4's review added two more: the
+regime job's result names the analysis plan in force, and a re-ask's payload
+the stratum and the plan it was sampled under — the design's payload was the
+request id alone, which is still all the handler reads — so the harness can
+keep each figure to the plan that registered it.
+
 ### Open items Phase C found
 
 Numbered on from Phase B's.
@@ -2211,30 +2614,29 @@ Numbered on from Phase B's.
     key; the probe's error says so. Lifting the hold on a later success would
     need the probe exempt from it, which is the design's "every lane" undone,
     so it is left for an operator to decide.
-38. **The daily report's data health reads every symbol's rows.**
-    `reports.build_daily_report` takes the newest session in `daily_bars`
-    across every symbol. Once the reference job runs (C4), a fresh IEF or GSG
-    row would read as fresh data while the live ingest for the traded universe
-    had failed, and `sessions_behind` would say 0 where the live decision reads
-    a stale panel. The report should read the traded universe's newest
-    session; C4, which starts the reference job, should land that with it.
-39. **C4's planner must give the reference job attempts enough to reach the
-    cutoff.** The job fails while a sleeve lacks its session's close, so that
-    the worker retries it, and the queue backs a retry off by `attempts × 10 s`.
-    The design's three attempts span about 30 seconds, which leaves a vendor
-    late after the close no room at all. For the retries to reach the forward
-    clock's cutoff, 15 minutes after the job's first chance, the planner
-    should allow at least 14 attempts (`5·n·(n−1)` seconds of backoff, at least
-    900); the regime job's 20 were sized the same way.
-40. **A day the live ingest could not refetch its span is a failed
-    `ingest_bars:{S}`, and the forward clock should read it.** On such a day a
-    live-owned sleeve keeps an older basis before the ten-day window, which
-    the reference job, leaving that sleeve to the live ingest, cannot mend.
-    The job fails saying so until a retry lands the span. When a sleeve is
-    live-owned, C4's regime handler should not measure S before
-    `ingest_bars:{S}` has succeeded, treating it as a missing close: retry
-    until the cutoff, then leave the session absent, the job's error its
-    reason.
+38. ~~**The daily report's data health reads every symbol's rows.**~~ *Closed
+    by C4:* the latest session is the stalest traded symbol's newest, read as
+    the live ingest reads the traded universe, and a universe that cannot be
+    read, a traded symbol with no bar or nothing traded leaves it absent with
+    a note; `tests/unit/test_report_data_health.py`. See C4 above.
+39. ~~**C4's planner must give the reference job attempts enough to reach the
+    cutoff.**~~ *Closed by C4:* `jev_plan.REFERENCE_ATTEMPTS` is
+    `attempts_spanning(15 minutes)`, 14, the fewest whose `attempts × 10 s`
+    backoff reaches the cutoff from the minute the bars settle;
+    `tests/unit/test_jev_plan.py::TestTheReferenceJobsAttempts`.
+40. ~~**A day the live ingest could not refetch its span is a failed
+    `ingest_bars:{S}`, and the forward clock should read it.**~~ *Closed by
+    C4:* while an enabled operator deployment trades a sleeve's instrument,
+    the regime job treats a session whose `ingest_bars:{S}` has not succeeded
+    as a missing close, retried until the cutoff and then absent, the job's
+    error its reason; a deployment that cannot be built counts every sleeve as
+    live-owned. And since who owns a sleeve now is not who owned it when the
+    ingest ran, once an attempt of the ingest has not succeeded a sleeve
+    nobody trades now waits too, unless the reference job for the session
+    re-based it whole (C4's review).
+    `tests/unit/test_jev_forward.py::TestALiveOwnedSleeveWaitsForTheLiveIngest`,
+    `::TestASleeveTheLiveIngestHeldWhenItFailedWaitsToo` and their integration
+    counterpart.
 41. **The web fetcher ignores the environment's proxies,** by design, so it
     cannot fetch where the only way out is a proxy — the development sandbox
     C5 was built in is such a place. The scheduled programme connects
@@ -2270,6 +2672,50 @@ Numbered on from Phase B's.
     `encoded_payload`; reading shorter runs would read ordinary titles, whose
     words are runs of letters, as payloads. Recorded so C7's evaluation counts
     it against the baseline rather than for it.
+48. **`forward-audit`'s drift is data trouble, and it cannot say which.**
+    *Corrected in C4's review*, which found this item teaching the opposite:
+    it said a re-basing could move a recorded state, so that drift might be
+    harmless basis movement. It cannot. Every descriptor is a ratio of the
+    sleeve's adjusted closes or a statistic of their log returns — trend is
+    the latest over the average, drawdown the latest over the high, momentum
+    the latest over an earlier close, volatility the spread of log returns —
+    and a distribution after session S multiplies every close S's state was
+    computed from by one factor, so it leaves every descriptor as it was
+    (exactly, in exact arithmetic; a vendor that rounded re-based prices could
+    flip only a label sitting within that rounding of its band's edge).
+    `tests/unit/test_jev_features.py::TestARebasingMovesNoDescriptor` re-bases
+    each sleeve by its own factor at every half year of a synthetic market
+    and finds no state moved, and a 3% stitch at the ten-day boundary moving
+    some. So drift always means the stored window changed unevenly since the
+    recording: a vendor revised a price, an adjustment was applied after the
+    recording (the table was stale when the state was computed), a stitched
+    window was mended, or a gap was filled. What stays open is which: the
+    audit names the descriptors that moved, and telling a revision from a
+    history that was stale or stitched at recording would need the bars as
+    they stood then, which nothing keeps.
+49. **The programme reads the traded universe by a copy of the worker's
+    rule.** It may not import the worker, so `repo.traded_universe` repeats
+    `maintenance_jobs._deployed_universe`'s query and strategy build, and
+    `tests/integration/test_jev_forward.py::TestTheTradedUniverseIsTheWorkers`
+    holds the two to one answer on one set of rows. A change to the worker's
+    rule that the test's rows do not exercise would pass it; the rule belongs
+    in a module both may import, which phase F's move of the cutoff into
+    `src/core` is the occasion for.
+50. ~~**The restart slots are UTC, and the busy windows are checked over two
+    years only.**~~ *Closed in C4's review:* the test walked every session
+    from a year before the day it ran, a span holding no summer half day, so
+    a July 3, which closes at 17:00 UTC, would have been checked only when it
+    came into reach. It now walks every session from 2007-03-12, the first
+    under the daylight-saving rules in force, to the calendar's end, and
+    fails if no summer half day is among them. The 17:00 slot restarts at
+    such a close, half an hour before the evening's first window opens, which
+    the test allows; the restart is the queued successor's, not a wait on
+    the 17:00 event, which is no longer a trigger (see C4 above).
+51. **The report page was changed without its captures.** The absent latest
+    session now says why in the report's terms; `tsc`, `next build` and the
+    design-token, component and formatting tests pass, but the route was not
+    captured or scanned with axe (`web/CLAUDE.md`), the change being words in
+    an existing `Absent`.
 
 ## Inputs needed from the operator
 
@@ -2280,15 +2726,21 @@ Inputs, not approvals.
    connected to the vault, or, for the scheduled programme, as the
    `TYPESAFE_API_KEY` repository secret, which `programme.yml` passes. A key
    alone calls nothing from the programme: its first call is the connectivity
-   probe, which needs `programme_enabled` and `jev_enabled` on and a
-   `jev_probe` job in the queue (open item 18). The key itself is checked
+   probe, which the planner enqueues once a UTC day from C4, and only once
+   `programme_enabled` and `jev_enabled` are both on. The key itself is checked
    first, by hand, with the dispatch-only `jev-check.yml`, which records
    nothing. The operator set the repository secret on 2026-09-26, and the key
    check passed against TypeSafe the same day. Phases A to G are built and
    tested against fakes regardless, and the programme makes no live call until
-   a probe is enqueued with both switches on.
-2. **A replacement Alpaca paper key** for the revoked one.
-3. **For phase H, a second Alpaca paper account's key**: a `PK` key, checked
+   both switches are on; the forward clock asks nothing until the decisions
+   area is on as well.
+2. **A review of `REGIME_BASELINE_RULE` and the reference sleeves** (SPY,
+   IEF, GSG). Both are the defaults the agent that built C4 chose (see C4
+   above). Before the decisions area is first switched on, a change is a plan
+   version bump that costs nothing; after the first regime answer, the same
+   bump is recorded as a change of plan.
+3. **A replacement Alpaca paper key** for the revoked one.
+4. **For phase H, a second Alpaca paper account's key**: a `PK` key, checked
    against both endpoints before it is stored, as CLAUDE.md requires of any
    Alpaca key.
 

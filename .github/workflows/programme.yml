@@ -40,9 +40,47 @@
 
 name: programme
 
+# Restarts at fixed times, and none after a close
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# A run used to stop after a fixed 5h45m while the cron, "30 */5 * * *", fired
+# every five hours, so a successor was always queued and each restart came
+# 5h45m after the last: the restarts drifted round the clock, 45 minutes a
+# run, and every few days one landed between an NYSE close and its decision
+# cutoff, where the forward clock collects the day's regime (close + 50 minutes)
+# before the cutoff (close + 60), and a session missed is missed for good. The
+# cron itself fired at 20:30, half an hour after a summer close.
+#
+# Now each run stops at the next of five slots, 02:30, 07:30, 12:30, 17:00 and
+# 22:30 UTC, at least ten minutes away, so the process restarts at a slot and
+# nowhere else. No slot falls from 20:30 to 22:15 UTC — the ingest, the
+# regime, the cutoff and the marks after an ordinary close, in summer and in
+# winter — nor near a half day's close or the open.
+#
+# Each slot has two triggers, and neither is at the slot or on the hour.
+# GitHub delays scheduled events, most at the top of the hour, and under load
+# drops some; a trigger at the moment a run stops would find nothing running
+# to queue behind, and every restart would last as long as it was late.
+#
+# - 41 minutes before the slot, while the run that stops there still runs:
+#   the new run waits, pending, and starts as the old one exits, so the
+#   restart takes the minutes a runner needs and waits on no schedule.
+# - 3 minutes after it. Ordinarily it finds the successor running, waits
+#   pending behind it, and is replaced by the next slot's earlier trigger, so
+#   five runs a day end "cancelled", by design. When that earlier trigger is
+#   late past its slot or lost, this one is already queued and takes its
+#   place; and when nothing is running at all — the first deploy, or both
+#   triggers lost — it starts the chain again.
+#
+# `worker.yml` restarts at the same slots on the same triggers, and
+# `tests/unit/test_jev_clock.py` runs this step's arithmetic, models the
+# schedule late, erratic and losing an event, and holds every restart outside
+# every session's working hours.
 on:
   schedule:
-    - cron: "30 */5 * * *"
+    - cron: "49 1,6,11,21 * * *"
+    - cron: "19 16 * * *"
+    - cron: "33 2,7,12,22 * * *"
+    - cron: "3 17 * * *"
   workflow_dispatch:
 
 # Queue, never overlap. Two runners would both claim requested ticks — the
@@ -111,12 +149,29 @@ jobs:
           # under `bash -e`, so 124 exited the script before `code=$?` and the
           # branch calling it a success was unreachable.
           set +e
+          # Stop at the next restart slot at least ten minutes away, never
+          # later than 5h45m from now: the slots' gaps are at most 5h30m, so a
+          # run always stops at a slot, and the trigger 41 minutes before it
+          # has queued the run that takes over. See the header. Unix time
+          # counts no leap seconds, so today's UTC midnight is `now` less its
+          # remainder of a day.
+          now=$(date -u +%s)
+          midnight=$((now - now % 86400))
+          seconds=20700
+          for day in 0 1; do
+            for slot in 02:30 07:30 12:30 17:00 22:30; do
+              at=$((midnight + day * 86400 + 10#${slot%:*} * 3600 + 10#${slot#*:} * 60))
+              if [ $((at - now)) -ge 600 ] && [ $((at - now)) -lt "$seconds" ]; then
+                seconds=$((at - now))
+              fi
+            done
+          done
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
           # the tick in flight, records it on its `programme_runs` row and
           # closes the pool. A killed tick would leave a row stuck 'running'.
           # A Jev job in flight is given 35 s to finish and be recorded, inside
           # the 60 s `--kill-after` allows.
-          timeout --signal=TERM --kill-after=60 20700 python -m src.programme.main
+          timeout --signal=TERM --kill-after=60 "$seconds" python -m src.programme.main
           code=$?
           # 124 is `timeout` stopping a healthy process, which is how every
           # run is meant to end.

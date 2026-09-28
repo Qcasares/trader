@@ -36,7 +36,7 @@ import math
 import os
 import types
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -46,7 +46,8 @@ pytest.importorskip("asyncpg")
 import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
-from src.programme import jev_repo  # noqa: E402
+from src.db.repos import jobs as job_repo  # noqa: E402
+from src.programme import jev_clock, jev_repo  # noqa: E402
 from src.programme.jev_hash import text_sha256  # noqa: E402
 
 TEST_DSN = os.environ.get("TEST_DATABASE_URL", "")
@@ -1513,3 +1514,323 @@ class TestTheValidatorsAnswersFitTheLedger:
                 if name == "probabilities" and expected is not None:
                     expected = dict(expected)
                 assert row[name] == expected, (answer.question_key, name)
+
+
+# ---------------------------------------------------------------------------
+# The reads the forward clock, the planner and the harness make (phase C4)
+# ---------------------------------------------------------------------------
+#
+# Every one of these once ran on Postgres only as plumbing, or not at all:
+# the planner's unit rig fakes them, and a wrong filter in any of them passed
+# every suite (docs/08, C4's review). Each is held here to what it counts.
+
+
+async def _job(
+    conn: asyncpg.Connection,
+    kind: str,
+    *,
+    status: str = "queued",
+    key: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> uuid.UUID:
+    """A job through the shipped writer, then moved to ``status``."""
+    job_id = await job_repo.enqueue(
+        conn, kind, payload or {}, dedupe_key=key or f"test:{uuid.uuid4()}"
+    )
+    assert job_id is not None
+    if status != "queued":
+        await conn.execute("UPDATE jobs SET status = $2 WHERE id = $1", job_id, status)
+    return job_id
+
+
+class TestPendingJobs:
+    async def test_only_queued_and_running_jobs_of_the_kinds_count(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        What the planner subtracts from a lane's share: calls already coming.
+        A finished job made its call, if any, and ``requests_today`` counts
+        it; counted again here, a lane's history would use up its share for
+        good.
+        """
+        before = await jev_repo.pending_jobs(conn, ["jev_regime"])
+        for status in ("queued", "running", "succeeded", "failed", "cancelled"):
+            await _job(conn, "jev_regime", status=status)
+        await _job(conn, "jev_probe")
+        await _job(conn, "jev_reask", status="running")
+        await _job(conn, "ingest_reference_bars")
+
+        assert await jev_repo.pending_jobs(conn, ["jev_regime"]) == before + 2
+        assert await jev_repo.pending_jobs(conn, ["jev_probe", "jev_reask"]) >= 2
+        assert await jev_repo.pending_jobs(conn, ["no_such_kind"]) == 0
+
+
+class TestTheCanonicalRequestsOfADay:
+    async def test_exactly_the_ok_rows_outside_the_probe_lane_stamped_inside(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        What the re-ask sample is drawn from: the canonical answers — ``ok``,
+        outside the probe lane — stamped in the window, the start in and the
+        end out; never a probe, a refused answer or a failed call.
+        """
+        start = datetime(2026, 9, 27, tzinfo=UTC)
+        end = start + timedelta(days=1)
+        inside = await _backdated(conn, start)
+        await jev_repo.record_answers(conn, inside, ANSWERS)
+        late_in_day = await _backdated(conn, end - timedelta(microseconds=1))
+        await jev_repo.record_answers(conn, late_in_day, ANSWERS)
+        for available_at, status, overrides in (
+            (start + timedelta(hours=1), "ok", {"lane": "probe"}),
+            (start + timedelta(hours=2), "invalid", {}),
+            (start + timedelta(hours=3), "error", {}),
+            (start - timedelta(microseconds=1), "ok", {}),
+            (end, "ok", {}),
+        ):
+            await _backdated(conn, available_at, status, **overrides)
+
+        found = await jev_repo.canonical_requests_between(conn, start=start, end=end)
+
+        assert [row["id"] for row in found] == [inside, late_in_day]
+
+    async def test_only_the_valid_answers_margins_are_read(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The low-margin stratum reads the margins of valid answers alone: an
+        invalid answer's margin, where one was recorded, is not a lead the
+        model stated.
+        """
+        start = datetime(2026, 9, 27, tzinfo=UTC)
+        request_id = await _backdated(conn, start + timedelta(hours=1))
+        await jev_repo.record_answers(
+            conn,
+            request_id,
+            (ANSWERS[0], _invalid(ANSWERS[1], "tie"), ANSWERS[2]),
+        )
+
+        (row,) = await jev_repo.canonical_requests_between(
+            conn, start=start, end=start + timedelta(days=1)
+        )
+
+        assert sorted(row["valid_margins"]) == sorted(
+            [ANSWERS[0].margin, ANSWERS[2].margin]
+        )
+
+
+def _regime_answer(argmax: str, margin: float) -> Answer:
+    """The regime question answered with ``argmax`` leading by ``margin``."""
+    return dataclasses.replace(ANSWERS[0], choice=argmax, argmax=argmax, margin=margin)
+
+
+class TestProbePairs:
+    """
+    The flip report's pairs: each canonical answer beside its re-ask, one row
+    per canonical request, whatever the re-ask came to. It once joined only
+    re-asks recorded ``ok`` and answered by the canonical's model, so a
+    re-ask refused whole — the vendor answering as another model — or failed
+    was in no count, and a vendor that malformed every re-ask read as though
+    none had been made (docs/08, C4's review).
+    """
+
+    async def _canonical(self, conn: asyncpg.Connection, **overrides: Any) -> dict:
+        fields = {"request_hash": _hash(), "pack_hash": "9" * 64, **overrides}
+        request_id = await _record(
+            conn, answers=(_regime_answer("risk_on", 0.41),), **fields
+        )
+        return {"id": request_id, **fields}
+
+    async def _reask(
+        self,
+        conn: asyncpg.Connection,
+        canonical: dict,
+        status: str = "ok",
+        answers: tuple[Answer, ...] | None = None,
+        **overrides: Any,
+    ) -> int:
+        return await _record(
+            conn,
+            status,
+            answers=answers,
+            request_hash=canonical["request_hash"],
+            pack_hash=canonical["pack_hash"],
+            lane="probe",
+            **overrides,
+        )
+
+    async def test_every_re_ask_is_a_pair_whatever_it_came_to(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        flipped = await self._canonical(conn)
+        refused_whole = await self._canonical(conn)
+        failed_then_answered = await self._canonical(conn)
+        refused_before_sending = await self._canonical(conn)
+        failed = await self._canonical(conn)
+
+        answered = await self._reask(
+            conn, flipped, answers=(_regime_answer("neutral", 0.2),)
+        )
+        invalid = await self._reask(
+            conn,
+            refused_whole,
+            "invalid",
+            answers=(_invalid(ANSWERS[0], "model_mismatch"),),
+            model_answered="jev-latest",
+        )
+        await self._reask(conn, failed_then_answered, "error")
+        retried = await self._reask(
+            conn, failed_then_answered, answers=(_regime_answer("risk_on", 0.3),)
+        )
+        refused = await self._reask(conn, refused_before_sending, "refused_budget")
+        timed_out = await self._reask(conn, failed, "error")
+
+        pairs = await jev_repo.probe_pairs(
+            conn,
+            question_set="decision.regime",
+            version=1,
+            question_key="regime",
+            model=MODEL,
+        )
+
+        by_canonical = {pair["canonical_request_id"]: pair for pair in pairs}
+        expected = {
+            flipped["id"]: (answered, "ok", True, "neutral"),
+            refused_whole["id"]: (invalid, "invalid", False, "risk_on"),
+            failed_then_answered["id"]: (retried, "ok", True, "risk_on"),
+            refused_before_sending["id"]: (refused, "refused_budget", None, None),
+            failed["id"]: (timed_out, "error", None, None),
+        }
+        assert set(by_canonical) == set(expected), "a re-ask is in no pair"
+        for canonical_id, (probe_id, status, valid, argmax) in expected.items():
+            pair = by_canonical[canonical_id]
+            assert (
+                pair["probe_request_id"],
+                pair["probe_status"],
+                pair["probe_valid"],
+                pair["probe_argmax"],
+            ) == (probe_id, status, valid, argmax), canonical_id
+            assert pair["canonical_valid"] is True
+            assert pair["canonical_argmax"] == "risk_on"
+            assert pair["lag_seconds"] > 0
+
+    async def test_what_is_not_a_re_ask_of_the_answer_is_no_pair(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        A probe of another pack, a probe asking another judge, and a probe
+        stamped before the answer are not re-asks of it; nor is a canonical
+        answer of another set.
+        """
+        other_pack = await self._canonical(conn)
+        await self._reask(
+            conn,
+            {**other_pack, "pack_hash": "8" * 64},
+            answers=(_regime_answer("neutral", 0.2),),
+        )
+        other_judge = await self._canonical(conn)
+        await self._reask(
+            conn,
+            other_judge,
+            answers=(_regime_answer("neutral", 0.2),),
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
+        early = {"request_hash": _hash(), "pack_hash": "9" * 64}
+        await self._reask(conn, early, answers=(_regime_answer("neutral", 0.2),))
+        await self._canonical(conn, **early)
+        other_set = await self._canonical(conn, question_set="decision.other")
+        await self._reask(conn, other_set, answers=(_regime_answer("neutral", 0.2),))
+
+        pairs = await jev_repo.probe_pairs(
+            conn,
+            question_set="decision.regime",
+            version=1,
+            question_key="regime",
+            model=MODEL,
+        )
+
+        assert pairs == []
+
+
+class TestFirstJobSession:
+    async def test_the_series_starts_at_its_own_versions_first_job(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        A version bump starts a new series; counted from the first job of any
+        version, its sessions since the old version's first job would all
+        read as absent.
+        """
+        for session, name, version in (
+            ("2026-09-10", "decision.regime", 1),
+            ("2026-09-14", "decision.regime", 1),
+            ("2026-09-01", "decision.regime", 0),
+            ("2026-08-25", "decision.other", 1),
+            ("not-a-date", "decision.regime", 1),
+        ):
+            await _job(
+                conn,
+                "jev_regime",
+                payload={"session": session, "set": name, "version": version},
+            )
+
+        assert await jev_repo.first_job_session(
+            conn, "jev_regime", question_set="decision.regime", version=1
+        ) == date(2026, 9, 10)
+        assert await jev_repo.first_job_session(conn, "jev_regime") == (
+            date(2026, 8, 25)
+        )
+        assert await jev_repo.first_job_session(conn, "no_such_kind") is None
+
+
+class TestTheDatabaseClock:
+    async def test_it_is_the_moment_of_the_read_not_the_transaction(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        ``jev_clock.database_now`` decides whether a session may still be
+        asked. Inside a transaction ``now()`` is the moment it began, so a
+        handler holding one open across the cutoff would read a time before
+        it; ``clock_timestamp()`` is the moment of the read.
+        """
+        began = await conn.fetchval("SELECT now()")
+        first = await jev_clock.database_now(conn)
+        await asyncio.sleep(0.05)
+        second = await jev_clock.database_now(conn)
+        assert await conn.fetchval("SELECT now()") == began
+        assert began <= first < second
+
+
+class TestThePlannerOnAQueueWithHistory:
+    async def test_finished_jobs_do_not_use_up_the_share(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        At a budget of 10 the decision lane has 2 calls a day. Three finished
+        regime jobs from earlier days are history, not calls coming, so the
+        next two sessions are still planned; had they been counted as
+        waiting, the planner would never plan a session again.
+        """
+        from src.db.repos import flags as flag_repo
+        from src.programme import flags, jev_catalogue, jev_plan
+
+        for key, value in {
+            flags.PROGRAMME_ENABLED: True,
+            flags.JEV_ENABLED: True,
+            f"{flags.JEV_AREA_PREFIX}decisions": True,
+            flags.JEV_MODEL: jev_catalogue.DEFAULT_MODEL,
+            flags.JEV_DAILY_REQUEST_BUDGET: 10,
+        }.items():
+            await flag_repo.set_flag(conn, key, value, "test")
+        assert jev_catalogue.lane_budget(10, "decision") == 2
+        await conn.execute("DELETE FROM jobs WHERE kind = 'jev_regime'")
+        for status in ("succeeded", "failed", "succeeded"):
+            await _job(conn, "jev_regime", status=status)
+
+        now = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+        planned = await jev_plan.plan(conn, now=now, key_available=True)
+
+        assert [key for key in planned if key.startswith("jev_regime")] == [
+            "jev_regime:decision.regime@1:2026-09-28",
+            "jev_regime:decision.regime@1:2026-09-29",
+        ]

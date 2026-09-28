@@ -715,9 +715,17 @@ export interface DailyReport {
   data_health: {
     symbols: number;
     rows: number;
+    /**
+     * The traded universe's: the newest session every symbol an enabled
+     * deployment of the operator's trades has reached (docs/08 open item 38).
+     */
     latest_session: string | null;
     sessions_behind: number | null;
     note: string | null;
+    /** Optional: an API from before the traded universe sends none of these. */
+    traded_symbols?: string[];
+    missing_symbols?: string[];
+    unreadable_deployments?: string[];
   };
   required_actions: string[];
   /** Sections §8.11 asks for that this system cannot produce, and why. */
