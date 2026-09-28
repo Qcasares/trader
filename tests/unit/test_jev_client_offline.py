@@ -613,6 +613,25 @@ _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 @dataclass(frozen=True)
+class Seam:
+    """
+    A test seam production must never use: the module that defines it, the
+    function every scan must find it on, and the parameter itself. The scan
+    below takes one, so the web fetcher's ``session_factory`` is held by the
+    very code that holds this client's transport
+    (``tests/unit/test_web_fetch.py::TestTheSeam``).
+    """
+
+    module: str
+    function: str
+    parameter: str
+
+
+#: The client's transport, the seam this scan was written for.
+TRANSPORT_SEAM = Seam(SEAM_MODULE, SEAM_FUNCTION, SEAM_PARAMETER)
+
+
+@dataclass(frozen=True)
 class _Param:
     """A seam parameter: its name, and its position if it can be passed by one."""
 
@@ -741,17 +760,17 @@ def _rebinds(fn: ast.AST, name: str) -> bool:
 
 
 def _forwarded(
-    module: _Module, call: ast.Call, value: ast.expr
+    module: _Module, call: ast.Call, value: ast.expr, parameter: str = SEAM_PARAMETER
 ) -> tuple[tuple[str, str], _Param] | str:
     """
     The function forwarding ``value`` and the parameter it forwards; or, when
     ``value`` is not a forwarded seam, why not.
     """
     if not isinstance(value, ast.Name):
-        return f"passes {ast.unparse(value)} as the transport"
+        return f"passes {ast.unparse(value)} as the {parameter}"
     fn = module.enclosing(call)
     if fn is None:
-        return f"passes {value.id}, a module-level name, as the transport"
+        return f"passes {value.id}, a module-level name, as the {parameter}"
     if not isinstance(fn, _FUNCTIONS) or module.parents.get(fn) is not module.tree:
         return (
             f"forwards {value.id} from a lambda, a method or a nested function, "
@@ -769,11 +788,14 @@ def _forwarded(
 
 
 def _seam_scan(
-    modules: Mapping[str, _Module],
+    modules: Mapping[str, _Module], seam: Seam = TRANSPORT_SEAM
 ) -> tuple[list[str], dict[tuple[str, str], _Param]]:
     """
     Every place in ``modules`` that could hand the client a transport, and
-    every seam followed to find them.
+    every seam followed to find them. ``seam`` names another module, function
+    and parameter to hold the same way — the web fetcher's
+    ``session_factory`` — and the words below read "transport" and "client"
+    for its parameter and its module.
 
     A seam is a function whose transport parameter reaches the client: each
     client function that takes one to begin with, then every function that
@@ -786,29 +808,29 @@ def _seam_scan(
     cannot be read.
     """
     offences: set[str] = set()
-    client = modules.get(SEAM_MODULE)
-    if client is None or SEAM_FUNCTION not in client.functions:
-        return [f"{SEAM_MODULE}.{SEAM_FUNCTION} is not defined"], {}
+    client = modules.get(seam.module)
+    if client is None or seam.function not in client.functions:
+        return [f"{seam.module}.{seam.function} is not defined"], {}
     roots = {
-        (SEAM_MODULE, name): fn
+        (seam.module, name): fn
         for name, fn in client.functions.items()
-        if SEAM_PARAMETER in _parameters(fn)
+        if seam.parameter in _parameters(fn)
     }
-    if (SEAM_MODULE, SEAM_FUNCTION) not in roots:
-        roots[(SEAM_MODULE, SEAM_FUNCTION)] = client.functions[SEAM_FUNCTION]
+    if (seam.module, seam.function) not in roots:
+        roots[(seam.module, seam.function)] = client.functions[seam.function]
     for (_, name), root in roots.items():
-        position, default = _parameters(root).get(SEAM_PARAMETER, (0, None))
+        position, default = _parameters(root).get(seam.parameter, (0, None))
         if (
             position is not None
             or not _is_none(default)
-            or _rebinds(root, SEAM_PARAMETER)
+            or _rebinds(root, seam.parameter)
         ):
             offences.add(
-                f"{SEAM_MODULE}.{name} must take {SEAM_PARAMETER} as a "
+                f"{seam.module}.{name} must take {seam.parameter} as a "
                 "keyword-only parameter defaulting to None, and never rebind it"
             )
 
-    seams = {target: _Param(SEAM_PARAMETER, None) for target in roots}
+    seams = {target: _Param(seam.parameter, None) for target in roots}
     grown = True
     while grown:
         grown = False
@@ -825,16 +847,16 @@ def _seam_scan(
                 ):
                     offences.add(f"{where}: spreads arguments into {'.'.join(target)}")
                     continue
-                seam = seams[target]
+                taken = seams[target]
                 value = next(
-                    (k.value for k in call.keywords if k.arg == seam.name), None
+                    (k.value for k in call.keywords if k.arg == taken.name), None
                 )
-                if value is None and seam.position is not None:
-                    if len(call.args) > seam.position:
-                        value = call.args[seam.position]
+                if value is None and taken.position is not None:
+                    if len(call.args) > taken.position:
+                        value = call.args[taken.position]
                 if value is None or _is_none(value):
                     continue
-                forwarded = _forwarded(module, call, value)
+                forwarded = _forwarded(module, call, value, seam.parameter)
                 if isinstance(forwarded, str):
                     offences.add(f"{where}: {forwarded}")
                 elif forwarded[0] not in seams:
@@ -842,12 +864,13 @@ def _seam_scan(
                     grown = True
 
     names = {name for _, name in roots}
+    holder = seam.module.rpartition(".")[2]
     for module in modules.values():
         for node in ast.walk(module.tree):
-            if _fetches_the_client_by_name(module, node, names):
+            if _fetches_the_client_by_name(module, node, names, seam.module):
                 offences.add(
-                    f"{module.path}:{node.lineno}: reaches the client through "
-                    "getattr, so the transport it is given cannot be read"
+                    f"{module.path}:{node.lineno}: reaches {holder} through "
+                    f"getattr, so the {seam.parameter} it is given cannot be read"
                 )
             if not isinstance(node, (ast.Name, ast.Attribute)):
                 continue
@@ -857,23 +880,23 @@ def _seam_scan(
             parent = module.parents.get(node)
             if not (isinstance(parent, ast.Call) and parent.func is node):
                 offences.add(
-                    f"{module.path}:{node.lineno}: names jev_client.{target[1]} "
-                    "other than to call it, so the transport it is given cannot "
-                    "be read"
+                    f"{module.path}:{node.lineno}: names {holder}.{target[1]} "
+                    f"other than to call it, so the {seam.parameter} it is given "
+                    "cannot be read"
                 )
     return sorted(offences), seams
 
 
 def _fetches_the_client_by_name(
-    module: _Module, node: ast.AST, names: set[str]
+    module: _Module, node: ast.AST, names: set[str], holder: str = SEAM_MODULE
 ) -> bool:
-    """Whether ``node`` is ``getattr(<the client module>, "<a seam>", ...)``."""
+    """Whether ``node`` is ``getattr(<the seam's module>, "<a seam>", ...)``."""
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "getattr"
         and len(node.args) >= 2
-        and module.dotted(node.args[0]) == SEAM_MODULE
+        and module.dotted(node.args[0]) == holder
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value in names
     )

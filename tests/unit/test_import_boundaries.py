@@ -210,9 +210,12 @@ ORDER_CAPABLE_MODULES = ("src.execution", "src.worker")
 #:
 #: ``client`` and ``jev_client`` hold the SDKs. ``author`` and ``panel`` import
 #: ``client`` at module level, ``tick`` and ``main`` import those, and
-#: ``jev_lane`` imports ``jev_client``. Matching is on the *imported name*, not
-#: on a file being present, which is how ``from src.programme import
-#: jev_client`` was refused in phase A, before the module existed.
+#: ``jev_lane`` imports ``jev_client``. ``web_fetch`` holds no model client: it
+#: is the programme's road to the open web, and the API, which commands the
+#: worker and holds the broker keys, has no business fetching a page an
+#: outsider wrote. Matching is on the *imported name*, not on a file being
+#: present, which is how ``from src.programme import jev_client`` was refused in
+#: phase A, before the module existed.
 RUNNER_ONLY = (
     "src.programme.tick",
     "src.programme.author",
@@ -221,6 +224,7 @@ RUNNER_ONLY = (
     "src.programme.panel",
     "src.programme.jev_client",
     "src.programme.jev_lane",
+    "src.programme.web_fetch",
 )
 
 #: The commentary layer. It imports its client lazily, so it is a route to a
@@ -2550,3 +2554,243 @@ def test_the_sdk_importer_scan_finds_each_spelling(source: str) -> None:
         }
     )
     assert _sdk_importers(graph) == {"src.programme.tick", SDK_IMPORTER}
+
+
+# ---------------------------------------------------------------------------
+# One road to the web
+# ---------------------------------------------------------------------------
+
+#: The one module of the programme that may import ``aiohttp``: the web
+#: fetcher, where every control on what is fetched is applied — the
+#: allow-list by identity, no redirects, no environment, global addresses
+#: only, verified TLS, a body capped as it arrives and as it inflates. A
+#: second importer would reach the web with none of them.
+WEB_FETCHER = "src.programme.web_fetch"
+
+#: The pure half: the allow-list, the parser, the normaliser and the code
+#: screen, which the API may import to show them.
+WEB_SOURCES = "src.programme.web_sources"
+
+
+def _importers(graph: ImportGraph, name: str, package: str) -> set[str]:
+    """The modules of ``package`` that import ``name`` or anything under it."""
+    return {
+        module
+        for module, names in graph.names.items()
+        if _matches(module, (package,)) and any(_matches(n, (name,)) for n in names)
+    }
+
+
+def test_only_the_web_fetcher_imports_aiohttp_in_the_programme() -> None:
+    """
+    ``aiohttp`` reaches any host it is given. Inside ``src/programme`` it is
+    imported by the fetcher alone; the process boundary already keeps the
+    fetcher out of the API and the worker (``RUNNER_ONLY``).
+    """
+    importers = _importers(_real_graph(), "aiohttp", f"src.{MODEL_HOLDING_PACKAGE}")
+    assert importers == {WEB_FETCHER}, importers
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import aiohttp",
+        "import aiohttp.web",
+        "from aiohttp import ClientSession",
+        "from aiohttp.abc import AbstractResolver",
+        "def f():\n    import aiohttp",
+        "import importlib\nclient = importlib.import_module('aiohttp')",
+    ],
+)
+def test_the_aiohttp_importer_scan_finds_each_spelling(source: str) -> None:
+    graph = _build_graph(
+        {
+            "src.programme.tick": (source, False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    assert _importers(graph, "aiohttp", "src.programme") == {
+        "src.programme.tick",
+        WEB_FETCHER,
+    }
+
+
+def _aiohttp_routes(graph: ImportGraph) -> list[str]:
+    """
+    Every way a module of the programme other than the fetcher can reach
+    ``aiohttp`` with none of the fetcher's controls: by reaching a module of
+    the tree that imports it — ``src.bankr_client`` does — along any route that
+    does not pass through the fetcher; by taking the name from such a module,
+    the fetcher itself included (``from src.programme.web_fetch import
+    aiohttp``); or by reading it off one as an attribute (``web_fetch.aiohttp``).
+    A module that imports ``aiohttp`` itself is the rule above's to find.
+    """
+    holders = {
+        module
+        for module, names in graph.names.items()
+        if any(_matches(name, ("aiohttp",)) for name in names)
+    }
+    starts = [
+        module
+        for module in graph.names
+        if _matches(module, (f"src.{MODEL_HOLDING_PACKAGE}",)) and module != WEB_FETCHER
+    ]
+    parents: dict[str, str | None] = dict.fromkeys(starts)
+    queue = deque(starts)
+    while queue:
+        module = queue.popleft()
+        for target in sorted(graph.edges[module]):
+            if target != WEB_FETCHER and target not in parents:
+                parents[target] = module
+                queue.append(target)
+    offences: list[str] = []
+    for module in sorted(parents):
+        route = _route(parents, module)
+        if module in holders and parents[module] is not None:
+            offences.append(f"{route} imports aiohttp")
+        for holder in sorted(holders):
+            if any(_matches(n, (f"{holder}.aiohttp",)) for n in graph.names[module]):
+                offences.append(f"{route} takes aiohttp from {holder}")
+        if module in starts:
+            for node in ast.walk(ast.parse(graph.sources[module])):
+                if isinstance(node, ast.Attribute) and node.attr == "aiohttp":
+                    offences.append(f"{module}:{node.lineno} reads .aiohttp")
+    return offences
+
+
+def test_no_programme_module_reaches_aiohttp_but_through_the_fetcher() -> None:
+    """
+    A second importer would reach the web with none of the fetcher's
+    controls, and importing is not the only way to be one: the scan above
+    counted only names that begin ``aiohttp``, and a module that took it from
+    ``src.bankr_client`` — or, once the ingest job may import the fetcher,
+    from the fetcher — built a bare ``ClientSession`` with every test green.
+    """
+    offences = _aiohttp_routes(_real_graph())
+    assert not offences, "\n".join(offences)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f():\n    from src.bankr_client import aiohttp as http\n"
+        "    return http.ClientSession()",
+        "import src.bankr_client",
+        "from src import bankr_client",
+        "from src.programme.web_fetch import aiohttp",
+        "from src.programme import web_fetch\nweb_fetch.aiohttp.ClientSession()",
+        "import src.programme.web_fetch as w\nsession = w.aiohttp.ClientSession()",
+    ],
+)
+def test_the_aiohttp_route_scan_finds_each_spelling(source: str) -> None:
+    graph = _build_graph(
+        {
+            "src.programme.jev_repo": (source, False),
+            "src.bankr_client": ("import aiohttp", False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    assert _aiohttp_routes(graph), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from src.programme import web_fetch\nFETCH = web_fetch.fetch",
+        "from src.programme.web_fetch import fetch",
+        "import src.programme.web_fetch",
+    ],
+)
+def test_the_aiohttp_route_scan_lets_the_fetcher_be_imported(source: str) -> None:
+    """The ingest job (C6) is to import the fetcher, and that is its road."""
+    graph = _build_graph(
+        {
+            "src.programme.web_ingest": (source, False),
+            "src.bankr_client": ("import aiohttp", False),
+            WEB_FETCHER: ("import aiohttp", False),
+        }
+    )
+    assert _aiohttp_routes(graph) == []
+
+
+def test_nothing_imports_the_web_fetcher_yet() -> None:
+    """
+    The fetcher lands dark (docs/08, "Phase C, as built", C5): nothing in the
+    tree or its entry points loads it. The ingest job (C6) is to be its one
+    importer, and this test is where that becomes a rule rather than an
+    absence.
+    """
+    graph = _real_graph()
+    assert WEB_FETCHER in graph.names, "the scan no longer sees the fetcher"
+    importers = sorted(
+        module
+        for module, targets in graph.edges.items()
+        if WEB_FETCHER in targets and module != WEB_FETCHER
+    )
+    assert importers == [], importers
+
+
+def test_the_web_sources_reach_nothing_that_fetches_stores_or_asks() -> None:
+    """
+    The pure half, walked: no HTTP client, no socket, no database, no model
+    SDK, not the features, and none of the runner — the lane, the clients,
+    the modules that prompt a generative model, and the fetcher. So the API
+    may import it, and a module the API loads stays one that cannot fetch.
+    """
+    graph = _real_graph()
+    forbidden = (
+        *FORBIDDEN_PREFIXES,
+        *RUNNER_ONLY,
+        "aiohttp",
+        "asyncpg",
+        "httpx",
+        "httpx2",
+        "requests",
+        "urllib3",
+        "yfinance",
+        "socket",
+        "ssl",
+        "src.db",
+        "src.programme.jev_features",
+    )
+    assert WEB_FETCHER in RUNNER_ONLY
+    reached = _walk(graph, [WEB_SOURCES])
+    assert "src.programme.jev_hash" in reached, "the walk is reading nothing"
+    offenders = _reachable_offences(graph, [WEB_SOURCES], forbidden)
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_web_fetcher_reaches_no_model_no_database_and_no_runner() -> None:
+    """
+    The fetcher reads the web and writes nothing: no database, no model SDK,
+    no other HTTP client, and none of the programme's runner — the lane, the
+    client, or the modules that prompt a generative model.
+    """
+    graph = _real_graph()
+    forbidden = (
+        *FORBIDDEN_PREFIXES,
+        "asyncpg",
+        "httpx",
+        "httpx2",
+        "requests",
+        "urllib3",
+        "src.db",
+        *(m for m in RUNNER_ONLY if m != WEB_FETCHER),
+    )
+    reached = _walk(graph, [WEB_FETCHER])
+    assert WEB_SOURCES in reached, "the walk is reading nothing"
+    offenders = _reachable_offences(graph, [WEB_FETCHER], forbidden)
+    assert not offenders, "\n".join(offenders)
+
+
+def test_safety_rule_5_names_every_runner_only_module() -> None:
+    """
+    CLAUDE.md's Safety rule 5 names the programme's runner: what the API may
+    not import. It once named four of the seven modules this file held to it
+    (docs/08 open item 11); read from the file, the two cannot drift again.
+    """
+    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    match = re.search(r"may not import its runner \(([^)]*)\)", text)
+    assert match, "CLAUDE.md no longer names the runner in Safety rule 5"
+    named = set(re.findall(r"`([a-z_]+)`", match.group(1)))
+    assert named == {module.rpartition(".")[2] for module in RUNNER_ONLY}, named

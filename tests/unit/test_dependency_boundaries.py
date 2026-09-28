@@ -2795,6 +2795,30 @@ def test_the_jev_client_imports_only_what_the_programme_declares() -> None:
     )
 
 
+#: The programme's one road to the web.
+WEB_FETCH = ROOT / "src" / "programme" / "web_fetch.py"
+
+
+def test_the_web_fetcher_imports_only_what_the_programme_declares() -> None:
+    """
+    ``web_fetch`` runs in the programme's process and imports ``aiohttp`` by
+    name. The programme's file declares it through ``requirements.txt``, which
+    it includes, where the Alpaca adapter needs it too; were the adapter ever
+    to move to another client and the line to go, the lock would stop
+    installing ``aiohttp`` and the fetcher would stop importing, with nothing
+    here having said it needed it.
+    """
+    imported = {_normalise(name) for name in _third_party_imports(WEB_FETCH)}
+    assert "aiohttp" in imported, imported
+    declared = {e.line.name for e in _read(PROGRAMME_REQUIREMENTS) if e.line.name}
+    missing = sorted(imported - declared)
+    assert not missing, (
+        f"{_label(WEB_FETCH)} imports {missing}, which "
+        f"{PROGRAMME_REQUIREMENTS.name} does not declare; declare it and "
+        "regenerate the lock with the command at its top"
+    )
+
+
 def test_the_lock_was_resolved_for_the_python_that_installs_it() -> None:
     """
     The image's base tag, programme.yml's interpreter and ``ci.yml``'s

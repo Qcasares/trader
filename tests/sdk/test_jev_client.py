@@ -16,7 +16,9 @@ here by setting the environment or the server up to exploit it:
 * retries are counted at the server, and ``Retry-After`` is sent and not
   deferred to;
 * the SDK's logger is set to DEBUG, before and after a call and in a fresh
-  process, and nothing it would log reaches a handler.
+  process, and nothing it would log reaches a handler;
+* with no transport, as production calls it, a server whose certificate no
+  trusted authority signed is refused before a request is sent.
 
 Every request asserted on is the one the client built for
 ``https://api.typesafe.ai``, recorded by ``conftest.Redirect`` before a copy
@@ -32,6 +34,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +51,11 @@ from src.programme import (  # noqa: E402
     jev_validate,
 )
 from src.programme.jev_client import JevCall  # noqa: E402
+from tests.fakes.web_server import (  # noqa: E402
+    Authority,
+    FakeHTTPS,
+)
+from tests.fakes.web_server import Reply as WebReply  # noqa: E402
 from tests.sdk.conftest import (  # noqa: E402
     ENDPOINT,
     FakeTypeSafe,
@@ -1043,3 +1051,89 @@ print(json.dumps({{"status": call.http_status, "records": records}}))
         assert leaks == []
         assert STATE_MARKER not in done.stderr
         assert outcome["records"], "the capture saw nothing at all"
+
+
+# ---------------------------------------------------------------------------
+# TLS, as production calls the client
+# ---------------------------------------------------------------------------
+
+#: Every variable that would send the client through a proxy, which would
+#: answer the handshake itself.
+PROXY_VARIABLES = (
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+)
+
+
+class TestTLSIsVerifiedWithNoTransport:
+    """
+    Every other test here passes a transport, and a transport decides how TLS
+    is done, so none of them sees how the client is built for production.
+    ``verify=ssl.SSLContext()`` added to either of ``jev_client``'s
+    ``httpx2.AsyncClient`` calls turned certificate and host checks off for
+    every call that carries the key, and every suite stayed green. Here the
+    client is called as production calls it, with no transport, against a
+    local server whose certificate an authority nobody trusts signed: it must
+    refuse the handshake, so no request — no key — reaches the server.
+    """
+
+    @pytest.fixture
+    async def untrusted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> AsyncIterator[tuple[FakeHTTPS, Authority]]:
+        authority = Authority()
+        try:
+            async with FakeHTTPS(
+                authority.server_context("localhost"), WebReply(body=b"{}")
+            ) as fake:
+                for variable in PROXY_VARIABLES:
+                    monkeypatch.delenv(variable, raising=False)
+                monkeypatch.setattr(
+                    jev_catalogue, "JEV_BASE_URL", f"https://localhost:{fake.port}"
+                )
+                yield fake, authority
+        finally:
+            authority.close()
+
+    async def test_the_server_answers_a_client_that_trusts_its_authority(
+        self, untrusted: tuple[FakeHTTPS, Authority]
+    ) -> None:
+        """The control: the same server, reached by a client that verifies."""
+        import httpx2
+
+        fake, authority = untrusted
+        async with httpx2.AsyncClient(
+            verify=authority.client_context(), trust_env=False
+        ) as client:
+            response = await client.get(f"https://localhost:{fake.port}/")
+        assert response.status_code == 200
+        assert len(fake.requests) == 1
+
+    async def test_a_question_is_never_sent_over_an_unverified_connection(
+        self, untrusted: tuple[FakeHTTPS, Authority]
+    ) -> None:
+        fake, _ = untrusted
+        call = await jev_client.ask(
+            api_key=KEY,
+            model=MODEL,
+            state=PROBE.dump_state(PROBE.state_model()),
+            questions=PROBE.as_request_questions(),
+        )
+        assert (call.http_status, call.error_kind) == (None, "connection")
+        assert fake.requests == []
+
+    async def test_a_listing_is_never_asked_over_an_unverified_connection(
+        self, untrusted: tuple[FakeHTTPS, Authority]
+    ) -> None:
+        fake, _ = untrusted
+        models = await jev_client.list_models(api_key=KEY)
+        assert (models.http_status, models.names, models.error_kind) == (
+            None,
+            None,
+            "connection",
+        )
+        assert fake.requests == []
