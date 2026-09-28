@@ -1141,10 +1141,19 @@ class TestTheDailyReport:
         assert all(reason.strip() for reason in unavailable.values())
 
     def test_it_reports_no_data_as_an_action(self, authed) -> None:
-        report = authed.get("/api/v1/programme/report").json()
-        assert any(
-            "market data" in action for action in report["required_actions"]
-        )
+        """
+        Asked of a day before any bar this suite stores. The report's latest
+        session is the traded universe's now (docs/08 open item 38), so on a
+        database holding other tests' bars and no enabled deployment of the
+        operator's, today's report rightly names no market-data action at
+        all: nothing reads those bars for a decision. Having no data at all
+        is a property of the day asked about, not of whichever rows earlier
+        tests left behind. The traded universe's own cases are
+        ``tests/unit/test_report_data_health.py``'s.
+        """
+        report = authed.get("/api/v1/programme/report?on=1990-01-02").json()
+        assert report["data_health"]["rows"] == 0
+        assert "no market data ingested at all" in report["required_actions"]
 
     def test_a_specific_session_can_be_requested(self, authed) -> None:
         report = authed.get("/api/v1/programme/report?on=2024-01-02").json()

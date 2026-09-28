@@ -340,6 +340,21 @@ class _Ledger:
             rows.append(row)
         return rows
 
+    # The reads record_signal makes (phase C4). The write itself is SQL of its
+    # own, which the rig's connection refuses, so a test here reaches it only
+    # to show it was refused first; the insert is the integration suite's.
+
+    async def get_request(self, conn, request_id):
+        self.log.append("get_request")
+        for row in self.requests:
+            if row["id"] == request_id:
+                return {k: v for k, v in row.items() if not k.startswith("_")}
+        return None
+
+    async def get_signal(self, conn, *, signal, symbol, session):
+        self.log.append("get_signal")
+        return None
+
     # For the assertions -------------------------------------------------------
 
     @property
@@ -466,6 +481,8 @@ _LEDGER_FUNCTIONS = (
     "content_blocked",
     "content_quarantined",
     "screened_clean",
+    "get_request",
+    "get_signal",
 )
 
 
@@ -3371,22 +3388,48 @@ def _programme_imports(module: str) -> set[str]:
     return {m for m in found if (SRC / "programme" / f"{m}.py").exists()}
 
 
-def test_the_lane_never_reaches_the_programmes_other_model() -> None:
-    """
-    docs/08: the lanes never import ``client.py``, so on the signal path the
-    cascade ends at Jev. Nothing the lane loads may hold the Anthropic client,
-    or the code that prompts it.
-    """
+def _programme_closure(start: str) -> set[str]:
+    """Every ``src.programme`` module ``start`` loads, itself included."""
     seen: set[str] = set()
-    todo = ["jev_lane"]
+    todo = [start]
     while todo:
         module = todo.pop()
         if module not in seen:
             seen.add(module)
             todo += sorted(_programme_imports(module))
-    assert "jev_client" in seen, "the walk is reading nothing"
-    reached = seen & {"client", "author", "panel", "tick"}
-    assert not reached, f"jev_lane reaches {sorted(reached)}"
+    return seen
+
+
+def test_the_lane_never_reaches_the_programmes_other_model() -> None:
+    """
+    docs/08: the lanes never import ``client.py``, so on the signal path the
+    cascade ends at Jev. Nothing any Jev module loads — the lane, and from phase
+    C4 the forward clock, the planner, the jobs and the harness — may hold the
+    Anthropic client, or the code that prompts it: no Jev answer, and no web
+    text a Jev lane reads, reaches a generative model's prompt through them.
+    The web modules are walked too (design part 9): the page they fetch and
+    parse is an outsider's text, and a road from it to a generative model's
+    prompt would carry whatever it says there.
+    """
+    programme = SRC / "programme"
+    starts = sorted(
+        path.stem
+        for pattern in ("jev_*.py", "web_*.py")
+        for path in programme.glob(pattern)
+    )
+    assert {
+        "jev_lane",
+        "jev_forward",
+        "jev_plan",
+        "jev_jobs",
+        "jev_eval",
+        "web_sources",
+        "web_fetch",
+    } <= set(starts), starts
+    assert "jev_client" in _programme_closure("jev_lane"), "the walk reads nothing"
+    for start in starts:
+        reached = _programme_closure(start) & {"client", "author", "panel", "tick"}
+        assert not reached, f"{start} reaches {sorted(reached)}"
 
 
 def test_the_fakes_take_what_the_real_functions_take() -> None:
@@ -3426,3 +3469,337 @@ def test_every_ledger_function_the_lane_calls_is_faked() -> None:
         and node.func.value.id == "jev_repo"
     }
     assert called - {"is_canonical_conflict"} == set(_LEDGER_FUNCTIONS)
+
+
+# ---------------------------------------------------------------------------
+# Signals (phase C4)
+# ---------------------------------------------------------------------------
+#
+# ``record_signal`` is the one writer of ``jev_signals``. Its refusals are
+# checked here, before any write; what the database then makes of the row —
+# the trigger that holds it to its answer, the stamp, ``backfilled`` — is
+# ``tests/integration/test_jev_forward.py``'s.
+
+REGIME_ESCAPE = "insufficient_evidence"
+REGIME_OPTIONS = tuple(DECISION_REGIME.as_request_questions()["regime"]["criteria"])
+SESSION = datetime(2026, 9, 25).date()
+CUTOFF = datetime(2026, 9, 25, 21, 0, tzinfo=UTC)
+SIGNAL = "decision.regime@1:regime"
+SYMBOL = "equities=SPY;bonds=IEF;commodities=GSG"
+
+
+def _answer(
+    *,
+    valid: bool,
+    argmax: str | None = None,
+    reason: str | None = None,
+    kind: str = "choice",
+) -> ValidatedAnswer:
+    return ValidatedAnswer(
+        question_key="regime",
+        question_type=kind,
+        noul=None,
+        choice=argmax,
+        score=None,
+        probabilities=None,
+        confidence=None,
+        argmax=argmax,
+        margin=0.3 if valid else None,
+        valid=valid,
+        invalid_reason=reason,
+    )
+
+
+class TestSignalOutcome:
+    """
+    What one recorded answer says about its session: exhaustive over validity,
+    every option and every reason the validator can give.
+    """
+
+    @pytest.mark.parametrize("option", REGIME_OPTIONS)
+    def test_a_valid_answer_is_measured_unless_it_is_the_escape(
+        self, option: str
+    ) -> None:
+        status, value = jev_lane.signal_outcome(
+            _answer(valid=True, argmax=option), REGIME_ESCAPE
+        )
+        if option == REGIME_ESCAPE:
+            assert (status, value) == ("abstain", None)
+        else:
+            assert (status, value) == ("measured", option)
+
+    @pytest.mark.parametrize("reason", sorted(jev_validate.REASONS))
+    def test_every_invalid_reason(self, reason: str) -> None:
+        """
+        A tie and a choice that is not its own argmax are the model's own
+        answers, declined as abstentions (``jev_validate``); every other reason
+        is a malformation, and not measured. Neither carries a value.
+        """
+        for argmax in (None, "risk_on"):
+            status, value = jev_lane.signal_outcome(
+                _answer(valid=False, argmax=argmax, reason=reason), REGIME_ESCAPE
+            )
+            expected = (
+                "abstain" if reason in ("tie", "choice_not_argmax") else "invalid"
+            )
+            assert (status, value) == (expected, None), reason
+
+    def test_the_abstaining_reasons_are_the_validators_abstentions(self) -> None:
+        assert jev_lane.ABSTAINING_REASONS == {"tie", "choice_not_argmax"}
+        assert jev_lane.ABSTAINING_REASONS <= set(jev_validate.ANSWER_REASONS)
+
+    def test_a_noul_has_no_escape_to_abstain_by(self) -> None:
+        for argmax in ("true", "false"):
+            answer = _answer(valid=True, argmax=argmax, kind="noul")
+            assert jev_lane.signal_outcome(answer, None) == ("measured", argmax)
+
+    def test_only_a_measurement_carries_a_value(self) -> None:
+        for valid in (True, False):
+            for argmax in (*REGIME_OPTIONS, None):
+                for reason in (None, *sorted(jev_validate.REASONS)):
+                    status, value = jev_lane.signal_outcome(
+                        _answer(valid=valid, argmax=argmax, reason=reason),
+                        REGIME_ESCAPE,
+                    )
+                    assert (status == "measured") == (value is not None)
+                    assert status in ("measured", "abstain", "invalid")
+
+
+async def _record(
+    rig: Rig,
+    result: AskResult,
+    question_set: jev_questions.QuestionSet = DECISION_REGIME,
+    question_key: str = "regime",
+) -> jev_lane.SignalRecord:
+    return await jev_lane.record_signal(
+        rig.conn,
+        question_set=question_set,
+        question_key=question_key,
+        result=result,
+        signal=SIGNAL,
+        symbol=SYMBOL,
+        session=SESSION,
+        decision_cutoff=CUTOFF,
+    )
+
+
+class TestRecordSignalRefuses:
+    """
+    Only a decision-lane set of internal provenance records a signal, only
+    from a recorded response of its own, and never from a probe's. Each
+    refusal is made before anything is written: the rig's connection refuses
+    any SQL, so a refusal that came after the insert would fail as that.
+    """
+
+    @pytest.mark.parametrize("name", ["_WEB", "_TITLES", "_SCREEN"])
+    async def test_a_web_research_or_guardrail_set(
+        self, rig: Rig, test_sets: None, name: str
+    ) -> None:
+        question_set = globals()[name]
+        key = question_set.questions[0][0]
+        with pytest.raises(ValueError, match="decision-lane set of internal"):
+            await _record(rig, AskResult("ok", 1), question_set, key)
+        assert rig.ledger.log == []
+
+    async def test_the_probe_set(self, rig: Rig) -> None:
+        with pytest.raises(ValueError, match="decision-lane set of internal"):
+            await _record(rig, AskResult("ok", 1), PROBE_CONNECTIVITY, "about_the_sun")
+
+    async def test_a_copy_that_is_not_the_registered_set(self, rig: Rig) -> None:
+        copy = dataclasses.replace(DECISION_REGIME, purpose="Another purpose.")
+        with pytest.raises(ValueError, match="not the registered set"):
+            await _record(rig, AskResult("ok", 1), copy)
+
+    async def test_a_question_the_set_does_not_ask(self, rig: Rig) -> None:
+        with pytest.raises(ValueError, match="asks no question"):
+            await _record(rig, AskResult("ok", 1), question_key="mood")
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            AskResult("error", 3, error_kind="server"),
+            AskResult("refused_budget", 4),
+            AskResult("refused_limits", 5),
+            *[AskResult(status) for status in sorted(jev_lane.UNRECORDED_STATUSES)],
+            AskResult("ok", None),
+            AskResult("invalid", None),
+        ],
+        ids=lambda r: f"{r.status}-{r.request_row_id}",
+    )
+    async def test_a_status_that_recorded_no_response(
+        self, rig: Rig, result: AskResult
+    ) -> None:
+        with pytest.raises(ValueError, match="only a recorded response"):
+            await _record(rig, result)
+        assert rig.ledger.log == []
+
+    async def test_another_sets_request_row(self, rig: Rig) -> None:
+        await jev_lane.run_probe(rig.conn, KEY)
+        (row,) = rig.ledger.requests
+        with pytest.raises(ValueError, match="recorded by probe.connectivity"):
+            await _record(rig, AskResult("ok", row["id"]))
+
+    async def test_a_probe_of_its_own_set(self, rig: Rig) -> None:
+        """A probe re-asks on purpose; its answer is nobody's measurement."""
+        await _ask(rig, probe=True)
+        (row,) = rig.ledger.requests
+        assert row["lane"] == "probe"
+        with pytest.raises(ValueError, match="nobody's measurement"):
+            await _record(rig, AskResult("ok", row["id"]))
+
+    async def test_a_request_the_ledger_does_not_hold(self, rig: Rig) -> None:
+        with pytest.raises(ValueError, match="not in the ledger"):
+            await _record(rig, AskResult("ok", 99))
+
+    async def _record_about(
+        self, rig: Rig, *, session: object, decision_cutoff: datetime
+    ) -> None:
+        """A recorded answer, and a signal of it asked for with these."""
+        await _ask(rig)
+        (row,) = rig.ledger.requests
+        written = list(rig.ledger.log)
+        try:
+            await jev_lane.record_signal(
+                rig.conn,
+                question_set=DECISION_REGIME,
+                question_key="regime",
+                result=AskResult("ok", row["id"]),
+                signal=SIGNAL,
+                symbol=SYMBOL,
+                session=session,  # type: ignore[arg-type]
+                decision_cutoff=decision_cutoff,
+            )
+        finally:
+            assert rig.ledger.log == written, "a refused signal wrote"
+
+    async def test_a_session_that_is_not_a_date(self, rig: Rig) -> None:
+        """
+        asyncpg stores a datetime in the ``DATE`` column without a word:
+        01:30 UTC on Saturday is Friday evening in New York, the session's
+        own, and would be recorded under Saturday.
+        """
+        with pytest.raises(TypeError, match="session is a date"):
+            await self._record_about(
+                rig,
+                session=datetime(2026, 9, 26, 1, 30, tzinfo=UTC),
+                decision_cutoff=CUTOFF,
+            )
+
+    async def test_a_cutoff_without_a_timezone(self, rig: Rig) -> None:
+        """
+        asyncpg stores a naive datetime in the ``timestamptz`` column as UTC:
+        17:00 meant in New York would be 13:00 there, four hours early, which
+        the same-day CHECK accepts, and ``backfilled`` would be decided
+        against the wrong moment.
+        """
+        with pytest.raises(ValueError, match="timezone-aware"):
+            await self._record_about(
+                rig, session=SESSION, decision_cutoff=datetime(2026, 9, 25, 17, 0)
+            )
+
+
+class _SignalConn(_Conn):
+    """
+    The rig's connection, taking the one insert ``record_signal`` makes as
+    well, and answering it as the table would: the row's status, value and
+    answer, and ``backfilled`` false.
+    """
+
+    def __init__(self, rows: Mapping[str, str]) -> None:
+        super().__init__(rows)
+        self.inserts: list[tuple[object, ...]] = []
+
+    async def fetchrow(self, query: str, *args: object) -> Any:
+        if query == FLAG_QUERY:
+            return await super().fetchrow(query, *args)
+        assert "INSERT INTO jev_signals" in query, query
+        assert "available_at" not in query and "backfilled," not in query
+        self.inserts.append(args)
+        return {
+            "status": args[3],
+            "value": args[4],
+            "answer_id": args[5],
+            "backfilled": False,
+        }
+
+
+class TestTheSignalIsItsAnswers:
+    """
+    What a signal says about its origin — lane, provenance, pack, model — is
+    copied from the request its answer came from, and its status and value are
+    computed from the recorded answer, never taken from the caller. A replayed
+    answer is recorded like a fresh one.
+    """
+
+    async def _signal(self, rig: Rig, conn: _SignalConn, result: AskResult) -> Any:
+        return await jev_lane.record_signal(
+            conn,
+            question_set=DECISION_REGIME,
+            question_key="regime",
+            result=result,
+            signal=SIGNAL,
+            symbol=SYMBOL,
+            session=SESSION,
+            decision_cutoff=CUTOFF,
+        )
+
+    async def test_the_origin_is_copied_from_the_request(self, rig: Rig) -> None:
+        asked = await _ask(rig)
+        conn = _SignalConn(rig.conn.rows)
+        record = await self._signal(rig, conn, asked)
+        ((signal, symbol, session, status, value, answer_id, *origin, cutoff),) = (
+            conn.inserts
+        )
+        row = rig.ledger.only_request
+        assert (signal, symbol, session, cutoff) == (SIGNAL, SYMBOL, SESSION, CUTOFF)
+        assert origin == [row["lane"], row["provenance"], row["pack_hash"], MODEL]
+        assert (status, value) == ("measured", REGIME_OPTIONS[0])
+        assert answer_id == 1
+        assert record == jev_lane.SignalRecord(
+            status="measured",
+            value=REGIME_OPTIONS[0],
+            answer_id=1,
+            backfilled=False,
+            inserted=True,
+        )
+
+    async def test_a_replay_rests_on_the_canonical_answer(self, rig: Rig) -> None:
+        first = await _ask(rig)
+        again = await _ask(rig, subject_id="2026-09-28")
+        assert again.replayed and again.request_row_id == first.request_row_id
+        conn = _SignalConn(rig.conn.rows)
+        for result in (first, again):
+            await self._signal(rig, conn, result)
+        assert [args[5] for args in conn.inserts] == [1, 1]
+        assert len(rig.client.calls) == 1
+
+    async def test_a_response_refused_whole_is_an_invalid_signal(
+        self, rig: Rig
+    ) -> None:
+        rig.client.respond = lambda **kw: _call(200, _body({}, model="jev-latest"))
+        asked = await _ask(rig)
+        assert asked.status == "invalid"
+        conn = _SignalConn(rig.conn.rows)
+        record = await self._signal(rig, conn, asked)
+        assert (record.status, record.value) == ("invalid", None)
+        ((*_, model, _cutoff),) = conn.inserts
+        # The response named another model, which is why it was refused, and
+        # nothing the pin answered: the signal names what the row says answered
+        # it, else the model asked.
+        assert model == (rig.ledger.only_request["model_answered"] or MODEL)
+
+    def test_the_lane_writes_the_signals_in_one_statement(self) -> None:
+        """
+        One statement, so one set of columns: the table-boundary scan holds
+        every other file in ``src/`` to writing none
+        (``test_jev_table_boundaries.py::test_only_the_lane_writes_signals``).
+        """
+        source = (SRC / "programme" / "jev_lane.py").read_text("utf-8")
+        statements = [
+            node.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "INSERT INTO jev_signals (" in node.value
+        ]
+        assert len(statements) == 1, statements

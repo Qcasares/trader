@@ -13,8 +13,10 @@ populated it, so the live loop could never have run at all.
 ``ingest_reference_bars`` is planned by no one here. The AI programme's forward
 clock describes three reference sleeves from ``daily_bars``, and the programme
 may neither write that table nor import this module, so the programme's planner
-is to enqueue the job (phase C4) and the worker runs it, as it runs
-``shadow_decision``. Until that planner lands nothing enqueues it.
+enqueues the job (``src/programme/jev_plan.py``, from phase C4) and the worker
+runs it, as it runs ``shadow_decision``. The planner does so only while the
+programme, Jev and Jev's decisions area are switched on, with a usable pin and
+a key, and every one of those is seeded off.
 
 Each handler here is idempotent. A scheduled job may be retried, and a
 re-ingested bar or a re-written mark must produce the same row rather than a
@@ -387,8 +389,8 @@ async def run_ingest_reference_bars(
     Keep the reference sleeves' history in ``daily_bars``, for the forward
     clock.
 
-    Enqueued by the AI programme's planner once phase C4 lands, and never by
-    the session planner, so it is absent from ``SCHEDULED_KINDS``; it reaches
+    Enqueued by the AI programme's planner (``jev_plan``, from phase C4), and
+    never by the session planner, so it is absent from ``SCHEDULED_KINDS``; it reaches
     no venue, so it is not kill-gated, as ``ingest_bars`` is not; and it is the
     worker's, so the API cannot drain it. Its queue priority,
     ``REFERENCE_PRIORITY``, orders it behind every kind on the live path when

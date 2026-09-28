@@ -41,6 +41,13 @@ the programme off stops Jev's spend as it stops the tick's, and switching Jev
 off stops Jev without stopping the tick. Either one off and nothing is claimed,
 so a queued job waits, its attempts untouched, for both to be on, rather than
 failing while an operator has them off.
+
+Before each drain, at most once a minute, the planner puts whatever Jev work is
+due in the queue (``jev_plan``): the daily probe, the forward clock's jobs and
+the re-asks. On its own connection and inside its own ``try``, so a planner
+that fails costs a minute of planning and never a drain; and dark on its own
+terms, planning nothing unless the programme, Jev, a usable pin and a key all
+allow it. The drain and its one claim are what they were.
 """
 
 from __future__ import annotations
@@ -52,6 +59,7 @@ import signal
 import socket
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -59,7 +67,14 @@ import asyncpg
 from src.config import get_settings, require_database_url
 from src.db.repos import jobs as job_repo
 from src.db.repos import secrets as secret_repo
-from src.programme import jev_catalogue, jev_lane, repo
+from src.programme import (
+    jev_catalogue,
+    jev_forward,
+    jev_jobs,
+    jev_lane,
+    jev_plan,
+    repo,
+)
 from src.programme.flags import (
     PROGRAMME_WORKER_ID,
     jev_enabled,
@@ -67,6 +82,7 @@ from src.programme.flags import (
     programme_enabled,
     tick_seconds,
 )
+from src.programme.job_errors import RETRIED_ERROR_KINDS, JobFailedError
 from src.programme.tick import run_tick
 
 logger = logging.getLogger(__name__)
@@ -84,6 +100,11 @@ REQUEST_POLL_SECONDS = 5.0
 #: this, and fifteen seconds is short beside the work it starts.
 JEV_POLL_SECONDS = 15.0
 
+#: The least time between two passes of the Jev planner. The planner only
+#: enqueues, and the work it plans is due at minutes after a close, so once a
+#: minute keeps the queue current without reading the switches every poll.
+JEV_PLAN_SECONDS = 60.0
+
 #: How often a running Jev job's lease is pushed out. Well under
 #: ``job_repo.DEFAULT_LEASE``, because the worker's sweep returns any job whose
 #: lease lapses to the queue, whoever owns it, and a job run twice is a call
@@ -92,6 +113,8 @@ JEV_LEASE_REFRESH_SECONDS = 60.0
 
 #: Connections: one each for the tick, the heartbeat, a Jev job and that job's
 #: lease, and one spare so a slow acquire is never the thing a pass waits on.
+#: The Jev planner runs between jobs, in the same loop, so it takes the Jev
+#: job's connection and needs none of its own.
 POOL_MAX_SIZE = 5
 
 #: How long shutdown waits for a Jev job already running before cancelling it.
@@ -109,26 +132,12 @@ JevHandler = Callable[
 ]
 
 
-class JobFailedError(Exception):
-    """
-    A handler's verdict that its job failed, and whether asking again could
-    change it.
-
-    Raised rather than returned, so that a job whose work came to nothing is
-    never recorded as ``succeeded`` with its reason buried in a result nobody
-    reads. The jobs page shows status and error; this puts the verdict in both.
-    """
-
-    def __init__(self, error: str, *, retry: bool) -> None:
-        super().__init__(error)
-        self.error = error
-        self.retry = retry
-
-
 #: The failed calls another attempt could change: no response, a rate limit or
 #: a vendor fault. A refused key, a refused request or an unreadable answer will
-#: be refused again.
-PROBE_RETRIED_KINDS = frozenset({"connection", "timeout", "rate_limited", "server"})
+#: be refused again. One set for every Jev job (``job_errors``), where
+#: :class:`JobFailedError` moved too, so the handlers outside this module can
+#: raise it; it is re-exported from here.
+PROBE_RETRIED_KINDS = RETRIED_ERROR_KINDS
 
 #: Why each outcome that made no call made none. Only ``disabled`` is retried:
 #: a switch turned off mid-job waits for the switch. Each of the vendor's
@@ -202,6 +211,12 @@ async def _jev_probe(
 #: table cannot disagree. No kind here may also be the worker's.
 JEV_HANDLERS: dict[str, JevHandler] = {
     "jev_probe": _jev_probe,
+    # The forward clock: one session's regime, at most one call an attempt
+    # before its cutoff, and one answer recorded at most once (jev_forward).
+    "jev_regime": jev_forward.collect,
+    # A canonical answer asked again, as a probe, to measure how often answers
+    # flip (jev_jobs); the pre-registered sample, planned by jev_plan.
+    "jev_reask": jev_jobs.run_reask,
 }
 
 
@@ -225,6 +240,7 @@ class Programme:
         self._pool: asyncpg.Pool | None = None
         self._stopping = asyncio.Event()
         self._last_scheduled = 0.0
+        self._last_planned: float | None = None
 
     async def start(self) -> None:
         require_database_url(get_settings())
@@ -374,8 +390,12 @@ class Programme:
     # ------------------------------------------------------------------
 
     async def _jev_loop(self) -> None:
-        """Run the Jev jobs in the queue, and look again when there are none."""
+        """
+        Plan whatever Jev work is due, run the Jev jobs in the queue, and look
+        again when there are none.
+        """
         while not self._stopping.is_set():
+            await self._plan_jev_when_due()
             try:
                 ran = await self._drain_jev()
             except asyncio.CancelledError:
@@ -385,6 +405,38 @@ class Programme:
                 ran = False
             if not ran:
                 await self._wait(JEV_POLL_SECONDS)
+
+    async def _plan_jev_when_due(self) -> None:
+        """
+        Run the planner if :data:`JEV_PLAN_SECONDS` have passed since it last
+        ran. In its own ``try``: a planner that fails is logged and the drain
+        goes ahead, since a job already queued does not need planning again.
+        """
+        now = asyncio.get_running_loop().time()
+        if self._last_planned is not None and (
+            now - self._last_planned < JEV_PLAN_SECONDS
+        ):
+            return
+        self._last_planned = now
+        try:
+            await self._plan_jev()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the drain outlives the planner
+            logger.exception("Jev planner error: %s", exc)
+
+    async def _plan_jev(self) -> list[str]:
+        """
+        One pass of the planner, on a connection of its own. The TypeSafe key
+        is resolved only to learn whether one exists: the planner plans nothing
+        without one, and is never handed it.
+        """
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            key_available = bool(await self._resolve_typesafe_key(conn))
+            return await jev_plan.plan(
+                conn, now=datetime.now(UTC), key_available=key_available
+            )
 
     async def _drain_jev(self) -> bool:
         """Run every Jev job currently available. Returns whether any ran."""

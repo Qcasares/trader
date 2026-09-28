@@ -30,7 +30,7 @@ import ast
 import re
 import subprocess
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +39,7 @@ import pytest
 
 from src.core.panel import LookAheadError, PricePanel
 from src.data import SyntheticSource, bars_to_rows
+from src.data.reference import REFERENCE_WINDOW_DAYS
 from src.programme import jev_features as features
 from src.programme import jev_questions as jq
 
@@ -398,6 +399,120 @@ class TestTheMapping:
             features.regime_state(panel, _last(panel), sleeves)  # type: ignore[arg-type]
 
 
+def _without_bar(symbol: str, on_last: bool = True, adjusted_only: bool = False):
+    """A flat market in which ``symbol`` has no bar, or no adjusted close, on
+    the last session."""
+    sessions = pd.bdate_range("2010-01-04", periods=N)
+    rows = []
+    for name in ("AAA", "BBB", "CCC"):
+        for day, close in zip(sessions, flat(), strict=True):
+            last = day == sessions[-1]
+            if name == symbol and last and on_last and not adjusted_only:
+                continue
+            gone = name == symbol and last and adjusted_only
+            adjusted = float("nan") if gone else close
+            rows.append((name, day.date(), close, close, close, close, 1e6, adjusted))
+    return PricePanel.from_bars(rows), sessions[-1].date()
+
+
+def _problem_cases() -> list[tuple[str, PricePanel, date, dict[str, str], str | None]]:
+    """Panels, sessions and sleeves, each with the reason expected, or None."""
+    whole = _panel({"AAA": flat(), "BBB": flat(), "CCC": flat()})
+    short = features.MIN_HISTORY_SESSIONS - 178
+    shorter = _panel({"AAA": flat(), "BBB": flat(), "CCC": flat(short)})
+    unusable = flat()
+    unusable[-100] = 0.0
+    bad = _panel({"AAA": flat(), "BBB": unusable, "CCC": flat()})
+    no_bar, no_bar_day = _without_bar("BBB")
+    no_adjusted, no_adjusted_day = _without_bar("CCC", adjusted_only=True)
+    saturday = _last(whole)
+    while saturday.weekday() != 5:
+        saturday = date.fromordinal(saturday.toordinal() - 1)
+    return [
+        ("whole", whole, _last(whole), SLEEVES, None),
+        (
+            "short",
+            shorter,
+            _last(shorter),
+            SLEEVES,
+            f"commodities (CCC) has {short:,} of the 1,280 closes it needs",
+        ),
+        (
+            "unusable",
+            bad,
+            _last(bad),
+            SLEEVES,
+            "bonds (BBB) has a close that is not a positive finite number in its "
+            "trailing window",
+        ),
+        (
+            "no-bar",
+            no_bar,
+            no_bar_day,
+            SLEEVES,
+            f"bonds (BBB) has no close on {no_bar_day.isoformat()}",
+        ),
+        (
+            "no-adjusted-close",
+            no_adjusted,
+            no_adjusted_day,
+            SLEEVES,
+            f"commodities (CCC) has no close on {no_adjusted_day.isoformat()}",
+        ),
+        (
+            "not-in-the-panel",
+            whole,
+            _last(whole),
+            {**SLEEVES, "commodities": "ZZZ"},
+            "commodities (ZZZ) is not in the panel",
+        ),
+        (
+            "a-saturday",
+            whole,
+            saturday,
+            SLEEVES,
+            f"equities (AAA) has no close on {saturday.isoformat()}",
+        ),
+    ]
+
+
+class TestTheProblemIsTheStatesOwn:
+    """
+    ``regime_state_problem`` says why ``regime_state`` returned ``None``, for
+    the forward clock's job to record as its error. The two share one helper
+    and one order of checks; these hold them to agree on every case, and hold
+    the problem to naming the first sleeve that fails and why.
+    """
+
+    @pytest.mark.parametrize(
+        "case", _problem_cases(), ids=[case[0] for case in _problem_cases()]
+    )
+    def test_the_problem_is_exactly_why_there_is_no_state(self, case: tuple) -> None:
+        _, panel, session, sleeves, expected = case
+        state = features.regime_state(panel, session, sleeves)
+        problem = features.regime_state_problem(panel, session, sleeves)
+        assert (state is None) == (problem is not None)
+        assert problem == expected
+
+    def test_the_first_sleeve_to_fail_is_the_one_named(self) -> None:
+        panel = _panel(
+            {
+                "AAA": flat(features.MIN_HISTORY_SESSIONS - 1),
+                "BBB": flat(features.MIN_HISTORY_SESSIONS - 2),
+                "CCC": flat(),
+            }
+        )
+        problem = features.regime_state_problem(panel, _last(panel), SLEEVES)
+        assert problem is not None and problem.startswith("equities (AAA)")
+
+    def test_a_mapping_that_cannot_be_read_is_an_error_here_too(self) -> None:
+        panel = _panel({"AAA": flat(), "BBB": flat(), "CCC": flat()})
+        with pytest.raises(ValueError):
+            features.regime_state_problem(
+                panel, _last(panel), {"equities": "AAA", "bonds": "BBB"}
+            )
+
+
 class TestNothingIdentifyingLeaves:
     def test_the_state_names_no_symbol_no_date_and_no_figure(self) -> None:
         sessions = pd.bdate_range("2010-01-04", periods=N)
@@ -547,6 +662,95 @@ class TestOnTheSyntheticMarket:
         assert calm.equities.trend == "above"
         assert calm.equities.momentum == "up"
         assert calm.equities.drawdown in ("none", "shallow")
+
+
+def _rebased(
+    rows: list[tuple], session: date, factors: dict[str, float], *, since: date | None
+) -> list[tuple]:
+    """
+    ``rows`` up to ``session``, as far back as the forward clock's loader reads
+    (``REFERENCE_WINDOW_DAYS``), each symbol's adjusted closes multiplied by
+    its factor from ``since`` on (from the first row when ``since`` is
+    ``None``).
+    """
+    first = session - timedelta(days=REFERENCE_WINDOW_DAYS)
+    moved = []
+    for row in rows:
+        if not first <= row[1] <= session:
+            continue
+        symbol, day = row[0], row[1]
+        if since is None or day >= since:
+            row = (*row[:7], row[7] * factors[symbol])
+        moved.append(row)
+    return moved
+
+
+class TestARebasingMovesNoDescriptor:
+    """
+    docs/08 open item 48. A distribution after a session re-bases every
+    adjusted close before its ex-date by one factor, so every close a
+    recorded state was computed from moves by that factor together; and every
+    descriptor is a ratio of those closes or a statistic of their log returns.
+    So a re-basing cannot move a recorded state, and ``forward-audit``'s drift
+    always means the stored window changed unevenly — a revision, a late
+    adjustment, a stitch or a gap — which is data trouble, not basis.
+    """
+
+    FACTORS = (0.9871, 0.99731, 0.95, 1.07, 1 - 1e-9)
+
+    def test_every_sleeve_rebased_by_its_own_factor_leaves_the_state(
+        self, market_rows: list[tuple]
+    ) -> None:
+        gsg = _sessions_of(market_rows, "GSG")
+        sample = gsg[features.MIN_HISTORY_SESSIONS - 1 :: 126] + [date(2020, 3, 23)]
+        assert len(sample) > 15
+        compared = 0
+        for session in sample:
+            known = _rebased(
+                market_rows, session, dict.fromkeys(MARKET.values(), 1.0), since=None
+            )
+            state = features.regime_state(PricePanel.from_bars(known), session, MARKET)
+            assert state is not None, session
+            for i, factor in enumerate(self.FACTORS):
+                factors = {
+                    symbol: self.FACTORS[(i + k) % len(self.FACTORS)] * factor
+                    for k, symbol in enumerate(MARKET.values())
+                }
+                moved = _rebased(market_rows, session, factors, since=None)
+                rebuilt = features.regime_state(
+                    PricePanel.from_bars(moved), session, MARKET
+                )
+                assert rebuilt == state, (session, factors)
+                compared += 1
+        assert compared == len(sample) * len(self.FACTORS)
+
+    def test_an_uneven_change_is_what_moves_one(self, market_rows: list[tuple]) -> None:
+        """
+        The other side: the same closes stitched — the ten most recent on a
+        basis 3% off the rest, as a failed refetch leaves them — do move
+        descriptors, on some of the same sessions. Drift is the audit seeing
+        exactly this.
+        """
+        gsg = _sessions_of(market_rows, "GSG")
+        sample = gsg[features.MIN_HISTORY_SESSIONS - 1 :: 126]
+        moved_somewhere = 0
+        for session in sample:
+            known = _rebased(
+                market_rows, session, dict.fromkeys(MARKET.values(), 1.0), since=None
+            )
+            state = features.regime_state(PricePanel.from_bars(known), session, MARKET)
+            window_from = _sessions_of(known, "SPY")[-10]
+            stitched = _rebased(
+                market_rows,
+                session,
+                {"SPY": 1.03, "IEF": 1.0, "GSG": 1.0},
+                since=window_from,
+            )
+            rebuilt = features.regime_state(
+                PricePanel.from_bars(stitched), session, MARKET
+            )
+            moved_somewhere += rebuilt != state
+        assert moved_somewhere > 0
 
 
 # ---------------------------------------------------------------------------

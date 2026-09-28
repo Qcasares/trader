@@ -87,8 +87,8 @@ HANDLERS: dict[str, JobHandler] = {
     # switch is engaged — that is the only time it does anything — so it is
     # deliberately absent from KILL_GATED_KINDS.
     "cancel_open_orders": run_cancel_open_orders,
-    # To be enqueued by the AI programme's planner (phase C4; nothing enqueues
-    # it before), never by the session planner, so absent from
+    # Enqueued by the AI programme's planner (src/programme/jev_plan.py, from
+    # phase C4), never by the session planner, so absent from
     # SCHEDULED_KINDS, as shadow_decision is. It keeps the reference sleeves
     # the forward clock describes in daily_bars: the programme may neither
     # write that table nor import this process. It reaches no venue, so it is

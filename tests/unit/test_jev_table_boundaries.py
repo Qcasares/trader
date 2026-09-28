@@ -20,7 +20,11 @@ an import scan cannot see: a query is a string, and a module that never imports
   a trigger (``jev_signals_rest_on_their_answer``), but which code may write one
   is checked here. The model-holding runners — ``client``, ``author``,
   ``panel`` and ``tick`` — may not even name the table, so on the signal path
-  the cascade ends at Jev.
+  the cascade ends at Jev; from phase C4 they name no Jev table at all, and
+  neither do ``gates`` and ``repo``.
+* **Inside the programme, one writer and one reader.** ``jev_lane`` writes the
+  signals and reads none of them; ``jev_repo`` reads them and writes none; no
+  other module of ``src/programme`` names the table.
 
 The scan reads string literals, f-string parts included, because that is where
 SQL lives; a table named in an identifier or a comment is not a query. A
@@ -176,6 +180,90 @@ def test_the_model_runners_never_name_the_signals() -> None:
             "model client must not be able to write, or even query, a signal: "
             "on the signal path the cascade ends at Jev."
         )
+
+
+def test_the_model_runners_name_no_jev_table() -> None:
+    """
+    From phase C4 the rule above covers every Jev table, not only the signals
+    (docs/08, phase C, I8): no Jev answer, no web text and no request may
+    reach a generative model's prompt, and a runner that could read the
+    ledger could put one there. Anywhere in the file, identifiers and comments
+    included, as the rule above reads it.
+    """
+    for path in MODEL_RUNNERS:
+        source = path.read_text(encoding="utf-8")
+        named = [table for table in JEV_TABLES if re.search(rf"\b{table}\b", source)]
+        assert not named, f"{_label(path)} names {named}"
+
+
+#: The one module that reads ``jev_signals`` inside the programme.
+SIGNALS_REPO = PROGRAMME / "jev_repo.py"
+
+#: The programme's modules that decide promotions and hold its rows, which no
+#: Jev table may reach until the phase that is to wire one in reviews it.
+GATE_AND_ROWS = (PROGRAMME / "gates.py", PROGRAMME / "repo.py")
+
+_SIGNAL_READ = re.compile(
+    r"\b(?:from|join)\s+(?:only\s+)?(?:\"?\w+\"?\.)?\"?jev_signals\"?(?![\w])",
+    re.IGNORECASE,
+)
+
+
+def test_inside_the_programme_only_the_lane_and_the_repo_name_the_signals() -> None:
+    """
+    One writer, ``jev_lane.record_signal``, and one reader, ``jev_repo``: every
+    other module in ``src/programme`` reaches a signal through one of them, so
+    a second query of the signals is a reviewer's edit to this test.
+    """
+    offenders = [
+        f"{_label(path)} {named}"
+        for path in _python_files(PROGRAMME)
+        if path not in (SIGNALS_WRITER, SIGNALS_REPO)
+        for named in _tables_named(path.read_text(encoding="utf-8"))
+        if "jev_signals" in named
+    ]
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_lane_writes_the_signals_and_reads_none() -> None:
+    """
+    ``record_signal`` reads back a row its insert found already there through
+    ``jev_repo.get_signal``, so the lane holds the write and nothing else.
+    """
+    source = SIGNALS_WRITER.read_text(encoding="utf-8")
+    reads = [
+        f"line {line}: {match.group(0)}"
+        for line, text in _strings(source)
+        for match in _SIGNAL_READ.finditer(text)
+    ]
+    assert not reads, reads
+    assert _signal_writes(source), "the scan no longer sees the lane's own write"
+
+
+def test_the_repo_reads_the_signals_and_writes_none() -> None:
+    source = SIGNALS_REPO.read_text(encoding="utf-8")
+    assert _signal_writes(source) == []
+    assert any(_SIGNAL_READ.search(text) for _, text in _strings(source))
+
+
+def test_the_gates_and_the_programmes_rows_name_no_jev_table() -> None:
+    for path in GATE_AND_ROWS:
+        assert path.is_file(), _label(path)
+        assert _tables_named(path.read_text(encoding="utf-8")) == [], _label(path)
+
+
+@pytest.mark.parametrize(
+    ("source", "reads"),
+    [
+        ('await conn.fetch("SELECT * FROM jev_signals")', True),
+        ('q = "SELECT s.value FROM x JOIN public.jev_signals s ON true"', True),
+        ('await conn.execute("INSERT INTO jev_signals (signal) VALUES ($1)")', False),
+        ('await conn.fetch("SELECT * FROM jev_signals_audit")', False),
+    ],
+)
+def test_the_read_scan_finds_a_read(source: str, reads: bool) -> None:
+    found = any(_SIGNAL_READ.search(text) for _, text in _strings(source))
+    assert found is reads
 
 
 def test_the_scans_read_the_entry_points_too() -> None:

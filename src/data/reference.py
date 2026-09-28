@@ -4,8 +4,9 @@ reference.py
 The reference sleeves: which instruments the forward clock describes, which
 vendor their history is kept under, and how much of it.
 
-Constants and nothing else, so both processes can read them: the worker reads
-them today, and the programme will from phase C4. The worker's
+Constants and nothing else, so both processes can read them: the worker, and
+from phase C4 the programme's forward clock (``jev_clock``, ``jev_forward``),
+whose planner (``jev_plan``) enqueues the reference job. The worker's
 ``ingest_reference_bars`` job (``src/worker/maintenance_jobs.py``) fetches and
 stores these symbols; the programme is to describe them, and may do no more
 than read, since nothing in ``src/programme`` writes ``daily_bars`` and the

@@ -210,12 +210,16 @@ ORDER_CAPABLE_MODULES = ("src.execution", "src.worker")
 #:
 #: ``client`` and ``jev_client`` hold the SDKs. ``author`` and ``panel`` import
 #: ``client`` at module level, ``tick`` and ``main`` import those, and
-#: ``jev_lane`` imports ``jev_client``. ``web_fetch`` holds no model client: it
-#: is the programme's road to the open web, and the API, which commands the
-#: worker and holds the broker keys, has no business fetching a page an
-#: outsider wrote. Matching is on the *imported name*, not on a file being
-#: present, which is how ``from src.programme import jev_client`` was refused in
-#: phase A, before the module existed.
+#: ``jev_lane`` imports ``jev_client``. From phase C4, ``jev_forward`` and
+#: ``jev_jobs`` ask through ``jev_lane``; ``jev_plan`` puts Jev's work in the
+#: queue, which is the runner's to do; and ``jev_eval`` reads the ledger for
+#: the harness, which holds no client but is the runner's command, not the
+#: API's. ``web_fetch`` holds no model client: it is the programme's road to
+#: the open web, and the API, which commands the worker and holds the broker
+#: keys, has no business fetching a page an outsider wrote. Matching is on the
+#: *imported name*, not on a file being present, which is how
+#: ``from src.programme import jev_client`` was refused in phase A, before the
+#: module existed.
 RUNNER_ONLY = (
     "src.programme.tick",
     "src.programme.author",
@@ -224,6 +228,10 @@ RUNNER_ONLY = (
     "src.programme.panel",
     "src.programme.jev_client",
     "src.programme.jev_lane",
+    "src.programme.jev_forward",
+    "src.programme.jev_jobs",
+    "src.programme.jev_plan",
+    "src.programme.jev_eval",
     "src.programme.web_fetch",
 )
 
@@ -2129,7 +2137,7 @@ def test_the_price_write_scan_sees_the_workers_own_writes() -> None:
         'await conn.execute("UPDATE {} SET close = 1".format(table))',
         'await conn.copy_records_to_table("daily_bars", records=rows)',
         'await conn.copy_records_to_table(table_name="daily_bars", records=r)',
-        'await conn.copy_to_table(TABLE, source=f)',
+        "await conn.copy_to_table(TABLE, source=f)",
         # Assembled from literals, the table named in none of them alone.
         '_PRICES = " ".join(["INSERT INTO", "daily_bars", "VALUES ($1)"])',
         '_PRICES = "INSERT INTO" + " daily_bars VALUES ($1)"',
@@ -2253,6 +2261,213 @@ def test_the_programme_modules_the_api_imports_hold_no_client() -> None:
         "the vocabulary the API needs into a module that holds no client, as "
         "src/programme/models.py does."
     )
+
+
+#: What the evaluation harness may never load: every road to a model, the web
+#: fetcher and ingest phase C adds (named before they exist, as ``jev_client``
+#: was), the runner, and the two handlers that ask; and the vault that holds
+#: the keys, with the one function that decrypts a stored secret.
+HARNESS_MUST_NOT_REACH = (
+    "src.programme.jev_lane",
+    "src.programme.jev_client",
+    "src.programme.web_fetch",
+    "src.programme.web_ingest",
+    "src.programme.client",
+    "src.programme.author",
+    "src.programme.panel",
+    "src.programme.tick",
+    "src.programme.main",
+    "src.programme.jev_forward",
+    "src.programme.jev_jobs",
+    "src.db.repos.secrets",
+    "src.crypto",
+)
+
+
+def test_the_harness_holds_no_key_and_reaches_no_client() -> None:
+    """
+    ``jev_eval`` reports on answers the lanes recorded; it never asks for one.
+    Its closure reaches no road to a model and no vault, so an operator can run
+    it against the production ledger with ``DATABASE_URL`` alone, and nothing
+    it does can spend a call or read a key
+    (``tests/unit/test_jev_eval.py::TestTheCommandLine`` reads its environment).
+    """
+    graph = _real_graph()
+    start = "src.programme.jev_eval"
+    assert start in graph.names, "the harness is not in the tree"
+    offenders = _reachable_offences(
+        graph, [start], FORBIDDEN_PREFIXES + HARNESS_MUST_NOT_REACH
+    )
+    assert not offenders, "the harness reaches a model or a key:\n" + "\n".join(
+        offenders
+    )
+
+
+#: What the planner may never load (docs/08, phase C, design section 9): it
+#: puts Jev's work in the queue and asks nothing itself. Every road to a model
+#: — the lane and its client, the two handlers that ask through it, the web
+#: fetcher and ingest phase C adds, the Anthropic client and what prompts it,
+#: the runner — and the vault and its decryption: it is told whether a key
+#: exists, never the key. An ask made from the planner would skip the claim's
+#: switch read, the one-call-per-job count and the shutdown grace, which all
+#: sit on the job loop.
+PLANNER_MUST_NOT_REACH = (
+    "src.programme.jev_lane",
+    "src.programme.jev_client",
+    "src.programme.jev_forward",
+    "src.programme.jev_jobs",
+    "src.programme.web_fetch",
+    "src.programme.web_ingest",
+    "src.programme.client",
+    "src.programme.author",
+    "src.programme.panel",
+    "src.programme.tick",
+    "src.programme.main",
+    "src.db.repos.secrets",
+    "src.crypto",
+)
+
+
+def test_the_planner_reaches_no_road_to_a_model_and_no_key() -> None:
+    """
+    ``jev_plan`` enqueues through ``job_repo.enqueue`` and reads the ledger
+    through ``jev_repo``; nothing it loads can ask Jev, prompt the other model
+    or read a key. The walk is the whole closure, so an intermediate module
+    that grew such an import is found too.
+    """
+    graph = _real_graph()
+    start = "src.programme.jev_plan"
+    assert start in graph.names, "the planner is not in the tree"
+    offenders = _reachable_offences(
+        graph, [start], FORBIDDEN_PREFIXES + PLANNER_MUST_NOT_REACH
+    )
+    assert not offenders, "the planner reaches a model or a key:\n" + "\n".join(
+        offenders
+    )
+
+
+#: The modules that hold a generative model client, or the code that prompts
+#: one: ``client`` holds it, ``author`` and ``panel`` prompt it, and ``tick``
+#: runs both.
+MODEL_RUNNERS = (
+    "src.programme.client",
+    "src.programme.author",
+    "src.programme.panel",
+    "src.programme.tick",
+)
+
+#: The one Jev module a model runner may load: ``flags`` reads the Jev
+#: switches beside the programme's own, and ``jev_catalogue`` is their
+#: vocabulary — the pin, the limits, the areas and the lanes — holding no
+#: answer and reading no ledger. It imports no other Jev module, or the walk
+#: below would find that one.
+MODEL_RUNNERS_MAY_LOAD = ("src.programme.jev_catalogue",)
+
+
+def _jev_or_web(name: str) -> bool:
+    """Whether ``name`` is, or is inside, a ``jev_*`` or ``web_*`` module of
+    the programme, one that exists yet or not."""
+    parts = name.split(".")
+    return (
+        len(parts) >= 3
+        and parts[:2] == ["src", "programme"]
+        and parts[2].startswith(("jev_", "web_"))
+    )
+
+
+@pytest.mark.parametrize("runner", MODEL_RUNNERS)
+def test_no_model_runner_loads_a_jev_or_web_module(runner: str) -> None:
+    """
+    docs/08, phase C, invariant I8: no Jev output and no web text reaches a
+    generative model's prompt. ``test_jev_table_boundaries.py`` keeps the
+    runners from naming a Jev table; that is not enough on its own, since a
+    runner could read the ledger through ``jev_repo``'s functions, or be handed
+    an answer by the lane, without writing a table's name. So the whole
+    closure of each runner is walked, and every ``jev_*`` and ``web_*`` module
+    in it is refused but the vocabulary ``flags`` reads — the design's "the
+    tick imports no ``jev_*`` or ``web_*`` module", held transitively and for
+    modules not yet written.
+    """
+    graph = _real_graph()
+    assert runner in graph.names, f"{runner} is not in the tree"
+    parents = _walk(graph, [runner])
+    offences = sorted(
+        f"{_route(parents, module)} imports {name}"
+        for module in parents
+        for name in graph.names[module]
+        if _jev_or_web(name) and not _matches(name, MODEL_RUNNERS_MAY_LOAD)
+    )
+    assert not offences, (
+        f"{runner} holds or prompts a generative model and loads a Jev or web "
+        "module, through which a Jev answer or web text could reach its "
+        "prompt:\n" + "\n".join(offences)
+    )
+
+
+def test_the_jev_module_the_runners_may_load_loads_no_other() -> None:
+    """The one exception above stays one: the vocabulary loads no Jev module."""
+    graph = _real_graph()
+    (allowed,) = MODEL_RUNNERS_MAY_LOAD
+    parents = _walk(graph, [allowed])
+    reached = sorted(
+        name
+        for module in parents
+        for name in graph.names[module]
+        if _jev_or_web(name) and not _matches(name, MODEL_RUNNERS_MAY_LOAD)
+    )
+    assert reached == [], reached
+
+
+#: The pure modules of the programme, which the API, the planner and the
+#: harness all read: each may load the standard library and itself, and
+#: nothing else, however it is imported.
+PURE_PROGRAMME_MODULES = (
+    "src.programme.jev_hash",
+    "src.programme.jev_prereg",
+    "src.programme.jev_stats",
+    "src.programme.job_errors",
+)
+
+
+def _loaded_by(statement: str) -> set[str]:
+    """The modules a fresh interpreter holds after running ``statement``."""
+    import subprocess
+    import sys
+
+    code = f"{statement}\nimport sys\nprint('\\n'.join(sorted(sys.modules)))"
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    ).stdout
+    return set(out.split())
+
+
+@pytest.mark.parametrize("module", PURE_PROGRAMME_MODULES)
+def test_the_pure_modules_load_nothing(module: str) -> None:
+    """
+    In a fresh interpreter, so what counts is what the import really loads —
+    a package ``__init__``, a lazy import made at module level, a dependency's
+    own imports — rather than what the source appears to name.
+    """
+    import sys
+
+    baseline = _loaded_by("pass")
+    loaded = _loaded_by(f"import {module}") - baseline
+    package = module.rsplit(".", 1)[0]
+    ours = {m for m in loaded if _matches(m, ("src",))}
+    assert ours == {"src", package, module}, sorted(ours)
+    foreign = sorted(
+        m
+        for m in loaded - ours
+        if m.split(".")[0].lstrip("_") not in sys.stdlib_module_names
+        and m.split(".")[0] not in sys.stdlib_module_names
+    )
+    assert not foreign, f"{module} loads {foreign}"
 
 
 @pytest.mark.parametrize("package", PROTECTED_PACKAGES)

@@ -131,9 +131,17 @@ READERS: dict[tuple[str, str], str] = {
     ("src/programme/repo.py", "load_facts"): (
         "rows per symbol in a candidate's window, for gate 0 -> 1; no price"
     ),
-    ("src/programme/reports.py", "build_daily_report"): (
-        "rows, symbols and the latest session, for the report's data health; "
-        "no price"
+    ("src/programme/reports.py", "_data_health"): (
+        "rows and symbols across the table, and the newest session of each "
+        "symbol the operator's enabled deployments trade, for the report's data "
+        "health; no price"
+    ),
+    ("src/programme/jev_clock.py", "load_regime_panel"): (
+        "adj_close alone, of the reference sleeves under REFERENCE_SOURCE, "
+        "dated from REFERENCE_WINDOW_DAYS before the session to the session "
+        "itself: the forward clock's regime state, labels computed from ratios "
+        "and log returns, which leave the programme as labels and never reach "
+        "money. No raw price is read; the panel's raw fields are NaN"
     ),
     ("scripts/deployment_status.py", "_report_database"): (
         "rows and the first and last session per symbol; no price"

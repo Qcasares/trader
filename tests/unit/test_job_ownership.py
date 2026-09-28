@@ -32,8 +32,9 @@ import inspect
 import json
 import pathlib
 import re
+import typing
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -617,9 +618,363 @@ class TestTheProgrammeRunsWhatItClaims:
                 programme.stop()
             raise ConnectionResetError("the pool went away")
 
+        async def plan() -> list[str]:
+            return []
+
         monkeypatch.setattr(programme, "_drain_jev", failing_drain)
+        monkeypatch.setattr(programme, "_plan_jev", plan)
         await asyncio.wait_for(programme._jev_loop(), timeout=5)
         assert attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# The planner runs beside the drain, and never in its way
+# ---------------------------------------------------------------------------
+
+
+class TestThePlannerStep:
+    async def test_the_planner_outlives_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A planner that fails every time is logged, and the drain goes ahead on
+        every pass: a job already queued does not need planning again.
+        """
+        programme = _programme(monkeypatch, _Queue(), _on())
+        monkeypatch.setattr(programme_main, "JEV_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(programme_main, "JEV_PLAN_SECONDS", 0.0)
+        events: list[str] = []
+
+        async def failing_plan() -> list[str]:
+            events.append("plan")
+            raise ConnectionResetError("the pool went away")
+
+        async def drain() -> bool:
+            events.append("drain")
+            if events.count("drain") >= 3:
+                programme.stop()
+            return False
+
+        monkeypatch.setattr(programme, "_plan_jev", failing_plan)
+        monkeypatch.setattr(programme, "_drain_jev", drain)
+        await asyncio.wait_for(programme._jev_loop(), timeout=5)
+        assert events == ["plan", "drain"] * 3
+
+    async def test_the_planner_runs_at_most_once_a_period(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        programme = _programme(monkeypatch, _Queue(), _on())
+        monkeypatch.setattr(programme_main, "JEV_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(programme_main, "JEV_PLAN_SECONDS", 3600.0)
+        events: list[str] = []
+
+        async def plan() -> list[str]:
+            events.append("plan")
+            return []
+
+        async def drain() -> bool:
+            events.append("drain")
+            if events.count("drain") >= 4:
+                programme.stop()
+            return False
+
+        monkeypatch.setattr(programme, "_plan_jev", plan)
+        monkeypatch.setattr(programme, "_drain_jev", drain)
+        await asyncio.wait_for(programme._jev_loop(), timeout=5)
+        assert events == ["plan", "drain", "drain", "drain", "drain"]
+
+    @pytest.mark.parametrize(
+        ("vault_key", "env_key", "available"),
+        [
+            ("vault-typesafe-key", None, True),
+            (None, "env-typesafe-key", True),
+            (None, None, False),
+        ],
+    )
+    async def test_the_planner_learns_only_whether_a_key_exists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        vault_key: str | None,
+        env_key: str | None,
+        available: bool,
+    ) -> None:
+        """
+        The planner plans nothing without a key, and is never handed one: it
+        is told a boolean, beside the time in UTC.
+        """
+        from src.programme import jev_plan
+
+        programme = _programme(
+            monkeypatch, _Queue(), _on(), vault_key=vault_key, env_key=env_key
+        )
+        seen: list[dict[str, Any]] = []
+
+        async def plan(conn: Any, **kwargs: Any) -> list[str]:
+            seen.append(kwargs)
+            return []
+
+        monkeypatch.setattr(jev_plan, "plan", plan)
+        assert await programme._plan_jev() == []
+        (kwargs,) = seen
+        assert set(kwargs) == {"now", "key_available"}
+        assert kwargs["key_available"] is available
+        assert kwargs["now"].utcoffset() == timedelta(0)
+
+
+# ---------------------------------------------------------------------------
+# Every Jev job makes at most one call an attempt
+# ---------------------------------------------------------------------------
+
+#: The calls that reach TypeSafe: the road, and the probe that takes it.
+ROAD = frozenset({"ask", "run_probe"})
+
+_LOOPS = (
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+
+def _road_calls(tree: ast.AST) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _name(node.func) in ROAD
+    ]
+
+
+def _road_calls_in_loops(tree: ast.AST) -> list[str]:
+    found = []
+    for loop in ast.walk(tree):
+        if isinstance(loop, _LOOPS):
+            found += [ast.unparse(call) for call in _road_calls(loop)]
+    return found
+
+
+def _handler_modules() -> dict[str, pathlib.Path]:
+    return {
+        kind: pathlib.Path(inspect.getfile(inspect.unwrap(handler)))
+        for kind, handler in JEV_HANDLERS.items()
+    }
+
+
+class TestEveryJevHandlerMakesAtMostOneCall:
+    """
+    One call an attempt, which is what the shutdown grace covers. Not one call
+    a job: an attempt whose call got no response is retried and asks again
+    (``jev_jobs.ask_verdict``), since an ``error`` row is no answer to replay.
+    """
+
+    def test_no_handler_module_calls_the_road_in_a_loop(self) -> None:
+        modules = set(_handler_modules().values()) | {SRC / "programme" / "jev_lane.py"}
+        for path in sorted(modules):
+            tree = ast.parse(path.read_text("utf-8"))
+            assert _road_calls_in_loops(tree) == [], path.name
+
+    def test_each_handler_module_takes_the_road_once(self) -> None:
+        """
+        One call site per module holding a handler, and one ``ask`` in the
+        probe: two sites in one module is a job that can take both.
+        """
+        for kind, path in _handler_modules().items():
+            calls = _road_calls(ast.parse(path.read_text("utf-8")))
+            assert len(calls) == 1, (kind, [ast.unparse(c) for c in calls])
+        lane = ast.parse((SRC / "programme" / "jev_lane.py").read_text("utf-8"))
+        (run_probe,) = [
+            node
+            for node in ast.walk(lane)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_probe"
+        ]
+        assert len(_road_calls(run_probe)) == 1
+
+    def test_the_scan_sees_a_call_in_a_loop(self) -> None:
+        tree = ast.parse(
+            "async def h(conn):\n"
+            "    for _ in range(2):\n"
+            "        await jev_lane.ask(conn)\n"
+            "    [await run_probe(conn) for _ in x]\n"
+        )
+        assert len(_road_calls_in_loops(tree)) == 2
+
+    @pytest.mark.parametrize("kind", sorted(JEV_HANDLERS))
+    async def test_every_jev_handler_makes_at_most_one_call(
+        self, monkeypatch: pytest.MonkeyPatch, kind: str
+    ) -> None:
+        """
+        Every outcome the road can return, with every error kind, run through
+        every handler, counted: never more than one ask. The shutdown grace is
+        sized for one call (``JEV_SHUTDOWN_GRACE_SECONDS``), and a job that
+        asked twice is two answers with an equal claim to be right.
+        """
+        from src.programme import jev_client, jev_lane
+
+        outcomes = [
+            (status, kind_)
+            for status in typing.get_args(jev_lane.AskStatus)
+            for kind_ in (jev_client.ERROR_KINDS if status == "error" else (None,))
+        ]
+        handler = JEV_HANDLERS[kind]
+        _prepare_handler(monkeypatch, kind)
+        for status, error_kind in outcomes:
+            asked: list[dict[str, Any]] = []
+
+            async def ask(
+                conn: Any,
+                *,
+                _status: str = status,
+                _kind: str | None = error_kind,
+                _asked: list[dict[str, Any]] = asked,
+                **kwargs: Any,
+            ) -> jev_lane.AskResult:
+                _asked.append(kwargs)
+                return jev_lane.AskResult(
+                    _status,  # type: ignore[arg-type]
+                    request_row_id=None
+                    if _status in jev_lane.UNRECORDED_STATUSES
+                    else 7,
+                    error_kind=_kind,
+                )
+
+            monkeypatch.setattr(jev_lane, "ask", ask)
+            try:
+                await handler(_Conn(_all_on()), dict(_PAYLOADS[kind]), "ts-key")
+            except JobFailedError:
+                pass
+            assert len(asked) == 1, (kind, status, error_kind, len(asked))
+
+    def test_every_handler_has_a_counted_run(self) -> None:
+        assert set(_PAYLOADS) == set(JEV_HANDLERS)
+
+
+#: Each Jev kind's payload for the counted run above.
+_PAYLOADS: dict[str, dict[str, Any]] = {
+    "jev_probe": {},
+    "jev_regime": {"session": "2026-09-28", "set": "decision.regime", "version": 1},
+    "jev_reask": {"request_id": 41},
+}
+
+
+def _all_on() -> dict[str, str]:
+    return {**_on(), f"{flags.JEV_AREA_PREFIX}decisions": "true"}
+
+
+def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    """
+    Everything a handler reads before it asks, answered so that it asks: the
+    count above is of what happens at and after the road.
+    """
+    from src.programme import (
+        jev_clock,
+        jev_features,
+        jev_lane,
+        jev_questions,
+        jev_repo,
+        repo,
+    )
+
+    state = jev_questions.RegimeState(
+        **{
+            sleeve: jev_questions.SleeveState(
+                trend="near", volatility_quintile=3, drawdown="none", momentum="flat"
+            )
+            for sleeve in jev_questions.SLEEVES
+        }
+    )
+
+    if kind == "jev_regime":
+        session = date(2026, 9, 28)
+
+        async def no_signal(conn: Any, **kwargs: Any) -> bool:
+            return False
+
+        async def before_the_cutoff(conn: Any) -> datetime:
+            return jev_clock.collect_at(session)
+
+        async def nobody_trades(conn: Any) -> repo.TradedUniverse:
+            return repo.TradedUniverse(frozenset(), ())
+
+        async def no_jobs(conn: Any, keys: Any) -> dict[str, Any]:
+            return {}
+
+        async def a_panel(conn: Any, when: date, symbols: Any = None) -> object:
+            return object()
+
+        async def recorded(conn: Any, **kwargs: Any) -> jev_lane.SignalRecord:
+            return jev_lane.SignalRecord("measured", "neutral", 1, False, True)
+
+        monkeypatch.setattr(jev_repo, "signal_exists", no_signal)
+        monkeypatch.setattr(jev_clock, "database_now", before_the_cutoff)
+        monkeypatch.setattr(repo, "traded_universe", nobody_trades)
+        monkeypatch.setattr(jev_repo, "job_outcomes", no_jobs)
+        monkeypatch.setattr(jev_clock, "load_regime_panel", a_panel)
+        monkeypatch.setattr(jev_features, "regime_state", lambda *a: state)
+        monkeypatch.setattr(jev_lane, "record_signal", recorded)
+    elif kind == "jev_reask":
+        regime = jev_questions.DECISION_REGIME
+
+        async def canonical(conn: Any, request_id: int) -> dict[str, Any]:
+            return {
+                "id": request_id,
+                "status": "ok",
+                "lane": regime.lane,
+                "question_set": regime.name,
+                "question_set_version": regime.version,
+                "pack_hash": regime.pack_hash,
+                "model_requested": "jev-1.13.0",
+                "state": regime.dump_state(state),
+                "subject_type": "session",
+                "subject_id": "2026-09-25",
+                "as_of": datetime(2026, 9, 25, 20, tzinfo=UTC),
+            }
+
+        async def pin(conn: Any) -> str:
+            return "jev-1.13.0"
+
+        async def no_answers(conn: Any, request_id: int) -> list[dict[str, Any]]:
+            return []
+
+        monkeypatch.setattr(jev_repo, "get_request", canonical)
+        monkeypatch.setattr(flags, "jev_model", pin)
+        monkeypatch.setattr(jev_repo, "answers_for", no_answers)
+    elif kind != "jev_probe":
+        raise AssertionError(f"{kind} has no counted run: add one")
+
+
+# ---------------------------------------------------------------------------
+# The shared vocabulary of a job's failure
+# ---------------------------------------------------------------------------
+
+
+def test_the_retried_kinds_are_one_set_the_client_knows() -> None:
+    from src.programme import jev_client, job_errors
+
+    assert programme_main.PROBE_RETRIED_KINDS is job_errors.RETRIED_ERROR_KINDS
+    assert job_errors.RETRIED_ERROR_KINDS <= set(jev_client.ERROR_KINDS)
+
+
+def test_job_failed_error_is_one_class_wherever_it_is_imported() -> None:
+    """
+    Moved to ``job_errors`` so the handlers outside ``main`` can raise it, and
+    re-exported from ``main``: two classes of one name would let a handler's
+    verdict escape the ``except`` that turns it into a job's error.
+    """
+    from src.programme import jev_forward, jev_jobs, job_errors
+
+    assert JobFailedError is job_errors.JobFailedError
+    assert jev_forward.JobFailedError is job_errors.JobFailedError
+    assert jev_jobs.JobFailedError is job_errors.JobFailedError
+
+
+def test_the_programme_owns_the_forward_clock_and_the_reasks() -> None:
+    assert set(JEV_HANDLERS) == {"jev_probe", "jev_regime", "jev_reask"}
+    kinds, _ = _every_enqueue()
+    for kind in ("jev_probe", "jev_regime", "jev_reask", "ingest_reference_bars"):
+        assert kinds.get(kind) == {"src/programme/jev_plan.py"}, (kind, kinds.get(kind))
+    assert "ingest_reference_bars" in HANDLERS
 
 
 def test_the_programme_claims_as_itself() -> None:

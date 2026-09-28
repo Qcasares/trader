@@ -24,11 +24,13 @@ import json
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import asyncpg
 
+from src.db.repos.marks import DEFAULT_OWNER
 from src.programme.gates import (
     CandidateFacts,
     ExperimentFact,
@@ -38,6 +40,7 @@ from src.programme.gates import (
     WalkforwardFact,
     evaluate_preregistered,
 )
+from src.strategies import build_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -1019,6 +1022,63 @@ async def ensure_shadow_deployment(
         candidate_id,
     )
     return str(deployment_id)
+
+
+#: Whose deployments the worker trades: the operator's. The worker's
+#: ``_enabled_deployment_rows`` and ``live_job._enabled_deployments`` filter on
+#: it, and so does :func:`traded_universe`, so the programme reads the universe
+#: exactly as the live ingest does.
+TRADED_OWNER = DEFAULT_OWNER
+
+
+@dataclass(frozen=True)
+class TradedUniverse:
+    """
+    What the operator's enabled deployments trade, as the worker's live ingest
+    reads it: every symbol any of them needs, and the id of any whose strategy
+    could not be built from its stored parameters, whose symbols are therefore
+    unknown here.
+    """
+
+    symbols: frozenset[str]
+    unreadable: tuple[str, ...]
+
+
+async def traded_universe(conn: asyncpg.Connection) -> TradedUniverse:
+    """
+    Every symbol an enabled deployment of the operator's trades: what the live
+    ingest fetches and the live decision reads.
+
+    The worker's own rule, read again here because the programme may not import
+    the worker: enabled, owned by :data:`TRADED_OWNER`, each strategy built from
+    its stored parameters and asked for its universe.
+    ``tests/integration/test_jev_forward.py`` holds the two to one answer on
+    the same rows. Where the worker's build fails its job, this names the
+    deployment instead, so a caller can fail closed rather than read a
+    universe smaller than the real one: the forward clock treats every sleeve
+    as possibly the live ingest's, and the daily report says it cannot tell.
+    """
+    rows = await conn.fetch(
+        "SELECT id, strategy_name, params FROM deployments "
+        "WHERE status = 'enabled' AND owner_id = $1 ORDER BY created_at",
+        TRADED_OWNER,
+    )
+    symbols: set[str] = set()
+    unreadable: list[str] = []
+    for row in rows:
+        params = loads_json(row["params"], {})
+        try:
+            strategy = build_strategy(row["strategy_name"], params or {})
+            symbols.update(strategy.universe())
+        except Exception as exc:  # noqa: BLE001 - named, and failed closed by callers
+            logger.error(
+                "Deployment %s cannot be built from its stored parameters (%s); "
+                "its universe is unknown",
+                row["id"],
+                exc,
+            )
+            unreadable.append(str(row["id"]))
+    return TradedUniverse(symbols=frozenset(symbols), unreadable=tuple(unreadable))
 
 
 async def shadow_sessions_recorded(

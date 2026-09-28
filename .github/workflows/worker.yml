@@ -15,10 +15,11 @@
 # handlers, the same heartbeat — against the deployed database.
 #
 # Continuity, not a cron. A job is capped at six hours, so each run stops
-# itself at 5h45m and the schedule below fires every five hours. The
-# `concurrency` group means the next run does not start alongside the current
-# one; it queues and takes over as the current one exits. Coverage is
-# continuous rather than sampled, which is the property that matters — an
+# itself at the next restart slot, at most 5h45m away, and the schedule below
+# queues its successor while it still runs. The `concurrency` group means the
+# next run does not start alongside the current one; it waits, pending, and
+# takes over as the current one exits. Coverage is continuous but for the
+# minutes a successor takes to start, which is the property that matters — an
 # end-of-day mark missed is a halting limit disarmed for a day.
 #
 # What this does NOT make safe: live trading. `LIVE_TRADING_ENABLED` and
@@ -30,9 +31,46 @@
 
 name: worker
 
+# Restarts at fixed times, and none after a close
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# A run used to stop after a fixed 5h45m while the cron, "0 */5 * * *", fired
+# every five hours, so a successor was always queued and each restart came
+# 5h45m after the last: the restarts drifted round the clock, 45 minutes a
+# run, and every few days one landed in the hour after a close, when this
+# worker ingests the session's bars (close + 45 minutes), fetches the forward
+# clock's reference bars in the same minute, decides (close + 60) and marks the
+# book (close + 75). The cron itself fired at 20:00, the summer close.
+#
+# Now each run stops at the next of five slots, 02:30, 07:30, 12:30, 17:00 and
+# 22:30 UTC, at least ten minutes away, so the worker restarts at a slot and
+# nowhere else: never from 20:30 to 22:15 UTC, after an ordinary close in
+# summer or winter, nor near a half day's close or the open.
+#
+# Each slot has two triggers, and neither is at the slot or on the hour.
+# GitHub delays scheduled events, most at the top of the hour, and under load
+# drops some; a trigger at the moment a run stops would find nothing running
+# to queue behind, and every restart would last as long as it was late.
+#
+# - 41 minutes before the slot, while the run that stops there still runs:
+#   the new run waits, pending, and starts as the old one exits, so the
+#   restart takes the minutes a runner needs and waits on no schedule.
+# - 3 minutes after it. Ordinarily it finds the successor running, waits
+#   pending behind it, and is replaced by the next slot's earlier trigger, so
+#   five runs a day end "cancelled", by design. When that earlier trigger is
+#   late past its slot or lost, this one is already queued and takes its
+#   place; and when nothing is running at all — the first deploy, or both
+#   triggers lost — it starts the chain again.
+#
+# `programme.yml` restarts at the same slots on the same triggers, and
+# `tests/unit/test_jev_clock.py` runs this step's arithmetic, models the
+# schedule late, erratic and losing an event, and holds every restart outside
+# every session's working hours.
 on:
   schedule:
-    - cron: "0 */5 * * *"
+    - cron: "49 1,6,11,21 * * *"
+    - cron: "19 16 * * *"
+    - cron: "33 2,7,12,22 * * *"
+    - cron: "3 17 * * *"
   workflow_dispatch:
 
 # Queue, never overlap. Two workers claiming concurrently is safe — `claim`
@@ -96,10 +134,27 @@ jobs:
           # run went red while the worker itself was healthy, which trains an
           # operator to ignore the one signal that says the worker died.
           set +e
+          # Stop at the next restart slot at least ten minutes away, never
+          # later than 5h45m from now: the slots' gaps are at most 5h30m, so a
+          # run always stops at a slot, and the trigger 41 minutes before it
+          # has queued the run that takes over. See the header. Unix time
+          # counts no leap seconds, so today's UTC midnight is `now` less its
+          # remainder of a day.
+          now=$(date -u +%s)
+          midnight=$((now - now % 86400))
+          seconds=20700
+          for day in 0 1; do
+            for slot in 02:30 07:30 12:30 17:00 22:30; do
+              at=$((midnight + day * 86400 + 10#${slot%:*} * 3600 + 10#${slot#*:} * 60))
+              if [ $((at - now)) -ge 600 ] && [ $((at - now)) -lt "$seconds" ]; then
+                seconds=$((at - now))
+              fi
+            done
+          done
           # SIGTERM, not SIGKILL: `main.py` installs a handler that finishes
           # the job in flight and closes the pool. --kill-after is the
           # guarantee that a wedged process still exits.
-          timeout --signal=TERM --kill-after=60 20700 python -m src.worker.main
+          timeout --signal=TERM --kill-after=60 "$seconds" python -m src.worker.main
           code=$?
           # 124 is `timeout` reporting it had to stop a healthy worker, which
           # is the expected end of every run. Anything else is a real failure
