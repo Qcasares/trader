@@ -155,6 +155,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1157,6 +1158,22 @@ def _holding(
     return min(interval[0], value), max(interval[1], value)
 
 
+def near_threshold(margin: float, threshold: float) -> bool:
+    """
+    Whether a canonical answer's margin is within ``jev_prereg.NEAR_THRESHOLD``
+    of the threshold, compared as the decimals they were written as. The
+    validator stores a margin as the decimal difference of the probabilities
+    the vendor wrote, and the grid is written in hundredths; in binary
+    ``0.52 - 0.42`` exceeds 0.1, so a margin exactly 0.10 from a threshold
+    fell out of its window on one side of 20 of the grid's 91 edges and into
+    it on the other (``jev_validate``'s rule: numbers are compared as the
+    decimals written wherever that decides a rule).
+    ``tests/unit/test_jev_eval.py::TestTheFlips::test_every_grid_threshold_holds_both_edges``.
+    """
+    distance = abs(Decimal(repr(float(margin))) - Decimal(repr(float(threshold))))
+    return distance <= Decimal(repr(jev_prereg.NEAR_THRESHOLD))
+
+
 def _mean(values: Sequence[float]) -> float:
     return math.fsum(values) / len(values)
 
@@ -1477,8 +1494,7 @@ def build_evaluation(
             for stratum in STRATA
             for p in strata[stratum]
             if p["canonical_margin"] is not None
-            and abs(float(p["canonical_margin"]) - threshold)
-            <= jev_prereg.NEAR_THRESHOLD
+            and near_threshold(p["canonical_margin"], threshold)
         ]
         near_flipped, near_n = jev_stats.flip_rate([argmaxes(p) for p in window])
         near = (jev_stats.proportion(near_flipped, near_n), near_n)

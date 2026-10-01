@@ -43,6 +43,7 @@ import math
 import random
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -1742,6 +1743,43 @@ class TestTheFlips:
             0.5,
             2,
         )
+
+    def test_the_window_is_read_as_the_decimals_written(self) -> None:
+        """
+        A canonical margin exactly 0.10 from the threshold is within it on
+        either side. In binary 0.52 - 0.42 exceeds 0.1, so a margin of 0.52
+        (0.76 against 0.24) fell out of a window around 0.42 that 0.32 fell
+        into; the window is read as the decimals the validator stored.
+        """
+        book = _catalogue_threshold(confident_right=True)
+        test = _texts_in("test", 200)
+        for text, margin in zip(test[:4], (0.52, 0.32, 0.53, 0.31), strict=True):
+            self._paired(book, text, "uniform", flipped=False, margin=margin)
+        evaluation = book.evaluate("test")
+        assert evaluation.threshold == 0.42
+        # The 35 re-asks the ledger already holds, at 0.4, and the two at
+        # exactly 0.10; never the two at 0.11.
+        assert evaluation.flip_rate_near_threshold_n == 35 + 2
+
+    def test_every_grid_threshold_holds_both_edges(self) -> None:
+        """
+        For every threshold the plan searches, a margin exactly
+        ``NEAR_THRESHOLD`` away on either side is near it, and one 0.01
+        further is not; in binary, 20 of the 91 edges fell outside.
+        """
+        step = Decimal(repr(jev_prereg.NEAR_THRESHOLD))
+        for threshold in jev_prereg.MARGIN_GRID:
+            exact = Decimal(repr(threshold))
+            for edge in (exact - step, exact + step):
+                if 0 <= edge <= 1:
+                    assert jev_eval.near_threshold(float(edge), threshold), (
+                        threshold,
+                        edge,
+                    )
+            further = step + Decimal("0.01")
+            for beyond in (exact - further, exact + further):
+                if 0 <= beyond <= 1:
+                    assert not jev_eval.near_threshold(float(beyond), threshold)
 
 
 class TestLabellerAgreement:
