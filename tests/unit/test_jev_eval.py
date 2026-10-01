@@ -1750,6 +1750,75 @@ class TestTheFlips:
         assert evaluation.flip_rate_near_threshold is None
         assert evaluation.flip_rate_near_threshold_n is None
 
+    def test_a_re_ask_that_could_not_be_compared_is_counted_apart(self) -> None:
+        """
+        Sixty uniform re-asks, half of them come back not valid — a tie, a
+        choice that is not its own argmax, a failure — and none of the rest
+        flipped: the rate is 0 of the 30 compared, and the 30 others are
+        counted with the row and printed beside it, never lost from both
+        counts as though only thirty had been asked.
+        """
+        book = _Book()
+        texts = _texts_in("test", 60)
+        for text in texts:
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        for i, text in enumerate(texts):
+            self._paired(book, text, "uniform", flipped=False)
+            if i % 2:
+                book.pairs[-1].update(probe_valid=False, probe_argmax=None)
+        evaluation = book.evaluate("test")
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (0.0, 30)
+        assert evaluation.flip_rate_not_compared == 30
+        assert (
+            evaluation.flip_rate_low_margin_n,
+            evaluation.flip_rate_low_margin_not_compared,
+        ) == (0, 0)
+        (line,) = [
+            line
+            for line in jev_eval.format_evaluation(evaluation.row()).splitlines()
+            if line.startswith("flips, uniform")
+        ]
+        assert line.startswith(
+            "flips, uniform: 0 of 30 compared re-asks changed their argmax = 0.000"
+        )
+        assert line.endswith("; 60 re-asked, 30 not compared"), line
+
+    def test_each_strata_and_the_window_count_their_own(self) -> None:
+        """
+        A low-margin re-ask whose canonical answer was not valid, and a
+        uniform one whose re-ask failed, are each counted apart in their own
+        stratum and, both near the threshold, in the window, where the one
+        pair compared, which flipped, is the rate.
+        """
+        book, _, test = _threshold_book()
+        self._paired(book, test[0], "low_margin", flipped=False, margin=0.15)
+        book.pairs[-1].update(canonical_valid=False, canonical_argmax=None)
+        self._paired(book, test[1], "uniform", flipped=False, margin=0.25)
+        book.pairs[-1].update(probe_valid=False, probe_argmax=None)
+        self._paired(book, test[2], "uniform", flipped=True, margin=0.3)
+        evaluation = book.evaluate("test")
+        assert evaluation.threshold == 0.22
+        assert (
+            evaluation.flip_rate_low_margin_n,
+            evaluation.flip_rate_low_margin_not_compared,
+        ) == (0, 1)
+        assert (evaluation.flip_rate_n, evaluation.flip_rate_not_compared) == (1, 1)
+        assert (
+            evaluation.flip_rate_near_threshold_n,
+            evaluation.flip_rate_near_threshold_not_compared,
+        ) == (1, 2)
+        assert evaluation.flip_rate_near_threshold == 1.0
+
+    def test_no_threshold_is_no_window_and_no_count_of_it(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        self._paired(book, _title(0), "uniform", flipped=False)
+        evaluation = book.evaluate()
+        assert evaluation.flip_rate_near_threshold_n is None
+        assert evaluation.flip_rate_near_threshold_not_compared is None
+
     def test_a_pair_of_an_unscored_item_is_not_counted(self) -> None:
         book = _Book()
         book.label(_title(0), "equities")
@@ -2278,7 +2347,10 @@ class TestWhatTheTextSays:
         text = jev_eval.format_evaluation(self._evaluation().row())
         assert "accuracy: not measured (n = 0 valid answers)" in text
         assert "Brier: not measured" in text
-        assert "flips, uniform: not measured (n = 0 pairs)" in text
+        assert (
+            "flips, uniform: not measured (0 compared; 0 re-asked, 0 not compared)"
+            in text
+        )
         assert "flips, near the threshold: not measured (no threshold chosen)" in text
         assert "equities: too few to say (n = 3)" in text
         assert "labeller agreement: not measured" in text

@@ -74,6 +74,14 @@
 -- both wrong say nothing about which is better, and a percentile bootstrap
 -- of the difference over a few such items understates their uncertainty.
 -- The difference is these two counts over `n`, and a CHECK holds it so.
+--
+-- `flip_rate_not_compared`, `flip_rate_low_margin_not_compared` and
+-- `flip_rate_near_threshold_not_compared`: the re-asks sampled under the plan
+-- in force whose pair could not be compared — a re-ask, or its canonical
+-- answer, refused whole, a tie, failed or refused before it was sent. A flip
+-- rate is over the pairs both of whose answers were measured, and a re-ask
+-- left out of both counts would make a vendor that malformed every second
+-- re-ask read as though it had been asked half as often.
 
 ALTER TABLE jev_evaluations
     ADD COLUMN split TEXT NOT NULL DEFAULT 'all'
@@ -117,10 +125,13 @@ ALTER TABLE jev_evaluations
     ADD COLUMN vs_keyword_jev_right_only INT,
     ADD COLUMN vs_keyword_baseline_right_only INT,
     ADD COLUMN flip_rate_n INT,
+    ADD COLUMN flip_rate_not_compared INT,
     ADD COLUMN flip_rate_low_margin DOUBLE PRECISION,
     ADD COLUMN flip_rate_low_margin_n INT,
+    ADD COLUMN flip_rate_low_margin_not_compared INT,
     ADD COLUMN flip_rate_near_threshold DOUBLE PRECISION,
     ADD COLUMN flip_rate_near_threshold_n INT,
+    ADD COLUMN flip_rate_near_threshold_not_compared INT,
     ADD COLUMN flip_median_lag_hours DOUBLE PRECISION,
     ADD COLUMN labeller_agreement DOUBLE PRECISION,
     ADD COLUMN labeller_kappa DOUBLE PRECISION,
@@ -253,6 +264,14 @@ ALTER TABLE jev_evaluations
         AND vs_keyword_jev_right_only >= 0
         AND vs_keyword_baseline_right_only >= 0
         AND vs_keyword_jev_right_only + vs_keyword_baseline_right_only <= n
+        -- Each scored item's canonical request is re-asked at most once, in
+        -- one stratum, so every re-ask of the two strata is within n.
+        AND flip_rate_not_compared >= 0
+        AND flip_rate_low_margin_not_compared >= 0
+        AND flip_rate_near_threshold_not_compared >= 0
+        AND flip_rate_n + flip_rate_not_compared + flip_rate_low_margin_n
+            + flip_rate_low_margin_not_compared <= n
+        AND flip_rate_near_threshold_n + flip_rate_near_threshold_not_compared <= n
     ),
     ADD CONSTRAINT jev_evaluations_counts_outside_n CHECK (
         n_contested >= 0 AND n_other_plans >= 0 AND n_plan_unknown >= 0

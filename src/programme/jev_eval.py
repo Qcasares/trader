@@ -882,10 +882,13 @@ class Evaluation:
     accuracy_at_threshold_wilson_high: float | None
     flip_rate: float | None
     flip_rate_n: int
+    flip_rate_not_compared: int
     flip_rate_low_margin: float | None
     flip_rate_low_margin_n: int
+    flip_rate_low_margin_not_compared: int
     flip_rate_near_threshold: float | None
     flip_rate_near_threshold_n: int | None
+    flip_rate_near_threshold_not_compared: int | None
     flip_median_lag_hours: float | None
     labeller_agreement: float | None
     labeller_kappa: float | None
@@ -1507,16 +1510,20 @@ def build_evaluation(
             pair["probe_argmax"] if pair["probe_valid"] else None,
         )
 
+    # A pair either of whose answers was not measured is no comparison: it
+    # is in no rate, and counted apart, so a re-ask is never lost from both.
     uniform_flipped, uniform_n = jev_stats.flip_rate(
         [argmaxes(p) for p in strata["uniform"]]
     )
     low_flipped, low_n = jev_stats.flip_rate(
         [argmaxes(p) for p in strata["low_margin"]]
     )
+    uniform_apart = len(strata["uniform"]) - uniform_n
+    low_apart = len(strata["low_margin"]) - low_n
     lags = [
         p["lag_seconds"] / 3600 for p in strata["uniform"] if None not in argmaxes(p)
     ]
-    near: tuple[float | None, int | None] = (None, None)
+    near: tuple[float | None, int | None, int | None] = (None, None, None)
     if threshold is not None:
         window = [
             p
@@ -1526,7 +1533,11 @@ def build_evaluation(
             and near_threshold(p["canonical_margin"], threshold)
         ]
         near_flipped, near_n = jev_stats.flip_rate([argmaxes(p) for p in window])
-        near = (jev_stats.proportion(near_flipped, near_n), near_n)
+        near = (
+            jev_stats.proportion(near_flipped, near_n),
+            near_n,
+            len(window) - near_n,
+        )
 
     # How far another labeller agrees with this one: each scored item another
     # labeller labelled, compared once, with the earliest label any other
@@ -1604,10 +1615,13 @@ def build_evaluation(
         accuracy_at_threshold_wilson_high=at_threshold[2],
         flip_rate=jev_stats.proportion(uniform_flipped, uniform_n),
         flip_rate_n=uniform_n,
+        flip_rate_not_compared=uniform_apart,
         flip_rate_low_margin=jev_stats.proportion(low_flipped, low_n),
         flip_rate_low_margin_n=low_n,
+        flip_rate_low_margin_not_compared=low_apart,
         flip_rate_near_threshold=near[0],
         flip_rate_near_threshold_n=near[1],
+        flip_rate_near_threshold_not_compared=near[2],
         flip_median_lag_hours=statistics.median(lags) if lags else None,
         labeller_agreement=jev_stats.proportion(agreeing, len(compared)),
         labeller_kappa=jev_stats.cohen_kappa(
@@ -2576,14 +2590,25 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
         if share is None and n is None:
             lines.append(f"flips, {name}: not measured (no threshold chosen)")
             continue
+        # Every re-ask sampled under the plan is in the text: those compared,
+        # and those whose pair could not be — never a rate quoted over the
+        # valid ones as though they were all that was asked.
+        apart = e.get(f"{rate}_not_compared")
+        asked = (
+            f"{n + apart} re-asked, {apart} not compared"
+            if isinstance(apart, int) and isinstance(n, int)
+            else "how many could not be compared not recorded"
+        )
         if share is None:
-            lines.append(f"flips, {name}: not measured (n = {n} pairs)")
+            lines.append(f"flips, {name}: not measured ({n} compared; {asked})")
             continue
         k = _count_of(share, n)
         interval = jev_stats.wilson(k, n, float(e["ci_level"])) if reported else None
         lines.append(
-            f"flips, {name}: {k} of {n} re-asked requests changed their argmax = "
-            f"{said(share)}" + _interval(*(interval or (None, None)), wilson)
+            f"flips, {name}: {k} of {n} compared re-asks changed their argmax = "
+            f"{said(share)}"
+            + _interval(*(interval or (None, None)), wilson)
+            + f"; {asked}"
         )
     lag = e.get("flip_median_lag_hours")
     lines.append(

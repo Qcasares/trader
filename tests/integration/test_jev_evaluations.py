@@ -141,10 +141,13 @@ ADDED: dict[str, Any] = {
             "vs_keyword_jev_right_only",
             "vs_keyword_baseline_right_only",
             "flip_rate_n",
+            "flip_rate_not_compared",
             "flip_rate_low_margin",
             "flip_rate_low_margin_n",
+            "flip_rate_low_margin_not_compared",
             "flip_rate_near_threshold",
             "flip_rate_near_threshold_n",
+            "flip_rate_near_threshold_not_compared",
             "flip_median_lag_hours",
             "labeller_agreement",
             "labeller_kappa",
@@ -276,10 +279,13 @@ def _measured(**overrides: Any) -> dict[str, Any]:
         accuracy_at_threshold_wilson_high=0.94,
         flip_rate=0.03,
         flip_rate_n=40,
+        flip_rate_not_compared=5,
         flip_rate_low_margin=0.08,
         flip_rate_low_margin_n=50,
+        flip_rate_low_margin_not_compared=5,
         flip_rate_near_threshold=0.07,
         flip_rate_near_threshold_n=35,
+        flip_rate_near_threshold_not_compared=2,
         flip_median_lag_hours=26.5,
         labeller_agreement=0.90,
         labeller_kappa=0.80,
@@ -492,6 +498,26 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         (f"{column} negative", {column: -1}, "jev_evaluations_counts_outside_n")
         for column in ("n_contested", "n_other_plans", "n_plan_unknown")
     ],
+    # The re-asks that could not be compared: each a count, and every re-ask
+    # of the two strata, as of the window, within n.
+    *[
+        (f"{column} negative", {column: -1}, "jev_evaluations_counts_within_n")
+        for column in (
+            "flip_rate_not_compared",
+            "flip_rate_low_margin_not_compared",
+            "flip_rate_near_threshold_not_compared",
+        )
+    ],
+    (
+        "more re-asks in the two strata than items",
+        {"flip_rate_not_compared": 106},
+        "jev_evaluations_counts_within_n",
+    ),
+    (
+        "more re-asks near the threshold than items",
+        {"flip_rate_near_threshold_not_compared": 166},
+        "jev_evaluations_counts_within_n",
+    ),
     # The discordant items: each a count, and the two of one baseline within
     # n, each case keeping the difference their arithmetic.
     *[
@@ -1629,6 +1655,7 @@ class TestTheLedgerTheJobsWrote:
         """
         labelled = {text_sha256(text) for text in EXCERPTS}
         found = {stratum: [0, 0] for stratum in jev_eval.STRATA}
+        apart = dict.fromkeys(jev_eval.STRATA, 0)
         jobs = await written.fetch(
             "SELECT status, error, payload, result FROM jobs WHERE kind = 'jev_reask'"
         )
@@ -1644,6 +1671,8 @@ class TestTheLedgerTheJobsWrote:
             if moved is not None:
                 found[payload["stratum"]][0] += moved
                 found[payload["stratum"]][1] += 1
+            else:
+                apart[payload["stratum"]] += 1
         assert sum(n for _, n in found.values()) >= 2, "B1 and K1 were not compared"
         assert sum(k for k, _ in found.values()) == 1, "K1 moved, and nothing else"
         for labelled_by in (TESTER, ledger.readme):
@@ -1654,7 +1683,9 @@ class TestTheLedgerTheJobsWrote:
             ):
                 k, n = found[stratum]
                 assert (row[rate], row[pairs]) == (jev_stats.proportion(k, n), n)
+                assert row[f"{rate}_not_compared"] == apart[stratum]
             assert row["flip_rate_near_threshold_n"] is None
+            assert row["flip_rate_near_threshold_not_compared"] is None
 
     async def test_the_report_holds_each_labeller_apart(
         self,
