@@ -1592,6 +1592,7 @@ def _flags(**overrides: str | None) -> dict[str, str]:
         f"{flags.JEV_AREA_PREFIX}guardrails": "false",
         flags.JEV_MODEL: json.dumps(MODEL),
         flags.JEV_DAILY_REQUEST_BUDGET: "500",
+        flags.JEV_MAX_STATE_TOKENS: "8000",
     }
     rows.update(overrides)
     return {key: value for key, value in rows.items() if value is not None}
@@ -1637,6 +1638,7 @@ class _Findings:
         self.auth_held = False
         self.refused = False
         self.spent = 0
+        self.spent_everywhere: int | None = None
         self.waiting = 0
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1654,6 +1656,8 @@ class _Findings:
             return self.refused
 
         async def requests_today(conn: Any, lane: str | None = None) -> int:
+            if lane is None and self.spent_everywhere is not None:
+                return self.spent_everywhere
             return self.spent
 
         async def pending_asks(conn: Any, sets: Any) -> int:
@@ -1810,6 +1814,77 @@ class TestPreview:
             "held: refused at this version under the pin",
             "the findings lane has no call left today",
         ]
+
+    @pytest.mark.parametrize(
+        ("limit", "read", "why"),
+        [
+            (
+                "0",
+                0,
+                "the state limit is 0; every request is refused until "
+                "jev_max_state_tokens is a positive integer",
+            ),
+            (
+                None,
+                0,
+                "the state limit is 0; every request is refused until "
+                "jev_max_state_tokens is a positive integer",
+            ),
+            ("1", 1, "over the 1 allowed by jev_max_state_tokens"),
+        ],
+        ids=["zero-makes-no-calls", "unreadable-reads-as-zero", "under-the-state"],
+    )
+    async def test_a_state_the_road_refuses_for_its_size_is_not_shown_as_sent(
+        self,
+        findings_rig: _Findings,
+        limit: str | None,
+        read: int,
+        why: str,
+    ) -> None:
+        """
+        D2's review (D2RW-1): the road refuses a request over the state limit
+        before any call, recording a ``refused_limits`` row, and a limit of 0,
+        or a row it cannot read, refuses every request; the first cut never
+        read the limit and printed "would send" for each. The planner does not
+        read it, so the set is still planned; what would be sent is nothing,
+        and why is said, quoting no text.
+        """
+        report = await _preview(_flags(**{flags.JEV_MAX_STATE_TOKENS: limit}))
+        (subject,) = report["subjects"]
+        assert subject["state"] is None, "a state the road refuses shown as sent"
+        assert subject["not_sent_because"].startswith(
+            "over the size limits, so the road would refuse it before any call: "
+        )
+        assert why in subject["not_sent_because"]
+        assert CANARY not in subject["not_sent_because"]
+        assert report["would_plan"] is True, report["not_planned_because"]
+        assert report["state_limit"] == read
+        text = jev_eval.format_preview(report)
+        assert "would send:" not in text and "would send nothing: over the" in text
+        assert f"state limit: {read} estimated tokens" in text
+
+    async def test_a_spent_day_is_named_for_each_subject(
+        self, findings_rig: _Findings
+    ) -> None:
+        """
+        The road refuses every ask once the day's budget is spent, whatever a
+        lane's share has left, as when the budget is lowered after the day's
+        calls: so does preview, and the planner, which reads the share alone,
+        still plans.
+        """
+        findings_rig.spent_everywhere = 500
+        report = await _preview()
+        (subject,) = report["subjects"]
+        assert (subject["state"], subject["not_sent_because"]) == (
+            None,
+            "the road would refuse it before any call: no call is left in the "
+            "day's request budget, 500 of 500 made today",
+        )
+        assert report["would_plan"] is True, report["not_planned_because"]
+        assert report["spent_today"] == 500 and report["budget"] == 500
+        findings_rig.spent_everywhere = 499
+        (subject,) = (await _preview())["subjects"]
+        assert subject["state"] == {"title": FINDING_TITLE}
 
     async def test_the_limit_is_the_planners_cap(self, findings_rig: _Findings) -> None:
         from src.programme import jev_plan

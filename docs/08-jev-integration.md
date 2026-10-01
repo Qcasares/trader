@@ -4448,13 +4448,23 @@ harness's read-only snapshot, loading no planner, lane or client:
 - `preview --set S [--limit N] [--json]` prints what a title set — the two
   findings sets, the hypothesis categories and the card check — would be
   asked about on the day: the planner's own read, each subject with the row
-  it comes from and the exact state the handler would send, or why it would
-  send nothing, quoting no text; and every switch the planner reads for it,
-  the pin, the plans, the holds and the lane's calls left. The planner's and
-  the handler's rules are copied, since the harness may load neither, and
-  `tests/integration/test_jev_findings.py::TestPreviewIsThePlanners` holds the
-  subjects equal to the planner's, in order, and every state equal to the one
-  the handler hands the road, on the same rows, for all four title sets.
+  it comes from and the exact state that would be sent, or why nothing would
+  be, quoting no text — the handler's refusals, and the two the road makes
+  before any call that the planner does not foresee: the day's budget spent,
+  whatever a lane's share has left, and a state over the size limits under
+  `jev_max_state_tokens`, read through its own reader, which refuses every
+  request at 0, what a setting nobody can read reads as. The first cut read
+  neither, and printed "would send" for a state the road would refuse under
+  a limit of 0 (D2's review;
+  `tests/unit/test_jev_eval.py::TestPreview::test_a_state_the_road_refuses_for_its_size_is_not_shown_as_sent`
+  and `::test_a_spent_day_is_named_for_each_subject`). It prints every
+  switch the planner reads for the set, the pin, the plans, the holds, the
+  lane's calls left, the day's budget and spend and the state limit. The
+  planner's and the handler's rules are copied, since the harness may load
+  neither, and `tests/integration/test_jev_findings.py::TestPreviewIsThePlanners`
+  holds the subjects equal to the planner's, in order, and every state equal
+  to the one the handler hands the road, on the same rows, for all four title
+  sets.
 - `suggestions [--json]` prints, for each open finding but Jev's, by its ref,
   how each findings set's ask came out — answered, invalid, held by a content
   block, retired, waiting, or not asked and why — with the switches, the pin

@@ -2925,6 +2925,9 @@ async def _previewed(
     question_set: jev_questions.QuestionSet,
     subject_type: str,
     row: Mapping[str, Any],
+    *,
+    state_limit: int,
+    day_spent: str | None,
 ) -> dict[str, Any]:
     """
     One subject as the ``jev_ask`` handler would take it: the row read again
@@ -2933,6 +2936,15 @@ async def _previewed(
     programme's model as its writer and to its cap, and built into the state
     that would be sent — or why nothing would be, in code's words, quoting
     no text.
+
+    And then as the road would take it, for the two refusals it makes before
+    any call that the planner does not foresee (D2's review, D2RW-1): the
+    day's budget spent, ``day_spent`` saying so, and the size limits under
+    ``state_limit``, ``jev_max_state_tokens`` as the road reads it, which
+    refuse every request at 0 — what a limit nobody can read reads as. Each
+    is checked as ``jev_lane.ask`` checks it, by the same function on the same
+    serialisation, and either means nothing would be sent: the first cut
+    printed "would send" for a state the road would refuse.
     """
     finding = subject_type == "finding_title"
     loaded = await (
@@ -2972,9 +2984,30 @@ async def _previewed(
             else jev_questions.HypothesisTitleState
         )
         try:
-            entry["state"] = question_set.dump_state(state_model(title=title))
+            state = question_set.dump_state(state_model(title=title))
         except ValueError:
             entry["not_sent_because"] = "the title does not make the state"
+            return entry
+        if day_spent is not None:
+            entry["not_sent_because"] = (
+                f"the road would refuse it before any call: {day_spent}"
+            )
+            return entry
+        too_large = jev_catalogue.request_size_problem(
+            json.dumps(state, ensure_ascii=False),
+            {
+                key: json.dumps(question, ensure_ascii=False)
+                for key, question in question_set.as_request_questions().items()
+            },
+            state_limit,
+        )
+        if too_large is not None:
+            entry["not_sent_because"] = (
+                "over the size limits, so the road would refuse it before any "
+                f"call: {too_large}"
+            )
+        else:
+            entry["state"] = state
     return entry
 
 
@@ -2989,11 +3022,13 @@ async def preview_report(
     What ``question_set`` would be asked about on ``day``, and what would be
     sent: the subjects the planner's read returns, at most ``limit``, each
     with the row it comes from and the exact state the handler would build
-    from it, or why nothing would be sent; and every switch the planner reads
-    for it, through the shipped readers, whether each is on, the pin, the
-    plans in force, the standing holds and the lane's calls left today.
-    Whether a key is set is not the harness's to know: it holds none. Reads
-    only, and enqueues nothing.
+    from it, or why nothing would be sent — the handler's refusals, and the
+    road's that the planner does not foresee, the day's budget spent and the
+    size limits; and every switch the planner reads for it, through the
+    shipped readers, whether each is on, the pin, the plans in force, the
+    standing holds, the lane's calls left today, the day's budget and its
+    spend, and the state limit. Whether a key is set is not the harness's to
+    know: it holds none. Reads only, and enqueues nothing.
     """
     subject_type = jev_questions.STATE_SUBJECT.get(question_set.state_model)
     if question_set is not jev_questions.REGISTRY.get(question_set.name):
@@ -3030,6 +3065,8 @@ async def preview_report(
         ),
     }
     budget = await flags.jev_daily_request_budget(conn)
+    spent = await jev_repo.requests_today(conn)
+    state_limit = await flags.jev_max_state_tokens(conn)
     lane_sets = sorted(
         other.name for other in jev_questions.REGISTRY.values() if other.lane == lane
     )
@@ -3046,12 +3083,26 @@ async def preview_report(
     reasons += [f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on]
     if calls_left <= 0:
         reasons.append(f"the {lane} lane has no call left today")
+    day_spent = (
+        f"no call is left in the day's request budget, {spent} of {budget} made today"
+        if spent >= budget
+        else None
+    )
     subjects = []
     if model is not None and plans is not None:
         for row in await _titles_to_ask(
             conn, subject_type, question_set, model, limit, day
         ):
-            subjects.append(await _previewed(conn, question_set, subject_type, row))
+            subjects.append(
+                await _previewed(
+                    conn,
+                    question_set,
+                    subject_type,
+                    row,
+                    state_limit=state_limit,
+                    day_spent=day_spent,
+                )
+            )
     return {
         "set": name,
         "version": version,
@@ -3064,6 +3115,9 @@ async def preview_report(
         "plans_in_force": plans is not None,
         "holds": holds,
         "calls_left_today": max(calls_left, 0),
+        "budget": budget,
+        "spent_today": spent,
+        "state_limit": state_limit,
         "key": "not read: the harness holds none, and nothing is planned without one",
         "would_plan": not reasons,
         "not_planned_because": reasons,
@@ -3090,6 +3144,8 @@ def format_preview(report: Mapping[str, Any]) -> str:
             for hold, on in report["holds"].items()
         ),
         f"calls left today in the lane: {report['calls_left_today']}",
+        f"budget: {report['budget']} calls a day, {report['spent_today']} made "
+        f"today; state limit: {report['state_limit']} estimated tokens",
         f"key: {report['key']}",
     ]
     if report["would_plan"]:

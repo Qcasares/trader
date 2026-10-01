@@ -257,10 +257,12 @@ python -m src.programme.jev_eval report [--json]
 # read in the harness's read-only snapshot. `preview` runs the planner's read
 # for one title set — the findings sets, the hypothesis categories, the card
 # check — and prints each subject with the row it comes from and the exact
-# state the handler would send, or why it would send nothing, and every
-# switch, the pin, the plans, the holds and the lane's calls left that decide
-# whether it is planned; it refuses a web set, whose subjects are the
-# injection screen's own answers. `suggestions` prints, for each open finding
+# state that would be sent, or why nothing would be — the handler's refusals,
+# and the road's for the day's budget spent or a state over the limits, which
+# refuse every request at a state limit of 0 — and every switch, the pin, the
+# plans, the holds, the lane's calls left, the day's budget and spend and the
+# state limit; it refuses a web set, whose subjects are the injection
+# screen's own answers. `suggestions` prints, for each open finding
 # but Jev's, by its ref, whether each findings set asked and how it came out:
 # statuses, never an answer, a probability or a chip, since anyone who reads
 # it may later label a set. Read `preview` before an area is first switched on.
