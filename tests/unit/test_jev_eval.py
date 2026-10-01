@@ -2500,6 +2500,106 @@ class TestThePlansAnAnswerWasRecordedUnder:
         assert (evaluation.n, evaluation.n_not_asked) == (1, 1)
 
 
+#: An invented failed job's error that code leaves to Jev and whose skeleton
+#: holds enough words to be asked about.
+OPS_ERROR = "[Errno 111] Connection refused while reading an invented page"
+
+
+def _failed_rows(*finished: datetime) -> list[dict[str, Any]]:
+    """Failed ingest jobs of :data:`OPS_ERROR`, one finished at each instant."""
+    return [
+        {
+            "id": f"6d0c5b1e-0d3a-4d37-9c43-{n:012d}",
+            "kind": "ingest_bars",
+            "error": OPS_ERROR,
+            "finished_at": at,
+        }
+        for n, at in enumerate(finished)
+    ]
+
+
+class TestTheOpsDates:
+    """
+    docs/09, section 3.7 (D3; revised: D-HMB-08): a job error's skeleton is
+    dated over exactly the rows its population reads — the failed jobs of a
+    triaged kind finished after the UTC day the pin was first observed — so
+    one occurrence of the same error before that day leaves the date where
+    the population puts it, and does not make every ops evaluation an upper
+    bound. ``jev_repo.item_dates`` over a fake of the one read beneath it;
+    ``tests/integration/test_jev_repo.py::TestTheJobErrorPopulation`` holds
+    the read itself.
+    """
+
+    async def test_an_item_is_dated_over_the_population_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+        before = datetime.combine(first - timedelta(days=30), time(9), UTC)
+        on_the_day = datetime.combine(first, time(18), UTC)
+        after = datetime.combine(first + timedelta(days=2), time(9), UTC)
+        later = after + timedelta(days=1)
+        rows = _failed_rows(later, after, on_the_day, before)
+        reads: list[datetime] = []
+
+        async def failed_jobs_for_triage(
+            conn: Any, *, kinds: Any, since: datetime, limit: int | None = 200
+        ) -> list[dict[str, Any]]:
+            reads.append(since)
+            kept = [r for r in rows if r["kind"] in kinds and r["finished_at"] > since]
+            return sorted(kept, key=lambda r: r["finished_at"], reverse=True)
+
+        monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
+        tokens = jev_redact_skeleton(OPS_ERROR)
+        state = jev_questions.JobErrorState(job_kind="ingest_bars", error=tokens)
+        subject = ("job_error", jev_questions.job_error_subject(state))
+        other = ("job_error", "0" * 64)
+
+        dates = await jev_repo.item_dates(object(), [subject, other], model=MODEL)
+
+        assert dates == {subject: after, other: None}
+        assert reads == [jev_repo.job_error_since(MODEL)]
+        assert jev_repo.job_error_since(MODEL) == datetime.combine(
+            first + timedelta(days=1), time(0), UTC
+        )
+        assert jev_eval.possibly_in_training(MODEL, [dates[subject]]) is False
+        for occurrence in (before, on_the_day):
+            assert jev_eval.possibly_in_training(MODEL, [occurrence]) is True
+
+    async def test_only_occurrences_before_the_day_leave_it_undated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A skeleton no job of the population holds is no item of it: undated,
+        which the harness reads as possibly in training, and never dated by an
+        occurrence the population does not read.
+        """
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+        rows = _failed_rows(datetime.combine(first, time(23, 59), UTC))
+
+        async def failed_jobs_for_triage(
+            conn: Any, *, kinds: Any, since: datetime, limit: int | None = 200
+        ) -> list[dict[str, Any]]:
+            return [r for r in rows if r["finished_at"] > since]
+
+        monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
+        state = jev_questions.JobErrorState(
+            job_kind="ingest_bars", error=jev_redact_skeleton(OPS_ERROR)
+        )
+        subject = ("job_error", jev_questions.job_error_subject(state))
+        assert await jev_repo.item_dates(object(), [subject], model=MODEL) == {
+            subject: None
+        }
+
+
+def jev_redact_skeleton(error: str) -> tuple[str, ...]:
+    """The redactor's skeleton of ``error``, through the harness's own rule."""
+    from src.programme import jev_chips
+
+    tokens = jev_chips.residue_skeleton("ingest_bars", error)
+    assert tokens is not None, error
+    return tokens
+
+
 class TestPossiblyInTraining:
     def test_it_is_computed_from_the_dates(self) -> None:
         first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]

@@ -61,8 +61,10 @@ Before Jev may be asked why a job failed, code reads the error:
 system's own raise sites write, and returns ``None`` only for the error of a
 triaged kind (``jev_redact.TRIAGED_KINDS``: research and ingest) that no shape
 places — the residue, the one thing ``ops.job_error`` may be asked about, and
-then only as a skeleton (``jev_redact.skeleton``), never the message
-(docs/09, section 4.5). Every other kind's unplaced error is
+then only as a skeleton (``jev_redact.skeleton``), never the message, and only
+one holding enough words of the vocabulary to be worth asking about
+(:func:`residue_skeleton`, the one rule an error is read by wherever it may
+become state) (docs/09, section 4.5). Every other kind's unplaced error is
 ``unclassified``: a venue's, the shadow replay's and the programme's own are
 code's to place or no one's, and are never sent. The shapes are pinned by
 :data:`GOLDEN_SHAPES_SHA256` and named, by their hash, in the ops set's plan.
@@ -966,6 +968,26 @@ def code_cause(kind: object, error: object) -> str | None:
     return None if kind in jev_redact.TRIAGED_KINDS else "unclassified"
 
 
+def residue_skeleton(kind: object, error: object) -> tuple[str, ...] | None:
+    """
+    The skeleton ``ops.job_error`` may be asked about for a failed job of
+    ``kind`` whose error is ``error``, or ``None``: the redactor's skeleton
+    (``jev_redact.skeleton``) of an error code leaves to Jev
+    (:func:`code_cause` is ``None``, so ``kind`` is a triaged kind's and
+    ``error`` is text), and only when it holds enough words of the
+    vocabulary to be asked about (``jev_redact.admissible``). The one rule a
+    job's error is read by wherever it may become state — the planner, the
+    harness and the reads beneath them, and the ``jev_ask`` handler's
+    admission, part by part — so that what is planned is what is asked, and
+    what is labelled is what was planned for. Pure, and never raises.
+    ``tests/unit/test_jev_chips.py::TestTheResidue``.
+    """
+    if code_cause(kind, error) is not None:
+        return None
+    tokens = jev_redact.skeleton(error)
+    return tokens if jev_redact.admissible(tokens) else None
+
+
 @dataclass(frozen=True, slots=True)
 class CodeChip:
     """
@@ -1112,6 +1134,7 @@ __all__ = [
     "job_error_shape",
     "normalised_title",
     "reconciliation_chip",
+    "residue_skeleton",
     "route_chip",
     "severity_chip",
     "shapes_sha256",

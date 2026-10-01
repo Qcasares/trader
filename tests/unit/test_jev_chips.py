@@ -1032,6 +1032,85 @@ class TestCodeFirst:
         assert time.perf_counter() - started < 0.05 * len(kinds)
 
 
+class TestTheResidue:
+    """
+    ``residue_skeleton``: the one rule a job's error is read by wherever it
+    may become state — the planner, the harness and the ``jev_ask`` handler's
+    admission (docs/09, sections 4.2 and 5.1) — code's triage first, then the
+    redactor, then enough words of the vocabulary to be asked about.
+    """
+
+    def test_it_is_the_skeleton_of_admissible_residue_and_nothing_else(
+        self,
+    ) -> None:
+        """
+        Over the redactor's fuzz and every message this system writes, under
+        every kind and values that are not kinds: the skeleton exactly when
+        code leaves the error to Jev and the skeleton is admissible, else
+        ``None``; it never raises.
+        """
+        corpus: list[object] = list(FUZZ[:2_000])
+        corpus += [site["message"] for site in raise_sites() if site["message"]]
+        corpus += [
+            "[Errno 111] Connection refused while reading an invented page",
+            "type object 'Frame' has no attribute 'close'",
+            "division by zero",
+            "",
+            None,
+            b"connection refused",
+        ]
+        kinds: tuple[object, ...] = (
+            *TRIAGED,
+            *jev_chips.VENUE_KINDS,
+            *jev_chips.PROGRAMME_KINDS,
+            "no_such_kind",
+            None,
+        )
+        asked = 0
+        for error in corpus:
+            for kind in kinds:
+                tokens = jev_chips.residue_skeleton(kind, error)
+                left = jev_chips.code_cause(kind, error) is None
+                skeleton = jev_redact.skeleton(error)
+                if left and jev_redact.admissible(skeleton):
+                    assert tokens == skeleton, (kind, error)
+                    asked += 1
+                else:
+                    assert tokens is None, (kind, error)
+        assert asked > 0
+
+    @pytest.mark.parametrize(
+        ("kind", "error"),
+        [
+            ("backtest", "unknown data source 'invented'"),
+            ("ingest_bars", "division by zero"),
+            ("ingest_bars", "'Adj Close'"),
+            ("live_decision", "[Errno 111] Connection refused while reading x"),
+            ("jev_ask", "[Errno 111] Connection refused while reading x"),
+            ("ingest_bars", None),
+            ("ingest_bars", ""),
+        ],
+        ids=[
+            "placed-by-code",
+            "too-few-words",
+            "a-quoted-key-alone",
+            "a-venue-kind",
+            "a-programme-kind",
+            "no-error",
+            "empty",
+        ],
+    )
+    def test_each_rule_refuses_alone(self, kind: str, error: object) -> None:
+        assert jev_chips.residue_skeleton(kind, error) is None
+
+    def test_admissible_residue_is_its_skeleton(self) -> None:
+        error = "[Errno 111] Connection refused while reading an invented page"
+        for kind in TRIAGED:
+            assert jev_chips.residue_skeleton(kind, error) == (
+                jev_redact.skeleton(error)
+            )
+
+
 class TestTheVenueShapes:
     """A venue kind's error is a code chip, and each venue shape is live."""
 

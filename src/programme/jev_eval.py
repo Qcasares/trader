@@ -1819,7 +1819,7 @@ async def read_ledger(
         jobs=await jev_repo.ask_jobs_about(
             conn, question_set=name, version=version, subjects=subjects
         ),
-        dates=await jev_repo.item_dates(conn, subjects),
+        dates=await jev_repo.item_dates(conn, subjects, model=model),
         texts=await jev_repo.subject_texts(conn, subjects),
         pairs=pairs,
         reasks=reasks,

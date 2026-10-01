@@ -6,8 +6,10 @@ plane will read; for the forward clock, its planner and the harness, what the
 queue says about their jobs, since a job's error is the durable record of why
 a session went unmeasured; and, from phases C7 and C8, what the planner is to
 ask each set about — stored web content and the programme's hypothesis titles,
-and from phase D2 the titles of the findings its panel raises — read beside
-the ledger's answers and the queue's jobs.
+from phase D2 the titles of the findings its panel raises, and from phase D3
+the failed research and ingest jobs whose errors code leaves to Jev, each
+read only through the redactor — read beside the ledger's answers and the
+queue's jobs.
 
 No SDK and no model client, so ``src/api`` may import it. It reads and writes
 rows and knows nothing about how an answer was obtained: ``jev_client``, which
@@ -44,12 +46,12 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
-from src.programme import jev_questions
+from src.programme import jev_catalogue, jev_chips, jev_questions, jev_redact
 from src.programme.jev_hash import text_sha256
 from src.programme.jev_questions import (
     SCREEN_CLEAR_ARGMAX,
@@ -1681,6 +1683,187 @@ async def findings_to_ask(
     return [dict(row) for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# Failed jobs, for the ops set (phase D3)
+# ---------------------------------------------------------------------------
+#
+# A failed job's error is read here and nowhere else on the Jev side, and
+# handed only to ``jev_chips.code_cause`` and ``jev_redact.skeleton`` — the
+# planner and the harness through ``jev_chips.residue_skeleton``, the handler
+# through its admission — so that what becomes state is the skeleton alone
+# (docs/09, sections 4 and 5). The error is never returned beside anything a
+# caller logs or stores, and no read here writes, changes, retries or resumes
+# a job.
+
+#: What the ops reads take of a job: never its payload or its result.
+_FAILED_JOB_COLUMNS = "id, kind, status, error, finished_at"
+
+
+async def get_failed_job(
+    conn: asyncpg.Connection, job_id: object
+) -> dict[str, Any] | None:
+    """
+    The job an ops ask is about, by its id: its id, kind, status, error and
+    when it finished, and nothing else (docs/09, section 5.1). Whatever its
+    status: the handler's admission refuses a job that did not fail, of a kind
+    that is not triaged, or with no finish time, and says which. ``None`` for
+    no such job.
+    """
+    row = await conn.fetchrow(
+        f"SELECT {_FAILED_JOB_COLUMNS} FROM jobs WHERE id = $1", job_id
+    )
+    return None if row is None else dict(row)
+
+
+async def failed_jobs_for_triage(
+    conn: asyncpg.Connection,
+    *,
+    kinds: Sequence[str],
+    since: datetime,
+    limit: int | None = 200,
+) -> list[dict[str, Any]]:
+    """
+    ``id``, ``kind``, ``error`` and ``finished_at`` of the jobs of ``kinds``
+    that failed and finished after ``since``, newest first by when they
+    finished, then by id; at most ``limit``, or every one with ``None``. A job
+    an expired lease failed has no finish time (``jobs.requeue_expired``), so
+    is never among them. The caller applies ``jev_chips.code_cause``, the
+    redactor and the admission (docs/09, section 5.3); nothing here reads the
+    error.
+    """
+    rows = await conn.fetch(
+        "SELECT id, kind, error, finished_at FROM jobs "
+        "WHERE status = 'failed' AND kind = ANY($1::text[]) "
+        "AND finished_at > $2 "
+        "ORDER BY finished_at DESC, id DESC "
+        "LIMIT $3",
+        list(kinds),
+        since,
+        None if limit is None else _page(limit),
+    )
+    return [dict(row) for row in rows]
+
+
+async def unasked_subjects(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    model: str,
+    subject_type: str,
+    subjects: Sequence[str],
+    day: date,
+    max_failed: int = MAX_FAILED_CALLS,
+) -> list[str]:
+    """
+    Of ``subjects``, by their addresses, those ``question_set`` is to be
+    asked about on ``day``, in the order given: for the set at its registered
+    version under ``model``, never one answered ``ok`` or retired by
+    ``max_failed`` failed calls, nor one whose job is waiting or was planned
+    today, nor one held by a content block — which holds text alone, so no
+    subject addressed by its state (see the section's comment above
+    :data:`MAX_FAILED_CALLS`). The reads above, generalised over a list the
+    caller computed: the ops set's subjects are skeletons, which no SQL can
+    compute (docs/09, section 5.3).
+    """
+    if (
+        _SUBJECT_TYPE_NAME.fullmatch(subject_type) is None
+        or subject_type not in jev_catalogue.SUBJECT_TYPES
+    ):
+        raise ValueError(f"{subject_type!r} is not a subject type's name")
+    wanted = list(dict.fromkeys(subjects))
+    if not wanted:
+        return []
+    prefix, suffix = _key_around(
+        question_set.name, question_set.version, subject_type, day
+    )
+    rows = await conn.fetch(
+        f"""
+        SELECT s.subject_id
+        FROM unnest($7::text[]) AS s(subject_id)
+        WHERE NOT {_blocked(subject_type, "s.subject_id")}
+          AND {_unanswered(subject_type, "s.subject_id")}
+          AND {_not_waiting("s.subject_id")}
+        """,
+        question_set.name,
+        question_set.version,
+        model,
+        max_failed,
+        prefix,
+        suffix,
+        wanted,
+    )
+    kept = {row["subject_id"] for row in rows}
+    return [subject for subject in wanted if subject in kept]
+
+
+@dataclass(frozen=True)
+class JobErrorItem:
+    """
+    One ``job_error`` subject of the ops set's population: its state, the
+    earliest and the latest time a job of the population failed with it, and
+    the newest such job's id. Never the error a skeleton was made from.
+    """
+
+    state: jev_questions.JobErrorState
+    earliest: datetime
+    latest: datetime
+    newest_job_id: Any
+
+
+async def job_error_population(
+    conn: asyncpg.Connection, *, since: datetime
+) -> dict[str, JobErrorItem]:
+    """
+    The ops set's population by address (``jev_prereg.OPS_POPULATION``): every
+    job of a triaged kind that failed and finished after ``since``, whose
+    error code leaves to Jev and whose skeleton holds enough words to be asked
+    about (``jev_chips.residue_skeleton``), each skeleton once, by its state's
+    address (``jev_questions.job_error_subject``), with the earliest and the
+    latest time a job failed with it — what an item is dated by, over exactly
+    the rows the population reads (docs/09, section 3.7) — and the newest such
+    job. The error is read by ``residue_skeleton`` alone and kept nowhere.
+    """
+    rows = await failed_jobs_for_triage(
+        conn, kinds=jev_redact.TRIAGED_KINDS, since=since, limit=None
+    )
+    items: dict[str, JobErrorItem] = {}
+    for row in rows:
+        tokens = jev_chips.residue_skeleton(row["kind"], row["error"])
+        if tokens is None:
+            continue
+        state = jev_questions.JobErrorState(job_kind=row["kind"], error=tokens)
+        address = jev_questions.job_error_subject(state)
+        seen = items.get(address)
+        finished = row["finished_at"]
+        if seen is None:
+            # Newest first, so the first row met is the newest job.
+            items[address] = JobErrorItem(state, finished, finished, row["id"])
+        else:
+            items[address] = JobErrorItem(
+                state,
+                min(seen.earliest, finished),
+                max(seen.latest, finished),
+                seen.newest_job_id,
+            )
+    return items
+
+
+def job_error_since(model: str | None) -> datetime:
+    """
+    Where the ops set's population starts: the UTC midnight after the day
+    ``model`` was first observed (``jev_catalogue.MODEL_FIRST_OBSERVED``),
+    since a job is the population's only when it finished after that day,
+    the day an item is dated by (``jev_eval.possibly_in_training``). With no
+    model, or one never observed, the earliest such day of any pinned model,
+    so a label of any pin's population is a subject.
+    """
+    observed = jev_catalogue.MODEL_FIRST_OBSERVED
+    first = observed.get(model) if model is not None else None
+    if first is None:
+        first = min(observed.values())
+    return datetime.combine(first + timedelta(days=1), time(0), tzinfo=UTC)
+
+
 async def first_job_session(
     conn: asyncpg.Connection,
     kind: str,
@@ -1954,18 +2137,26 @@ async def answers_for_subjects(
 
 
 async def item_dates(
-    conn: asyncpg.Connection, subjects: Sequence[Subject]
+    conn: asyncpg.Connection,
+    subjects: Sequence[Subject],
+    *,
+    model: str | None = None,
 ) -> dict[Subject, datetime | None]:
     """
     Per subject, when its text existed by: a web excerpt's earliest
     ``published_at`` among the documents holding it, ``None`` when any of them
     has none, since an unknown date could be the earliest; a hypothesis
-    title's earliest ``created_at`` among the hypotheses holding it; and, from
+    title's earliest ``created_at`` among the hypotheses holding it; from
     phase D2, a finding title's earliest ``opened_at`` among the findings of
     its population holding it — those the programme's model raised, within
-    the cap (``jev_prereg.FINDINGS_POPULATION``). ``None`` for a subject of
-    any other type, or one nothing holds: unknown, which the harness reads as
-    possibly in the model's training data.
+    the cap (``jev_prereg.FINDINGS_POPULATION``); and, from phase D3, a job
+    error's earliest ``finished_at`` among the rows its population reads under
+    ``model`` — the failed jobs of a triaged kind finished after ``model``
+    was first observed that hold it (:func:`job_error_population`), so one
+    recurring error is not dated before the population it is labelled from
+    (docs/09, section 3.7). ``None`` for a subject of any other type, or one
+    nothing holds: unknown, which the harness reads as possibly in the
+    model's training data.
     """
     dates: dict[Subject, datetime | None] = dict.fromkeys(subjects)
     excerpts = [i for t, i in subjects if t == "web_excerpt"]
@@ -1998,6 +2189,11 @@ async def item_dates(
             jev_questions.FINDING_TITLE_MAX_CHARS,
         )
         dates.update({("finding_title", r["subject_id"]): r["dated"] for r in rows})
+    if any(t == "job_error" for t, _ in subjects):
+        population = await job_error_population(conn, since=job_error_since(model))
+        for t, i in subjects:
+            if t == "job_error" and i in population:
+                dates[(t, i)] = population[i].earliest
     return dates
 
 
@@ -2006,11 +2202,15 @@ async def subject_texts(
 ) -> dict[Subject, str]:
     """
     The text of each subject that is stored: a web excerpt as the earliest
-    document holding it stores it, a title as a hypothesis holds it, and, from
-    phase D2, a finding title as a finding of its population holds it — one
-    the programme's model raised, within the cap. What the keyword baselines
-    read, and what a label's subject must be; a subject nothing holds is not
-    in the result, so a title only an operator's finding holds is no subject.
+    document holding it stores it, a title as a hypothesis holds it, from
+    phase D2 a finding title as a finding of its population holds it — one
+    the programme's model raised, within the cap — and, from phase D3, a job
+    error's skeleton as its population holds it, written as
+    ``jev_questions.job_error_text`` writes it, for any pin
+    (:func:`job_error_since`); never the error it was made from. What the
+    keyword baselines read, and what a label's subject must be; a subject
+    nothing holds is not in the result, so a title only an operator's finding
+    holds is no subject.
     """
     texts: dict[Subject, str] = {}
     excerpts = [i for t, i in subjects if t == "web_excerpt"]
@@ -2046,6 +2246,11 @@ async def subject_texts(
             jev_questions.FINDING_TITLE_MAX_CHARS,
         )
         texts.update({("finding_title", r["subject_id"]): r["title"] for r in rows})
+    if any(t == "job_error" for t, _ in subjects):
+        population = await job_error_population(conn, since=job_error_since(None))
+        for t, i in subjects:
+            if t == "job_error" and i in population:
+                texts[(t, i)] = jev_questions.job_error_text(population[i].state)
     return texts
 
 
@@ -2217,10 +2422,13 @@ async def subjects_to_label(
     ``jev_questions.TITLE_MAX_CHARS``, the titles the sets ask about; or, from
     phase D2, each title of a finding the programme's model raised within
     ``jev_questions.FINDING_TITLE_MAX_CHARS``, whatever its status — the
-    findings sets' population. In address order. A finding's title is all of
-    it a labeller is shown: never who raised it, its severity, its status,
-    its candidate or its detail, which the baseline reads or a labeller would
-    copy (docs/09, section 3.5).
+    findings sets' population; or, from phase D3, each skeleton of the ops
+    set's population, for any pin (:func:`job_error_population`), as
+    ``jev_questions.job_error_text`` writes it. In address order. A finding's
+    title is all of it a labeller is shown: never who raised it, its severity,
+    its status, its candidate or its detail, which the baseline reads or a
+    labeller would copy (docs/09, section 3.5); and a skeleton is all of a job
+    a labeller is shown, never the job or its error.
 
     Nothing about any answer is read, and neither is whether or why content
     is quarantined: a quarantine may have been an answer — the injection
@@ -2253,6 +2461,16 @@ async def subjects_to_label(
             "ORDER BY subject_id, opened_at, ref",
             jev_questions.FINDING_TITLE_MAX_CHARS,
         )
+    elif subject_type == "job_error":
+        population = await job_error_population(conn, since=job_error_since(None))
+        return [
+            {
+                "subject_type": subject_type,
+                "subject_id": address,
+                "text": jev_questions.job_error_text(population[address].state),
+            }
+            for address in sorted(population)
+        ]
     else:
         raise ValueError(f"{subject_type!r} is not a subject a labeller is shown")
     return [{"subject_type": subject_type, **dict(row)} for row in rows]

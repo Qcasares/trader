@@ -3959,3 +3959,421 @@ class TestRecordEvaluation:
         assert sorted(row["id"] for row in latest) == sorted(
             [new, other_labeller, other_split]
         )
+
+
+# ---------------------------------------------------------------------------
+# Failed jobs, for the ops set (phase D3)
+# ---------------------------------------------------------------------------
+
+#: An invented failed job's error that code leaves to Jev and whose skeleton
+#: holds enough words to be asked about, with an invented identifier the
+#: redactor reduces to ``[id]`` whatever is formatted into it, so two jobs
+#: failing with it at another value make one skeleton.
+RESIDUE = "[Errno 111] Connection refused while reading m{}9"
+
+#: The ops set as the reads name it: its name and version are all they read.
+OPS = types.SimpleNamespace(name="ops.job_error", version=1)
+
+#: Where the population starts under :data:`MODEL`: the UTC midnight after
+#: the day it was first observed.
+SINCE = datetime(2026, 9, 27, tzinfo=UTC)
+
+
+async def _failed_job(
+    conn: asyncpg.Connection,
+    kind: str = "ingest_bars",
+    *,
+    error: str | None = None,
+    finished_at: datetime | None = SINCE + timedelta(hours=9),
+    status: str = "failed",
+) -> uuid.UUID:
+    """
+    A job through the shipped writer, then ended as the queue ends one: its
+    status, its error and when it finished, which an expired lease leaves
+    unset. Its payload and result carry markers no read may return.
+    """
+    job_id = await job_repo.enqueue(
+        conn, kind, {"marker": "payload"}, dedupe_key=f"test:{uuid.uuid4()}"
+    )
+    assert job_id is not None
+    await conn.execute(
+        "UPDATE jobs SET status = $2, error = $3, finished_at = $4, "
+        "result = '{\"marker\": \"result\"}'::jsonb WHERE id = $1",
+        job_id,
+        status,
+        RESIDUE.format(uuid.uuid4().hex[:8]) if error is None else error,
+        finished_at,
+    )
+    return job_id
+
+
+def _state_of(kind: str, error: str) -> jev_questions.JobErrorState:
+    """The state a job of ``kind`` failing with ``error`` is asked about as."""
+    from src.programme import jev_chips
+
+    tokens = jev_chips.residue_skeleton(kind, error)
+    assert tokens is not None, error
+    return jev_questions.JobErrorState(job_kind=kind, error=tokens)
+
+
+def _address_of(kind: str, error: str) -> str:
+    return jev_questions.job_error_subject(_state_of(kind, error))
+
+
+async def _triage(conn: asyncpg.Connection, **kwargs: Any) -> list[dict[str, Any]]:
+    arguments = {
+        "kinds": ("backtest", "walkforward", "ingest_bars", "ingest_reference_bars"),
+        "since": SINCE,
+    }
+    return await jev_repo.failed_jobs_for_triage(conn, **{**arguments, **kwargs})
+
+
+class TestTheFailedJobRead:
+    async def test_its_id_kind_status_error_and_finish_time_and_nothing_else(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """docs/09, section 5.1: never the payload or the result."""
+        job_id = await _failed_job(conn, error="an invented error")
+        row = await jev_repo.get_failed_job(conn, job_id)
+        assert row == {
+            "id": job_id,
+            "kind": "ingest_bars",
+            "status": "failed",
+            "error": "an invented error",
+            "finished_at": SINCE + timedelta(hours=9),
+        }
+
+    @pytest.mark.parametrize("status", ["queued", "running", "succeeded"])
+    async def test_whatever_its_status(
+        self, conn: asyncpg.Connection, status: str
+    ) -> None:
+        """The handler's admission refuses it, and says why; the read does not."""
+        job_id = await _failed_job(conn, status=status, finished_at=None)
+        row = await jev_repo.get_failed_job(conn, job_id)
+        assert row is not None and row["status"] == status
+
+    async def test_no_such_job_is_none(self, conn: asyncpg.Connection) -> None:
+        assert await jev_repo.get_failed_job(conn, uuid.uuid4()) is None
+
+
+class TestFailedJobsForTriage:
+    """
+    ``jev_repo.failed_jobs_for_triage``, each filter held by a case only it
+    refuses: jobs of the kinds named that failed and finished after
+    ``since``, newest first, at most ``limit``, four columns and no more.
+    """
+
+    async def test_failed_jobs_of_the_kinds_named_newest_first(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        older = await _failed_job(conn, "backtest", error="an older error")
+        newer = await _failed_job(
+            conn, finished_at=SINCE + timedelta(hours=10), error="a newer error"
+        )
+        assert await _triage(conn) == [
+            {
+                "id": newer,
+                "kind": "ingest_bars",
+                "error": "a newer error",
+                "finished_at": SINCE + timedelta(hours=10),
+            },
+            {
+                "id": older,
+                "kind": "backtest",
+                "error": "an older error",
+                "finished_at": SINCE + timedelta(hours=9),
+            },
+        ]
+
+    @pytest.mark.parametrize("status", ["queued", "running", "succeeded", "cancelled"])
+    async def test_only_a_failed_job(
+        self, conn: asyncpg.Connection, status: str
+    ) -> None:
+        await _failed_job(conn, status=status)
+        assert await _triage(conn) == []
+
+    async def test_only_the_kinds_named(self, conn: asyncpg.Connection) -> None:
+        await _failed_job(conn, "live_decision")
+        await _failed_job(conn, "jev_ask")
+        assert await _triage(conn) == []
+        assert len(await _triage(conn, kinds=("live_decision",))) == 1
+
+    async def test_only_finished_after_since(self, conn: asyncpg.Connection) -> None:
+        await _failed_job(conn, finished_at=SINCE)
+        after = await _failed_job(conn, finished_at=SINCE + timedelta(microseconds=1))
+        assert [row["id"] for row in await _triage(conn)] == [after]
+
+    async def test_never_one_an_expired_lease_failed(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """``requeue_expired`` fails a job with no finish time; it is never read."""
+        await _failed_job(
+            conn, error="lease expired; worker presumed dead", finished_at=None
+        )
+        assert await _triage(conn) == []
+
+    async def test_at_most_the_limit_or_every_one(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        ids = [
+            await _failed_job(conn, finished_at=SINCE + timedelta(minutes=n))
+            for n in range(1, 4)
+        ]
+        assert [row["id"] for row in await _triage(conn, limit=2)] == ids[::-1][:2]
+        assert [row["id"] for row in await _triage(conn, limit=None)] == ids[::-1]
+
+    async def test_a_tie_is_broken_by_the_id(self, conn: asyncpg.Connection) -> None:
+        ids = [await _failed_job(conn) for _ in range(3)]
+        assert [row["id"] for row in await _triage(conn)] == sorted(
+            ids, reverse=True
+        )
+
+
+async def _ops_request(
+    conn: asyncpg.Connection, subject_id: str, status: str = "ok", **overrides: Any
+) -> int:
+    """A request of the ops set about ``subject_id``, as the lane records one."""
+    fields: dict[str, Any] = {
+        "question_set": OPS.name,
+        "question_set_version": OPS.version,
+        "lane": "ops",
+        "provenance": "system",
+        "subject_type": "job_error",
+        "subject_id": subject_id,
+        **overrides,
+    }
+    return await _record(conn, status, **fields)
+
+
+async def _ops_job(
+    conn: asyncpg.Connection, subject_id: str, *, status: str, day: date = TODAY
+) -> uuid.UUID:
+    """A ``jev_ask`` job of the ops set about ``subject_id``, under its key."""
+    return await _job(
+        conn,
+        "jev_ask",
+        status=status,
+        key=jev_repo.ask_job_key(OPS.name, OPS.version, "job_error", subject_id, day),
+        payload={
+            "set": OPS.name,
+            "version": OPS.version,
+            "subject_type": "job_error",
+            "subject_id": subject_id,
+            "source_id": str(uuid.uuid4()),
+        },
+    )
+
+
+async def _unasked(
+    conn: asyncpg.Connection, subjects: list[str], **kwargs: Any
+) -> list[str]:
+    arguments: dict[str, Any] = {
+        "question_set": OPS,
+        "model": MODEL,
+        "subject_type": "job_error",
+        "subjects": subjects,
+        "day": TODAY,
+    }
+    return await jev_repo.unasked_subjects(conn, **{**arguments, **kwargs})
+
+
+class TestUnaskedSubjects:
+    """
+    ``jev_repo.unasked_subjects``: the planner's filters over a list of
+    addresses it computed (docs/09, section 5.3), each held by a case only it
+    refuses — an ``ok`` answer outside the probe lane from the set at its
+    version under the pin, three failed calls, and a job waiting or planned
+    today; a content block holds no subject addressed by its state.
+    """
+
+    async def test_every_address_in_the_order_given_each_once(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        a, b, c = _hash(), _hash(), _hash()
+        assert await _unasked(conn, [c, a, b, a]) == [c, a, b]
+        assert await _unasked(conn, []) == []
+
+    async def test_an_answer_on_record_under_the_pin_is_left_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        answered, other_model, other_version, probed = (_hash() for _ in range(4))
+        await _ops_request(conn, answered)
+        await _ops_request(
+            conn,
+            other_model,
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
+        await _ops_request(conn, other_version, question_set_version=2)
+        await _ops_request(conn, probed, lane="probe")
+        subjects = [answered, other_model, other_version, probed]
+        assert await _unasked(conn, subjects) == [other_model, other_version, probed]
+
+    async def test_three_failed_calls_retire_a_subject(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        retired, twice = _hash(), _hash()
+        for status in ("error", "invalid", "error"):
+            await _ops_request(conn, retired, status)
+        for status in ("error", "invalid"):
+            await _ops_request(conn, twice, status)
+        assert await _unasked(conn, [retired, twice]) == [twice]
+
+    async def test_a_job_waiting_or_planned_today_holds_a_subject(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        queued, running, today, yesterday = (_hash() for _ in range(4))
+        await _ops_job(conn, queued, status="queued", day=TODAY - timedelta(days=3))
+        await _ops_job(conn, running, status="running", day=TODAY - timedelta(days=1))
+        await _ops_job(conn, today, status="failed")
+        await _ops_job(conn, yesterday, status="failed", day=TODAY - timedelta(days=1))
+        subjects = [queued, running, today, yesterday]
+        assert await _unasked(conn, subjects) == [yesterday]
+
+    async def test_no_content_block_holds_a_skeleton(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Open item 36: a block holds text alone, so an enumerated state the
+        vendor blocked is asked again, once its failed calls allow.
+        """
+        blocked = _hash()
+        await _ops_request(conn, blocked, "error", **_failed("content_block"))
+        assert await _unasked(conn, [blocked]) == [blocked]
+
+    @pytest.mark.parametrize("subject_type", ["Job Error", "no_such_subject", ""])
+    async def test_a_subject_type_is_one_of_the_catalogues(
+        self, conn: asyncpg.Connection, subject_type: str
+    ) -> None:
+        with pytest.raises(ValueError):
+            await _unasked(conn, [_hash()], subject_type=subject_type)
+
+
+class TestTheJobErrorPopulation:
+    """
+    ``jev_repo.job_error_population``, ``job_error_since`` and the harness's
+    reads of a job error (docs/09, sections 3.4 and 3.7): every failed job of
+    a triaged kind finished after the UTC day the pin was first observed,
+    whose error code leaves to Jev and whose skeleton is admissible, each
+    skeleton once, dated by the earliest such job and never by another; its
+    text the skeleton's, never the error's.
+    """
+
+    async def test_it_starts_the_midnight_after_the_pin_was_first_observed(
+        self,
+    ) -> None:
+        assert jev_repo.job_error_since(MODEL) == SINCE
+        assert jev_repo.job_error_since(None) == SINCE
+        assert jev_repo.job_error_since("jev-9.9.9") == SINCE
+
+    async def test_each_skeleton_once_with_its_earliest_latest_and_newest(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        first = await _failed_job(conn, finished_at=SINCE + timedelta(hours=1))
+        last = await _failed_job(conn, finished_at=SINCE + timedelta(hours=5))
+        await _failed_job(conn, finished_at=SINCE + timedelta(hours=3))
+        address = _address_of("ingest_bars", RESIDUE.format("x"))
+        population = await jev_repo.job_error_population(conn, since=SINCE)
+        assert list(population) == [address]
+        item = population[address]
+        assert item.state == _state_of("ingest_bars", RESIDUE.format("x"))
+        assert item.earliest == SINCE + timedelta(hours=1)
+        assert item.latest == SINCE + timedelta(hours=5)
+        assert item.newest_job_id == last != first
+
+    @pytest.mark.parametrize(
+        ("kind", "error", "status", "finished_at"),
+        [
+            ("backtest", "unknown data source 'invented'", "failed", "after"),
+            ("ingest_bars", "division by zero", "failed", "after"),
+            ("live_decision", RESIDUE.format("x"), "failed", "after"),
+            ("ingest_bars", RESIDUE.format("x"), "succeeded", "after"),
+            ("ingest_bars", RESIDUE.format("x"), "failed", None),
+            ("ingest_bars", RESIDUE.format("x"), "failed", "before"),
+        ],
+        ids=[
+            "placed-by-code",
+            "too-few-words",
+            "a-venue-kind",
+            "not-failed",
+            "no-finish-time",
+            "before-the-day",
+        ],
+    )
+    async def test_each_rule_refuses_alone(
+        self,
+        conn: asyncpg.Connection,
+        kind: str,
+        error: str,
+        status: str,
+        finished_at: str | None,
+    ) -> None:
+        at = {
+            "after": SINCE + timedelta(hours=2),
+            "before": SINCE - timedelta(hours=2),
+            None: None,
+        }[finished_at]
+        await _failed_job(conn, kind, error=error, status=status, finished_at=at)
+        assert await jev_repo.job_error_population(conn, since=SINCE) == {}
+
+    async def test_a_skeleton_is_dated_over_the_population_rows_alone(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        D-HMB-08: an occurrence of the same error before the day the pin was
+        first observed, which the population does not read, does not date it.
+        """
+        await _failed_job(conn, finished_at=SINCE - timedelta(days=40))
+        await _failed_job(conn, finished_at=SINCE - timedelta(hours=1))
+        await _failed_job(conn, finished_at=SINCE + timedelta(days=2))
+        subject = ("job_error", _address_of("ingest_bars", RESIDUE.format("x")))
+        other = ("job_error", _hash())
+        assert await jev_repo.item_dates(conn, [subject, other], model=MODEL) == {
+            subject: SINCE + timedelta(days=2),
+            other: None,
+        }
+
+    async def test_its_text_is_the_skeletons_and_never_the_error(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        marker = uuid.uuid4().hex[:8]
+        await _failed_job(conn, "backtest", error=RESIDUE.format(marker))
+        await _failed_job(conn, finished_at=SINCE - timedelta(days=1))
+        state = _state_of("backtest", RESIDUE.format(marker))
+        subject = ("job_error", jev_questions.job_error_subject(state))
+        outside = ("job_error", _address_of("ingest_bars", RESIDUE.format("x")))
+        texts = await jev_repo.subject_texts(conn, [subject, outside])
+        assert texts == {subject: jev_questions.job_error_text(state)}
+        assert marker not in texts[subject]
+        assert jev_questions.job_error_from_text(texts[subject]) == state
+
+    async def test_what_a_labeller_could_be_shown(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Each skeleton of the population once, in address order, as its text:
+        never the job, its id or its error.
+        """
+        markers = [uuid.uuid4().hex[:8] for _ in range(3)]
+        for marker, kind in zip(
+            markers, ("backtest", "walkforward", "backtest"), strict=True
+        ):
+            await _failed_job(conn, kind, error=RESIDUE.format(marker))
+        await _failed_job(conn, "live_decision", error=RESIDUE.format("venue"))
+        shown = await jev_repo.subjects_to_label(conn, subject_type="job_error")
+        states = {
+            _state_of(kind, RESIDUE.format("x")) for kind in ("backtest", "walkforward")
+        }
+        assert shown == sorted(
+            [
+                {
+                    "subject_type": "job_error",
+                    "subject_id": jev_questions.job_error_subject(state),
+                    "text": jev_questions.job_error_text(state),
+                }
+                for state in states
+            ],
+            key=lambda row: row["subject_id"],
+        )
+        for marker in markers:
+            assert marker not in json.dumps(shown)
