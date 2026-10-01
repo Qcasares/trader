@@ -1033,6 +1033,23 @@ class TestWhatIsNotAsked:
         assert failed.retry is False
         assert ask_rig.asks == [] and ask_rig.loaded == []
 
+    @pytest.mark.parametrize("version", [0, 2])
+    async def test_a_subject_of_another_type_fails_whatever_its_version(
+        self, ask_rig: AskRig, version: int
+    ) -> None:
+        """
+        Row 0 of the step table is read before row 1: a job naming a subject
+        its set is not asked about is malformed, and fails for good, whatever
+        version it names — never retired as ``superseded``, which says the
+        job was sound when it was planned.
+        """
+        failed = await ask_rig.fails(
+            _payload("guardrail.injection", subject_type="session", version=version)
+        )
+        assert failed.retry is False
+        assert "is asked about a 'web_excerpt'" in failed.error
+        assert ask_rig.asks == [] and ask_rig.loaded == []
+
     @pytest.mark.parametrize(
         ("name", "source_id"),
         [
@@ -1274,6 +1291,31 @@ class TestWhatAnAnswerChanges:
         assert ask_rig.quarantine.written == [(EXCERPT_SHA, SCREEN_REASON)]
         assert (result["quarantined"], result["quarantined_by"]) == (2, "jev_screen")
         assert result["status"] == "ok", "the answer was recorded; the job succeeds"
+
+    async def test_the_screens_quarantine_is_logged_as_its_reason_is_worded(
+        self, ask_rig: AskRig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """
+        Design section 10.3: a quarantine may be quoted as one "by Jev's screen
+        (not calibrated)", never as an injection found. The log line, which
+        lands in the programme's run logs, says what the stored reason says:
+        the screen's probability, its request and its model, uncalibrated.
+        """
+        caplog.set_level("INFO", logger=jev_jobs.__name__)
+        ask_rig.result = AskResult(
+            "ok", request_row_id=88, answers=_answers("guardrail.injection", p=0.87)
+        )
+        await ask_rig.run(_payload("guardrail.injection"))
+        (line,) = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == jev_jobs.__name__ and "quarantined" in record.getMessage()
+        ]
+        assert line == (
+            "document 7 quarantined by Jev's injection screen (addressed_to_ai "
+            "p=0.87, request 88, jev-1.13.0; not calibrated); 2 documents"
+        )
+        assert "found" not in line and "injection found" not in line
 
     async def test_a_replayed_finding_quarantines_every_copy(
         self, ask_rig: AskRig

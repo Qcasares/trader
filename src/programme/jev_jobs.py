@@ -339,9 +339,16 @@ async def _screen_follow_up(
         "calibrated"
     )
     count = await jev_repo.quarantine_content(conn, row["content_sha256"], reason)
+    # Worded as the reason is: an uncalibrated argmax, never "an injection
+    # found" (design section 10.3), in the run logs as in the row.
     logger.info(
-        "Jev screen found %s addressed to an AI system; %d documents quarantined",
+        "%s quarantined by Jev's injection screen (%s p=%.2f, request %s, %s; "
+        "not calibrated); %d documents",
         _document(row),
+        jev_questions.SCREEN_QUESTION,
+        answer.noul,
+        result.request_row_id,
+        model,
         count,
     )
     return {"quarantined": count, "quarantined_by": "jev_screen"}
@@ -461,6 +468,14 @@ async def run_ask(
             f"a jev_ask job asks one of {sorted(ASKABLE)}, and this one names {name!r}",
             retry=False,
         )
+    # Row 0 before row 1: a job naming a subject its set is not asked about is
+    # malformed whatever version it names, and never merely superseded.
+    if subject_type != askable.subject_type:
+        raise JobFailedError(
+            f"{name} is asked about a {askable.subject_type!r}, and this job "
+            f"names a {subject_type!r}",
+            retry=False,
+        )
     asked_about = {
         "set": name,
         "version": version,
@@ -480,12 +495,6 @@ async def run_ask(
             "status": "superseded",
             "registered_version": question_set.version,
         }
-    if subject_type != askable.subject_type:
-        raise JobFailedError(
-            f"{name} is asked about a {askable.subject_type!r}, and this job "
-            f"names a {subject_type!r}",
-            retry=False,
-        )
     plans = jev_prereg.plans_in_force(name, version)
     if plans is None:
         raise JobFailedError(
