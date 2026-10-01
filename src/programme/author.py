@@ -21,17 +21,29 @@ of a specific way this could go wrong:
    whole arrangement rests on the model never asserting a number, and the
    cheapest place to enforce that is at the point the prose is written. A card
    claiming "a Sharpe of about 1.2" would, months later, be indistinguishable
-   in the UI from a measured one.
+   in the UI from a measured one. The title is read too, by the same rule:
+   until phase C8 it was the one field the check passed unread (F11).
+
+The check itself lives in :mod:`src.programme.claims`, pure, from phase C8, so
+the API, the harness and the analysis plan can read it without loading this
+module, which prompts a generative model. Every name is re-exported here, and
+each is the claims module's own object: there is one rule, not two.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
+from src.programme.claims import (
+    NUMERIC_BY_DESIGN,
+    PERFORMANCE_TERMS,
+    PerformanceClaimError,
+    find_performance_claim,
+    reject_performance_claims,
+)
 from src.programme.client import ModelCall, ask_json
 from src.programme.gates import REQUIRED_CARD_FIELDS
 from src.programme.models import ModelSettings
@@ -39,87 +51,20 @@ from src.strategies import build_strategy, describe_all, get_strategy_class
 
 logger = logging.getLogger(__name__)
 
-#: Words whose appearance beside a number makes a sentence a performance claim.
-#:
-#: Turnover and capacity are deliberately absent: "roughly twelve rebalances a
-#: year" and "around fifty million of capacity" are design estimates the card
-#: is supposed to carry, and they are not claims about how well the thing did.
-PERFORMANCE_TERMS = (
-    "sharpe",
-    "sortino",
-    "calmar",
-    "cagr",
-    "return",
-    "returns",
-    "drawdown",
-    "alpha",
-    "profit",
-    "profitable",
-    "pnl",
-    "p&l",
-    "win rate",
-    "hit rate",
-    "annualised",
-    "annualized",
-    "outperform",
-)
-
-_NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?%?")
-
-#: How close a number must be to a performance word to count as a claim about
-#: it. Wide enough to catch "a Sharpe ratio of roughly 1.2", narrow enough that
-#: a number in an unrelated clause of the same paragraph is left alone.
-_PROXIMITY = 40
-
-
-class PerformanceClaimError(ValueError):
-    """The model asserted a figure it is not permitted to assert."""
-
-
-def find_performance_claim(text: str) -> str | None:
-    """
-    The first numeric performance assertion in ``text``, or ``None``.
-
-    Returns the offending fragment rather than a boolean so the rejection can
-    say what it objected to. An operator reading "rejected: contains a
-    performance claim" learns nothing; one reading the sentence can judge
-    whether the check was right.
-    """
-    lowered = text.lower()
-    for match in _NUMBER.finditer(lowered):
-        window_start = max(0, match.start() - _PROXIMITY)
-        window = lowered[window_start : match.end() + _PROXIMITY]
-        for term in PERFORMANCE_TERMS:
-            if term in window:
-                start = max(0, match.start() - _PROXIMITY)
-                return text[start : match.end() + _PROXIMITY].strip()
-    return None
-
-
-#: Card fields that are *supposed* to contain a threshold.
-#:
-#: The acceptance and rejection criteria are the falsifiable bar, and the whole
-#: design requires them to be numeric and machine-checkable — ``sharpe >= 0.3``
-#: is parsed straight into an experiment's preregistered criteria. The
-#: distinction the check is drawing is between a figure the model *asserts*
-#: about a result and a figure it *commits to being judged against*. The first
-#: is a claim; the second is the opposite of one.
-NUMERIC_BY_DESIGN = ("acceptance_criteria", "rejection_criteria")
-
-
-def reject_performance_claims(card: dict[str, Any]) -> None:
-    """Raise if any field of a card asserts a figure."""
-    for field_name, value in card.items():
-        if field_name in NUMERIC_BY_DESIGN:
-            continue
-        if not isinstance(value, str):
-            continue
-        offending = find_performance_claim(value)
-        if offending is not None:
-            raise PerformanceClaimError(
-                f"{field_name} asserts a performance figure: {offending!r}. "
-                "Figures come from the engine, never from the card."
-            )
+#: Re-exported from :mod:`src.programme.claims`, where they moved in phase C8:
+#: every import of them from here still works, and reads the one rule.
+__all__ = [
+    "NUMERIC_BY_DESIGN",
+    "PERFORMANCE_TERMS",
+    "Configuration",
+    "HypothesisCard",
+    "PerformanceClaimError",
+    "find_performance_claim",
+    "propose_configuration",
+    "propose_hypothesis",
+    "reject_performance_claims",
+    "validate_configuration",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +172,11 @@ async def propose_hypothesis(
     """
     Draft one hypothesis card. Returns ``(title, card)``.
 
-    Raises :class:`PerformanceClaim` or ``ValidationError`` rather than
+    Raises :class:`PerformanceClaimError` or ``ValidationError`` rather than
     returning a degraded card. A rejected draft is recorded as a rejected draft
-    in the tick's actions; it is not quietly repaired.
+    in the tick's actions; it is not quietly repaired. The title is screened
+    with the card, by the same rule: a title carrying a figure is refused here,
+    by code, before anything is stored (``tests/unit/test_claims.py``).
     """
     prompt = (
         "Propose one new trading hypothesis for this programme.\n\n"
@@ -247,7 +194,7 @@ async def propose_hypothesis(
     )
     card_model = HypothesisCard(**payload)
     card = card_model.as_card()
-    reject_performance_claims(card)
+    reject_performance_claims({"title": card_model.title, **card})
     missing = [f for f in REQUIRED_CARD_FIELDS if not str(card.get(f, "")).strip()]
     if missing:
         raise ValueError(f"card is missing required fields: {missing}")
