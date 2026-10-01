@@ -2296,6 +2296,165 @@ class TestTheReportReadsTheCalibration:
         assert report["quarantined_content"]["by the code screen v1"] == 1
 
 
+def _subjects_in(
+    split: str, count: int, subject_type: str, words: str, start: int = 0
+) -> list[str]:
+    """``count`` invented texts of ``subject_type`` whose address is in ``split``."""
+    found, i = [], start
+    while len(found) < count:
+        text = _title(i, words)
+        if _split(text, subject_type) == split:
+            found.append(text)
+        i += 1
+    return found
+
+
+def _reasked_near(book: _Book, texts: list[str], margin: float) -> None:
+    """Uniform re-asks of ``texts``, none flipped, sampled under this plan."""
+    for text in texts:
+        answer = book.answers[book.subject(text)]
+        book.pairs.append(
+            {
+                "canonical_request_id": answer["request_id"],
+                "canonical_valid": True,
+                "canonical_argmax": answer["argmax"],
+                "canonical_margin": margin,
+                "probe_valid": True,
+                "probe_argmax": answer["argmax"],
+                "lag_seconds": 30 * 3600.0,
+            }
+        )
+        book.reasks[jev_eval.reask_job_key(answer["request_id"])] = {
+            "payload": {
+                "request_id": answer["request_id"],
+                "stratum": "uniform",
+                "plan_hash": PLAN,
+            }
+        }
+
+
+def _catalogue_threshold(confident_right: bool) -> _Book:
+    """
+    120 development items: 40 answered right by 0.9 and 80 wrong by 0.4, so
+    the threshold is chosen at 0.42, where 40 of 40 are right. 200 test items:
+    30 answered by 0.9, right or wrong as asked, and 170 right by 0.4, below
+    it; 35 of the latter re-asked, near the threshold, none flipped. Every
+    item dated after the model was first observed.
+    """
+    book = _Book()
+    options = [o for o in ASSET_OPTIONS if o != "insufficient_evidence"]
+    for i, text in enumerate(_texts_in("dev", 120)):
+        label = options[i % len(options)]
+        book.label(text, label)
+        wrong = options[(i + 1) % len(options)]
+        book.answer(text, label if i < 40 else wrong, margin=0.9 if i < 40 else 0.4)
+    test = _texts_in("test", 200)
+    for i, text in enumerate(test):
+        label = options[i % len(options)]
+        book.label(text, label)
+        if i < 30:
+            chosen = label if confident_right else options[(i + 1) % len(options)]
+            book.answer(text, chosen, margin=0.9)
+        else:
+            book.answer(text, label, margin=0.4)
+    _reasked_near(book, test[30:65], 0.4)
+    return book
+
+
+def _card_threshold(confident_right: bool) -> _Book:
+    """
+    The card check, whose acting class is ``true``. 130 development titles:
+    80 claims answered ``true`` by 0.9, right; 20 answered ``true`` by 0.1,
+    wrong; 30 answered ``false``; so the threshold is chosen at 0.12. 280 test
+    titles: 150 claims answered ``true`` by 0.1, below it; 60 answered
+    ``false``, right; and 70 answered ``true`` by 0.9, right or wrong as
+    asked — 70 being enough for 70 of 70 to meet the guardrail's 0.90 by its
+    lower bound. 40 of the narrow ``true`` re-asked, near the threshold.
+    """
+    book = _Book(CARD, "performance_claim")
+    words = "Invented Fictional Card Pattern"
+    dev = _subjects_in("dev", 130, "hypothesis_title", words)
+    for i, text in enumerate(dev):
+        label = "true" if i < 80 else "false"
+        book.label(text, label)
+        book.answer(
+            text,
+            "false" if i >= 100 else "true",
+            margin=0.9 if i < 80 else 0.1 if i < 100 else 0.8,
+        )
+    test = _subjects_in("test", 280, "hypothesis_title", words, start=100_000)
+    for i, text in enumerate(test):
+        if i < 150:
+            book.label(text, "true")
+            book.answer(text, "true", margin=0.1)
+        elif i < 210:
+            book.label(text, "false")
+            book.answer(text, "false", margin=0.8)
+        else:
+            book.label(text, "true" if confident_right else "false")
+            book.answer(text, "true", margin=0.9)
+    _reasked_near(book, test[:40], 0.1)
+    return book
+
+
+class TestAThresholdTheTestSplitRefutes:
+    """
+    ``jev_calibration.usable`` reads what the held-out test split measured at
+    the threshold, since the threshold is the smallest of fifty margins that
+    cleared its target on the development split and that bound is optimistic
+    by construction (docs/08, C9). Two ledgers each pass every other
+    condition; on one the test split bears the threshold out, and on the
+    other every answer that leads by it is wrong.
+    """
+
+    @pytest.mark.parametrize(
+        ("build", "threshold"),
+        [(_catalogue_threshold, 0.42), (_card_threshold, 0.12)],
+        ids=["covered accuracy", "covered precision of true"],
+    )
+    def test_usable_only_where_the_test_split_bears_it_out(
+        self, build: Any, threshold: float
+    ) -> None:
+        for confident_right, expected in (
+            (True, (True, threshold, [])),
+            (False, (False, None, ["held_out"])),
+        ):
+            evaluation = build(confident_right).evaluate("test")
+            assert (evaluation.threshold_outcome, evaluation.threshold) == (
+                "chosen",
+                threshold,
+            )
+            assert evaluation.possibly_in_training is False
+            row = _recorded(evaluation, code_commit="c" * 40)
+            verdict = jev_calibration.usable(
+                row,
+                earlier=[],
+                pin=MODEL,
+                plan_hash=jev_calibration.analysis_plan_hash(
+                    evaluation.question_set, evaluation.question_set_version
+                ),
+            )
+            assert verdict == expected, (confident_right, verdict)
+            if not confident_right:
+                assert evaluation.accuracy_at_threshold == 0.0
+                text = jev_eval.format_report(
+                    {
+                        "pin": MODEL,
+                        "evaluations": [
+                            {
+                                "evaluation": row,
+                                "usable": verdict[0],
+                                "usable_threshold": verdict[1],
+                                "not_usable_because": verdict[2],
+                            }
+                        ],
+                        "quarantined_content": {},
+                    }
+                )
+                assert "usable as a calibration, at margin" not in text
+                assert jev_calibration.REASONS["held_out"] in text
+
+
 class TestTheCommandsThatWrite:
     def _run(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         record: dict[str, Any] = {"writes": []}

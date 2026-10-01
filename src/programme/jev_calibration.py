@@ -2,8 +2,9 @@
 jev_calibration.py
 ------------------
 When a recorded evaluation of Jev could arm a threshold, and what an armed
-threshold would be allowed to do. Pure: the standard library and
-``jev_prereg``, the analysis plan, and nothing else
+threshold would be allowed to do. Pure: the standard library, ``jev_prereg``,
+the analysis plan, and ``jev_stats``, the statistics the plan's gates are
+computed by, and nothing else
 (``tests/unit/test_import_boundaries.py::test_the_pure_modules_load_nothing``).
 
 Consumed by nothing that acts
@@ -47,6 +48,18 @@ item, and each paired difference's lower bound above 0 at the gate level;
 with the uniform and the near-threshold flip rates measured on enough pairs
 and below their limits; on a test set no earlier version's evaluation used;
 and the newest evaluation of its key.
+
+And one condition design C9's list left out: **the held-out test split bears
+the threshold out** (``held_out``). The threshold is the smallest of fifty
+margins whose statistic cleared its target on the development split, and the
+best of a search flatters by construction (CLAUDE.md, honesty rules), so its
+development bound is optimistic; the test split is the one measurement of it
+that was not searched. So the statistic measured there — covered accuracy,
+or the acting class's covered precision — must meet the plan's target by the
+same rule the search applied: on at least ``MIN_COVERED`` test items, by its
+one-sided Wilson lower bound at ``GATE_CI``. Without it a threshold the test
+split refuted outright, every answer leading by it wrong, read as usable
+(``tests/unit/test_jev_eval.py::TestAThresholdTheTestSplitRefutes``).
 """
 
 from __future__ import annotations
@@ -57,7 +70,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from src.programme import jev_prereg
+from src.programme import jev_prereg, jev_stats
 
 if TYPE_CHECKING:
     from src.programme.jev_validate import ValidatedAnswer
@@ -80,6 +93,12 @@ REASONS: Mapping[str, str] = {
     "size": f"fewer than {jev_prereg.MIN_TEST_ITEMS} test items",
     "training": "its items may be in the model's training data (an upper bound)",
     "threshold": "no threshold chosen, or no coverage measured at it",
+    "held_out": (
+        "the held-out test split does not bear its threshold out: fewer than "
+        f"{jev_prereg.MIN_COVERED} test items measured at it, or their "
+        "statistic's one-sided Wilson lower bound at the gate level below its "
+        "target"
+    ),
     "majority": "does not beat the majority baseline",
     "keyword": "does not beat the keyword baseline",
     "uniform_flips": (
@@ -130,13 +149,19 @@ def usable(
     pinned model and ``plan_hash`` the :func:`analysis_plan_hash` of the set
     at its registered version, both the caller's to read; ``None`` for
     either reads as no pin and no plan, which nothing matches.
+
+    A threshold the development split chose is usable only where the test
+    split bears it out (``held_out``, see the module docstring):
+    ``tests/unit/test_jev_calibration.py::TestUsable`` and
+    ``tests/unit/test_jev_eval.py::TestAThresholdTheTestSplitRefutes``.
     """
     reasons: list[str] = []
     name = evaluation.get("question_set")
     version = evaluation.get("question_set_version")
     key = evaluation.get("question_key")
     plan = jev_prereg.set_plan(name, version) if isinstance(name, str) else None
-    if plan is None or key not in plan["questions"]:
+    planned = None if plan is None else plan["questions"].get(key)
+    if planned is None:
         reasons.append("set")
     if evaluation.get("model") != pin or not pin:
         reasons.append("model")
@@ -155,6 +180,8 @@ def usable(
         or evaluation.get("coverage_at_threshold") is None
     ):
         reasons.append("threshold")
+    if not _held_out(evaluation, None if planned is None else planned["at_least"]):
+        reasons.append("held_out")
     for baseline in ("majority", "keyword"):
         if not _beats(evaluation, baseline):
             reasons.append(baseline)
@@ -186,6 +213,42 @@ def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+def _held_out(evaluation: Mapping[str, Any], planned_target: object) -> bool:
+    """
+    Whether the test split bears the threshold out: some test item covered,
+    at least ``MIN_COVERED`` measured at the threshold, and their statistic's
+    one-sided Wilson lower bound at ``GATE_CI`` at least the target — the
+    plan's, or the row's where it is higher, never the row's where it is
+    lower. The rule the development split's search applied
+    (``jev_stats.choose_threshold``), applied to the items it never saw.
+
+    The count right is read back from the stored share, which is exactly
+    ``right / n_at_threshold``; a share no count of the items could give is
+    not a measurement.
+    """
+    tested = evaluation.get("n_at_threshold")
+    share = _number(evaluation.get("accuracy_at_threshold"))
+    coverage = _number(evaluation.get("coverage_at_threshold"))
+    targets = [
+        t
+        for t in (_number(planned_target), _number(evaluation.get("threshold_target")))
+        if t is not None
+    ]
+    if (
+        not _at_least(tested, jev_prereg.MIN_COVERED)
+        or share is None
+        or coverage is None
+        or not coverage > 0
+        or not targets
+    ):
+        return False
+    right = round(share * tested)
+    if not 0 <= right <= tested:
+        return False
+    bound = jev_stats.wilson(right, tested, jev_prereg.GATE_CI, one_sided=True)
+    return bound is not None and bound[0] >= max(targets)
 
 
 def _beats(evaluation: Mapping[str, Any], baseline: str) -> bool:

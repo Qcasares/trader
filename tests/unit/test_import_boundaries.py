@@ -2572,12 +2572,17 @@ PURE_PROGRAMME_MODULES = (
     "src.programme.job_errors",
 )
 
-#: The one pure module that loads another: ``jev_calibration`` reads the
-#: analysis plan its rules are written against, ``jev_prereg``, which is
-#: itself pure and loads nothing. Named, so a second such load is a
-#: reviewer's edit here rather than a loosened rule.
+#: The one pure module that loads others: ``jev_calibration`` reads the
+#: analysis plan its rules are written against, ``jev_prereg``, and computes
+#: the plan's gates with ``jev_stats`` — the held-out bound at a threshold,
+#: the exact test a baseline is beaten by — each itself pure and loading
+#: nothing. Named, so a further such load is a reviewer's edit here rather
+#: than a loosened rule.
 PURE_MODULES_MAY_LOAD: Mapping[str, tuple[str, ...]] = {
-    "src.programme.jev_calibration": ("src.programme.jev_prereg",),
+    "src.programme.jev_calibration": (
+        "src.programme.jev_prereg",
+        "src.programme.jev_stats",
+    ),
 }
 
 

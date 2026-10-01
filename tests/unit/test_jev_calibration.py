@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from src.programme import jev_calibration, jev_prereg, jev_questions
+from src.programme import jev_calibration, jev_prereg, jev_questions, jev_stats
 from src.programme.jev_calibration import (
     REASONS,
     analysis_plan_hash,
@@ -63,7 +63,12 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "threshold_dataset_sha256": "d" * 64,
         "threshold_outcome": "chosen",
         "threshold": 0.42,
+        "threshold_target": 0.80,
         "coverage_at_threshold": 0.55,
+        # 114 of the 120 test items at the threshold right: a one-sided lower
+        # bound of 0.871 at the gate level, above the plan's 0.80.
+        "n_at_threshold": 120,
+        "accuracy_at_threshold": 0.95,
         "accuracy_wilson_low": 0.83,
         "accuracy_all_items_wilson_low": 0.81,
         "majority_baseline_accuracy": 0.40,
@@ -96,6 +101,9 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
     "size": ({"n": jev_prereg.MIN_TEST_ITEMS - 1}, []),
     "training": ({"possibly_in_training": True}, []),
     "threshold": ({"threshold_outcome": "none_found", "threshold": None}, []),
+    # 102 of 120 right at the threshold on the test split: 0.85, whose
+    # one-sided lower bound at the gate level, 0.748, falls short of 0.80.
+    "held_out": ({"accuracy_at_threshold": 0.85}, []),
     "majority": ({"majority_baseline_accuracy": 0.82}, []),
     "keyword": ({"vs_keyword_diff_low": 0.0}, []),
     "uniform_flips": ({"flip_rate": jev_prereg.MAX_FLIP_RATE + 0.01}, []),
@@ -178,6 +186,26 @@ class TestUsable:
             ({"question_set_version": 2}, "set"),
             ({"threshold": None}, "threshold"),
             ({"coverage_at_threshold": None}, "threshold"),
+            # The test split measured nothing at the threshold, or too little.
+            ({"n_at_threshold": 0, "accuracy_at_threshold": None}, "held_out"),
+            ({"n_at_threshold": None, "accuracy_at_threshold": None}, "held_out"),
+            ({"accuracy_at_threshold": None}, "held_out"),
+            ({"coverage_at_threshold": 0.0}, "held_out"),
+            (
+                {
+                    "n_at_threshold": jev_prereg.MIN_COVERED - 1,
+                    "accuracy_at_threshold": 1.0,
+                },
+                "held_out",
+            ),
+            ({"n_at_threshold": True, "accuracy_at_threshold": 1.0}, "held_out"),
+            # A target the row raises binds; one it lowers does not loosen the
+            # plan's.
+            ({"threshold_target": 0.90}, "held_out"),
+            (
+                {"threshold_target": 0.50, "accuracy_at_threshold": 0.85},
+                "held_out",
+            ),
             ({"possibly_in_training": None}, "training"),
             ({"keyword_baseline_accuracy": None}, "keyword"),
             ({"accuracy_all_items_wilson_low": 0.5}, "keyword"),
@@ -195,6 +223,43 @@ class TestUsable:
         ok, threshold, reasons = _verdict(_usable_row(**overrides))
         assert (ok, threshold) == (False, None)
         assert reason in reasons
+
+    @pytest.mark.parametrize(
+        ("question_set", "key", "right", "tested", "borne_out"),
+        [
+            ("research.catalogue", "asset_class", 30, 30, True),
+            ("research.catalogue", "asset_class", 29, 30, False),
+            ("research.catalogue", "asset_class", 114, 120, True),
+            ("guardrail.card", "performance_claim", 70, 70, True),
+            ("guardrail.card", "performance_claim", 66, 70, False),
+        ],
+    )
+    def test_the_held_out_bound_is_the_searchs_own_rule(
+        self, question_set: str, key: str, right: int, tested: int, borne_out: bool
+    ) -> None:
+        """
+        The test split is held to the rule the development split's search
+        applied: the statistic's one-sided Wilson lower bound at the gate level,
+        on at least ``MIN_COVERED`` items, against the plan's target — 0.80
+        for the research lane, which 30 of 30 meets and 29 of 30 does not, and
+        0.90 for a guardrail's covered precision.
+        """
+        target = jev_prereg.SET_TARGETS[(question_set, key)]["at_least"]
+        bound = jev_stats.wilson(right, tested, jev_prereg.GATE_CI, one_sided=True)
+        assert bound is not None
+        assert (bound[0] >= target) is borne_out
+        plan = analysis_plan_hash(question_set, 1)
+        row = _usable_row(
+            question_set=question_set,
+            question_key=key,
+            analysis_plan_hash=plan,
+            threshold_target=target,
+            n_at_threshold=tested,
+            accuracy_at_threshold=right / tested,
+        )
+        verdict = usable(row, earlier=[], pin=PIN, plan_hash=plan or "")
+        refused = (False, None, ["held_out"])
+        assert verdict == ((True, 0.42, []) if borne_out else refused)
 
     def test_no_pin_and_no_plan_match_nothing(self) -> None:
         row = _usable_row()
