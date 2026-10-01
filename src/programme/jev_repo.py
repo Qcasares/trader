@@ -1588,6 +1588,466 @@ async def list_evaluations(
 
 
 # ---------------------------------------------------------------------------
+# The evaluation harness (phase C9): labels, answers, and evaluations
+# ---------------------------------------------------------------------------
+#
+# What ``jev_eval`` reads to evaluate one question against one labeller's
+# labels, and the one write of an evaluation. A subject is a pair,
+# ``(subject_type, subject_id)``, as a label and a request each name one; for
+# the text sets C9 evaluates, the id is the text's content address
+# (``jev_hash.text_sha256``), so a label joins its answer exactly. Every read
+# here is a read: the harness runs them in one read-only snapshot, and the
+# only writes it makes are :func:`record_label`, for ``labels import`` and
+# ``labels copy``, and :func:`record_evaluation`, for ``evaluate --record``
+# (``tests/unit/test_jev_table_boundaries.py`` holds each table to its
+# writers).
+
+#: Every column of ``jev_evaluations`` a writer gives, 0012's and 0014's: all
+#: but ``id`` and ``created_at``, which are the database's. A row is written
+#: with every one of them named — ``None`` where nothing was measured — so a
+#: figure cannot go unwritten by being forgotten, and NULL always means not
+#: measured. ``tests/integration/test_jev_evaluations.py`` holds this list to
+#: the table's columns, and ``jev_eval.Evaluation``'s fields to this list.
+EVALUATION_COLUMNS: tuple[str, ...] = (
+    "question_set",
+    "question_set_version",
+    "question_key",
+    "model",
+    "split",
+    "dataset_ref",
+    "dataset_sha256",
+    "analysis_plan_hash",
+    "keyword_baseline_ref",
+    "answers_sha256",
+    "code_commit",
+    "possibly_in_training",
+    "ci_level",
+    "n",
+    "n_per_class",
+    "n_valid",
+    "n_escape",
+    "n_invalid",
+    "n_not_asked",
+    "n_contested",
+    "n_other_plans",
+    "n_plan_unknown",
+    "n_distinct_states",
+    "accuracy",
+    "accuracy_wilson_low",
+    "accuracy_wilson_high",
+    "accuracy_all_items",
+    "accuracy_all_items_wilson_low",
+    "accuracy_all_items_wilson_high",
+    "balanced_accuracy",
+    "per_class",
+    "brier",
+    "brier_ci_low",
+    "brier_ci_high",
+    "brier_reference",
+    "calibration_bins",
+    "majority_baseline_accuracy",
+    "keyword_baseline_accuracy",
+    "vs_majority_diff",
+    "vs_majority_diff_low",
+    "vs_majority_diff_high",
+    "vs_keyword_diff",
+    "vs_keyword_diff_low",
+    "vs_keyword_diff_high",
+    "threshold_outcome",
+    "threshold_statistic",
+    "threshold_target",
+    "threshold_dataset_sha256",
+    "threshold",
+    "coverage_at_threshold",
+    "n_at_threshold",
+    "accuracy_at_threshold",
+    "accuracy_at_threshold_wilson_low",
+    "accuracy_at_threshold_wilson_high",
+    "flip_rate",
+    "flip_rate_n",
+    "flip_rate_low_margin",
+    "flip_rate_low_margin_n",
+    "flip_rate_near_threshold",
+    "flip_rate_near_threshold_n",
+    "flip_median_lag_hours",
+    "labeller_agreement",
+    "labeller_kappa",
+    "labeller_agreement_n",
+)
+
+#: The columns of ``jev_evaluations`` that hold JSON.
+EVALUATION_JSON_COLUMNS = frozenset({"n_per_class", "per_class", "calibration_bins"})
+
+#: Subjects as the harness names them: ``(subject_type, subject_id)``.
+Subject = tuple[str, str]
+
+#: A hypothesis title's content address in SQL: what ``jev_hash.text_sha256``
+#: gives the text, as :func:`hypotheses_to_ask` computes it.
+_TITLE_ADDRESS = "encode(sha256(convert_to(h.title, 'UTF8')), 'hex')"
+
+
+async def labels_for(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    version: int,
+    question_key: str,
+    labelled_by: str | None,
+) -> list[dict[str, Any]]:
+    """
+    The labels of one question of one set at one version, oldest first: by
+    exactly one labeller, ``labelled_by``, or, with ``None``, by every
+    labeller — what an evaluation needs to measure how far another labeller
+    agrees with the one it is scored against, never to score with.
+    """
+    clauses = ["question_set = $1", "question_set_version = $2", "question_key = $3"]
+    args: list[Any] = [question_set, version, question_key]
+    if labelled_by is not None:
+        args.append(labelled_by)
+        clauses.append(f"labelled_by = ${len(args)}")
+    rows = await conn.fetch(
+        "SELECT id, subject_type, subject_id, label, labelled_by, labelled_at, "
+        f"note FROM jev_labels WHERE {' AND '.join(clauses)} ORDER BY id",
+        *args,
+    )
+    return [dict(row) for row in rows]
+
+
+async def answers_for_subjects(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    version: int,
+    question_key: str,
+    model: str,
+    subjects: Sequence[Subject],
+) -> dict[Subject, dict[str, Any]]:
+    """
+    Per subject, the answer an evaluation scores: the canonical row's — ``ok``
+    and outside the probe lane, of which a set version, a pin and a text have
+    one — else the newest response refused whole (``invalid``), each to
+    ``question_key``, from requests of ``question_set`` at ``version`` asked of
+    ``model``. A subject with neither is not in the result: it was not asked,
+    or every ask of it failed or was refused, and no answer was recorded.
+
+    The answer comes with its request: its id, status and hashes, which the
+    harness needs to name the plans it was recorded under, its distinct
+    states and its re-asks. A re-ask is a probe, and a probe never answers
+    for a subject here.
+    """
+    if not subjects:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (r.subject_type, r.subject_id)
+               r.subject_type, r.subject_id, r.id AS request_id,
+               r.status AS request_status, r.request_hash, r.state_hash,
+               r.model_requested, r.model_answered, r.available_at,
+               a.id AS answer_id, a.question_key, a.question_type, a.noul,
+               a.choice, a.probabilities, a.confidence, a.argmax, a.margin,
+               a.valid, a.invalid_reason
+        FROM unnest($5::text[], $6::text[]) AS s(subject_type, subject_id)
+        JOIN jev_requests r
+          ON r.subject_type = s.subject_type AND r.subject_id = s.subject_id
+        JOIN jev_answers a ON a.request_id = r.id AND a.question_key = $3
+        WHERE r.question_set = $1 AND r.question_set_version = $2
+          AND r.model_requested = $4 AND r.lane <> 'probe'
+          AND r.status IN ('ok', 'invalid')
+        ORDER BY r.subject_type, r.subject_id, (r.status = 'ok') DESC,
+                 r.available_at DESC, r.id DESC
+        """,
+        question_set,
+        version,
+        question_key,
+        model,
+        [subject_type for subject_type, _ in subjects],
+        [subject_id for _, subject_id in subjects],
+    )
+    found = {}
+    for row in rows:
+        answer = dict(row)
+        answer["probabilities"] = _loads(answer["probabilities"])
+        found[(answer["subject_type"], answer["subject_id"])] = answer
+    return found
+
+
+async def item_dates(
+    conn: asyncpg.Connection, subjects: Sequence[Subject]
+) -> dict[Subject, datetime | None]:
+    """
+    Per subject, when its text existed by: a web excerpt's earliest
+    ``published_at`` among the documents holding it, ``None`` when any of them
+    has none, since an unknown date could be the earliest; a hypothesis
+    title's earliest ``created_at`` among the hypotheses holding it. ``None``
+    for a subject of any other type, or one nothing holds: unknown, which the
+    harness reads as possibly in the model's training data.
+    """
+    dates: dict[Subject, datetime | None] = dict.fromkeys(subjects)
+    excerpts = [i for t, i in subjects if t == "web_excerpt"]
+    titles = [i for t, i in subjects if t == "hypothesis_title"]
+    if excerpts:
+        rows = await conn.fetch(
+            "SELECT content_sha256 AS subject_id, CASE WHEN "
+            "bool_or(published_at IS NULL) THEN NULL ELSE MIN(published_at) END "
+            "AS dated FROM web_documents WHERE content_sha256 = ANY($1::text[]) "
+            "GROUP BY content_sha256",
+            excerpts,
+        )
+        dates.update({("web_excerpt", r["subject_id"]): r["dated"] for r in rows})
+    if titles:
+        rows = await conn.fetch(
+            f"SELECT {_TITLE_ADDRESS} AS subject_id, MIN(h.created_at) AS dated "
+            f"FROM hypotheses h WHERE {_TITLE_ADDRESS} = ANY($1::text[]) "
+            "GROUP BY 1",
+            titles,
+        )
+        dates.update({("hypothesis_title", r["subject_id"]): r["dated"] for r in rows})
+    return dates
+
+
+async def subject_texts(
+    conn: asyncpg.Connection, subjects: Sequence[Subject]
+) -> dict[Subject, str]:
+    """
+    The text of each subject that is stored: a web excerpt as the earliest
+    document holding it stores it, a title as a hypothesis holds it. What the
+    keyword baselines read; a subject nothing holds is not in the result.
+    """
+    texts: dict[Subject, str] = {}
+    excerpts = [i for t, i in subjects if t == "web_excerpt"]
+    titles = [i for t, i in subjects if t == "hypothesis_title"]
+    if excerpts:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (content_sha256) content_sha256 AS subject_id, "
+            "excerpt FROM web_documents WHERE content_sha256 = ANY($1::text[]) "
+            "ORDER BY content_sha256, id",
+            excerpts,
+        )
+        texts.update({("web_excerpt", r["subject_id"]): r["excerpt"] for r in rows})
+    if titles:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (subject_id) subject_id, title FROM ("
+            f" SELECT {_TITLE_ADDRESS} AS subject_id, h.title, h.created_at, h.ref"
+            " FROM hypotheses h) held "
+            "WHERE subject_id = ANY($1::text[]) "
+            "ORDER BY subject_id, created_at, ref",
+            titles,
+        )
+        texts.update({("hypothesis_title", r["subject_id"]): r["title"] for r in rows})
+    return texts
+
+
+async def subjects_to_label(
+    conn: asyncpg.Connection, *, subject_type: str, include_quarantined: bool
+) -> list[dict[str, Any]]:
+    """
+    Every subject of ``subject_type`` a labeller could be asked to label, by
+    its address, with its text: stored web content, the earliest document's
+    excerpt, and none quarantined under any source unless
+    ``include_quarantined``; or each title of a hypothesis the programme's
+    model wrote within ``jev_questions.TITLE_MAX_CHARS``, the titles the sets
+    ask about. In address order. Nothing about any answer is read, so what a
+    labeller is shown cannot depend on what Jev said.
+    """
+    if subject_type == "web_excerpt":
+        having = "" if include_quarantined else "HAVING NOT bool_or(quarantined) "
+        rows = await conn.fetch(
+            "SELECT content_sha256 AS subject_id, "
+            "(array_agg(excerpt ORDER BY id))[1] AS text "
+            f"FROM web_documents GROUP BY content_sha256 {having}"
+            "ORDER BY content_sha256"
+        )
+    elif subject_type == "hypothesis_title":
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (subject_id) subject_id, title AS text FROM ("
+            f" SELECT {_TITLE_ADDRESS} AS subject_id, h.title, h.created_at, h.ref"
+            " FROM hypotheses h WHERE h.origin = 'model'"
+            " AND char_length(h.title) BETWEEN 1 AND $1) held "
+            "ORDER BY subject_id, created_at, ref",
+            jev_questions.TITLE_MAX_CHARS,
+        )
+    else:
+        raise ValueError(f"{subject_type!r} is not a subject a labeller is shown")
+    return [{"subject_type": subject_type, **dict(row)} for row in rows]
+
+
+async def ask_jobs_about(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    version: int,
+    subjects: Sequence[Subject],
+) -> list[dict[str, Any]]:
+    """
+    Every ``jev_ask`` job of ``question_set`` at ``version`` about one of
+    ``subjects``, oldest first, with its payload and result: where the harness
+    reads the analysis plans an answer was recorded under (docs/08, C7+C8).
+    A job's payload names the plans it was planned under, and its result,
+    when its attempt recorded or read a row, that row and whether it was a
+    replay.
+    """
+    if not subjects:
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT j.id, j.status, j.attempts, j.payload, j.result, j.created_at
+        FROM jobs j
+        JOIN unnest($3::text[], $4::text[]) AS s(subject_type, subject_id)
+          ON j.payload->>'subject_type' = s.subject_type
+         AND j.payload->>'subject_id' = s.subject_id
+        WHERE j.kind = 'jev_ask'
+          AND j.payload->>'set' = $1
+          AND j.payload->>'version' = $2::int::text
+        ORDER BY j.created_at, j.id
+        """,
+        question_set,
+        version,
+        [subject_type for subject_type, _ in subjects],
+        [subject_id for _, subject_id in subjects],
+    )
+    found = []
+    for row in rows:
+        job = dict(row)
+        job["payload"] = _loads(job["payload"])
+        job["result"] = _loads(job["result"])
+        found.append(job)
+    return found
+
+
+async def recorded_questions(
+    conn: asyncpg.Connection, *, question_set: str, version: int
+) -> list[dict[str, Any]]:
+    """
+    The questions requests of ``question_set`` at ``version`` were sent with,
+    each distinct set of them once, with their option order as sent: how a
+    version that is no longer registered can still be read, since only its
+    requests keep its words. ``labels copy`` reads it.
+    """
+    rows = await conn.fetch(
+        "SELECT DISTINCT questions::text AS questions FROM jev_requests "
+        "WHERE question_set = $1 AND question_set_version = $2",
+        question_set,
+        version,
+    )
+    return [json.loads(row["questions"]) for row in rows]
+
+
+async def quarantine_reasons(conn: asyncpg.Connection) -> dict[str, str]:
+    """
+    For each content quarantined under any source, the reason its earliest
+    quarantined document records: what quarantined it first, which the report
+    counts by kind, in the words design section 10.3 allows.
+    """
+    rows = await conn.fetch(
+        "SELECT DISTINCT ON (content_sha256) content_sha256, quarantine_reason "
+        "FROM web_documents WHERE quarantined ORDER BY content_sha256, id"
+    )
+    return {row["content_sha256"]: row["quarantine_reason"] for row in rows}
+
+
+async def record_evaluation(conn: asyncpg.Connection, **fields: Any) -> int:
+    """
+    Write one evaluation and return its id: the one write ``jev_eval
+    evaluate --record`` makes, and the only write of ``jev_evaluations`` in
+    ``src/`` (``tests/unit/test_jev_table_boundaries.py``).
+
+    Every column of :data:`EVALUATION_COLUMNS` is named, ``None`` where nothing
+    was measured, and nothing else; a column missing or unknown is refused
+    before anything is written. The schema holds the rest (migrations 0012
+    and 0014): a proportion is a probability, an interval holds its estimate
+    and goes with it, a threshold arrives whole and never on an upper bound,
+    the model is pinned.
+    """
+    missing = sorted(set(EVALUATION_COLUMNS) - set(fields))
+    unknown = sorted(set(fields) - set(EVALUATION_COLUMNS))
+    if missing or unknown:
+        raise ValueError(
+            f"an evaluation names every column and nothing else; missing "
+            f"{missing}, unknown {unknown}"
+        )
+    values = [
+        _evaluation_json(fields[column])
+        if column in EVALUATION_JSON_COLUMNS
+        else fields[column]
+        for column in EVALUATION_COLUMNS
+    ]
+    placeholders = [
+        f"${i}::jsonb" if column in EVALUATION_JSON_COLUMNS else f"${i}"
+        for i, column in enumerate(EVALUATION_COLUMNS, start=1)
+    ]
+    evaluation_id = await conn.fetchval(
+        f"INSERT INTO jev_evaluations ({', '.join(EVALUATION_COLUMNS)}) "
+        f"VALUES ({', '.join(placeholders)}) RETURNING id",
+        *values,
+    )
+    return int(evaluation_id)
+
+
+def _evaluation_json(value: Any) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+
+
+async def evaluations_for(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    version: int | None = None,
+    question_key: str | None = None,
+    model: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Every evaluation of ``question_set``, newest first, narrowed to a version,
+    a question and a model where given: what ``jev_calibration.usable`` reads
+    beside an evaluation, which needs every version's rows to see a test set
+    used before. Measurements come back as stored, ``None`` not measured.
+    """
+    clauses = ["question_set = $1"]
+    args: list[Any] = [question_set]
+    for column, value in (
+        ("question_set_version", version),
+        ("question_key", question_key),
+        ("model", model),
+    ):
+        if value is not None:
+            args.append(value)
+            clauses.append(f"{column} = ${len(args)}")
+    rows = await conn.fetch(
+        f"SELECT * FROM jev_evaluations WHERE {' AND '.join(clauses)} "
+        "ORDER BY created_at DESC, id DESC",
+        *args,
+    )
+    return [_decode_evaluation(row) for row in rows]
+
+
+async def latest_evaluations(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """
+    The newest evaluation of each set, version, question and model, against
+    each labeller and on each split, in that order: what ``jev_eval report``
+    shows. A labeller's evaluations and another's are reported apart, never
+    one standing for the other (docs/08 open item 57).
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (question_set, question_set_version, question_key,
+                            model, dataset_ref, split) *
+        FROM jev_evaluations
+        ORDER BY question_set, question_set_version, question_key, model,
+                 dataset_ref, split, created_at DESC, id DESC
+        """
+    )
+    return [_decode_evaluation(row) for row in rows]
+
+
+def _decode_evaluation(row: asyncpg.Record) -> dict[str, Any]:
+    evaluation = dict(row)
+    for key in EVALUATION_JSON_COLUMNS:
+        evaluation[key] = _loads(evaluation[key])
+    return evaluation
+
+
+# ---------------------------------------------------------------------------
 # Encoding and decoding
 # ---------------------------------------------------------------------------
 
