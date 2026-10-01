@@ -31,6 +31,10 @@ an import scan cannot see: a query is a string, and a module that never imports
   one update the table's trigger allows — and no other function anywhere
   updates it, so quarantine stays one-way and by content wherever it is
   decided.
+* **Labels are written by one module.** From phase C7, only ``jev_repo``
+  writes ``jev_labels``, by its two inserts — ``record_label`` and the web
+  ingest's ``record_label_once`` — so no label, which is ground truth, is
+  written by a path nobody reviewed, and none is ever rewritten.
 
 The scan reads strings, because that is where SQL lives: literals, f-strings,
 and the one text a chain of ``+`` or a ``str.join`` of literals assembles,
@@ -163,6 +167,28 @@ QUARANTINE_FUNCTION = "quarantine_content"
 DOCUMENTS_WRITES = frozenset(
     {("insert_documents", "insert into"), (QUARANTINE_FUNCTION, "update")}
 )
+
+
+#: The one module that writes ``jev_labels`` (phase C7), and every write it
+#: makes: ``record_label``, for a label written once, and
+#: ``record_label_once``, the web ingest's, which a labeller that has labelled
+#: the item already leaves as it was.
+LABELS_WRITER = PROGRAMME / "jev_repo.py"
+LABELS_WRITES = frozenset(
+    {("record_label", "insert into"), ("record_label_once", "insert into")}
+)
+
+
+def _label_writes(source: str) -> list[tuple[int, str, str | None]]:
+    """
+    Every write of ``jev_labels`` in ``source``, and every write whose table
+    the scan cannot read, which could be one (``_table_writes``, as for
+    ``web_documents`` below).
+    """
+    return [
+        (write.line, write.verb, write.function)
+        for write in _table_writes(source, "jev_labels", bare_name=True)
+    ]
 
 
 def _document_writes(source: str) -> list[tuple[int, str, str | None]]:
@@ -324,6 +350,61 @@ def test_only_the_repo_writes_web_documents() -> None:
         "writes a table this scan cannot read; name the table in the SQL:\n"
         + "\n".join(offenders)
     )
+
+
+def test_only_the_repo_writes_jev_labels() -> None:
+    """
+    A label is ground truth, and a label a model could write would measure
+    its agreement with itself: the schema refuses a model as a labeller, and
+    this keeps every write of ``jev_labels`` in ``jev_repo``, whose two
+    inserts the web ingest's labels and an operator's go through (phase C7).
+    """
+    offenders = [
+        f"{_label(path)} line {line}: {verb} jev_labels"
+        for path in _scanned()
+        if path != LABELS_WRITER
+        for line, verb, _ in _label_writes(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "a module other than src/programme/jev_repo.py writes jev_labels, or "
+        "writes a table this scan cannot read; name the table in the SQL:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_repo_writes_jev_labels_by_its_two_inserts_alone() -> None:
+    """No update, no upsert that rewrites a label, nothing the scan cannot read."""
+    writes = _label_writes(LABELS_WRITER.read_text(encoding="utf-8"))
+    assert {(function, verb) for _, verb, function in writes} == LABELS_WRITES
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.execute("INSERT INTO jev_labels (label) VALUES ($1)")',
+        'await conn.execute("INSERT INTO public.jev_labels (label) VALUES ($1)")',
+        'q = "INSERT INTO " + "jev_labels (label) VALUES ($1)"',
+        'q = " ".join(["INSERT INTO", "jev_labels", "(label) VALUES ($1)"])',
+        'await conn.execute(f"INSERT INTO {TABLE} (label) VALUES ($1)")',
+        'await conn.copy_records_to_table("jev_labels", records=rows)',
+        "await conn.execute(\"UPDATE jev_labels SET label = 'bonds'\")",
+        'q = "INSERT INTO jev_labels (x) VALUES (1) ON CONFLICT (x) DO UPDATE SET x=2"',
+    ],
+)
+def test_the_label_write_scan_finds_each_spelling(source: str) -> None:
+    assert _label_writes(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.fetch("SELECT * FROM jev_labels")',
+        '"""Labels are written to jev_labels by jev_repo alone."""',
+        'await conn.execute("INSERT INTO jev_labels_audit (x) VALUES (1)")',
+    ],
+)
+def test_the_label_write_scan_ignores_what_does_not_write_labels(source: str) -> None:
+    assert _label_writes(source) == [], source
 
 
 def test_the_one_update_of_web_documents_is_quarantine_content() -> None:

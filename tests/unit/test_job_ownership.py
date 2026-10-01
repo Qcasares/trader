@@ -1308,11 +1308,15 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
         async def usable_pin(conn: Any) -> str:
             return "jev-1.13.0"
 
+        async def labelled(conn: Any, **label: Any) -> int:
+            return 1
+
         monkeypatch.setattr(web_fetch, "fetch", fetch)
         monkeypatch.setattr(flags, "jev_model", usable_pin)
         monkeypatch.setattr(jev_repo, "earliest_quarantined", none_quarantined)
         monkeypatch.setattr(jev_repo, "insert_documents", stored)
         monkeypatch.setattr(jev_repo, "quarantine_content", quarantined)
+        monkeypatch.setattr(jev_repo, "record_label_once", labelled)
     elif kind == "jev_ask":
         # The screen asked about a stored excerpt the code screen passes, so
         # every follow-up the road's outcome can reach runs: a block's, by

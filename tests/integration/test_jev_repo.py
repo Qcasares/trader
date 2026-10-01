@@ -1449,6 +1449,40 @@ class TestLabels:
             conn, **_label(label="equities", labelled_by="source:pwb-readme@3f2a9c1")
         )
 
+    async def test_a_source_labels_an_item_once_and_never_revises_it(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        ``record_label_once``, the web ingest's writer (phase C7): the same
+        page read again records nothing, a different label from the same
+        labeller included, and raises nothing; the first label stands.
+        """
+        source = "source:pwb-readme@0123456789ab"
+        first = await jev_repo.record_label_once(conn, **_label(labelled_by=source))
+        assert first is not None
+        again = await jev_repo.record_label_once(
+            conn, **_label(labelled_by=source, label="equities")
+        )
+        assert again is None
+        rows = await conn.fetch(
+            "SELECT id, label FROM jev_labels WHERE labelled_by = $1", source
+        )
+        assert [(row["id"], row["label"]) for row in rows] == [(first, "futures")]
+        other = await jev_repo.record_label_once(
+            conn, **_label(labelled_by="source:pwb-readme@ba9876543210")
+        )
+        assert other is not None and other != first
+
+    async def test_a_source_label_is_still_never_a_models(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """Only its one constraint is passed over: the labeller check holds."""
+        with pytest.raises(asyncpg.CheckViolationError):
+            async with conn.transaction():
+                await jev_repo.record_label_once(
+                    conn, **_label(labelled_by="jev:research.catalogue")
+                )
+
 
 async def _evaluation(conn: asyncpg.Connection, **overrides: Any) -> int:
     row: dict[str, Any] = {

@@ -323,6 +323,52 @@ async def record_label(
     return int(label_id)
 
 
+async def record_label_once(
+    conn: asyncpg.Connection,
+    *,
+    question_set: str,
+    question_set_version: int,
+    question_key: str,
+    subject_type: str,
+    subject_id: str,
+    label: str,
+    labelled_by: str,
+    note: str | None = None,
+) -> int | None:
+    """
+    Record one label unless this labeller has labelled the item already, and
+    return its id, or ``None`` when it had (phase C7).
+
+    The web ingest's writer: a source's own grouping, recorded as a dataset at
+    a fixed hash, labels the same items every time it reads the same page, so
+    the second read records nothing, by ``ON CONFLICT ON CONSTRAINT
+    jev_labels_once_per_labeller DO NOTHING``, and the first label stands — a
+    labeller still never revises one. A conflict with any other constraint is
+    raised: ``jev_labels_by_a_person_or_a_dataset`` refuses a model as a
+    labeller here as in :func:`record_label`.
+    """
+    label_id = await conn.fetchval(
+        """
+        INSERT INTO jev_labels (
+            question_set, question_set_version, question_key, subject_type,
+            subject_id, label, labelled_by, note
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT ON CONSTRAINT jev_labels_once_per_labeller DO NOTHING
+        RETURNING id
+        """,
+        question_set,
+        question_set_version,
+        question_key,
+        subject_type,
+        subject_id,
+        label,
+        labelled_by,
+        note,
+    )
+    return int(label_id) if label_id is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Web documents (phase C6): the one writer, and the one-way quarantine
 # ---------------------------------------------------------------------------
