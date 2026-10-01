@@ -1466,6 +1466,35 @@ def _schema_tables() -> list[str]:
     return sorted(names)
 
 
+#: A table no module names: the scanner run for it finds only the writes whose
+#: table it cannot read, which do not depend on the table asked about.
+_NO_TABLE = "a_table_no_module_names"
+
+
+def _texts_the_scanner_reads(source: str) -> str:
+    """
+    Every text ``_table_writes`` can read in ``source``, joined by NULs: each
+    string literal, each f-string with its literal interpolations read as
+    their text, and each text a chain of ``+`` or a ``str.join`` of a literal
+    sequence assembles, its separator included — read by the scanner's own
+    helpers, inner chains too, so the texts the scanner reads are among them.
+    A table named in none of them, case aside, as the scanner's patterns
+    ignore case, is a table it cannot find written here; and since no table's
+    name holds a NUL, no name is found across two texts.
+    """
+    from tests.unit.test_import_boundaries import _assembled, _literal_text
+
+    texts: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Constant | ast.JoinedStr):
+            text = _literal_text(node)
+        else:
+            text = _assembled(node)
+        if text is not None:
+            texts.append(text)
+    return "\x00".join(texts)
+
+
 def _writes_reached(
     graph: Any, roots: list[tuple[str, str]], tables: list[str]
 ) -> set[tuple[str, str]]:
@@ -1474,6 +1503,13 @@ def _writes_reached(
     reached definition: each write of a table the migrations create, and each
     write whose table the scan cannot read, as ``("unread", writer)``. A load
     the scan cannot read is a pair of its own.
+
+    The scanner is run for a table only where the texts it reads name it,
+    case aside (``_texts_the_scanner_reads``), which saves running it for
+    every table on every module and skips nothing it would find. The first
+    cut looked for the table's lower-case name in the module's raw text, so a
+    write the scanner reads — the name in capitals, or split across ``+`` or
+    ``str.join`` — was never looked for (D1's review, D1RS-1).
     """
     from tests.unit.test_import_boundaries import UNREAD
 
@@ -1483,9 +1519,11 @@ def _writes_reached(
         if module in by_module:
             continue
         source = graph.sources[module]
+        texts = _texts_the_scanner_reads(source)
         writes: set[tuple[int, str]] = set()
-        for table in [*tables, "a_table_no_module_names"]:
-            if table != "a_table_no_module_names" and table not in source:
+        for table in [*tables, _NO_TABLE]:
+            named = re.search(re.escape(table), texts, re.IGNORECASE)
+            if table != _NO_TABLE and named is None:
                 continue
             for write in _table_writes(source, table):
                 writes.add((write.line, UNREAD if write.verb == UNREAD else table))
@@ -1563,14 +1601,67 @@ class TestWhatJevCodeCanWrite:
                 ("findings", "src.programme.repo.close_finding"),
                 id="stored-under-another-name",
             ),
+            # Every spelling the shared scanner reads is looked for (D1's
+            # review, D1RS-1): the first cut looked for a table only where its
+            # lower-case name stood in the module's raw text, so a name in
+            # capitals, or split across ``+`` or ``str.join``, went unread.
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(\"UPDATE PROGRAMME_DECISIONS SET r = 'x'\")\n",
+                ("programme_decisions", "src.programme.jev_jobs.handle"),
+                id="a-table-in-capitals",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(\"UPDATE SYSTEM_FLAGS SET value = 'true'\")\n",
+                ("system_flags", "src.programme.jev_jobs.handle"),
+                id="a-switch-in-capitals",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(\"UPDATE Candidates SET status = 'x'\")\n",
+                ("candidates", "src.programme.jev_jobs.handle"),
+                id="a-table-mixed-case",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute('INSERT INTO Deployments (id) VALUES (1)')\n",
+                ("deployments", "src.programme.jev_jobs.handle"),
+                id="an-insert-mixed-case",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(\n"
+                '        "UPDATE programme_" + "decisions SET rationale = \'x\'"\n'
+                "    )\n",
+                ("programme_decisions", "src.programme.jev_jobs.handle"),
+                id="a-name-split-by-plus",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(''.join(['DELETE FROM system_', 'flags']))\n",
+                ("system_flags", "src.programme.jev_jobs.handle"),
+                id="a-name-split-by-join",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute('s'.join(['UPDATE sy', 'tem_flags SET x']))\n",
+                ("system_flags", "src.programme.jev_jobs.handle"),
+                id="a-name-the-separator-completes",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(f\"DELETE FROM system_{'flags'}\")\n",
+                ("system_flags", "src.programme.jev_jobs.handle"),
+                id="a-name-completed-by-a-literal-interpolated",
+            ),
         ],
     )
     def test_the_walk_finds_each_writer(
         self, handler: str, pair: tuple[str, str]
     ) -> None:
         graph = _synthetic(_detail_tree(handler))
-        tables = ["findings", "hypotheses", "jobs", "system_flags"]
-        assert pair in _writes_reached(graph, _HANDLER_ROOT, tables)
+        assert pair in _writes_reached(graph, _HANDLER_ROOT, _schema_tables())
 
     def test_the_walk_passes_a_reader(self) -> None:
         handler = (
@@ -1581,6 +1672,37 @@ class TestWhatJevCodeCanWrite:
         graph = _synthetic(_detail_tree(handler))
         tables = ["findings", "hypotheses", "jobs", "system_flags"]
         assert _writes_reached(graph, _HANDLER_ROOT, tables) == set()
+
+    @pytest.mark.parametrize(
+        ("source", "table"),
+        [
+            ('await c.execute("INSERT INTO jev_signals VALUES ($1)")', "jev_signals"),
+            ('q = "".join(("UPDATE ", "jev_", "signals SET v = 1"))', "jev_signals"),
+            ('q = "DELETE FROM jev_" + "signals"', "jev_signals"),
+            ("q = f\"UPDATE {'web_documents'} SET x = TRUE\"", "web_documents"),
+            ('q = "".join(("UPDATE ", "web", "_documents SET x"))', "web_documents"),
+            ('q = "MERGE INTO web_documents d USING x ON true"', "web_documents"),
+            ('q = "UPDATE PROGRAMME_DECISIONS SET r = 1"', "programme_decisions"),
+            ('q = "UPDATE programme_" + "decisions SET r = 1"', "programme_decisions"),
+            ("q = ''.join(['DELETE FROM system_', 'flags'])", "system_flags"),
+            ("q = 's'.join(['UPDATE sy', 'tem_flags SET x = 1'])", "system_flags"),
+            ("q = f\"DELETE FROM system_{'flags'}\"", "system_flags"),
+            ('q = "UPDATE ONLY public.\\"Candidates\\" SET x = 1"', "candidates"),
+            ('await c.copy_records_to_table("Findings", records=r)', "findings"),
+        ],
+    )
+    def test_the_walk_looks_for_every_table_the_scanner_finds(
+        self, source: str, table: str
+    ) -> None:
+        """
+        Guards the guard's shortcut: wherever the shared scanner finds a write
+        of a table, the texts the walk reads before running it name the table,
+        so the shortcut never skips a write it would have found.
+        """
+        found = [w for w in _table_writes(source, table) if w.verb != "unread"]
+        assert found, f"the scanner reads no write of {table} in {source!r}"
+        texts = _texts_the_scanner_reads(source)
+        assert re.search(re.escape(table), texts, re.IGNORECASE), texts
 
 
 # ---------------------------------------------------------------------------

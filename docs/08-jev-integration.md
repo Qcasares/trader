@@ -4198,7 +4198,11 @@ each `JEV_HANDLERS` handler, each `ASKABLE` set's `load`, `admit`, `build` and
   `jev_repo.record_request` and `record_answers`, which `record_exchange` alone
   calls; `jev_signals` from `jev_lane.record_signal`; `web_documents` from
   `insert_documents` and `quarantine_content`; `jev_labels` from
-  `record_label_once`; and `jobs` from `enqueue`.
+  `record_label_once`; and `jobs` from `enqueue`. It runs the shared scanner
+  for a table wherever the texts that scanner reads name it, case aside; the
+  first cut looked for the table's lower-case name in a module's raw text,
+  and so never looked for a write named in capitals or split across `+` or
+  `str.join`, which the scanner reads (D1's review).
 - `::test_nothing_in_the_programme_writes_a_switch` and
   `test_job_ownership.py::test_nothing_in_the_programme_changes_a_job_it_did_not_claim`:
   no write of `system_flags` and no reference to a switch's writer anywhere in
