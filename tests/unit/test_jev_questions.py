@@ -3132,3 +3132,222 @@ def test_no_score_set_is_registered_yet() -> None:
         if question["type"] == "score"
     ]
     assert scores == []
+
+
+# ---------------------------------------------------------------------------
+# Phase D1: subjects addressed by their state, and lanes that carry no text
+# ---------------------------------------------------------------------------
+#
+# Nothing in D1 registers a set in the ops lane or a state-addressed subject:
+# phase D3's ``ops.job_error`` is the first of each. So every rule here is
+# proved with a set and a state model that exist only in this file, the way
+# phase C's first pull request proved its web and title rules.
+
+
+class _Skeleton(BaseModel):
+    """A stand-in for phase D3's ``JobErrorState``: labels written in code."""
+
+    model_config = _TEST_CONFIG
+    job_kind: Literal["ingest_bars", "run_backtest"]
+    error: tuple[Literal["timeout", "refused", "[number]"], ...]
+
+
+class _SerialisedSkeleton(BaseModel):
+    """Labels only, sent through a serializer, which no annotation shows."""
+
+    model_config = _TEST_CONFIG
+    job_kind: Literal["ingest_bars"]
+
+    @field_serializer("job_kind")
+    def _spelled(self, value: str) -> str:
+        return value
+
+
+def _skeleton_with(name: str, annotation: Any) -> type[BaseModel]:
+    """A state model of a labelled ``job_kind`` and one field, ``other``."""
+    return create_model(
+        name,
+        __config__=_TEST_CONFIG,
+        __module__=__name__,
+        job_kind=(Literal["ingest_bars"], ...),
+        other=(annotation, ...),
+    )
+
+
+def _ops_set(state_model: type[BaseModel] = _Skeleton, **overrides: Any) -> QuestionSet:
+    """A test-only ops set: provenance ``system``, declaring its detail."""
+    fields: dict[str, Any] = {
+        "name": "ops.example",
+        "version": 1,
+        "lane": "ops",
+        "provenance": "system",
+        "questions": (
+            ("transient", {"type": "noul", "instructions": "Is `error` transient?"}),
+        ),
+        "state_model": state_model,
+        "purpose": "test only: a set of the ops lane",
+        "internal_detail": True,
+    }
+    fields.update(overrides)
+    return QuestionSet(**fields)
+
+
+@pytest.fixture
+def skeleton_addressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stand-in given a subject type, and addressed by its state."""
+    monkeypatch.setattr(
+        jq,
+        "STATE_SUBJECT",
+        types.MappingProxyType({**jq.STATE_SUBJECT, _Skeleton: "job_error"}),
+    )
+    monkeypatch.setattr(
+        jq, "STATE_ADDRESSED", types.MappingProxyType({_Skeleton: "system"})
+    )
+
+
+class TestStateAddressedSubjects:
+    def test_no_subject_is_addressed_by_its_state_until_phase_d3(self) -> None:
+        assert dict(jq.STATE_ADDRESSED) == {}
+
+    def test_a_job_error_subject_must_be_its_state_hash(
+        self, skeleton_addressed: None
+    ) -> None:
+        """
+        A set asking about a state-addressed subject registers, and the
+        subject's address is ``jev_hash.state_hash`` of the state as sent,
+        which the lane holds every request to
+        (``test_jev_lane.py::TestSubjectsAreContentAddressed::
+        test_a_state_addressed_subject_is_refused_before_any_switch``).
+        Proved with a stand-in for phase D3's ``JobErrorState``.
+        """
+        from src.programme import jev_hash
+
+        question_set = _ops_set()
+        assert jq.question_set_problem(question_set) is None
+        assert jq.registration_problem(question_set, jq.REGISTRY) is None
+        state = _Skeleton(job_kind="ingest_bars", error=("timeout", "[number]"))
+        sent = question_set.dump_state(state)
+        assert sent == {"job_kind": "ingest_bars", "error": ["timeout", "[number]"]}
+        assert jev_hash.state_hash(sent) == jev_hash.state_hash(
+            {"error": ["timeout", "[number]"], "job_kind": "ingest_bars"}
+        )
+
+    def test_a_model_is_not_both_text_and_state_addressed(
+        self, skeleton_addressed: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            jq,
+            "TEXT_SUBJECT_FIELD",
+            types.MappingProxyType({**jq.TEXT_SUBJECT_FIELD, _Skeleton: "job_kind"}),
+        )
+        writers = {**jq.TEXT_SUBJECT_PROVENANCE, "job_error": "system"}
+        monkeypatch.setattr(
+            jq, "TEXT_SUBJECT_PROVENANCE", types.MappingProxyType(writers)
+        )
+        problem = jq.registration_problem(_ops_set(), jq.REGISTRY)
+        assert problem is not None and "one address" in problem
+
+    @pytest.mark.parametrize("provenance", ["internal", "operator", "model"])
+    def test_a_state_addressed_set_records_its_writers_provenance(
+        self, skeleton_addressed: None, provenance: str
+    ) -> None:
+        """
+        ``system``, as the mapping names it, and never ``internal``, which the
+        phase F loader is to trust: a skeleton is computed in code from this
+        system's records, which can quote an outsider (docs/09, D-SAFE-5).
+        """
+        problem = jq.registration_problem(
+            _ops_set(provenance=provenance), jq.REGISTRY
+        )
+        assert problem is not None and "STATE_ADDRESSED" in problem, problem
+
+    def test_a_state_addressed_model_is_proved_text_free(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Outside the text-free lanes too: a state carrying text would be
+        addressed by a hash of text nobody screened as text.
+        """
+        monkeypatch.setattr(
+            jq,
+            "STATE_SUBJECT",
+            types.MappingProxyType({**jq.STATE_SUBJECT, _Detailed: "job_error"}),
+        )
+        monkeypatch.setattr(
+            jq, "STATE_ADDRESSED", types.MappingProxyType({_Detailed: "system"})
+        )
+        question_set = _ops_set(_Detailed, name="findings.example", lane="findings")
+        problem = jq.registration_problem(question_set, jq.REGISTRY)
+        assert problem is not None and "text-free" in problem, problem
+
+
+class TestTheTextFreeLanes:
+    def test_the_ops_lane_is_text_free(self) -> None:
+        assert frozenset({"ops"}) == jq.TEXT_FREE_LANES
+        assert jq.TEXT_FREE_LANES <= set(jev_catalogue.LANES)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            _TextState,
+            _Titled,
+            _skeleton_with("_SkeletonWithADataclass", _CardDataclass),
+            _skeleton_with(
+                "_SkeletonValidated",
+                Annotated[Literal["timeout"], AfterValidator(lambda value: value)],
+            ),
+            _SerialisedSkeleton,
+        ],
+        ids=["str", "title", "a dataclass", "a validator", "a serializer"],
+    )
+    def test_an_ops_set_carrying_text_is_refused(
+        self, model: type[BaseModel]
+    ) -> None:
+        """
+        Declaring ``internal_detail`` does not admit text to the ops lane, and
+        no field is exempt, a plain ``title`` included.
+        """
+        problem = jq.registration_problem(_ops_set(model), jq.REGISTRY)
+        assert problem is not None and "TEXT_FREE_LANES" in problem, problem
+
+    def test_an_ops_set_without_internal_detail_is_refused(
+        self, skeleton_addressed: None
+    ) -> None:
+        """
+        Its state is text-free and would pass the detail rule as it stands;
+        the lane's rule asks the declaration anyway, so the detail switch is
+        read before any ops ask (docs/09, D-SAFE-1).
+        """
+        problem = jq.registration_problem(
+            _ops_set(internal_detail=False), jq.REGISTRY
+        )
+        assert problem is not None and "internal_detail=True" in problem, problem
+        assert jq.registration_problem(_ops_set(), jq.REGISTRY) is None
+
+    def test_dump_state_checks_an_ops_set_whatever_its_internal_detail(
+        self,
+    ) -> None:
+        """
+        A set placed by hand, never through registration, declaring its
+        detail, whose dump would carry an undeclared string: refused on its
+        first dump. The same model in a lane that is not text-free dumps,
+        since it declared its detail; the check is the lane's.
+        """
+        carrying = _skeleton_with("_SkeletonWithANote", str)
+        state = carrying(job_kind="ingest_bars", other="a message nobody declared")
+        with pytest.raises(ValueError, match="TEXT_FREE_LANES"):
+            _ops_set(carrying).dump_state(state)
+        elsewhere = _ops_set(carrying, name="findings.example", lane="findings")
+        assert elsewhere.dump_state(state)["other"] == "a message nobody declared"
+
+    def test_a_title_is_not_exempt_in_a_text_free_lane(self) -> None:
+        state = _Titled(title="A title nobody declared")
+        with pytest.raises(ValueError, match="TEXT_FREE_LANES"):
+            _ops_set(_Titled).dump_state(state)
+
+    def test_a_skeleton_dumps(self) -> None:
+        state = _Skeleton(job_kind="run_backtest", error=("refused",))
+        assert _ops_set().dump_state(state) == {
+            "job_kind": "run_backtest",
+            "error": ["refused"],
+        }

@@ -41,7 +41,7 @@ import pathlib
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 import asyncpg
 import pytest
@@ -57,7 +57,7 @@ from src.programme import (
     jev_repo,
     jev_validate,
 )
-from src.programme.jev_hash import text_sha256
+from src.programme.jev_hash import state_hash, text_sha256
 from src.programme.jev_lane import AskResult
 from src.programme.jev_questions import (
     DECISION_REGIME,
@@ -609,6 +609,25 @@ _DETAILED = jev_questions.QuestionSet(
     questions=(_noul("claims", "Does `detail` claim a result?"),),
     state_model=_CardState,
     purpose="test only: a set that carries this system's detail",
+    internal_detail=True,
+)
+
+class _Skeleton(BaseModel):
+    """A stand-in for phase D3's ``JobErrorState``: labels written in code."""
+
+    model_config = _TEST_STATE_CONFIG
+    job_kind: Literal["ingest_bars", "run_backtest"]
+    error: tuple[Literal["timeout", "refused"], ...]
+
+
+_OPS = jev_questions.QuestionSet(
+    name="ops.example",
+    version=1,
+    lane="ops",
+    provenance="system",
+    questions=(_noul("transient", "Is the failure in `error` transient?"),),
+    state_model=_Skeleton,
+    purpose="test only: a set of the ops lane, its subject addressed by its state",
     internal_detail=True,
 )
 
@@ -1963,6 +1982,46 @@ class TestSubjectsAreContentAddressed:
 
     async def test_the_right_address_passes_the_check(self, rig: Rig) -> None:
         result = await _ask_text(rig, _WEB, "Time-Series Momentum Effect")
+        assert result.status == "disabled", "checked, then stopped by the switch"
+
+    async def test_a_state_addressed_subject_is_refused_before_any_switch(
+        self, rig: Rig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A subject addressed by its state (``jev_questions.STATE_ADDRESSED``,
+        phase D) is ``jev_hash.state_hash`` of exactly the state sent, checked
+        with the arguments, before any switch is read. Proved with a test-only
+        set and a stand-in for phase D3's ``JobErrorState``: nothing in D1
+        registers one.
+        """
+        monkeypatch.setattr(
+            jev_questions,
+            "STATE_SUBJECT",
+            MappingProxyType({**jev_questions.STATE_SUBJECT, _Skeleton: "job_error"}),
+        )
+        monkeypatch.setattr(
+            jev_questions, "STATE_ADDRESSED", MappingProxyType({_Skeleton: "system"})
+        )
+        assert jev_questions.question_set_problem(_OPS) is None
+        assert jev_questions.registration_problem(_OPS, jev_questions.REGISTRY) is None
+        monkeypatch.setitem(jev_questions.REGISTRY, _OPS.name, _OPS)
+        state = _Skeleton(job_kind="ingest_bars", error=("timeout",))
+        right = state_hash(_OPS.dump_state(state))
+        for wrong in (
+            "1",
+            right.upper(),
+            text_sha256("ingest_bars: timeout"),
+            state_hash({"job_kind": "ingest_bars", "error": ["refused"]}),
+        ):
+            with pytest.raises(ValueError, match="state_hash"):
+                await _ask(
+                    rig, _OPS, state, subject_type="job_error", subject_id=wrong
+                )
+        assert rig.conn.asked == [], "a switch was read before the subject"
+        _nothing_happened(rig)
+        result = await _ask(
+            rig, _OPS, state, subject_type="job_error", subject_id=right
+        )
         assert result.status == "disabled", "checked, then stopped by the switch"
 
     async def test_a_titles_address_is_its_title_alone(self, rig: Rig) -> None:
