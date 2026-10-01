@@ -100,17 +100,21 @@ their pairs are counted, the re-ask sample and the "too few to say" floor. The
 regime plan: the sleeves and the baseline rule. Nothing here is consumed by
 anything that acts.
 
-The set plans (phases C7 and C8)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Each question set the research and guardrail lanes ask has a plan of its own
-(:func:`set_plan`), registered with the set and golden-hashed beside it
+The set plans (phases C7, C8 and D2)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each question set the research, guardrail and findings lanes ask has a plan of
+its own (:func:`set_plan`), registered with the set and golden-hashed beside it
 (:data:`GOLDEN_SET_PLAN_HASHES`), with an append-only released history in the
 test, as the global plan has: per question, the class whose answer acts, the
 target its statistic must meet — its statistic's floor raised, never lowered —
-and the keyword baseline Jev is measured against, a pure, deterministic
-function of the text whose rules are data hashed into the plan.
-``decision.regime`` is the regime plan's, and the connectivity probe measures
-the vendor, not a set, so neither has one.
+and the baseline Jev is measured against, in the plan's ``keyword_baseline``
+slot whatever its rule: for phase C's sets a pure, deterministic function of
+the text whose rules are data hashed into the plan; for phase D2's findings
+sets the value already recorded beside the title, the raiser or the severity
+(:data:`FINDINGS_RECORDED_BASELINE`), whose plans also name the population
+they are asked about (:data:`FINDINGS_POPULATION`). ``decision.regime`` is the
+regime plan's, and the connectivity probe measures the vendor, not a set, so
+neither has one.
 
 A plan is in force for the answers recorded under it, and for no others. So
 every ``jev_ask`` job is planned with the set plan's version and hash, and the
@@ -576,6 +580,8 @@ SET_PLAN_VERSIONS: Mapping[tuple[str, int], int] = MappingProxyType(
         ("research.catalogue", 1): 1,
         ("research.hypothesis", 1): 1,
         ("guardrail.card", 1): 1,
+        ("findings.owner", 1): 1,
+        ("findings.severity", 1): 1,
     }
 )
 
@@ -594,6 +600,12 @@ GOLDEN_SET_PLAN_HASHES: Mapping[tuple[str, int], str] = MappingProxyType(
         ),
         ("guardrail.card", 1): (
             "a72753b5ea04d5af9392657928d777be19b9bbbbd9e013700f2e97e0d231956d"
+        ),
+        ("findings.owner", 1): (
+            "e6cb5e05456468a9447b5748a3f09900a4893a5096cea6b0e98c445de05e09e9"
+        ),
+        ("findings.severity", 1): (
+            "256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2"
         ),
     }
 )
@@ -655,6 +667,24 @@ SET_TARGETS: Mapping[tuple[str, str], Mapping[str, Any]] = MappingProxyType(
                 "bound": "wilson_lower_at_gate_ci",
             }
         ),
+        # Phase D2: a suggestion, which acts on nothing, measured by its
+        # covered accuracy at the floor (docs/09, section 3.4).
+        ("findings.owner", "owning_role"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("findings.severity", "severity"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
     }
 )
 
@@ -709,6 +739,47 @@ PERFORMANCE_CLAIM_BASELINE: Mapping[str, Any] = MappingProxyType(
         "proximity": 40,
         "number": r"-?\d+(?:[.,]\d+)?%?",
         "true_when": "a claim is found",
+    }
+)
+
+#: The findings sets' baseline (phase D2, docs/09 section 3.4): the value
+#: already recorded for the finding — the role that raised it for
+#: ``findings.owner``, its severity for ``findings.severity``, named by each
+#: question's ``reads`` — of the earliest finding the programme's model wrote
+#: holding the title, by when it was opened and then by its ref. "Send it to
+#: whoever raised it" is the honest comparison: a suggestion from the title
+#: alone that cannot beat the value recorded beside it adds nothing, and a
+#: keyword list, a weaker comparison, would let a chip be called calibrated
+#: while it did worse than reading ``raised_by``. Neither column is ever
+#: exported to a labeller (``jev_eval.export_labels``), and the harness reads
+#: them for the baseline alone (``jev_repo.finding_records``).
+FINDINGS_RECORDED_BASELINE: Mapping[str, Any] = MappingProxyType(
+    {
+        "rule": "findings.recorded",
+        "of": "the earliest finding holding the title",
+        "origin": "model",
+        "order": ("opened_at", "ref"),
+        "exported_to_labellers": False,
+    }
+)
+
+#: Who the findings sets are asked about, and so whose titles are labelled:
+#: every finding the programme's model wrote (``origin = 'model'``), whatever
+#: its status, with a title of one to ``FINDING_TITLE_MAX_CHARS`` characters
+#: — 200, ``jev_questions``' cap, a copy held to it by
+#: ``tests/unit/test_jev_prereg.py``, since this module loads the standard
+#: library alone — each title once, by its content address. Any status,
+#: because the population labels are drawn from is then the population asked
+#: about (docs/09, D24); a finding raised by an operator, by Jev, or before
+#: migration 0015 named its writer is never in it.
+FINDINGS_POPULATION: Mapping[str, Any] = MappingProxyType(
+    {
+        "table": "findings",
+        "origin": "model",
+        "status": "any",
+        "title_chars": (1, 200),
+        "subject": "finding_title",
+        "address": "sha256 of the title as UTF-8",
     }
 )
 
@@ -833,30 +904,43 @@ def _keyword_pattern(keyword: str) -> re.Pattern[str]:
     return re.compile(r"(?<![^\W_])(?:" + "|".join(alternatives) + ")")
 
 
-def keyword_label(rules: Sequence[tuple[str, Sequence[str]]], text: str) -> str:
+def keyword_label(
+    rules: Sequence[tuple[str, Sequence[str]]],
+    text: str,
+    *,
+    fallback: str | None = None,
+) -> str:
     """
     What an ordered keyword rule says of ``text``: the label of the first rule
     any of whose keywords ``text`` holds, read casefolded and as whole words
     (:func:`_keyword_pattern`), each keyword in its forms
-    (:func:`keyword_forms`); :data:`KEYWORD_FALLBACK` when none does. Pure and
-    deterministic: the text alone decides it.
+    (:func:`keyword_forms`); ``fallback`` when none does —
+    :data:`KEYWORD_FALLBACK` unless a plan names its own (from phase D, each
+    plan records the one it uses as ``"fallback"``; every phase C plan keeps
+    :data:`KEYWORD_FALLBACK`, so no hash of theirs moved). The constant is
+    read when the rule is applied, never bound as a default, so a moved
+    constant is a moved rule. Pure and deterministic: the text alone decides
+    it.
     """
     folded = text.casefold()
     for label, keywords in rules:
         if any(_keyword_pattern(keyword).search(folded) for keyword in keywords):
             return label
-    return KEYWORD_FALLBACK
+    return KEYWORD_FALLBACK if fallback is None else fallback
 
 
 def _keyword_baseline(
-    rules: Sequence[tuple[str, Sequence[str]]], reads: str
+    rules: Sequence[tuple[str, Sequence[str]]],
+    reads: str,
+    *,
+    fallback: str | None = None,
 ) -> dict[str, Any]:
     return {
         "rule": "jev_prereg.keyword_label",
         "matcher": KEYWORD_MATCHER,
         "reads": reads,
         "rules": rules,
-        "fallback": KEYWORD_FALLBACK,
+        "fallback": KEYWORD_FALLBACK if fallback is None else fallback,
     }
 
 
@@ -864,7 +948,11 @@ def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
     """
     Every set plan, by set name and version, built from the constants above
     each time it is read, so a constant moved is a plan moved: per question,
-    its target (:data:`SET_TARGETS`) and its keyword baseline.
+    its target (:data:`SET_TARGETS`) and its baseline, in the plan's
+    ``keyword_baseline`` slot whatever its rule; and from phase D2, for the
+    findings sets, the population they are asked about
+    (:data:`FINDINGS_POPULATION`). A phase C plan holds no population, so none
+    of their hashes moved.
     """
 
     def question(name: str, key: str, baseline: Mapping[str, Any]) -> dict:
@@ -901,6 +989,24 @@ def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
                 {**PERFORMANCE_CLAIM_BASELINE, "reads": "title"},
             ),
         },
+        ("findings.owner", 1): {
+            "owning_role": question(
+                "findings.owner",
+                "owning_role",
+                {**FINDINGS_RECORDED_BASELINE, "reads": "raised_by"},
+            ),
+        },
+        ("findings.severity", 1): {
+            "severity": question(
+                "findings.severity",
+                "severity",
+                {**FINDINGS_RECORDED_BASELINE, "reads": "severity"},
+            ),
+        },
+    }
+    populations: dict[tuple[str, int], Mapping[str, Any]] = {
+        ("findings.owner", 1): FINDINGS_POPULATION,
+        ("findings.severity", 1): FINDINGS_POPULATION,
     }
     return {
         key: {
@@ -908,6 +1014,7 @@ def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
             "version": key[1],
             "plan_version": SET_PLAN_VERSIONS[key],
             "questions": planned,
+            **({"population": populations[key]} if key in populations else {}),
         }
         for key, planned in questions.items()
         if key in SET_PLAN_VERSIONS
@@ -962,6 +1069,8 @@ __all__ = [
     "CALIBRATION_BINS",
     "CODE_SCREEN_BASELINE",
     "DEV_SPLIT_TENTHS",
+    "FINDINGS_POPULATION",
+    "FINDINGS_RECORDED_BASELINE",
     "FLIPS_NOT_COMPARED",
     "FLIP_PAIRS",
     "GATE_CI",

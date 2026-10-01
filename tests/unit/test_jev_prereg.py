@@ -337,6 +337,8 @@ _SET_PLAN_CHOICES = frozenset(
     {
         "ASSET_CLASS_KEYWORDS",
         "CODE_SCREEN_BASELINE",
+        "FINDINGS_POPULATION",
+        "FINDINGS_RECORDED_BASELINE",
         "KEYWORD_FALLBACK",
         "KEYWORD_MATCHER",
         "MECHANISM_KEYWORDS",
@@ -509,6 +511,23 @@ class TestTheGateFamily:
     def test_the_gated_pairs_fit_the_family(self) -> None:
         family = _gated_family()
         assert len(family) <= jev_prereg.GATE_FAMILY, sorted(family)
+
+    def test_the_family_holds_phase_ds_pairs(self) -> None:
+        """
+        Pinned pair by pair: phase C's six, and phase D2's two findings
+        questions — eight of the twenty; D3's ops question makes nine
+        (docs/09, section 13).
+        """
+        assert _gated_family() == {
+            ("guardrail.injection", 1, "addressed_to_ai"),
+            ("research.catalogue", 1, "asset_class"),
+            ("research.catalogue", 1, "mechanism"),
+            ("research.hypothesis", 1, "asset_class"),
+            ("research.hypothesis", 1, "mechanism"),
+            ("guardrail.card", 1, "performance_claim"),
+            ("findings.owner", 1, "owning_role"),
+            ("findings.severity", 1, "severity"),
+        }
 
     def test_the_level_is_bonferroni_over_the_family_and_the_looks(self) -> None:
         """
@@ -1016,6 +1035,14 @@ RELEASED_SET_PLAN_HASHES: dict[tuple[str, int, int], str] = {
     ("guardrail.card", 1, 1): (
         "a72753b5ea04d5af9392657928d777be19b9bbbbd9e013700f2e97e0d231956d"
     ),
+    # Phase D2: the findings sets, their baseline the value recorded beside
+    # the title, released while the ledger held no answer of theirs.
+    ("findings.owner", 1, 1): (
+        "e6cb5e05456468a9447b5748a3f09900a4893a5096cea6b0e98c445de05e09e9"
+    ),
+    ("findings.severity", 1, 1): (
+        "256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2"
+    ),
 }
 
 #: The sets with no plan of their own: the probe measures the vendor, not a
@@ -1146,6 +1173,11 @@ class TestTheSetPlansAreTheirReleasedHashes:
 _MOVED_SET: dict[str, Any] = {
     "ASSET_CLASS_KEYWORDS": jev_prereg.ASSET_CLASS_KEYWORDS[1:],
     "CODE_SCREEN_BASELINE": {**jev_prereg.CODE_SCREEN_BASELINE, "version": 2},
+    "FINDINGS_POPULATION": {**jev_prereg.FINDINGS_POPULATION, "status": "open"},
+    "FINDINGS_RECORDED_BASELINE": {
+        **jev_prereg.FINDINGS_RECORDED_BASELINE,
+        "order": ("opened_at", "ref", "candidate_id"),
+    },
     "KEYWORD_FALLBACK": "unclear",
     "KEYWORD_MATCHER": "keywords/v2",
     "MECHANISM_KEYWORDS": jev_prereg.MECHANISM_KEYWORDS[::-1],
@@ -1199,6 +1231,12 @@ class TestEverySetPlanChoiceIsHashed:
             jev_prereg.CODE_SCREEN_BASELINE["version"] = 2  # type: ignore[index]
         with pytest.raises(TypeError):
             jev_prereg.PERFORMANCE_CLAIM_BASELINE["proximity"] = 1  # type: ignore[index]
+        with pytest.raises(TypeError):
+            jev_prereg.FINDINGS_RECORDED_BASELINE["origin"] = "any"  # type: ignore[index]
+        with pytest.raises(TypeError):
+            jev_prereg.FINDINGS_POPULATION["status"] = "open"  # type: ignore[index]
+        assert isinstance(jev_prereg.FINDINGS_RECORDED_BASELINE["order"], tuple)
+        assert isinstance(jev_prereg.FINDINGS_POPULATION["title_chars"], tuple)
 
 
 def _registered() -> dict[str, Any]:
@@ -1305,13 +1343,17 @@ class TestTheTargets:
 
     def test_the_design_targets(self) -> None:
         """Covered precision of at least 0.90 for the guardrails, covered
-        accuracy of at least 0.80 for the research sets."""
+        accuracy of at least 0.80 for the research sets and, from phase D2,
+        for the findings sets (docs/09, section 3.4)."""
         expected = {
             "guardrail.injection": ("covered_precision_of_the_acting_class", 0.90),
             "guardrail.card": ("covered_precision_of_the_acting_class", 0.90),
             "research.catalogue": ("covered_accuracy", 0.80),
             "research.hypothesis": ("covered_accuracy", 0.80),
+            "findings.owner": ("covered_accuracy", 0.80),
+            "findings.severity": ("covered_accuracy", 0.80),
         }
+        assert {name for name, _ in jev_prereg.SET_PLAN_VERSIONS} == set(expected)
         for name, (statistic, at_least) in expected.items():
             plan = jev_prereg.set_plan(name, 1)
             assert plan is not None
@@ -1381,6 +1423,114 @@ class TestTheKeywordBaselinesAreWhatTheyName:
             theirs = dict(hypothesis["questions"][key]["keyword_baseline"])
             assert (mine.pop("reads"), theirs.pop("reads")) == ("excerpt", "title")
             assert mine == theirs
+
+
+class TestTheFindingsBaseline:
+    """
+    Phase D2 (docs/09, section 3.4): the findings sets are measured against
+    the value already recorded beside the title — ``raised_by`` for the owner,
+    ``severity`` for the severity — of the earliest finding the programme's
+    model wrote holding it, by ``opened_at`` then ``ref``. Data in each plan,
+    hashed with it, so the rule an answer is scored by was registered before
+    the answer.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "key", "reads"),
+        [
+            ("findings.owner", "owning_role", "raised_by"),
+            ("findings.severity", "severity", "severity"),
+        ],
+    )
+    def test_it_reads_the_recorded_value(self, name: str, key: str, reads: str) -> None:
+        plan = jev_prereg.set_plan(name, 1)
+        assert plan is not None
+        assert list(plan["questions"]) == [key]
+        assert plan["questions"][key]["keyword_baseline"] == {
+            "rule": "findings.recorded",
+            "of": "the earliest finding holding the title",
+            "origin": "model",
+            "order": ["opened_at", "ref"],
+            "exported_to_labellers": False,
+            "reads": reads,
+        }
+
+    def test_the_two_plans_differ_by_what_they_read_alone(self) -> None:
+        owner = jev_prereg.set_plan("findings.owner", 1)
+        severity = jev_prereg.set_plan("findings.severity", 1)
+        assert owner is not None and severity is not None
+        a = dict(owner["questions"]["owning_role"]["keyword_baseline"])
+        b = dict(severity["questions"]["severity"]["keyword_baseline"])
+        assert (a.pop("reads"), b.pop("reads")) == ("raised_by", "severity")
+        assert a == b
+        assert owner["population"] == severity["population"]
+
+    def test_the_population_is_every_model_written_finding_within_the_cap(
+        self,
+    ) -> None:
+        """
+        Any status, so the population labelled is the population asked about
+        (docs/09, D24); the cap a copy of ``jev_questions``', which this
+        module, loading the standard library alone, cannot import.
+        """
+        from src.programme import jev_questions
+
+        plan = jev_prereg.set_plan("findings.owner", 1)
+        assert plan is not None
+        assert plan["population"] == {
+            "table": "findings",
+            "origin": "model",
+            "status": "any",
+            "title_chars": [1, jev_questions.FINDING_TITLE_MAX_CHARS],
+            "subject": "finding_title",
+            "address": "sha256 of the title as UTF-8",
+        }
+        assert jev_questions.STATE_SUBJECT[jev_questions.FindingTitleState] == (
+            plan["population"]["subject"]
+        )
+
+    def test_no_phase_c_plan_names_a_population(self) -> None:
+        """So adding the findings plans moved no phase C plan's hash."""
+        for name, version in jev_prereg.SET_PLAN_VERSIONS:
+            plan = jev_prereg.set_plan(name, version)
+            assert plan is not None
+            assert ("population" in plan) is name.startswith("findings."), name
+
+
+class TestTheKeywordFallback:
+    """
+    ``keyword_label`` takes the label a plan gives text no keyword is in, and
+    each plan records it as ``"fallback"`` (docs/09, section 3.4): phase D3's
+    ops plan names ``unclear``, its escape. Every phase C plan keeps
+    ``insufficient_evidence``, so none of their hashes moved.
+    """
+
+    def test_the_c_plans_are_unchanged(self) -> None:
+        for name in (
+            "guardrail.injection",
+            "research.catalogue",
+            "research.hypothesis",
+            "guardrail.card",
+        ):
+            assert jev_prereg.set_plan_hash(name, 1) == (
+                RELEASED_SET_PLAN_HASHES[(name, 1, 1)]
+            ), name
+        for name in ("research.catalogue", "research.hypothesis"):
+            plan = jev_prereg.set_plan(name, 1)
+            assert plan is not None
+            for question in plan["questions"].values():
+                assert question["keyword_baseline"]["fallback"] == (
+                    jev_prereg.KEYWORD_FALLBACK
+                )
+
+    def test_the_fallback_is_the_label_of_text_no_keyword_is_in(self) -> None:
+        rules = (("found", ("needle",)),)
+        assert jev_prereg.keyword_label(rules, "a needle") == "found"
+        assert jev_prereg.keyword_label(rules, "hay") == jev_prereg.KEYWORD_FALLBACK
+        assert jev_prereg.keyword_label(rules, "hay", fallback="unclear") == "unclear"
+        assert jev_prereg.keyword_label(rules, "a needle", fallback="unclear") == (
+            "found"
+        )
 
 
 #: The card check's rule, ``claims.find_performance_claim``, written out here

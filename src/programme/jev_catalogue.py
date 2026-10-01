@@ -161,9 +161,17 @@ PROVENANCES: tuple[str, ...] = ("web", "internal", "operator", "model", "system"
 
 #: What a request's state describes, one per state model
 #: (``jev_questions.STATE_SUBJECT``). A text subject — a web excerpt, a
-#: hypothesis title — is addressed by the sha256 of its text, so a replay can
-#: never answer for another subject, and a label joins its answer exactly.
-SUBJECT_TYPES: tuple[str, ...] = ("probe", "session", "web_excerpt", "hypothesis_title")
+#: hypothesis title, from phase D2 a finding's title — is addressed by the
+#: sha256 of its text, so a replay can never answer for another subject, and a
+#: label joins its answer exactly. Vocabulary: migration 0012 holds
+#: ``subject_type`` to no CHECK.
+SUBJECT_TYPES: tuple[str, ...] = (
+    "probe",
+    "session",
+    "web_excerpt",
+    "hypothesis_title",
+    "finding_title",
+)
 
 #: The percent of ``jev_daily_request_budget`` each recorded lane may spend in
 #: a UTC day, beside the budget itself. A probe is recorded in the probe lane

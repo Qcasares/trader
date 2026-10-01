@@ -305,6 +305,39 @@ class HypothesisTitleState(BaseModel):
     title: Annotated[str, StringConstraints(min_length=1, max_length=TITLE_MAX_CHARS)]
 
 
+#: The longest finding title a finding-title state may carry, in characters:
+#: ``roles.ProposedFinding.title``'s ``max_length``, the most the panel's model
+#: may write in one (``tests/unit/test_jev_questions.py::
+#: test_the_title_cap_is_proposed_findings`` holds the two equal). A title
+#: over it is not sent, and never cut: ``jev_jobs`` refuses it by this number
+#: before any state is built, so the refusal is the cap's and not pydantic's.
+#: Phase D2's findings sets write this number into their own words, so
+#: changing it changes their pack hashes.
+FINDING_TITLE_MAX_CHARS = 200
+
+
+class FindingTitleState(BaseModel):
+    """
+    The title of a finding the programme's own model wrote, and nothing else:
+    the one state a findings set may be asked about (phase D2).
+
+    A finding's title is sent without ``jev_send_internal_detail``, as docs/08
+    fact 7's defaults send findings as titles only, so its detail, its
+    remediation and its close note never are; nor is who raised it or how
+    severe it was recorded, which the findings sets' baseline reads and an
+    answer could otherwise echo (docs/09, section 2.5). It is recorded as
+    ``model``, never ``internal`` (:data:`TEXT_SUBJECT_PROVENANCE`), since a
+    generative model wrote it; an operator's finding, or one raised before
+    migration 0015 named its writer, is not sent at all.
+    """
+
+    model_config = _STATE_CONFIG
+
+    title: Annotated[
+        str, StringConstraints(min_length=1, max_length=FINDING_TITLE_MAX_CHARS)
+    ]
+
+
 #: The state models a ``web``-provenance set may take, and the only sets that
 #: may take them. Held both ways at registration: web text in any other shape
 #: would reach no screen, and a web state under another provenance would be
@@ -320,6 +353,7 @@ STATE_SUBJECT: Mapping[type[BaseModel], str] = MappingProxyType(
         RegimeState: "session",
         WebExcerptState: "web_excerpt",
         HypothesisTitleState: "hypothesis_title",
+        FindingTitleState: "finding_title",
     }
 )
 
@@ -328,19 +362,24 @@ STATE_SUBJECT: Mapping[type[BaseModel], str] = MappingProxyType(
 #: replay can never answer for another subject, the same words from two sources
 #: are one subject, and a label joins its answer exactly.
 TEXT_SUBJECT_FIELD: Mapping[type[BaseModel], str] = MappingProxyType(
-    {WebExcerptState: "excerpt", HypothesisTitleState: "title"}
+    {
+        WebExcerptState: "excerpt",
+        HypothesisTitleState: "title",
+        FindingTitleState: "title",
+    }
 )
 
 #: Who writes each kind of text subject, as the provenance every set asking
-#: about it records. A web excerpt is an outsider's. A hypothesis title is
-#: written by the programme's own generative model, so it is recorded as
-#: ``model`` and never as ``internal``, which means computed in code and is
-#: what the phase F signal loader is to trust. A state model whose subject is
-#: text is registered only if its subject has a writer here, so a new kind of
-#: text cannot arrive without somebody saying who wrote it; an operator's text
-#: (docs/08 open item 28) is a subject of its own.
+#: about it records. A web excerpt is an outsider's. A hypothesis title, and
+#: from phase D2 a finding's title, is written by the programme's own
+#: generative model, so it is recorded as ``model`` and never as ``internal``,
+#: which means computed in code and is what the phase F signal loader is to
+#: trust. A state model whose subject is text is registered only if its
+#: subject has a writer here, so a new kind of text cannot arrive without
+#: somebody saying who wrote it; an operator's text (docs/08 open item 28) is
+#: a subject of its own.
 TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
-    {"web_excerpt": "web", "hypothesis_title": "model"}
+    {"web_excerpt": "web", "hypothesis_title": "model", "finding_title": "model"}
 )
 
 #: State models whose subject is the state itself (phase D), each with the
@@ -1678,12 +1717,195 @@ GUARDRAIL_CARD = _register(
     )
 )
 
+# ---------------------------------------------------------------------------
+# Phase D2: findings routing, asked about the titles the panel's model writes
+# ---------------------------------------------------------------------------
+#
+# Written as docs/09 sections 2.2 and 2.3 wrote them, word for word, which are
+# final, and held by every rule above. Two sets of one question each, so a
+# rewording of one — severity, the likelier to be reworded or dropped — re-asks
+# nothing of the other (design D2). Each owner option says what kind of defect
+# falls in a role's area, paraphrasing its mandate in ``roles.ROLES``, in that
+# order, and none speaks to who may veto or close: routing is about subject
+# matter, and words about authority would invite an answer about authority.
+# The severity levels are the panel's own (``roles.SEVERITIES`` and
+# ``roles.system_prompt``), so a suggested level means what a recorded one
+# means. Neither the raiser nor the recorded severity is in the state, since
+# the baseline reads them and Jev could otherwise echo the value it is
+# measured against. ``tests/unit/test_jev_questions.py`` holds the options to
+# the roles and the severities, and the cap to ``roles.ProposedFinding``'s.
+
+#: Said after each findings question: what the title is, and that it is all.
+#: The cap is a sentence of its own, rendered from its constant, so it cannot
+#: be read as describing the defect.
+_FINDING_TAIL = (
+    "`title` is the title of a finding, a defect that one of this system's "
+    "reviewing specialists recorded against a trading strategy under test. It is "
+    f"up to {FINDING_TITLE_MAX_CHARS} characters, and it is all the text given."
+)
+
+#: The areas a finding may belong to: the twelve roles in ``roles.ROLES``'
+#: order, each by what falls in its area, and the escape last.
+OWNING_ROLE_CRITERIA: Mapping[str, str] = MappingProxyType(
+    {
+        "quant_research": (
+            "The trading idea itself: its economic mechanism, who takes the "
+            "other side of the trade and why, or whether its result holds "
+            "across nearby parameter values."
+        ),
+        "data_engineering": (
+            "The data: information used before it was available, survivorship "
+            "in the universe, corporate actions handled inconsistently, or gaps "
+            "in the price history."
+        ),
+        "machine_learning": (
+            "A model that forecasts, ranks or classifies: leakage of the target, "
+            "validation that ignores time order, or complexity that adds little "
+            "over a simple baseline."
+        ),
+        "portfolio_construction": (
+            "Turning signals into a portfolio: unintended concentration, "
+            "turnover, correlation with strategies already held, or risk and "
+            "liquidity limits."
+        ),
+        "independent_risk": (
+            "Risk to capital: drawdowns, exposure concentrated in one regime or "
+            "a few trades, or a halting limit that would fail to act."
+        ),
+        "execution": (
+            "Turning decisions into orders: fill prices, trading costs and "
+            "spreads, or trade sizes larger than a market would absorb."
+        ),
+        "platform": (
+            "Reproducing and operating the work: a result that the recorded "
+            "commit, seed or dataset fails to rebuild, or a change that is hard "
+            "to reverse."
+        ),
+        "independent_validation": (
+            "Whether a claim follows from its evidence: a metric that disagrees "
+            "with the rows it cites, an acceptance test looser than the "
+            "hypothesis promised, or more tests run than the analysis admits."
+        ),
+        "compliance": (
+            "Approvals, records and permitted use: data used outside its "
+            "licence, a decision recorded with its reasons missing, or a running "
+            "configuration that differs from the approved one."
+        ),
+        "operations": (
+            "Keeping the intended portfolio and the actual one in agreement: "
+            "reconciliation, state lost on a restart, or positions and cash "
+            "that rest on a single source."
+        ),
+        "adversarial_review": (
+            "Whether the result is an artefact: a stress that would break it, "
+            "such as doubled volatility, halved liquidity, stale data or "
+            "rejected orders."
+        ),
+        "programme_director": (
+            "Priorities and economy: whether the work is worth the attention it "
+            "takes, or whether a simpler strategy already held does the same "
+            "job."
+        ),
+        "unclear": (
+            "The defect in `title` fits two or more of the areas above about "
+            "equally well, or fits each of them only weakly."
+        ),
+    }
+)
+
+#: How serious a finding is: the panel's four levels in ``roles.SEVERITIES``'
+#: order, each as ``roles.system_prompt`` defines them, and the escape last.
+SEVERITY_CRITERIA: Mapping[str, str] = MappingProxyType(
+    {
+        "low": (
+            "A minor weakness: the result stays trustworthy and the strategy "
+            "safe, and fixing it would improve the record."
+        ),
+        "medium": (
+            "A real weakness that limits how far the result can be trusted, "
+            "while leaving it usable."
+        ),
+        "high": (
+            "A defect that makes the result untrustworthy or the strategy unsafe "
+            "to run until it is fixed."
+        ),
+        "critical": (
+            "A defect that invalidates the result entirely, or exposes capital "
+            "to a loss the controls would fail to stop."
+        ),
+        "insufficient_evidence": (
+            "The title leaves the seriousness open: it fits two or more of the "
+            "levels above about equally well, or fits each of them only weakly."
+        ),
+    }
+)
+
+FINDINGS_OWNER = _register(
+    QuestionSet(
+        name="findings.owner",
+        version=1,
+        lane="findings",
+        provenance="model",
+        questions=(
+            (
+                "owning_role",
+                {
+                    "type": "choice",
+                    "instructions": (
+                        "Which specialist's area of responsibility does the defect "
+                        "in `title` belong to? " + _FINDING_TAIL
+                    ),
+                    "criteria": dict(OWNING_ROLE_CRITERIA),
+                },
+            ),
+        ),
+        state_model=FindingTitleState,
+        purpose=(
+            "Suggests the specialist area a finding the programme's model raised "
+            "falls in, from its title alone. Suggestion-only: nothing it answers "
+            "writes, routes or closes a finding."
+        ),
+    )
+)
+
+FINDINGS_SEVERITY = _register(
+    QuestionSet(
+        name="findings.severity",
+        version=1,
+        lane="findings",
+        provenance="model",
+        questions=(
+            (
+                "severity",
+                {
+                    "type": "choice",
+                    "instructions": (
+                        "How serious is the defect in `title`? "
+                        + _FINDING_TAIL
+                        + " Seriousness is about whether the strategy's result "
+                        "can be trusted and whether running the strategy is safe."
+                    ),
+                    "criteria": dict(SEVERITY_CRITERIA),
+                },
+            ),
+        ),
+        state_model=FindingTitleState,
+        purpose=(
+            "Suggests how serious a finding the programme's model raised reads, "
+            "from its title alone. Suggestion-only: nothing it answers writes a "
+            "finding's severity or status, and a suggested level is shown only "
+            "where it is more serious than the one recorded."
+        ),
+    )
+)
+
 #: The pack hash of every registered set, pinned. A test requires each
 #: registered set to hash to its entry and every entry to be registered, so
 #: editing a set's words without bumping its version fails the build, and so
 #: does bumping the version without recording the new hash here. The four
 #: phase C sets hash to the values design section 5 computed from the same
-#: words.
+#: words, and the two findings sets of phase D2 to the values docs/09 section
+#: 2.6 computed from theirs.
 GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ("probe.connectivity", 1): (
         "5d5d091e936ae7b0a2006d2d2a92f90c7a08b0bbe55453550ef2c08c2370560e"
@@ -1702,6 +1924,12 @@ GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ),
     ("guardrail.card", 1): (
         "3f98bbc1511995b4ba35563f271a3d043eb4db43e23912d035785605e0ebd455"
+    ),
+    ("findings.owner", 1): (
+        "7e97f8b11d80494d5ecb978bc04240226229993d2f73617b1fccdf7ea4437c8c"
+    ),
+    ("findings.severity", 1): (
+        "a9cae8cdafff291715982ea74dc3fe05f3e0da1ba8ffdd03cc428df585e830e0"
     ),
 }
 
@@ -1726,6 +1954,9 @@ __all__ = [
     "ENUMERATED_LANES",
     "ESCAPE_OPTIONS",
     "EXCERPT_MAX_CHARS",
+    "FINDINGS_OWNER",
+    "FINDINGS_SEVERITY",
+    "FINDING_TITLE_MAX_CHARS",
     "GOLDEN_PACK_HASHES",
     "GUARDRAIL_CARD",
     "GUARDRAIL_INJECTION",
@@ -1739,6 +1970,7 @@ __all__ = [
     "MIN_SCORE_LEVELS",
     "MOMENTUM_FLAT_BAND",
     "MOMENTUM_SESSIONS",
+    "OWNING_ROLE_CRITERIA",
     "PROBE_CONNECTIVITY",
     "PROBE_TEXT",
     "QUESTION_TYPES",
@@ -1749,6 +1981,7 @@ __all__ = [
     "SCREEN_FLAG_ARGMAX",
     "SCREEN_QUESTION",
     "SCREEN_SET_NAME",
+    "SEVERITY_CRITERIA",
     "SLEEVES",
     "STATE_SUBJECT",
     "TEXT_SUBJECT_FIELD",
@@ -1760,6 +1993,7 @@ __all__ = [
     "VOLATILITY_SESSIONS",
     "WEB_STATE_MODELS",
     "Drawdown",
+    "FindingTitleState",
     "HypothesisTitleState",
     "Momentum",
     "ProbeState",
