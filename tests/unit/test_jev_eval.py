@@ -2328,6 +2328,37 @@ class TestLooks:
         assert captured.out == ""
         assert "nothing was read" in captured.err
 
+    @pytest.mark.parametrize("command", ["Evaluate", "None", "labels evaluate"])
+    async def test_neither_dispatch_has_a_default(
+        self, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        """
+        Behind ``_command``, a second layer: ``_read`` and ``_write`` run each
+        command by its name, and a name they do not know is refused rather
+        than run as the evaluation, the first cut's catch-all (D1RP-1).
+        """
+
+        async def database_now(conn: Any) -> datetime:
+            return AFTER
+
+        async def evaluated(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an unknown command reached the evaluation")
+
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
+        monkeypatch.setattr(jev_eval, "_evaluate", evaluated)
+        arguments = argparse.Namespace(json=False)
+        with pytest.raises(jev_eval.Refused, match="no reading command"):
+            await jev_eval._read(object(), arguments, command)  # type: ignore[arg-type]
+        with pytest.raises(jev_eval.Refused, match="no writing command"):
+            await jev_eval._write(
+                object(),  # type: ignore[arg-type]
+                arguments,
+                command,
+                commit=None,
+                rows=None,
+                labelled_by=None,
+            )
+
     def test_every_command_the_parser_makes_is_one_the_harness_runs(self) -> None:
         """
         The commands ``_command`` admits are exactly the ones ``_parser`` can

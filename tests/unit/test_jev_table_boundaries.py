@@ -2187,6 +2187,11 @@ def test_the_detail_walk_finds_each_read(handler: str) -> None:
                     "lane = 'findings'\")",
                 ),
                 (
+                    "a-literal-naming-a-detail-column",
+                    "return await conn.fetch(\"SELECT h.ref FROM hypotheses h WHERE "
+                    "h.title NOT LIKE '%card%' AND h.origin <> 'summary, *'\")",
+                ),
+                (
                     "another-tables-star-beside-a-title",
                     "return await conn.fetch('SELECT c.*, h.ref, h.title FROM "
                     "candidates c JOIN hypotheses h ON h.id = c.hypothesis_id')",
