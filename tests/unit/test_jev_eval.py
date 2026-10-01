@@ -1886,6 +1886,27 @@ class TestPreview:
         (subject,) = (await _preview())["subjects"]
         assert subject["state"] == {"title": FINDING_TITLE}
 
+    async def test_a_set_with_no_plan_in_force_is_planned_nothing_and_says_so(
+        self, findings_rig: _Findings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        D2's review (D2RT-2): the planner plans nothing for a set with no
+        analysis plan in force, and preview's reason for it was held by no
+        case; without it preview printed "would plan: yes" for such a set.
+        """
+        monkeypatch.setattr(jev_prereg, "plans_in_force", lambda name, version: None)
+        report = await _preview()
+        assert report["plans_in_force"] is False
+        assert report["would_plan"] is False
+        assert report["not_planned_because"] == [
+            "findings.owner v1 has no analysis plan in force"
+        ]
+        assert report["subjects"] == [] and findings_rig.reads == []
+        assert (
+            "would plan: no — findings.owner v1 has no analysis plan in force"
+            in jev_eval.format_preview(report)
+        )
+
     async def test_the_limit_is_the_planners_cap(self, findings_rig: _Findings) -> None:
         from src.programme import jev_plan
 
@@ -1948,6 +1969,9 @@ class _Outcomes:
         self.open: list[dict[str, Any]] = []
         self.outcomes: dict[str, dict[str, dict[str, Any]]] = {}
         self.jev = 0
+        self.auth_held = False
+        self.refused: set[str] = set()
+        self.refusals_read: list[dict[str, Any]] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def open_findings(conn: Any) -> list[dict[str, Any]]:
@@ -1960,10 +1984,11 @@ class _Outcomes:
             return self.outcomes.get(kwargs["question_set"].name, {})
 
         async def auth_failed_today(conn: Any) -> bool:
-            return False
+            return self.auth_held
 
         async def set_refused(conn: Any, **kwargs: Any) -> bool:
-            return False
+            self.refusals_read.append(kwargs)
+            return kwargs["question_set"] in self.refused
 
         async def answered(*args: Any, **kwargs: Any) -> Any:
             raise AssertionError("suggestions read an answer")
@@ -2158,6 +2183,35 @@ class TestSuggestions:
         status: str,
     ) -> None:
         assert jev_eval.ask_status(origin, title, outcome) == status
+
+    async def test_each_hold_is_read_for_its_own_set_and_named(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        """
+        D2's review (D2RT-2): the holds that decide whether a findings set is
+        asked, each read as the road reads it — a 422 for the set, its
+        version and the pin, and an authentication failure today — were held
+        by no case, and suggestions forced to say "no" for every 422 passed.
+        """
+        self._register(outcomes_rig)
+        outcomes_rig.refused = {"findings.severity"}
+        outcomes_rig.auth_held = True
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_flags())  # type: ignore[arg-type]
+        )
+        assert report["holds"] == {
+            "authentication_failure_today": True,
+            "findings.owner refused under the pin": False,
+            "findings.severity refused under the pin": True,
+        }
+        assert outcomes_rig.refusals_read == [
+            {"question_set": name, "version": 1, "model": MODEL}
+            for name in ("findings.owner", "findings.severity")
+        ]
+        text = jev_eval.format_suggestions(report)
+        assert "findings.severity refused under the pin: yes" in text
+        assert "findings.owner refused under the pin: no" in text
+        assert "authentication failure today: yes" in text
 
     @pytest.mark.parametrize(
         "pin",

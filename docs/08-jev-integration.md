@@ -4532,7 +4532,16 @@ harness's read-only snapshot, loading no planner, lane or client:
   every root that asks to reading neither `raised_by` nor `severity`, so no
   answer can echo the value it is measured against, proved on synthetic trees.
 
-Every new control was removed in turn and a named test failed.
+Every new control was removed in turn and a named test failed. That claim
+was first made with four controls holding it falsely, each of which D2's
+review removed with every test still passing: the cap on the dates read for
+a finding title, the subject-type filter on `ask_outcomes`' block, `preview`'s
+reason for a set with no plan in force, and `suggestions`' 422 hold. Each now
+has a case that fails when it is removed:
+`test_jev_repo.py::TestTheFindingTitlesAHarnessReads::test_a_model_title_outside_the_cap_is_undated`,
+`::TestWhatSuggestionsReads::test_a_block_holds_what_the_road_holds`,
+`test_jev_eval.py::TestPreview::test_a_set_with_no_plan_in_force_is_planned_nothing_and_says_so`
+and `::TestSuggestions::test_each_hold_is_read_for_its_own_set_and_named`.
 
 **Where D2 departs from the design and its scope.**
 

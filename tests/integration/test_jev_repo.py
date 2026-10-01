@@ -3423,6 +3423,24 @@ class TestTheFindingTitlesAHarnessReads:
         subjects = [_subject(operator, "finding_title")]
         assert await jev_repo.item_dates(conn, subjects) == dict.fromkeys(subjects)
 
+    @pytest.mark.parametrize(
+        "title",
+        ["O" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1), ""],
+        ids=["one-over-the-cap", "empty"],
+    )
+    async def test_a_model_title_outside_the_cap_is_undated(
+        self, conn: asyncpg.Connection, title: str
+    ) -> None:
+        """
+        D2's review (D2RT-2): the cap on the dates read was held by no case,
+        and a cap of twice 200 passed every test. A labelled item must be in
+        ``subject_texts`` too, so it moved no figure yet; a date is still the
+        population's or none.
+        """
+        await _finding(conn, title)
+        subjects = [_subject(title, "finding_title")]
+        assert await jev_repo.item_dates(conn, subjects) == dict.fromkeys(subjects)
+
     async def test_the_text_is_the_populations(self, conn: asyncpg.Connection) -> None:
         """
         A title only an operator's finding, or one raised before migration

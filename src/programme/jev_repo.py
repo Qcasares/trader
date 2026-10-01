@@ -1604,10 +1604,15 @@ async def hypotheses_to_ask(
 
 #: A finding title's content address in SQL: what ``jev_hash.text_sha256``
 #: gives the text, as :func:`hypotheses_to_ask` computes a hypothesis title's.
-#: Every read of a finding title below takes the findings its set plan names
+#: The reads that choose or measure a finding title — :func:`findings_to_ask`,
+#: :func:`item_dates`, :func:`subject_texts`, :func:`finding_records` and
+#: :func:`subjects_to_label` — take the findings its set plan names
 #: (``jev_prereg.FINDINGS_POPULATION``): those the programme's model wrote,
 #: whatever their status, with a title of one to
-#: ``jev_questions.FINDING_TITLE_MAX_CHARS`` characters.
+#: ``jev_questions.FINDING_TITLE_MAX_CHARS`` characters. :func:`open_findings`,
+#: ``suggestions``' read, takes every open finding's title whoever wrote it
+#: and however long, to address it and say how its asks came out, and prints
+#: none (D2's review, D2RT-3: this said every read took the population).
 _FINDING_ADDRESS = "encode(sha256(convert_to(f.title, 'UTF8')), 'hex')"
 
 
