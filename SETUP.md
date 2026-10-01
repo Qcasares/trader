@@ -127,6 +127,25 @@ hand sooner or later.
 
 ## 2. Run
 
+### One command: `scripts/local.sh`
+
+Docker is the only prerequisite. It does steps 1 and 2 for you, and runs the
+CI gates without GitHub Actions:
+
+```bash
+scripts/local.sh setup    # writes .env: generated secrets, your hashed password
+scripts/local.sh up       # db + api + worker + UI, migrations applied
+scripts/local.sh check    # every gate in ci.yml, against a throwaway Postgres
+scripts/local.sh down     # stops everything; the database volume is kept
+```
+
+`setup` asks for the operator password and never writes it anywhere
+unhashed. Every generator runs inside the API image, so the host needs no
+Python or bcrypt. `check` runs ruff, the parity and import-boundary steps, the
+unit suite, the integration suite against Postgres 16 with trust auth (as in
+CI), and the web typecheck and build, then prints PASS or FAIL per CI job.
+Nothing in the script touches the live-trading gates.
+
 ### With Docker
 
 ```bash
