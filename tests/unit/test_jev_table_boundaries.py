@@ -65,6 +65,7 @@ own test first. It reads spellings, and is not a sandbox.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 import re
 from pathlib import Path
@@ -1110,47 +1111,320 @@ DETAIL_COLUMNS: dict[str, frozenset[str]] = {
     "role_assessments": frozenset({"summary", "evidence"}),
 }
 
-_DETAIL_TABLE = re.compile(
-    r"\b(?:from|join|into|update)\s+(?:only\s+)?(?:\"?\w+\"?\.)?\"?"
-    r"(hypotheses|findings|role_assessments)\"?(?!\w)",
+#: A statement's comments and its string literals, which name no table and no
+#: column: ``lane = 'findings'`` compares a value.
+_SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_SQL_LITERAL = re.compile(r"'(?:[^']|'')*'")
+
+#: One token of a statement as the detail scan reads it: a parenthesis, a
+#: comma, a dot, a star, a number or a parameter, a piece the scan cannot
+#: read — an interpolation, marked by a NUL, or a placeholder ``%`` or
+#: ``str.format`` fills — a guarded table named where a table may stand,
+#: schema-qualified or quoted and never as a column's qualifier, or a word.
+_SQL_TOKEN = re.compile(
+    r"(?P<open>\()|(?P<close>\))|(?P<comma>,)|(?P<star>\*)"
+    r"|(?P<unread>\x00|%(?:\(\w+\))?s|\{\w*\})"
+    r"|(?P<value>\$?\d+(?:\.\d+)?)"
+    r"|(?P<table>(?<![\w.$\"])(?:\"?(?:\w+|\x00)\"?\.)?\"?"
+    r"(?P<guarded>" + "|".join(DETAIL_COLUMNS) + r")\"?(?![\w$\"])(?!\s*\.))"
+    r"|(?P<word>\"[^\"]+\"|[A-Za-z_][\w$]*)|(?P<dot>\.)",
     re.IGNORECASE,
 )
-_STAR = re.compile(
-    r"(?:\bselect\s+(?:distinct\s+(?:on\s*\([^)]*\)\s*)?)?|,\s*|\breturning\s+)"
-    r"(?:\"?\w+\"?\.)?\*",
-    re.IGNORECASE,
+
+#: The words a statement begins with, its comments and parentheses read past.
+#: The scan judges no other text, so prose that names a table is not a read.
+_STATEMENT_WORDS = frozenset(
+    {"select", "with", "insert", "update", "delete", "merge", "copy", "table"}
+    | {"values", "explain"}
 )
-_RETURNING = re.compile(r"\breturning\b.*$", re.IGNORECASE | re.DOTALL)
+
+#: The words a clause begins with, which say whether a comma at that depth
+#: is in a ``FROM`` list, where a table may follow it.
+_CLAUSES = frozenset(
+    {"select", "from", "where", "join", "using", "on", "group", "order", "set"}
+    | {"having", "values", "returning", "into", "limit", "union", "window"}
+)
+
+#: Words that end a table's reference rather than name its alias.
+_NOT_AN_ALIAS = _CLAUSES | frozenset(
+    {"inner", "left", "right", "full", "outer", "cross", "natural", "offset"}
+    | {"intersect", "except", "for", "fetch", "lateral", "tablesample", "and"}
+    | {"or", "to", "with", "default", "do", "when", "then", "else", "end"}
+)
+
+#: The words before a guarded table that make it a table written, defined or
+#: locked rather than read: ``INSERT INTO``, ``UPDATE``, ``TRUNCATE``,
+#: ``ALTER TABLE`` and their kin.
+_TABLE_WRITERS = frozenset(
+    {"into", "update", "truncate", "references", "on", "exists", "alter"}
+    | {"drop", "lock", "create", "as"}
+)
+
+#: asyncpg's bulk reader, which takes a table as an argument and builds the
+#: SQL inside the driver, so no string names the read.
+_BULK_READERS = frozenset({"copy_from_table"})
+
+
+def _sql_tokens(statement: str) -> list[tuple[str, str]]:
+    """``statement``'s tokens, lower-cased, its comments and literals removed."""
+    text = _SQL_LITERAL.sub("''", _SQL_COMMENT.sub(" ", statement))
+    tokens: list[tuple[str, str]] = []
+    for match in _SQL_TOKEN.finditer(text):
+        kind = match.lastgroup or ""
+        if kind == "guarded":
+            kind, value = "table", match.group("guarded")
+        else:
+            value = match.group(0)
+        tokens.append((kind, value.lower().strip('"')))
+    return tokens
+
+
+def _matching_open(tokens: list[tuple[str, str]], close: int) -> int | None:
+    """The index of the parenthesis the one at ``close`` closes."""
+    depth = 0
+    for index in range(close, -1, -1):
+        kind = tokens[index][0]
+        depth += {"close": 1, "open": -1}.get(kind, 0)
+        if depth == 0:
+            return index
+    return None
+
+
+def _select_star(tokens: list[tuple[str, str]], star: int) -> bool:
+    """
+    Whether the ``*`` at ``star`` stands for columns — ``SELECT *``, ``x.*``,
+    ``(x).*``, ``, *``, ``SELECT ALL *``, ``DISTINCT ON (…) *``, ``RETURNING *``
+    — rather than multiplying, or counting as ``COUNT(*)`` does.
+    """
+    if star == 0:
+        return True
+    kind, value = tokens[star - 1]
+    if kind in ("dot", "comma"):
+        return True
+    if kind == "word":
+        return value in ("select", "all", "distinct", "returning")
+    if kind == "close":
+        opened = _matching_open(tokens, star - 1)
+        before = [] if opened is None else tokens[max(0, opened - 2) : opened]
+        return [value for _, value in before] == ["distinct", "on"]
+    return False
+
+
+def _star_qualifier(tokens: list[tuple[str, str]], star: int) -> str | None:
+    """The name a qualified ``*`` expands — ``f`` of ``f.*`` or ``(f).*`` —
+    ``""`` for one the scan cannot name, ``None`` for an unqualified one."""
+    if star == 0 or tokens[star - 1][0] != "dot":
+        return None
+    kind, value = tokens[star - 2] if star > 1 else ("", "")
+    if kind in ("word", "table"):
+        return value
+    if kind == "close":
+        opened = _matching_open(tokens, star - 2)
+        inside = tokens[opened + 1 : star - 2] if opened is not None else []
+        if len(inside) == 1 and inside[0][0] in ("word", "table"):
+            return inside[0][1]
+    return ""
+
+
+#: What the scan calls a table it reads and cannot name: ``FROM {table}``.
+_UNNAMED = "a table the scan cannot name"
+
+
+@dataclasses.dataclass
+class _Statement:
+    """One statement as the detail scan reads it."""
+
+    tokens: list[tuple[str, str]]
+    #: Each name a guarded table read goes by — its own, and its alias — and
+    #: the table, :data:`_UNNAMED` for a table the scan cannot name; the same
+    #: for a guarded table written.
+    reads: dict[str, str] = dataclasses.field(default_factory=dict)
+    written: dict[str, str] = dataclasses.field(default_factory=dict)
+    #: Where a table or an alias is named rather than used.
+    declared: set[int] = dataclasses.field(default_factory=set)
+    #: The tables read whole: ``TABLE t``, ``COPY t TO``.
+    whole: set[str] = dataclasses.field(default_factory=set)
+    #: The tables read by a ``SELECT`` whose column list holds a piece the
+    #: scan cannot read, and whether a ``RETURNING`` list holds one.
+    unread_lists: set[str] = dataclasses.field(default_factory=set)
+    unread_returning: bool = False
+    #: Where its ``RETURNING`` begins, if it has one.
+    returning: int | None = None
+
+
+def _parsed(statement: str) -> _Statement | None:
+    """
+    ``statement``'s guarded tables, each read or written, the names each goes
+    by, and the column lists it cannot read; ``None`` for a text whose first
+    word is no statement's and no piece the scan cannot read, which is prose,
+    never a read. A text that opens with such a piece — ``f"{cols} FROM
+    hypotheses"`` — opens in a column list, and is judged for the guarded
+    tables it names alone, so a message that interpolates a name before the
+    word "from" is not taken for a read. See :func:`_detail_read`.
+    """
+    tokens = _sql_tokens(statement)
+    words = [value for kind, value in tokens if kind not in ("open", "close")]
+    if not words:
+        return None
+    opens_a_statement = words[0] in _STATEMENT_WORDS
+    if not opens_a_statement and words[0][:1] not in ("\x00", "%", "{"):
+        return None
+    parsed = _Statement(tokens)
+    clause: dict[int, str] = {}
+    # The column lists open at each depth, a SELECT's until its FROM and a
+    # RETURNING's to the end, and whether each holds a piece the scan cannot
+    # read; kept past its FROM, for the tables that FROM reads.
+    open_lists: set[int] = set() if opens_a_statement else {0}
+    unread_list: dict[int, bool] = {0: False}
+    depth = 0
+    for index, (kind, value) in enumerate(tokens):
+        if kind == "open":
+            depth += 1
+            continue
+        if kind == "close":
+            clause.pop(depth, None)
+            open_lists.discard(depth)
+            unread_list.pop(depth, None)
+            depth -= 1
+            continue
+        if kind == "word" and value in _CLAUSES:
+            clause[depth] = value
+        if kind == "word" and value in ("select", "returning"):
+            open_lists.add(depth)
+            unread_list[depth] = False
+            if value == "returning" and parsed.returning is None:
+                parsed.returning = index
+        elif kind == "word" and value in ("from", "union", "intersect", "except"):
+            open_lists.discard(depth)
+        if kind not in ("table", "unread"):
+            continue
+        previous = [
+            v
+            for k, v in tokens[:index]
+            if k not in ("open", "close") and v not in ("only", "lateral")
+        ]
+        last = previous[-1] if previous else None
+        earlier = previous[-2] if len(previous) > 1 else None
+        rest = tokens[index + 1 :]
+        if last == "copy":
+            copied = [v for k, v in rest if k == "word"][:1] == ["to"]
+            is_read, is_written = copied, not copied
+            if copied and rest[:1] != [("open", "(")]:
+                parsed.whole.add(value if kind == "table" else _UNNAMED)
+        elif (last == "from" and earlier == "delete") or (
+            last == "table" and earlier in _TABLE_WRITERS
+        ):
+            is_read, is_written = False, True
+        elif last in ("from", "join", "using", "table"):
+            is_read, is_written = True, False
+            if last == "table":
+                parsed.whole.add(value if kind == "table" else _UNNAMED)
+        elif last == "," and clause.get(depth) in ("from", "join", "on", "using"):
+            is_read, is_written = True, False
+        else:
+            is_read, is_written = False, last in _TABLE_WRITERS
+        if kind == "unread":
+            if not (is_read or is_written):
+                for open_depth in open_lists:
+                    if open_depth <= depth:
+                        unread_list[open_depth] = True
+                if parsed.returning is not None:
+                    parsed.unread_returning = True
+                continue
+            if not (is_read and opens_a_statement):
+                continue
+            value = _UNNAMED
+        if not (is_read or is_written):
+            continue
+        parsed.declared.add(index)
+        names = parsed.reads if is_read else parsed.written
+        names[value] = value
+        if is_read and unread_list.get(depth):
+            parsed.unread_lists.add(value)
+        offset = 2 if rest[:1] == [("word", "as")] else 1
+        alias = rest[offset - 1 : offset]
+        if alias and alias[0][0] == "word" and alias[0][1] not in _NOT_AN_ALIAS:
+            names[alias[0][1]] = value
+            parsed.declared.add(index + offset)
+    parsed.whole &= {_UNNAMED, *parsed.reads.values()}
+    return parsed
+
+
+def _tables_read(statement: str) -> set[str]:
+    """The guarded tables ``statement`` reads from."""
+    parsed = _parsed(statement)
+    return set() if parsed is None else set(parsed.reads.values()) - {_UNNAMED}
+
+
+def _detail_columns(table: str) -> frozenset[str]:
+    """A guarded table's detail columns; for one the scan cannot name, all."""
+    if table == _UNNAMED:
+        return frozenset().union(*DETAIL_COLUMNS.values())
+    return DETAIL_COLUMNS[table]
 
 
 def _detail_read(statement: str) -> str | None:
     """
     What in ``statement`` reads detail from ``hypotheses``, ``findings`` or
-    ``role_assessments``, or ``None``: in a SELECT, ``*`` or a detail column
-    anywhere in it; in a write, the same in its RETURNING. An insert that
-    writes ``detail_md`` and an update that sets ``close_note`` write detail,
-    and read none.
+    ``role_assessments``, or ``None``.
+
+    A statement reads a guarded table wherever it names it as a table read
+    from: after ``FROM``, ``JOIN`` or ``USING``, after a comma in a ``FROM``
+    list, as the ``TABLE`` shorthand, or copied out by ``COPY … TO``. Such a
+    statement, whatever its first word — an ``INSERT … SELECT``, an
+    ``UPDATE … FROM``, a ``COPY (…)`` — reads detail when it holds a ``*``
+    that is not another table's, a detail column of a table it reads, or a
+    table it reads, by its name or alias, as a whole row: ``to_jsonb(h)``,
+    ``SELECT f``, ``(f).*``. So does a ``SELECT`` whose column list holds a
+    piece the scan cannot read, interpolated or a placeholder, where its
+    ``FROM`` reads a guarded table, since the piece could be any column. A
+    table it reads but cannot name (``FROM {table}``) could be any of the
+    three: a ``*``, a detail column of any of them, or its whole row, read
+    from it, is a read. A table written reads nothing but what its
+    ``RETURNING`` names, so an insert that writes ``detail_md`` and an update
+    that sets ``close_note`` read no detail. Comments and string literals are
+    read past, and a text whose first word is no statement's is prose.
+
+    The first cut judged a statement only when its first word was ``SELECT``
+    or ``WITH``, found a table only after ``FROM``, ``JOIN``, ``INTO`` or
+    ``UPDATE``, and read neither a whole row nor a column list it could not
+    read (D1's review, D1RS-2 and D1RT-3).
     """
-    tables = {table.lower() for table in _DETAIL_TABLE.findall(statement)}
-    if not tables:
+    parsed = _parsed(statement)
+    if parsed is None:
         return None
-    words = statement.split(None, 1)
-    if words and words[0].lower() in ("select", "with"):
-        read = statement
-    else:
-        returning = _RETURNING.search(statement)
-        if returning is None:
-            return None
-        read = returning.group(0)
-    if _STAR.search(read):
-        return f"reads * from {sorted(tables)}"
-    columns = sorted(
-        column
-        for table in tables
-        for column in DETAIL_COLUMNS[table]
-        if re.search(rf"\b{column}\b", read, re.IGNORECASE)
-    )
-    return f"reads {columns} from {sorted(tables)}" if columns else None
+    tokens, returning = parsed.tokens, parsed.returning
+    returned = parsed.written if returning is not None else {}
+    if not parsed.reads and not returned:
+        return None
+    if parsed.whole:
+        return f"reads every column of {sorted(parsed.whole)}"
+    if parsed.unread_lists:
+        return f"a column list on {sorted(parsed.unread_lists)} the scan cannot read"
+    if parsed.unread_returning and returned:
+        tables = sorted(set(returned.values()))
+        return f"a returning list on {tables} the scan cannot read"
+    for index, (kind, value) in enumerate(tokens):
+        in_returning = returning is not None and index > returning
+        names = {**parsed.reads, **(returned if in_returning else {})}
+        if kind == "star" and _select_star(tokens, index):
+            qualifier = _star_qualifier(tokens, index)
+            if not qualifier and names:
+                return f"reads * from {sorted(set(names.values()))}"
+            if qualifier and qualifier in names:
+                return f"reads * from {names[qualifier]}"
+        elif (
+            kind in ("word", "table")
+            and index not in parsed.declared
+            and value in names
+            and tokens[index + 1 : index + 2] != [("dot", ".")]
+        ):
+            return f"reads the whole row of {names[value]}"
+        if kind == "word":
+            for table in sorted(set(names.values())):
+                if value in _detail_columns(table):
+                    return f"reads {value} from {table}"
+    return None
 
 
 def _reach_from(graph: Any, roots: list[tuple[str, str]]) -> Any:
@@ -1174,17 +1448,228 @@ def _spans(nodes: Any) -> list[tuple[int, int]]:
     ]
 
 
+def _module_constants(tree: ast.Module) -> dict[str, str]:
+    """
+    Each name ``tree`` binds once, at its top level, to a string literal, and
+    nowhere else rebinds: what an f-string interpolating it reads as its
+    text, so a column list held in a constant is read where it is used.
+    """
+    bound: dict[str, int] = {}
+
+    def bind(name: str) -> None:
+        bound[name] = bound.get(name, 0) + 1
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            bind(node.id)
+        elif isinstance(node, ast.arg):
+            bind(node.arg)
+        elif isinstance(node, ast.alias):
+            bind(node.asname or node.name.partition(".")[0])
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            bind(node.name)
+        elif isinstance(node, ast.Global | ast.Nonlocal):
+            for name in node.names:
+                bind(name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bind(node.name)
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if (
+            isinstance(target, ast.Name)
+            and bound.get(target.id) == 1
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ):
+            constants[target.id] = value.value
+    return constants
+
+
+def _sql_texts(source: str) -> list[tuple[int, str]]:
+    """
+    Every text in ``source`` that could be a statement, with its line: each
+    string literal; each f-string, a literal or a module's string constant it
+    interpolates read as its text and anything else marked by a NUL; and the
+    one text each chain of ``+`` or ``str.join`` of a literal sequence
+    assembles, its pieces read the same way. A piece of an f-string or a
+    chain is read in its whole rather than on its own, and a docstring, which
+    no connection runs, is not read at all.
+    """
+    tree = ast.parse(source)
+    constants = _module_constants(tree)
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(
+            node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+        )
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+
+    def inlined(part: ast.FormattedValue) -> ast.expr | None:
+        """What a plain interpolation holds, where its text can be read."""
+        if part.conversion != -1 or part.format_spec is not None:
+            return None
+        value = part.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value
+        if isinstance(value, ast.Name) and value.id in constants:
+            return value
+        if isinstance(value, ast.JoinedStr):
+            return value
+        return None
+
+    def piece(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name) and node.id in constants:
+            return constants[node.id]
+        if isinstance(node, ast.JoinedStr):
+            texts = []
+            for part in node.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    texts.append(part.value)
+                elif isinstance(part, ast.FormattedValue) and (
+                    held := inlined(part)
+                ):
+                    texts.append(piece(held) or "\x00")
+                else:
+                    texts.append("\x00")
+            return "".join(texts)
+        return None
+
+    def consumed(node: ast.AST) -> set[int]:
+        """The nodes read as part of ``node``'s text, and never on their own."""
+        ids: set[int] = set()
+        if isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                ids.add(id(part))
+                held = inlined(part) if isinstance(part, ast.FormattedValue) else None
+                if held is not None:
+                    ids.add(id(held))
+                    ids |= consumed(held)
+        return ids
+
+    def chain(node: ast.AST) -> tuple[list[ast.expr], set[int]] | None:
+        """The pieces of a chain of ``+``, and the inner ``+`` nodes it holds."""
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            return None
+        pieces: list[ast.expr] = []
+        inner: set[int] = set()
+        for side in (node.left, node.right):
+            nested = chain(side)
+            if nested is None:
+                pieces.append(side)
+            else:
+                pieces.extend(nested[0])
+                inner |= nested[1] | {id(side)}
+        return pieces, inner
+
+    skipped: set[int] = set()
+    texts: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if id(node) in skipped or id(node) in docstrings:
+            continue
+        pieces: list[ast.expr] | None = None
+        separator = ""
+        if (found := chain(node)) is not None:
+            pieces = found[0]
+            skipped |= found[1]
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+            and isinstance(node.func.value, ast.Constant)
+            and isinstance(node.func.value.value, str)
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.List | ast.Tuple | ast.Set)
+        ):
+            pieces, separator = list(node.args[0].elts), node.func.value.value
+        if pieces is not None:
+            read = [piece(p) for p in pieces]
+            if any(text is not None for text in read):
+                skipped |= {id(p) for p in pieces if piece(p) is not None}
+                skipped |= {i for p in pieces for i in consumed(p)}
+                assembled = separator.join("\x00" if t is None else t for t in read)
+                texts.append((node.lineno, assembled))
+            continue
+        if isinstance(node, ast.JoinedStr):
+            skipped |= consumed(node)
+            texts.append((node.lineno, piece(node) or ""))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            texts.append((node.lineno, node.value))
+    return texts
+
+
+def _bulk_reads(source: str) -> list[tuple[int, str]]:
+    """
+    Every call of asyncpg's bulk reader in ``source`` that copies detail out,
+    with its line: a guarded table copied whole, or with a column list that is
+    not a literal free of its detail columns; and a table the scan cannot
+    read, which could be one.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute | ast.Name)
+            and _called(node.func) in _BULK_READERS
+        ):
+            continue
+        target = node.args[0] if node.args else None
+        columns = None
+        for keyword in node.keywords:
+            if keyword.arg == "table_name":
+                target = keyword.value
+            elif keyword.arg == "columns":
+                columns = keyword.value
+        if not (isinstance(target, ast.Constant) and isinstance(target.value, str)):
+            found.append((node.lineno, "copies a table the scan cannot read"))
+            continue
+        table = target.value.rpartition(".")[2].strip('"').lower()
+        if table not in DETAIL_COLUMNS:
+            continue
+        listed = (
+            [e.value for e in columns.elts if isinstance(e, ast.Constant)]
+            if isinstance(columns, ast.List | ast.Tuple)
+            else None
+        )
+        if (
+            listed is None
+            or len(listed) != len(columns.elts)  # type: ignore[union-attr]
+            or {str(c).lower() for c in listed} & DETAIL_COLUMNS[table]
+        ):
+            found.append((node.lineno, f"copies the detail of {table}"))
+    return found
+
+
 def _detail_reads(graph: Any, roots: list[tuple[str, str]]) -> list[str]:
-    """Every reached definition holding a statement that reads detail."""
+    """
+    Every reached definition holding a statement that reads detail
+    (``_detail_read``), or a bulk copy that does (``_bulk_reads``).
+    """
     reach = _reach_from(graph, roots)
     found: dict[str, None] = {}
-    statements: dict[str, list[tuple[int, str]]] = {}
+    judged: dict[str, list[tuple[int, str]]] = {}
     for (module, name), nodes in sorted(reach.reached.items(), key=lambda i: i[0]):
-        if module not in statements:
-            statements[module] = _strings(graph.sources[module])
+        if module not in judged:
+            source = graph.sources[module]
+            judged[module] = [
+                (line, read)
+                for line, text in _sql_texts(source)
+                if (read := _detail_read(text))
+            ] + _bulk_reads(source)
         for first, last in _spans(nodes):
-            for line, text in statements[module]:
-                if first <= line <= last and (read := _detail_read(text)):
+            for line, read in judged[module]:
+                if first <= line <= last:
                     found[f"{module}.{name} (line {line}): {read}"] = None
     unread = (f"a load the scan cannot read: {load}" for load in reach.unreadable)
     found.update(dict.fromkeys(unread))
@@ -1271,12 +1756,15 @@ def test_the_detail_walk_reaches_the_reads_it_judges() -> None:
         ("src.programme.jev_repo", "hypotheses_to_ask"),
         ("src.programme.jev_eval", "evaluate"),
     } <= set(reach.reached)
-    judged = [
+    judged = {
         text
-        for _, text in _strings(graph.sources["src.programme.jev_repo"])
-        if _DETAIL_TABLE.search(text)
-    ]
+        for _, text in _sql_texts(graph.sources["src.programme.jev_repo"])
+        if "hypotheses" in _tables_read(text)
+    }
     assert any("FROM hypotheses" in text for text in judged), judged
+    # The title reads interpolate a module constant, which is read as its
+    # text, so the scan judges their column lists rather than skipping them.
+    assert any("encode(sha256(convert_to(h.title" in text for text in judged)
 
 
 #: A synthetic ``repo``: the two ``SELECT *`` readers the walk must refuse, a
@@ -1377,6 +1865,151 @@ _HANDLER_ROOT = [("src.programme.jev_jobs", "handle")]
             "    return await conn.fetch(q)\n",
             id="assembled-by-plus",
         ),
+        # D1's review (D1RS-2, D1RT-3): what the first cut read only when a
+        # statement's first word was SELECT or WITH, its tables named after
+        # FROM, JOIN, INTO or UPDATE, and ``*`` or a column by its name.
+        *(
+            pytest.param(
+                f"async def handle(conn, cols='card', table='t'):\n    {call}\n",
+                id=name,
+            )
+            for name, call in (
+                (
+                    "an-insert-that-selects-the-card",
+                    "await conn.execute(\"INSERT INTO jev_requests (state) SELECT "
+                    "jsonb_build_object('card', card) FROM hypotheses\")",
+                ),
+                (
+                    "a-comma-join-naming-the-card",
+                    "return await conn.fetch('SELECT h.card FROM candidates c, "
+                    "hypotheses h WHERE h.id = c.hypothesis_id')",
+                ),
+                (
+                    "a-comma-join-star",
+                    "return await conn.fetch('SELECT f.* FROM jobs j, findings f')",
+                ),
+                (
+                    "to_jsonb-of-the-row",
+                    "return await conn.fetch('SELECT to_jsonb(h) FROM hypotheses h')",
+                ),
+                (
+                    "the-row-as-a-value",
+                    "return await conn.fetch('SELECT f FROM findings f')",
+                ),
+                (
+                    "row_to_json-of-the-row",
+                    "return await conn.fetch("
+                    "'SELECT row_to_json(a) FROM role_assessments a')",
+                ),
+                (
+                    "json_agg-of-the-row",
+                    "return await conn.fetch('SELECT json_agg(f) FROM findings f')",
+                ),
+                (
+                    "the-row-expanded",
+                    "return await conn.fetch('SELECT (f).* FROM findings f')",
+                ),
+                (
+                    "the-table-as-its-row",
+                    "return await conn.fetch('SELECT hypotheses FROM hypotheses')",
+                ),
+                ("the-table-shorthand", "return await conn.fetch('TABLE hypotheses')"),
+                (
+                    "a-leading-line-comment",
+                    "return await conn.fetch('-- titles\\nSELECT * FROM hypotheses')",
+                ),
+                (
+                    "a-leading-block-comment",
+                    "return await conn.fetch('/* t */ SELECT card FROM hypotheses')",
+                ),
+                (
+                    "a-leading-parenthesis",
+                    "return await conn.fetch('(SELECT * FROM findings) UNION ALL "
+                    "(SELECT * FROM findings)')",
+                ),
+                (
+                    "a-copy-of-a-query",
+                    "await conn.execute("
+                    "'COPY (SELECT card FROM hypotheses) TO STDOUT')",
+                ),
+                (
+                    "a-copy-of-the-table",
+                    "await conn.execute('COPY findings TO STDOUT')",
+                ),
+                (
+                    "a-computed-column-list",
+                    "return await conn.fetch(f'SELECT {cols} FROM hypotheses')",
+                ),
+                (
+                    "a-percent-placeholder",
+                    "return await conn.fetch('SELECT %s FROM hypotheses' % '*')",
+                ),
+                (
+                    "a-format-placeholder",
+                    "return await conn.fetch("
+                    "'SELECT {} FROM hypotheses'.format(cols))",
+                ),
+                (
+                    "an-update-from-the-card",
+                    "await conn.execute('UPDATE jobs SET result = to_jsonb(h.card) "
+                    "FROM hypotheses h WHERE h.ref = $1', 'H-1')",
+                ),
+                (
+                    "select-all-star",
+                    "return await conn.fetch('SELECT ALL * FROM findings')",
+                ),
+                (
+                    "a-delete-using-the-card",
+                    "await conn.execute('DELETE FROM jobs USING hypotheses h "
+                    "WHERE h.card IS NULL')",
+                ),
+                (
+                    "returning-the-whole-row",
+                    "return await conn.fetchrow('UPDATE findings SET status = $1 "
+                    "RETURNING to_jsonb(findings)', 'x')",
+                ),
+                (
+                    "a-star-from-a-table-it-cannot-read",
+                    "return await conn.fetch(f'SELECT * FROM {table}')",
+                ),
+                (
+                    "a-copy-of-the-table-by-asyncpg",
+                    "await conn.copy_from_table('hypotheses', output='h.csv')",
+                ),
+                (
+                    "a-copy-by-asyncpg-of-a-table-it-cannot-read",
+                    "await conn.copy_from_table(table, output='t.csv')",
+                ),
+                (
+                    "a-detail-column-of-a-table-it-cannot-name",
+                    "return await conn.fetch(f'SELECT summary FROM {table}')",
+                ),
+                (
+                    "a-computed-list-from-a-table-it-cannot-name",
+                    "return await conn.fetch(f'SELECT {cols} FROM {table} t')",
+                ),
+                (
+                    "the-whole-row-of-a-table-it-cannot-name",
+                    "return await conn.fetch(f'SELECT to_jsonb(t) FROM {table} t')",
+                ),
+                (
+                    "a-star-in-a-common-table-expression",
+                    "return await conn.fetch('WITH x AS (SELECT * FROM findings) "
+                    "SELECT x.title FROM x')",
+                ),
+                (
+                    "a-returning-list-it-cannot-read",
+                    "return await conn.fetchrow(f'UPDATE findings SET status = $1 "
+                    "RETURNING {cols}', 'x')",
+                ),
+            )
+        ),
+        pytest.param(
+            "COLUMNS = 'ref, card'\n"
+            "async def handle(conn):\n"
+            "    return await conn.fetch(f'SELECT {COLUMNS} FROM hypotheses')\n",
+            id="a-module-constant-naming-the-card",
+        ),
     ],
 )
 def test_the_detail_walk_finds_each_read(handler: str) -> None:
@@ -1408,6 +2041,77 @@ def test_the_detail_walk_finds_each_read(handler: str) -> None:
             "async def elsewhere(conn):\n"
             "    return await repo.get_hypothesis(conn, 'H-1')\n",
             id="a-reader-nothing-reached-calls",
+        ),
+        *(
+            pytest.param(
+                f"async def handle(conn, where='TRUE'):\n    {call}\n", id=name
+            )
+            for name, call in (
+                (
+                    "a-count",
+                    "return await conn.fetchval("
+                    "'SELECT 2 * COUNT(*) FROM findings WHERE origin = $1', 'm')",
+                ),
+                (
+                    "columns-qualified-by-an-alias",
+                    "return await conn.fetch('SELECT h.ref, h.title FROM hypotheses h "
+                    "WHERE h.origin = $1', 'model')",
+                ),
+                (
+                    "a-lane-named-like-a-table",
+                    "return await conn.fetch(\"SELECT id FROM jev_requests WHERE "
+                    "lane = 'findings'\")",
+                ),
+                (
+                    "another-tables-star-beside-a-title",
+                    "return await conn.fetch('SELECT c.*, h.ref, h.title FROM "
+                    "candidates c JOIN hypotheses h ON h.id = c.hypothesis_id')",
+                ),
+                (
+                    "an-interpolated-filter",
+                    "return await conn.fetch(f'SELECT h.ref FROM hypotheses h "
+                    "WHERE {where} ORDER BY h.ref')",
+                ),
+                (
+                    "a-write-of-detail-with-a-subquery-for-its-candidate",
+                    "await conn.execute('INSERT INTO findings (title, detail_md, "
+                    "origin, candidate_id) SELECT $1, $2, $3, c.id FROM "
+                    "candidates c WHERE c.ref = $4', 't', 'd', 'jev', 'C-1')",
+                ),
+                (
+                    "a-closure-of-a-finding",
+                    "await conn.execute('UPDATE findings SET close_note = $2 "
+                    "WHERE ref = $1 RETURNING ref', 'F-1', 'n')",
+                ),
+                (
+                    "columns-from-a-table-it-cannot-name",
+                    "return await conn.fetch(f'SELECT f.id, fa.noul FROM {where} "
+                    "ORDER BY f.id')",
+                ),
+                (
+                    "an-interpolated-flag-beside-a-subquery-it-cannot-name",
+                    "return await conn.fetch(f'SELECT c.id, {where} AS blocked, "
+                    "EXISTS (SELECT 1 FROM {where}) AS flagged FROM content c')",
+                ),
+                (
+                    "a-message-that-interpolates-before-from",
+                    "raise ValueError(f'{where!r} is refused; pin one from {where}')",
+                ),
+            )
+        ),
+        pytest.param(
+            "ADDRESS = \"encode(sha256(convert_to(h.title, 'UTF8')), 'hex')\"\n"
+            "async def handle(conn):\n"
+            "    return await conn.fetch(\n"
+            "        f'SELECT {ADDRESS} AS subject_id FROM hypotheses h'\n"
+            "    )\n",
+            id="a-module-constant-read-as-its-text",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            '    """Reads nothing from findings, not * nor detail_md."""\n'
+            "    return None\n",
+            id="a-docstring",
         ),
     ],
 )

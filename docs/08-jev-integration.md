@@ -4192,7 +4192,21 @@ each `JEV_HANDLERS` handler, each `ASKABLE` set's `load`, `admit`, `build` and
   from `hypotheses`, `findings` or `role_assessments`, or names a detail column
   of them (`card`, `decision_rationale`, `detail_md`, `remediation`,
   `close_note`, `summary`, `evidence`) in a SELECT or a RETURNING; it trips on
-  handlers calling `repo.get_hypothesis` and `repo.list_findings`.
+  handlers calling `repo.get_hypothesis` and `repo.list_findings`. From D1's
+  review it judges every statement that reads one of the three, whatever its
+  first word once comments and parentheses are read past — an `INSERT …
+  SELECT`, an `UPDATE … FROM`, a `DELETE … USING`, a `COPY (…) TO` — finds a
+  table after a comma in a `FROM` list and as the `TABLE` shorthand, counts a
+  table read as a whole row (`to_jsonb(h)`, `SELECT f`, `(f).*`) and a table
+  copied whole (`COPY t TO`, asyncpg's `copy_from_table`) as reads of every
+  column, refuses a column list it cannot read (interpolated, or a `%` or
+  `str.format` placeholder) on a table it reads, and treats a table it reads
+  but cannot name (`FROM {table}`) as any of the three. A module's string
+  constant interpolated into a statement is read as its text, comments and
+  string literals are read past, and docstrings and other prose are not
+  statements. The first cut judged only statements whose first word was
+  `SELECT` or `WITH`, found a table only after `FROM`, `JOIN`, `INTO` or
+  `UPDATE`, and read no whole row and no column list it could not read.
 - `::TestWhatJevCodeCanWrite::test_exactly_these_writers` finds exactly the
   allow-listed `(table, writer)` pairs: `jev_requests` and `jev_answers` from
   `jev_repo.record_request` and `record_answers`, which `record_exchange` alone
