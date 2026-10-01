@@ -352,6 +352,28 @@ class TestThePanelSits:
         (raised,) = _actions(report, "finding_raised")
         assert raised["blocks"] is True
 
+    async def test_the_tick_raises_findings_as_model(
+        self, monkeypatch: pytest.MonkeyPatch, written: dict[str, list]
+    ) -> None:
+        """
+        What a role says through its panel seat, the programme's model wrote,
+        and the tick says so on every finding it raises (migration 0015's
+        ``findings.origin``). ``repo.raise_finding`` takes ``origin``
+        keyword-only with no default, so a call naming none would fail before
+        the insert; this holds the value.
+        """
+        _asked(
+            monkeypatch, {"data_engineering": _veto(), "quant_research": _veto()}
+        )
+        report = tick.TickReport()
+
+        await tick._convene(
+            _FreshCandidateConn(), _candidate(), GATE, report, API_KEY, SETTINGS
+        )
+
+        assert len(written["findings"]) == 2
+        assert [f["origin"] for f in written["findings"]] == ["model", "model"]
+
     async def test_one_role_failing_does_not_silence_the_rest(
         self, monkeypatch: pytest.MonkeyPatch, written: dict[str, list]
     ) -> None:

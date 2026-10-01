@@ -619,6 +619,7 @@ async def create_finding(
         title=body.title,
         detail=body.detail,
         remediation=body.remediation,
+        origin="operator",
     )
     await flags.record_audit(
         conn,

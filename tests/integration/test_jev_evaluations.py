@@ -592,53 +592,41 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         for column in ("n_distinct_states", "n_at_threshold", "labeller_agreement_n")
         for where, value in (("below 0", -1), ("above n", 201))
     ],
-    # A stratum's pairs: below 0 with no rate, as no pairs have none; above n
-    # with the re-asks not compared unrecorded, which would otherwise carry
-    # them past n in the sum below.
+    # A stratum's pairs, a count: below 0 with no rate, as no pairs have none.
+    # From 0015 a flip rate counts the set's whole population (plan v2's M2),
+    # so neither its pairs nor the re-asks it could not compare are bounded by
+    # the n scored items any more: 0015 moved these conjuncts out of
+    # jev_evaluations_counts_within_n into a rule of their own, and
+    # test_phase_d_schema.py::TestFlipCountsAboveN admits rows above n.
     *[
-        case
+        (
+            f"{pairs} below 0",
+            {
+                pairs: -1,
+                rate: None,
+                **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
+            },
+            "jev_evaluations_flip_counts_are_counts",
+        )
         for rate, pairs in (
             ("flip_rate", "flip_rate_n"),
             ("flip_rate_low_margin", "flip_rate_low_margin_n"),
             ("flip_rate_near_threshold", "flip_rate_near_threshold_n"),
         )
-        for case in (
-            (
-                f"{pairs} below 0",
-                {
-                    pairs: -1,
-                    rate: None,
-                    **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
-                },
-                "jev_evaluations_counts_within_n",
-            ),
-            (
-                f"{pairs} above n",
-                {pairs: 201, f"{rate}_not_compared": None},
-                "jev_evaluations_counts_within_n",
-            ),
-        )
     ],
-    # The re-asks that could not be compared: each a count, and every re-ask
-    # of the two strata, as of the window, within n.
+    # The re-asks that could not be compared: each a count.
     *[
-        (f"{column} below 0", {column: -1}, "jev_evaluations_counts_within_n")
+        (
+            f"{column} below 0",
+            {column: -1},
+            "jev_evaluations_flip_counts_are_counts",
+        )
         for column in (
             "flip_rate_not_compared",
             "flip_rate_low_margin_not_compared",
             "flip_rate_near_threshold_not_compared",
         )
     ],
-    (
-        "more re-asks in the two strata than items",
-        {"flip_rate_not_compared": 106},
-        "jev_evaluations_counts_within_n",
-    ),
-    (
-        "more re-asks near the threshold than items",
-        {"flip_rate_near_threshold_not_compared": 166},
-        "jev_evaluations_counts_within_n",
-    ),
     # The discordant items: each a count, and the two of one baseline within
     # n, each case keeping the difference their arithmetic.
     *[
@@ -894,7 +882,11 @@ class TestEveryRuleBites:
     async def test_every_rule_0014_adds_has_a_case(
         self, conn: asyncpg.Connection
     ) -> None:
-        """A CHECK added without a case here would be a rule nobody saw bite."""
+        """
+        A CHECK added without a case here would be a rule nobody saw bite.
+        Read on a fully migrated database, so it holds 0015's
+        jev_evaluations_flip_counts_are_counts to its cases too.
+        """
         rows = await conn.fetch(
             "SELECT conname FROM pg_constraint "
             "WHERE conrelid = 'jev_evaluations'::regclass AND contype = 'c'"

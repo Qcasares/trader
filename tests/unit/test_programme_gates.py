@@ -565,6 +565,19 @@ class TestTheVeto:
     def test_the_severities_that_block_are_the_documented_ones(self) -> None:
         assert BLOCKING_SEVERITIES == {"high", "critical"}
 
+    def test_veto_roles_are_role_keys(self) -> None:
+        """
+        Every veto belongs to one of the twelve roles, by its key, and no veto
+        role holds a ``:``. Jev's finding is raised as ``jev:guardrail.card``
+        (migration 0015) and the API takes a role's key, so no raiser spelt
+        with a prefix — Jev's, or ``programme:`` or ``operator:`` — can ever be
+        read as a veto, whatever this set comes to hold (docs/09, M3).
+        """
+        from src.programme.roles import ROLES_BY_KEY
+
+        assert VETO_ROLES <= set(ROLES_BY_KEY)
+        assert not any(":" in role for role in VETO_ROLES)
+
 
 class TestHumanGating:
     @pytest.mark.parametrize("stage", [0, 1, 2, 3])

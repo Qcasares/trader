@@ -35,6 +35,11 @@ an import scan cannot see: a query is a string, and a module that never imports
   writes ``jev_labels``, by its two inserts — ``record_label`` and the web
   ingest's ``record_label_once`` — so no label, which is ground truth, is
   written by a path nobody reviewed, and none is ever rewritten.
+* **A finding says who wrote it, and what was raised stays raised.** From
+  phase D1 (migration 0015), every insert into ``findings`` names its
+  ``origin``, ``repo.raise_finding`` takes it keyword-only with no default,
+  its two callers pass ``'model'`` (the tick) and ``'operator'`` (the API) as
+  literals, and the one update of the table sets the closure's columns alone.
 
 The scan reads strings, because that is where SQL lives: literals, f-strings,
 and the one text a chain of ``+`` or a ``str.join`` of literals assembles,
@@ -60,6 +65,7 @@ own test first. It reads spellings, and is not a sandbox.
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 from pathlib import Path
 
@@ -749,3 +755,338 @@ def test_the_documents_write_scan_names_the_function_it_is_in() -> None:
         ("update", "nested"),
         ("delete from", None),
     ]
+
+
+# ---------------------------------------------------------------------------
+# findings: who wrote it, and what was raised stays raised (phase D1)
+# ---------------------------------------------------------------------------
+#
+# Migration 0015 holds both in the schema (``findings.origin`` NOT NULL with no
+# default, ``findings_keep_what_was_raised``); these hold the code to them, so
+# a writer is caught in review rather than by the first insert that fails in
+# production. ``tests/integration/test_phase_d_schema.py`` is the schema's side.
+
+#: The columns a finding's closure writes, and the only ones an update of
+#: ``findings`` may set (docs/09, M1).
+FINDINGS_CLOSURE = frozenset({"status", "closed_at", "closed_by", "close_note"})
+
+#: Who calls ``repo.raise_finding``, and the writer each names (docs/09, M22).
+FINDING_CALLERS = frozenset(
+    {
+        ("src/programme/tick.py", "model"),
+        ("src/api/routers/programme.py", "operator"),
+    }
+)
+
+_FINDINGS_TABLE = r'(?:"?\w+"?\.)?"?findings"?'
+_FINDINGS_UPDATE = re.compile(
+    rf"\bupdate\s+(?:only\s+)?{_FINDINGS_TABLE}\s+set\b"
+    r"(?P<set>.*?)(?=\bwhere\b|\breturning\b|\bfrom\b|;|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_FINDINGS_INSERT = re.compile(
+    rf"\binsert\s+into\s+{_FINDINGS_TABLE}\s*\((?P<columns>[^)]*)\)",
+    re.IGNORECASE | re.DOTALL,
+)
+_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]*")
+
+
+def _top_level(text: str) -> list[str]:
+    """``text`` split on the commas outside any parentheses."""
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for character in text:
+        depth += {"(": 1, ")": -1}.get(character, 0)
+        if character == "," and depth == 0:
+            parts.append(current)
+            current = ""
+        else:
+            current += character
+    parts.append(current)
+    return parts
+
+
+def _identifiers(names: list[str]) -> set[str] | None:
+    """The column names, unquoted and lower-cased, or ``None`` if one is not."""
+    columns = {name.strip().strip('"').lower() for name in names}
+    if not all(_IDENTIFIER.fullmatch(column) for column in columns):
+        return None
+    return columns
+
+
+def _set_columns(statement: str) -> set[str] | None:
+    """The columns an ``UPDATE findings`` sets, or ``None`` where unreadable."""
+    match = _FINDINGS_UPDATE.search(statement)
+    if match is None:
+        return None
+    columns: set[str] = set()
+    for assignment in _top_level(match.group("set")):
+        target = assignment.split("=", 1)[0].strip()
+        names = _top_level(target[1:-1]) if target.startswith("(") else [target]
+        read = _identifiers(names)
+        if read is None:
+            return None
+        columns |= read
+    return columns
+
+
+def _inserted_columns(statement: str) -> set[str] | None:
+    """The column list of an ``INSERT INTO findings``, ``None`` if it has none."""
+    match = _FINDINGS_INSERT.search(statement)
+    if match is None:
+        return None
+    return _identifiers(match.group("columns").split(","))
+
+
+def _findings_writes(source: str) -> list[tuple[int, str, str | None]]:
+    """
+    Every write of ``findings`` in ``source`` (``_table_writes``, which also
+    reports a write whose table it cannot read), each with the whole statement
+    that makes it where the scan can read one: the longest string on the
+    write's line that is an insert into, or an update of, the table.
+    """
+    texts: dict[int, list[str]] = {}
+    for line, text in _strings(source):
+        texts.setdefault(line, []).append(text)
+    pattern = {"insert into": _FINDINGS_INSERT, "update": _FINDINGS_UPDATE}
+    found: list[tuple[int, str, str | None]] = []
+    for write in _table_writes(source, "findings"):
+        statements = [
+            text
+            for text in texts.get(write.line, [])
+            if write.verb in pattern and pattern[write.verb].search(text)
+        ]
+        found.append(
+            (write.line, write.verb, max(statements, key=len) if statements else None)
+        )
+    return found
+
+
+def _findings_offences(source: str) -> list[str]:
+    """
+    What in ``source`` breaks 0015's rules as code can: a write of
+    ``findings`` that is not an insert or an update, or whose statement the
+    scan cannot read; an update that sets a column the closure does not own;
+    and an insert that does not name its writer.
+    """
+    offences: list[str] = []
+    for line, verb, statement in _findings_writes(source):
+        if verb not in ("insert into", "update") or statement is None:
+            offences.append(f"line {line}: {verb} findings, which the scan cannot read")
+        elif verb == "update":
+            columns = _set_columns(statement)
+            if columns is None or not columns <= FINDINGS_CLOSURE:
+                offences.append(f"line {line}: an update setting {columns}")
+        else:
+            columns = _inserted_columns(statement)
+            if columns is None or "origin" not in columns:
+                offences.append(f"line {line}: an insert naming no origin")
+    return offences
+
+
+def _called(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _raise_finding_calls(source: str) -> list[tuple[int, str | None]]:
+    """
+    Every call of ``raise_finding`` in ``source``, with the ``origin`` it
+    passes when that is a string literal, ``None`` otherwise: a variable, a
+    spread ``**kwargs`` or ``*args``, or no origin at all. A reference to the
+    function that is not a call is ``None`` too, since stored under another
+    name its calls are ones this scan cannot read.
+    """
+    tree = ast.parse(source)
+    called = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _called(node.func) == "raise_finding"
+    }
+    found: list[tuple[int, str | None]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and id(node.func) in called:
+            spread = any(keyword.arg is None for keyword in node.keywords) or any(
+                isinstance(argument, ast.Starred) for argument in node.args
+            )
+            origin = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "origin"),
+                None,
+            )
+            literal = (
+                origin.value
+                if isinstance(origin, ast.Constant) and isinstance(origin.value, str)
+                else None
+            )
+            found.append((node.lineno, None if spread else literal))
+        elif (
+            isinstance(node, ast.Name | ast.Attribute)
+            and _called(node) == "raise_finding"
+            and id(node) not in called
+        ):
+            found.append((node.lineno, None))
+    return found
+
+
+def test_every_update_of_findings_sets_closure_columns_only() -> None:
+    """
+    What was raised stays raised (docs/09, M1): the only update of a finding
+    is its closure, which 0015's trigger enforces and an operator alone may
+    make. Across ``src/`` and the protected entry points, every update of the
+    table sets ``status``, ``closed_at``, ``closed_by`` or ``close_note`` and
+    nothing else, and no write of it is anything but an insert or an update
+    the scan can read: a delete, a truncate, an upsert that rewrites a row,
+    and a write whose table or columns it cannot read are all refused.
+    """
+    offenders = [
+        f"{_label(path)} {offence}"
+        for path in _scanned()
+        for offence in _findings_offences(path.read_text(encoding="utf-8"))
+        if "insert naming no origin" not in offence
+    ]
+    assert not offenders, "\n".join(offenders)
+    updates = [
+        _label(path)
+        for path in _scanned()
+        for _, verb, _ in _findings_writes(path.read_text(encoding="utf-8"))
+        if verb == "update"
+    ]
+    assert updates == ["src/programme/repo.py"], updates
+
+
+def test_every_insert_into_findings_names_its_origin() -> None:
+    """
+    Migration 0015 dropped the column's default, so an insert that names no
+    writer fails on NOT NULL; this finds it before it runs (docs/09, M11).
+    """
+    offenders = [
+        f"{_label(path)} {offence}"
+        for path in _scanned()
+        for offence in _findings_offences(path.read_text(encoding="utf-8"))
+        if "insert naming no origin" in offence
+    ]
+    assert not offenders, "\n".join(offenders)
+    inserts = [
+        _label(path)
+        for path in _scanned()
+        for _, verb, _ in _findings_writes(path.read_text(encoding="utf-8"))
+        if verb == "insert into"
+    ]
+    assert inserts == ["src/programme/repo.py"], inserts
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "await conn.execute(\"UPDATE findings SET severity = 'low' WHERE id = $1\")",
+        'await conn.execute("UPDATE public.findings SET title = $2 WHERE ref = $1")',
+        'q = "UPDATE findings SET status = $2, " + "raised_by = $3 WHERE ref = $1"',
+        'q = " ".join(["UPDATE findings", "SET detail_md = $1"])',
+        'await conn.execute("UPDATE findings SET (status, severity) = ($1, $2)")',
+        'await conn.execute(f"UPDATE findings SET {column} = $1 WHERE ref = $2")',
+        'await conn.execute(f"UPDATE {TABLE} SET status = $1")',
+        "q = 'INSERT INTO findings (ref, origin) VALUES ($1, $2) "
+        "ON CONFLICT (ref) DO UPDATE SET severity = EXCLUDED.severity'",
+        'await conn.execute("DELETE FROM findings WHERE ref = $1")',
+        'await conn.execute("TRUNCATE findings")',
+        'await conn.copy_records_to_table("findings", records=rows)',
+        'await conn.execute("INSERT INTO findings (id, ref, title) VALUES ($1,$2,$3)")',
+        'await conn.execute("INSERT INTO findings SELECT * FROM old_findings")',
+        'q = "INSERT INTO findings " + "(id, ref) VALUES ($1, $2)"',
+    ],
+)
+def test_the_findings_scan_finds_each_offence(source: str) -> None:
+    assert _findings_offences(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.execute("UPDATE findings SET status=$2, closed_by=$3, '
+        'close_note=$4, closed_at=NOW() WHERE ref=$1")',
+        'q = "INSERT INTO findings (id, ref, origin) VALUES ($1, $2, $3)"',
+        "await conn.fetch(\"SELECT * FROM findings WHERE status = 'open'\")",
+        '"""Findings are closed by an operator, through the closure alone."""',
+        'await conn.execute("UPDATE findings_audit SET severity = $1")',
+        'await conn.execute("INSERT INTO findings_audit (ref) VALUES ($1)")',
+        'ref = await _next_ref(conn, "findings", "F")',
+    ],
+)
+def test_the_findings_scan_passes_what_keeps_the_rules(source: str) -> None:
+    assert _findings_offences(source) == [], source
+
+
+def test_raise_finding_takes_origin_keyword_only_with_no_default() -> None:
+    """
+    Every caller names the writer, by keyword (docs/09, M22): a positional
+    slot could be filled by accident, and a default would let a new caller
+    write ``'model'`` without saying so.
+    """
+    from src.programme import repo
+
+    parameter = inspect.signature(repo.raise_finding).parameters["origin"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+    assert repo.FINDING_WRITERS == ("model", "operator")
+
+
+@pytest.mark.parametrize("origin", ["jev", "unknown", "", "Model", "operator:quentin"])
+async def test_raise_finding_refuses_a_writer_it_does_not_know(origin: str) -> None:
+    """
+    Refused before the connection is touched: no ref taken, no row tried.
+    ``'jev'`` is the card check's, which phase D4's writer alone raises, and
+    ``'unknown'`` means raised before 0015.
+    """
+    from src.programme import repo
+
+    class Untouched:
+        def __getattr__(self, name: str) -> None:
+            raise AssertionError(f"the connection was used: {name}")
+
+    with pytest.raises(ValueError, match="written by one of"):
+        await repo.raise_finding(
+            Untouched(), None, "independent_risk", "high", "A title", origin=origin
+        )
+
+
+def test_its_callers_pass_literals() -> None:
+    """
+    The tick passes ``'model'`` — what a role says through its panel seat, the
+    programme's model wrote — and the API ``'operator'``, each as a literal,
+    so which writer a call names is read in review, not computed. No other
+    module in the scanned trees calls it, and none stores it under another
+    name.
+    """
+    calls = {
+        (_label(path), origin)
+        for path in _scanned()
+        for _, origin in _raise_finding_calls(path.read_text(encoding="utf-8"))
+    }
+    assert calls == FINDING_CALLERS
+
+
+@pytest.mark.parametrize(
+    ("source", "origins"),
+    [
+        (
+            'await repo.raise_finding(conn, None, "r", "high", "t", origin="model")',
+            ["model"],
+        ),
+        ('await raise_finding(conn, origin="operator")', ["operator"]),
+        ("await repo.raise_finding(conn, origin=ORIGIN)", [None]),
+        ("await repo.raise_finding(conn, **row)", [None]),
+        ('await repo.raise_finding(conn, *args, origin="model")', [None]),
+        ("await repo.raise_finding(conn, None, 'r', 'high', 't')", [None]),
+        ("write = repo.raise_finding", [None]),
+        ("WRITERS = {'finding': raise_finding}", [None]),
+        ("await repo.raise_card_finding(conn)", []),
+    ],
+)
+def test_the_caller_scan_reads_each_spelling(
+    source: str, origins: list[str | None]
+) -> None:
+    assert [origin for _, origin in _raise_finding_calls(source)] == origins

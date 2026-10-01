@@ -1341,7 +1341,7 @@ class TestRegistrationRules:
             questions=(("q", {"type": "noul", "instructions": "Is `excerpt` odd?"}),),
         )
         assert jq.registration_problem(web, {}) is None
-        for provenance in ("internal", "operator", "model"):
+        for provenance in ("internal", "operator", "model", "system"):
             for internal_detail in (False, True):
                 not_web = dataclasses.replace(
                     web, provenance=provenance, internal_detail=internal_detail
@@ -1355,7 +1355,7 @@ class TestRegistrationRules:
         assert "web text is asked about as a WebExcerptState" in problem, problem
 
     @pytest.mark.parametrize("model", [_Detailed, _Noted, _Nested])
-    @pytest.mark.parametrize("provenance", ["internal", "operator", "model"])
+    @pytest.mark.parametrize("provenance", ["internal", "operator", "model", "system"])
     def test_a_set_carrying_detail_must_declare_it(
         self, subjects: None, model: type[BaseModel], provenance: str
     ) -> None:

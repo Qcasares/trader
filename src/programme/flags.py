@@ -203,10 +203,10 @@ async def tick_seconds(conn: asyncpg.Connection) -> int:
 # Jev
 # ---------------------------------------------------------------------------
 #
-# Every key below is seeded by migration 0012 in its off position, and every
-# reader treats what it cannot establish as that position. None of them
-# substitutes a default: a setting that cannot be read means no request, never
-# a request made under a value nobody chose.
+# Every key below is seeded by migration 0012 in its off position — the
+# arming switch by 0015 — and every reader treats what it cannot establish as
+# that position. None of them substitutes a default: a setting that cannot be
+# read means no request, never a request made under a value nobody chose.
 
 #: The master switch. While it is off Jev is asked nothing, the connectivity
 #: probe included. Seeded ``false``.
@@ -232,11 +232,19 @@ JEV_MAX_STATE_TOKENS = "jev_max_state_tokens"
 #: titles. Seeded ``false``.
 JEV_SEND_INTERNAL_DETAIL = "jev_send_internal_detail"
 
+#: Whether the card check is armed (phase D): whether a usable evaluation of
+#: ``guardrail.card`` may add a finding on a card the code's own check
+#: accepted. Seeded ``false`` by migration 0015. Nothing reads it to act
+#: before phase D4, and then only beside a usable, person-labelled evaluation,
+#: never instead of one.
+JEV_ARM_CARD_CHECK = "jev_arm_card_check"
+
 #: Every key the Jev readers consult. The area switches are derived from the
 #: catalogue, so an area cannot be added there without its switch appearing
 #: here, and ``tests/unit/test_jev_flags.py`` holds the whole set to what
-#: migration 0012 seeds. The reason is the failure mode: a reader pointed at a
-#: key nobody seeded reads as off forever, and says nothing about it.
+#: migrations 0012 and 0015 seed. The reason is the failure mode: a reader
+#: pointed at a key nobody seeded reads as off forever, and says nothing about
+#: it.
 JEV_KEYS: tuple[str, ...] = (
     JEV_ENABLED,
     *(f"{JEV_AREA_PREFIX}{area}" for area in jev_catalogue.AREAS),
@@ -244,6 +252,7 @@ JEV_KEYS: tuple[str, ...] = (
     JEV_DAILY_REQUEST_BUDGET,
     JEV_MAX_STATE_TOKENS,
     JEV_SEND_INTERNAL_DETAIL,
+    JEV_ARM_CARD_CHECK,
 )
 
 #: What a count that cannot be established is read as. A real setting rather
@@ -437,3 +446,22 @@ async def jev_send_internal_detail(conn: asyncpg.Connection) -> bool:
     (docs/08-jev-integration.md, fact 7). An unreadable switch sends less.
     """
     return await _switch(conn, JEV_SEND_INTERNAL_DETAIL)
+
+
+async def jev_arm_card_check(conn: asyncpg.Connection) -> bool:
+    """
+    Whether an operator has armed the card check: a stored JSON ``true``, and
+    nothing else. Any failure to establish it means unarmed.
+
+    One of two independent conditions for the card check to add a finding
+    (docs/09, decision D17): this switch and a usable evaluation, neither
+    derived from the other. Seeded off by migration 0015, and read through
+    :func:`_switch` as every Jev switch is, so ``"true"`` or ``1`` stored by
+    hand reads as off. Phase D1 adds the switch and its reader, and nothing
+    reads it to act; from phase D4 the arming module reads it on every
+    follow-up, the planner before it plans a re-judge, and the harness to
+    say whether the card check is armed. Unarmed is the direction every doubt
+    falls: armed, the check can only add friction, but an arming nobody chose
+    is not one an operator can reason about.
+    """
+    return await _switch(conn, JEV_ARM_CARD_CHECK)

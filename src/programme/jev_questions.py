@@ -833,8 +833,10 @@ def question_set_problem(question_set: QuestionSet) -> str | None:
 
 #: Provenances whose state is this system's own text, as opposed to the open
 #: web's. Detail of it — anything beyond a title — goes to the vendor only
-#: while ``jev_send_internal_detail`` is on (docs/08, fact 7).
-_OWN_TEXT_PROVENANCES = frozenset({"internal", "operator", "model"})
+#: while ``jev_send_internal_detail`` is on (docs/08, fact 7). ``system``
+#: (phase D) is this system's own records computed in code, which can quote an
+#: outsider, and is read as this system's own text like the rest.
+_OWN_TEXT_PROVENANCES = frozenset({"internal", "operator", "model", "system"})
 
 #: The one field of this system's own text that may be sent without the detail
 #: switch: a title, as fact 7's default sends hypothesis cards and findings.

@@ -18,7 +18,8 @@ answers as asyncpg does with no codec registered, handing ``jsonb`` back as its
 JSON text for ``flag_repo.get_flag`` to parse, so each test states exactly what
 is stored: ``'"true"'`` is the JSON string and ``'true'`` the JSON boolean. The
 real-Postgres counterpart, which reads migration 0012's own seeds through these
-readers, is ``tests/integration/test_jev_schema.py``.
+readers, is ``tests/integration/test_jev_schema.py``, and for 0015's arming
+switch ``tests/integration/test_phase_d_schema.py``.
 """
 
 from __future__ import annotations
@@ -38,6 +39,10 @@ from src.programme import flags, jev_catalogue
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "migrations" / "0012_jev.sql"
+#: Phase D's migration, which seeds the card check's arming switch.
+PHASE_D_MIGRATION = ROOT / "migrations" / "0015_jev_phase_d.sql"
+#: Every migration that seeds a Jev key, in order.
+SEED_MIGRATIONS = (MIGRATION, PHASE_D_MIGRATION)
 
 #: The one query ``flag_repo.get_flag`` makes. The fake refuses any other, so a
 #: reader that starts reading some other way gets looked at rather than
@@ -195,6 +200,12 @@ READERS = (
         "jev_send_internal_detail",
         flags.jev_send_internal_detail,
         flags.JEV_SEND_INTERNAL_DETAIL,
+        False,
+    ),
+    Reader(
+        "jev_arm_card_check",
+        flags.jev_arm_card_check,
+        flags.JEV_ARM_CARD_CHECK,
         False,
     ),
 )
@@ -693,14 +704,27 @@ async def test_a_state_limit_nobody_can_read_admits_no_request() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _seeded_jev_keys() -> set[str]:
-    """The ``jev_`` keys migration 0012 inserts into ``system_flags``."""
-    sql = re.sub(r"--[^\n]*", "", MIGRATION.read_text(encoding="utf-8"))
-    keys: set[str] = set()
+def _seeds(migration: pathlib.Path) -> dict[str, str]:
+    """
+    The ``jev_`` keys ``migration`` inserts into ``system_flags``, each with
+    the JSON text it is seeded with.
+    """
+    sql = re.sub(r"--[^\n]*", "", migration.read_text(encoding="utf-8"))
+    seeds: dict[str, str] = {}
     for statement in re.findall(
         r"INSERT\s+INTO\s+system_flags\b(.*?);", sql, re.S | re.I
     ):
-        keys.update(re.findall(r"\(\s*'(jev_[a-z0-9_]*)'\s*,", statement))
+        seeds.update(
+            re.findall(r"\(\s*'(jev_[a-z0-9_]*)'\s*,\s*'([^']*)'", statement)
+        )
+    return seeds
+
+
+def _seeded_jev_keys() -> set[str]:
+    """The ``jev_`` keys migrations 0012 and 0015 insert into ``system_flags``."""
+    keys: set[str] = set()
+    for migration in SEED_MIGRATIONS:
+        keys.update(_seeds(migration))
     return keys
 
 
@@ -708,16 +732,30 @@ class TestTheReadersReadTheSeededKeys:
     """
     A reader pointed at a key nobody seeded reads as off forever and says
     nothing, which for the boolean switches is indistinguishable from working:
-    the seed is off too. So the keys are held to the migration by name.
+    the seed is off too. So the keys are held to the migrations by name: 0012,
+    which seeds every switch and setting of phase B, and 0015, which seeds the
+    card check's arming switch (phase D).
     """
 
-    def test_every_key_read_is_one_migration_0012_seeds(self) -> None:
-        seeded = _seeded_jev_keys()
-        assert flags.JEV_ENABLED in seeded, (
-            f"found {sorted(seeded)} in {MIGRATION.name}; has the statement that "
-            "seeds system_flags changed shape?"
-        )
-        assert set(flags.JEV_KEYS) == seeded
+    def test_every_key_read_is_one_migration_0012_or_0015_seeds(self) -> None:
+        for migration, key in (
+            (MIGRATION, flags.JEV_ENABLED),
+            (PHASE_D_MIGRATION, flags.JEV_ARM_CARD_CHECK),
+        ):
+            seeded = _seeds(migration)
+            assert key in seeded, (
+                f"found {sorted(seeded)} in {migration.name}; has the statement "
+                "that seeds system_flags changed shape?"
+            )
+        assert set(flags.JEV_KEYS) == _seeded_jev_keys()
+
+    def test_no_key_is_seeded_twice(self) -> None:
+        """
+        ``ON CONFLICT (key) DO NOTHING`` makes a second seed of a key silent:
+        whichever migration ran first would decide its value.
+        """
+        first, second = (set(_seeds(migration)) for migration in SEED_MIGRATIONS)
+        assert not first & second
 
     def test_there_is_an_area_switch_for_every_area_and_no_other(self) -> None:
         areas = {
@@ -736,6 +774,7 @@ class TestTheReadersReadTheSeededKeys:
         await flags.jev_daily_request_budget(conn)
         await flags.jev_max_state_tokens(conn)
         await flags.jev_send_internal_detail(conn)
+        await flags.jev_arm_card_check(conn)
         assert set(conn.asked) == set(flags.JEV_KEYS)
 
     async def test_everything_on_reads_as_on(self) -> None:
@@ -748,3 +787,69 @@ class TestTheReadersReadTheSeededKeys:
         assert await flags.jev_daily_request_budget(conn) == 500
         assert await flags.jev_max_state_tokens(conn) == 8_000
         assert await flags.jev_send_internal_detail(conn) is True
+        assert await flags.jev_arm_card_check(conn) is True
+
+
+# ---------------------------------------------------------------------------
+# The arming switch (phase D)
+# ---------------------------------------------------------------------------
+
+
+class TestTheArmingSwitch:
+    """
+    ``jev_arm_card_check`` is one of two independent conditions for the card
+    check to add a finding (docs/09, decision D17): the switch and a usable,
+    person-labelled evaluation, neither derived from the other. The rules every
+    switch shares are driven above, through ``READERS``; this class holds what
+    is particular to it.
+    """
+
+    async def test_the_arming_switch_is_on_only_for_json_true(self) -> None:
+        on = _SystemFlags({flags.JEV_ARM_CARD_CHECK: "true"})
+        assert await flags.jev_arm_card_check(on) is True
+        for stored in ("false", *NOT_TRUE.values(), *NOT_JSON.values()):
+            conn = _SystemFlags({flags.JEV_ARM_CARD_CHECK: stored})
+            assert await flags.jev_arm_card_check(conn) is False, stored
+        assert await flags.jev_arm_card_check(_SystemFlags()) is False
+        for error in DATABASE_ERRORS.values():
+            conn = _SystemFlags(
+                _everything_on(), failing={flags.JEV_ARM_CARD_CHECK: error}
+            )
+            assert await flags.jev_arm_card_check(conn) is False
+
+    async def test_it_reads_its_own_key_and_no_other(self) -> None:
+        """
+        Derived from no other switch: armed with everything else off or
+        missing, and unarmed with everything else on. A reader that also read
+        ``jev_enabled``, or the guardrails area, would fold two conditions
+        into one, which is the weakening safety rule 1 describes.
+        """
+        alone = _SystemFlags({flags.JEV_ARM_CARD_CHECK: "true"})
+        assert await flags.jev_arm_card_check(alone) is True
+        assert alone.asked == [flags.JEV_ARM_CARD_CHECK]
+
+        rows = _everything_on()
+        rows[flags.JEV_ARM_CARD_CHECK] = "false"
+        rest_on = _SystemFlags(rows)
+        assert await flags.jev_arm_card_check(rest_on) is False
+        assert rest_on.asked == [flags.JEV_ARM_CARD_CHECK]
+
+    def test_0015_seeds_it_off(self) -> None:
+        assert _seeds(PHASE_D_MIGRATION) == {flags.JEV_ARM_CARD_CHECK: "false"}
+
+    def test_nothing_reads_it_yet(self) -> None:
+        """
+        Phase D1 adds the switch and its reader, and nothing reads it to act:
+        the arming module that will is phase D4's. Until then, a reference to
+        it anywhere in ``src/`` but ``flags`` is a consumer nobody reviewed.
+        """
+        readers = sorted(
+            str(path.relative_to(ROOT))
+            for path in (ROOT / "src").rglob("*.py")
+            if path != ROOT / "src" / "programme" / "flags.py"
+            and re.search(
+                r"jev_arm_card_check|JEV_ARM_CARD_CHECK",
+                path.read_text(encoding="utf-8"),
+            )
+        )
+        assert readers == []

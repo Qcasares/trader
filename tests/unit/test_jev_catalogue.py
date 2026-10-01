@@ -426,8 +426,17 @@ class TestTheVocabulary:
         """
         Migration 0013 adds ``model``: text the programme's own model wrote,
         kept apart from ``internal``, which the phase F loader is to trust.
+        Migration 0015 adds ``system`` (phase D): this system's own records,
+        computed in code, which can quote an outsider — on ``jev_requests``
+        alone, so ``jev_signals`` still refuses it.
         """
-        assert catalogue.PROVENANCES == ("web", "internal", "operator", "model")
+        assert catalogue.PROVENANCES == (
+            "web",
+            "internal",
+            "operator",
+            "model",
+            "system",
+        )
 
     def test_subject_types(self) -> None:
         assert catalogue.SUBJECT_TYPES == (

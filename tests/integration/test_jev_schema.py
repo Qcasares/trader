@@ -93,8 +93,15 @@ BODY = json.dumps(
 
 LANES = ("research", "guardrail", "findings", "ops", "signals", "decision", "probe")
 #: 0012's three, and 0013's ``model``: text the programme's own generative model
-#: wrote, which is none of the other three (``TestModelProvenance``).
+#: wrote, which is none of the other three (``TestModelProvenance``). What
+#: ``jev_signals_provenance_check`` holds, from 0013 on.
 PROVENANCES = ("web", "internal", "operator", "model")
+#: What ``jev_requests_provenance_check`` holds from 0015 on: the four above and
+#: ``system``, this system's own records computed in code, which can quote an
+#: outsider. A request may carry it and a signal may not, so the two CHECKs
+#: read two vocabularies by design (docs/09, section 7;
+#: ``tests/integration/test_phase_d_schema.py::TestTheProvenances``).
+REQUEST_PROVENANCES = (*PROVENANCES, "system")
 REFUSED = ("refused_budget", "refused_limits", "refused_model")
 
 #: Dates no honest stamp could carry: well before the ledger existed, and well
@@ -112,7 +119,7 @@ def _cutoff(session: date, at: time = time(17)) -> datetime:
     return datetime.combine(session, at, tzinfo=EXCHANGE)
 
 #: The switches migration 0012 seeds, and the value each must start with.
-SEEDED_SWITCHES = {
+SEEDED_BY_0012 = {
     "jev_enabled": False,
     "jev_model": "jev-1.13.0",
     "jev_area_research": False,
@@ -125,6 +132,9 @@ SEEDED_SWITCHES = {
     "jev_max_state_tokens": 8000,
     "jev_send_internal_detail": False,
 }
+#: Every Jev switch a fully migrated database seeds: 0012's, and the card
+#: check's arming switch, which 0015 seeds off (phase D).
+SEEDED_SWITCHES = {**SEEDED_BY_0012, "jev_arm_card_check": False}
 
 #: Columns sent as JSON text, and the type each is cast to on the way in.
 JSON_COLUMNS = {
@@ -2046,6 +2056,7 @@ class TestTheSwitchesAreSeededOff:
             "jev_daily_request_budget",
             "jev_max_state_tokens",
             "jev_send_internal_detail",
+            "jev_arm_card_check",
         )
         if not all(hasattr(flags, name) for name in readers):
             pytest.skip("the Jev readers are not in src/programme/flags.py yet")
@@ -2064,6 +2075,7 @@ class TestTheSwitchesAreSeededOff:
         assert await flags.jev_daily_request_budget(conn) == 500
         assert await flags.jev_max_state_tokens(conn) == 8000
         assert await flags.jev_send_internal_detail(conn) is False
+        assert await flags.jev_arm_card_check(conn) is False
 
     async def test_the_seeded_settings_are_ones_the_catalogue_accepts(self) -> None:
         catalogue = pytest.importorskip("src.programme.jev_catalogue")
@@ -2104,11 +2116,18 @@ class TestTheVocabulariesAgree:
     async def test_the_schema_holds_the_lanes_and_provenances_it_was_designed_with(
         self, conn: asyncpg.Connection
     ) -> None:
+        """
+        Two provenance vocabularies from 0015 on, by design: a request may be
+        recorded as ``system`` and a signal may not (docs/09, section 7).
+        """
         for table in ("jev_requests", "jev_signals"):
             assert await _vocabulary(conn, f"{table}_lane_check") == set(LANES)
-            assert await _vocabulary(conn, f"{table}_provenance_check") == set(
-                PROVENANCES
-            )
+        assert await _vocabulary(conn, "jev_requests_provenance_check") == set(
+            REQUEST_PROVENANCES
+        )
+        assert await _vocabulary(conn, "jev_signals_provenance_check") == set(
+            PROVENANCES
+        )
 
     async def test_the_catalogue_names_the_same_ones(
         self, conn: asyncpg.Connection
@@ -2202,7 +2221,7 @@ class TestTheMigration:
                     legacy[key],
                 )
                 assert dict(row) == dict.fromkeys(PROVENANCE_COLUMNS), table
-            assert set(await _switches(conn)) == set(SEEDED_SWITCHES)
+            assert set(await _switches(conn)) == set(SEEDED_BY_0012)
         finally:
             await conn.close()
 

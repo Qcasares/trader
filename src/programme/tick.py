@@ -607,6 +607,8 @@ async def _record_view(
             evidence={"gate": result.as_dict()},
         )
         for proposed in assessment.findings:
+            # The programme's own model wrote it, through this role's panel
+            # seat (migration 0015's `findings.origin`).
             finding = await repo.raise_finding(
                 conn,
                 candidate_id=candidate["id"],
@@ -615,6 +617,7 @@ async def _record_view(
                 title=proposed.title,
                 detail=proposed.detail,
                 remediation=proposed.remediation,
+                origin="model",
             )
             refs.append(finding["ref"])
     return refs

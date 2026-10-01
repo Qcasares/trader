@@ -547,6 +547,24 @@ class FindingClosureError(RuntimeError):
     """Something tried to close a finding without being an operator."""
 
 
+#: Who may write a finding through :func:`raise_finding`: the programme's
+#: model, through the tick's panel, and an operator, through the API.
+#: Migration 0015's ``findings_origin_check`` also admits ``'unknown'``, which
+#: means raised before 0015 and which its trigger refuses on any new row, and
+#: ``'jev'``, the card check's finding, which only phase D4's writer raises.
+FINDING_WRITERS = ("model", "operator")
+
+#: How a Jev finding's ref is formatted from ``n``, the count of Jev findings
+#: plus one as text: ``'J-' ||`` this, padded to at least four digits and never
+#: cut (docs/09, section 7). PostgreSQL's ``lpad`` truncates a longer string,
+#: so ``lpad(n, 4, '0')`` would give the 10,000th Jev finding ``J-1000``, which
+#: is taken, and every later attempt the same ref. Phase D4's card-check writer
+#: is its one user; it is here from D1, an expression with no writer, so that
+#: ``tests/integration/test_phase_d_schema.py::TestTheJevRefs`` can evaluate it
+#: for any count without writing ten thousand findings.
+JEV_REF_SQL = "lpad(n, greatest(4, length(n)), '0')"
+
+
 async def raise_finding(
     conn: asyncpg.Connection,
     candidate_id: str | None,
@@ -555,6 +573,8 @@ async def raise_finding(
     title: str,
     detail: str = "",
     remediation: str = "",
+    *,
+    origin: str,
 ) -> dict[str, Any]:
     """
     Record a defect. Only ever opens one; closing is a separate, operator act.
@@ -563,14 +583,27 @@ async def raise_finding(
     close path lives behind the API and stamps ``operator:<subject>``, which is
     the only string the schema's CHECK constraint accepts — so a role cannot
     retract its own veto even by calling into the repository directly.
+
+    ``origin`` says who wrote the finding — ``'model'``, the tick's panel, or
+    ``'operator'``, the API — and is keyword-only with no default, so every
+    caller names it: migration 0015 dropped the column's default and refuses
+    ``'unknown'`` on a new row, which from then on means raised before it and
+    nothing else (``tests/unit/test_jev_table_boundaries.py::
+    test_raise_finding_takes_origin_keyword_only_with_no_default``). A writer
+    this function does not know is refused before the insert.
     """
+    if origin not in FINDING_WRITERS:
+        raise ValueError(
+            f"a finding raised here is written by one of {FINDING_WRITERS}, "
+            f"not {origin!r}"
+        )
     finding_id = uuid.uuid4()
     ref = await _next_ref(conn, "findings", "F")
     await conn.execute(
         """
         INSERT INTO findings (id, ref, candidate_id, raised_by, severity,
-                              title, detail_md, remediation)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                              title, detail_md, remediation, origin)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         """,
         finding_id,
         ref,
@@ -580,6 +613,7 @@ async def raise_finding(
         title,
         detail,
         remediation,
+        origin,
     )
     logger.info("Finding %s raised by %s (%s): %s", ref, raised_by, severity, title)
     return {"id": str(finding_id), "ref": ref}

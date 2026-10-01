@@ -152,8 +152,12 @@ LANES: tuple[str, ...] = (
 #: text the programme's own generative model wrote, such as a hypothesis title
 #: (migration 0013). Not ``internal``: the phase F signal loader trusts
 #: ``internal``, and must never have to know that it sometimes means text a
-#: model wrote.
-PROVENANCES: tuple[str, ...] = ("web", "internal", "operator", "model")
+#: model wrote. ``system`` (migration 0015, phase D) is this system's own
+#: records, computed in code, which can quote an outsider — a job error's
+#: skeleton, whose residue is a library's message repeating a vendor's reply —
+#: so it is never ``internal`` either, and ``jev_signals`` refuses it by CHECK:
+#: no answer recorded as ``system`` can rest under a signal.
+PROVENANCES: tuple[str, ...] = ("web", "internal", "operator", "model", "system")
 
 #: What a request's state describes, one per state model
 #: (``jev_questions.STATE_SUBJECT``). A text subject — a web excerpt, a
