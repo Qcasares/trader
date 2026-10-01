@@ -35,7 +35,10 @@ read-only snapshot. The three are phase C9's that write, each through
 ``jev_repo`` and nothing else: ``labels import`` and ``labels copy`` write
 labels (``record_label``), and ``evaluate --record`` an evaluation
 (``record_evaluation``) — held by ``tests/unit/test_jev_eval.py::
-TestTheCommandLine::test_three_commands_write_and_the_rest_only_read``.
+TestTheCommandsThatWrite::test_three_commands_write_and_the_rest_only_read``,
+and on PostgreSQL, where the database itself refuses a reading command's
+write, by ``tests/integration/test_jev_evaluations.py::
+TestTheCommandsOnPostgres``.
 
 What an evaluation may say (phase C9)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -57,10 +60,13 @@ prints "not measured: no labelled items".
   than those in force, or under unknown ones, is set apart and counted
   (``n_other_plans``, ``n_plan_unknown``), and never scored, never guessed.
 * **Possibly in training is computed**, never typed: false only when every
-  item is dated strictly after the model's first observation
-  (``jev_catalogue.MODEL_FIRST_OBSERVED``). The README's titles are undated,
-  so an evaluation against its grouping is an upper bound, and says so
-  everywhere it is printed; it is never given a threshold.
+  item the evaluation reads — the development split's, which a threshold
+  rests on, as well as the test split's — is dated strictly after the
+  model's first observation (``jev_catalogue.MODEL_FIRST_OBSERVED``). Every
+  web document is stored undated, so an evaluation of a web set — against
+  the README's grouping or a person's labels alike — is an upper bound, and
+  says so everywhere it is printed; it is never given a threshold (docs/08
+  open item 65).
 * **The threshold is the development split's**, searched on its items alone
   and measured on the test split's; the figure a gate reads is a one-sided
   Wilson lower bound, never a point estimate.
@@ -1373,9 +1379,13 @@ def build_evaluation(
         comparisons[baseline] = (point, *_holding(point, interval))
 
     # The threshold: searched on the development split's scored items alone,
-    # never on an upper bound, and measured on the test split's.
+    # never on an upper bound, and measured on the test split's. Whether the
+    # evaluation may rest on the model's training data is read over every item
+    # it reads — the development split's too when its figures are the test
+    # split's, since the threshold rests on those — so a threshold is never
+    # searched on an undated development item beside a dated test split.
     in_training = possibly_in_training(
-        model, [ledger.dates.get(i.subject) for i in in_split]
+        model, [ledger.dates.get(i.subject) for i in items]
     )
     acting = target["acting_class"]
     choice = jev_stats.ThresholdChoice("not_attempted")

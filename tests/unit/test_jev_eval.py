@@ -1480,6 +1480,24 @@ class TestPossiblyInTraining:
         )
         assert evaluation.flip_rate_near_threshold_n is None
 
+    def test_an_undated_development_item_makes_the_test_split_an_upper_bound(
+        self,
+    ) -> None:
+        """
+        The test split's figures rest on its own items, and its threshold on
+        the development split's: one development item undated, and no
+        threshold is searched however well the test split is dated, and the
+        evaluation says it is an upper bound.
+        """
+        book, dev, _ = _threshold_book()
+        book.dates[book.subject(dev[0])] = None
+        evaluation = book.evaluate("test")
+        assert evaluation.possibly_in_training is True
+        assert (evaluation.threshold_outcome, evaluation.threshold) == (
+            "not_attempted",
+            None,
+        )
+
 
 def _threshold_book(acting: bool = False) -> tuple[_Book, list[str], list[str]]:
     """

@@ -3382,11 +3382,15 @@ The plans in force are `jev_prereg.plans_in_force`, and the row records their
 identity, `jev_calibration.analysis_plan_hash`.
 
 **Possibly in training** (the scope's 6). Computed, never typed: false only
-when every item's date is strictly after the pinned model's first observation,
-`jev_catalogue.MODEL_FIRST_OBSERVED`, `jev-1.13.0` on 26 September 2026 by
-the key check, a conservative bound. An excerpt's date is its documents'
-earliest `published_at`, unknown, and so possibly in training, if any is
-NULL; a title's is its hypothesis's earliest `created_at`. Every web document
+when every item the evaluation reads is dated strictly after the pinned
+model's first observation, `jev_catalogue.MODEL_FIRST_OBSERVED`, `jev-1.13.0`
+on 26 September 2026 by the key check, a conservative bound. The items read
+include the development split's when the figures are the test split's, since
+a threshold rests on them: an undated development item makes a well-dated
+test split an upper bound, and no threshold is searched
+(`tests/unit/test_jev_eval.py::TestPossiblyInTraining`). An excerpt's date is
+its documents' earliest `published_at`, unknown, and so possibly in training,
+if any is NULL; a title's is its hypothesis's earliest `created_at`. Every web document
 is stored with `published_at` NULL (C6), so every evaluation of a web set is
 an upper bound — the README's grouping's always — and an upper bound carries
 no threshold: the harness searches none, and 0014 refuses one whoever writes
@@ -3508,7 +3512,12 @@ The Brier score of a Choice scales its distribution to sum to one, which the
 validator allows to be off by 0.02. A percentile bootstrap interval that
 misses its own estimate is widened to hold it, which 0014's rule requires and
 a skewed few items can produce; never narrowed. `choose_threshold` takes the
-development floor as an argument, `jev_stats` loading nothing. Labeller
+development floor as an argument, `jev_stats` loading nothing. "Every item"
+in the scope's rule for possibly in training is read as every item the
+evaluation reads, the development split's included when the figures are the
+test split's, since the threshold rests on them. The first cut read the
+figures' items alone, and would have searched a threshold on an undated
+development item beside a dated test split. Labeller
 agreement is defined by the earliest other labeller's label, one comparison
 per item, where the design said "items with ≥ 2 labellers" (open item 62).
 `analysis_plan_hash` lives in `jev_calibration` rather than `jev_prereg`,
