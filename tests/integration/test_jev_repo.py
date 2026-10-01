@@ -2722,6 +2722,29 @@ class TestHypothesesToAsk:
         await _asked(conn, SCREEN, title, "error", **_failed("content_block"))
         assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
 
+    @pytest.mark.parametrize(
+        "asked",
+        [jev_questions.FINDINGS_OWNER, jev_questions.FINDINGS_SEVERITY],
+        ids=lambda question_set: question_set.name,
+    )
+    async def test_a_block_on_a_finding_title_holding_the_same_text_holds_it_too(
+        self, conn: asyncpg.Connection, asked: Any
+    ) -> None:
+        """
+        D2's review (D2RS-1): a finding's title is sent as ``{"title": …}``,
+        the very state a hypothesis's title is sent as, and the road holds a
+        block by that state's hash, so it refuses the title for good whichever
+        of the two recorded the block. Planned anyway, it was refused every UTC
+        day and never retired, since a refusal writes no row.
+        """
+        title = "Invented Words Raised as a Finding Too"
+        await _hypothesis(conn, title)
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (HYPOTHESIS, jev_questions.GUARDRAIL_CARD):
+            assert await _titles(conn, question_set=question_set) == [], (
+                question_set.name
+            )
+
     async def test_another_sets_answer_leaves_the_title_for_this_one(
         self, conn: asyncpg.Connection
     ) -> None:
@@ -3027,18 +3050,42 @@ class TestFindingsToAsk:
         await _ask_job(conn, OWNER, text_sha256(title), version=OWNER.version + 1)
         assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
 
-    async def test_a_block_on_a_hypothesis_title_holding_the_same_text_is_not_this_ones(
-        self, conn: asyncpg.Connection
+    @pytest.mark.parametrize(
+        "asked",
+        [jev_questions.GUARDRAIL_CARD, HYPOTHESIS],
+        ids=lambda question_set: question_set.name,
+    )
+    async def test_a_block_on_a_hypothesis_title_holding_the_same_text_holds_it_too(
+        self, conn: asyncpg.Connection, asked: Any
     ) -> None:
+        """
+        D2's review (D2RS-1, D2RT-1), inverting the first cut's case, which
+        held the read to the subject type alone. A hypothesis's title and a
+        finding's holding the same words are sent as one state, ``{"title":
+        …}``, and the road holds a block by that state's hash: it refused the
+        finding's title for good while this read went on returning it, so the
+        planner queued both sets' asks every UTC day, each refused, none ever
+        retired, since a refusal writes no row.
+        """
         title = "Invented Words Held by a Hypothesis Too"
         await _finding(conn, title)
-        await _asked(
-            conn,
-            jev_questions.GUARDRAIL_CARD,
-            title,
-            "error",
-            **_failed("content_block"),
-        )
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (OWNER, SEVERITY):
+            assert await _to_ask(conn, question_set=question_set) == [], (
+                question_set.name
+            )
+
+    async def test_a_block_on_an_excerpt_holding_the_same_text_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        An excerpt is sent as ``{"excerpt": …}``, another state for the same
+        words, which the road does not hold for a title's block nor a title's
+        for its: only the subjects sent as the same state are read together.
+        """
+        title = "Invented Words Stored as an Excerpt Too"
+        await _finding(conn, title)
+        await _asked(conn, SCREEN, title, "error", **_failed("content_block"))
         assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
 
     async def test_another_sets_answer_leaves_the_title_for_this_one(
@@ -3645,6 +3692,56 @@ class TestWhatSuggestionsReads:
             subject_type="finding_title",
             subject_ids=[],
         ) == {}
+
+    @pytest.mark.parametrize(
+        ("asked", "held"),
+        [
+            (jev_questions.GUARDRAIL_CARD, True),
+            (HYPOTHESIS, True),
+            (SCREEN, False),
+        ],
+        ids=["the-card-on-a-title", "a-category-on-a-title", "the-screen-on-text"],
+    )
+    async def test_a_block_holds_what_the_road_holds(
+        self, conn: asyncpg.Connection, asked: Any, held: bool
+    ) -> None:
+        """
+        D2's review (D2RS-1, D2RT-1): the road holds a block by the hash of
+        the state sent, so a block about a hypothesis's title holding the
+        finding's words holds the finding, and ``suggestions`` says so, where
+        the first cut printed "not asked yet"; a block about an excerpt of the
+        same words, another state, holds nothing here. The first cut's filter
+        on the block's subject type was held by no case.
+        """
+        title = "Invented Finding Whose Words Were Blocked Elsewhere"
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (OWNER, SEVERITY):
+            found = await _outcomes(conn, title, question_set=question_set)
+            assert found == {title: _nothing(blocked=held)}, question_set.name
+
+    async def test_no_block_holds_a_subject_that_is_not_text(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The road holds an enumerated state by no block (open item 36), so
+        neither does this read, whatever is on record under its address.
+        """
+        session = "2026-09-25"
+        await _record(
+            conn,
+            "error",
+            subject_type="session",
+            subject_id=session,
+            **_failed("content_block"),
+        )
+        found = await jev_repo.ask_outcomes(
+            conn,
+            question_set=jev_questions.get("decision.regime"),
+            model=MODEL,
+            subject_type="session",
+            subject_ids=[session],
+        )
+        assert found[session]["blocked"] is False
 
 
 class TestTheJobsAboutASubject:

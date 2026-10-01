@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -735,10 +736,14 @@ async def content_blocked(conn: asyncpg.Connection, state_hash: str) -> bool:
 
     Matched by the state hash, across every set and lane, so text the vendor
     blocked for one question is not sent again for another. The lane asks it
-    only about text, a web excerpt or a hypothesis title: an enumerated state
-    has nothing in it a content filter could object to. An unverified
-    precaution, resting on one third-party report; for text, holding is the
-    safe direction.
+    only about text, a web excerpt, a hypothesis title or a finding title: an
+    enumerated state has nothing in it a content filter could object to. A
+    hypothesis's title and a finding's holding the same words are one state,
+    ``{"title": …}``, so a block about either holds both; the planner's reads
+    and :func:`ask_outcomes` hold a block by subject, and read it across the
+    subjects sent as one state (``jev_questions.same_state_subjects``) to hold
+    exactly this. An unverified precaution, resting on one third-party report;
+    for text, holding is the safe direction.
     """
     return bool(
         await conn.fetchval(
@@ -1360,13 +1365,45 @@ def _unanswered(subject_type: str, subject: str) -> str:
     """
 
 
+#: A subject type as it may be written into SQL: one of the catalogue's
+#: names, never text from a row.
+_SUBJECT_TYPE_NAME = re.compile(r"[a-z][a-z_]*")
+
+
+def _same_state_subjects(subject_type: str) -> tuple[str, ...]:
+    """
+    ``jev_questions.same_state_subjects``, each checked to be a subject type's
+    name before any is written into a statement.
+    """
+    types = jev_questions.same_state_subjects(subject_type)
+    for name in types:
+        if _SUBJECT_TYPE_NAME.fullmatch(name) is None:
+            raise ValueError(f"{name!r} is not a subject type's name")
+    return types
+
+
 def _blocked(subject_type: str, subject: str) -> str:
-    """A vendor content block on record for the subject, from any set."""
+    """
+    A vendor content block on record for the subject's state, from any set:
+    recorded about this subject, or about one of another type sent as the very
+    same state (``jev_questions.same_state_subjects``), since the road holds a
+    block by the hash of the state sent, across every set and subject
+    (``jev_lane``, step 4). A hypothesis's title and a finding's holding the
+    same words are one state, ``{"title": …}``, so a block about either holds
+    both; an excerpt of the same words is another state, held by neither.
+    The first cut matched the block's own subject type alone, and so planned,
+    every UTC day, a findings ask the road refused for good (D2's review).
+    ``FALSE`` for a subject that is not text, which no block holds.
+    """
+    types = _same_state_subjects(subject_type)
+    if not types:
+        return "FALSE"
+    listed = ", ".join(f"'{name}'" for name in types)
     return f"""
         EXISTS (
             SELECT 1 FROM jev_requests b
             WHERE b.error_kind = 'content_block'
-              AND b.subject_type = '{subject_type}' AND b.subject_id = {subject}
+              AND b.subject_type IN ({listed}) AND b.subject_id = {subject}
         )
     """
 
@@ -1522,7 +1559,9 @@ async def hypotheses_to_ask(
     operator's text would be a subject of its own, docs/08 open item 28) of
     one to ``jev_questions.TITLE_MAX_CHARS`` characters, the handler's own
     limits. Never a title with a content block on record, which the road
-    refuses for good; and, for the set at its registered version under
+    refuses for good — recorded about it, or from phase D2 about a finding's
+    title holding the same words, which is sent as the same state
+    (:func:`_blocked`); and, for the set at its registered version under
     ``model``, never a title answered ``ok`` or retired by ``max_failed``
     failed calls (see the section's comment).
     """
@@ -1593,12 +1632,14 @@ async def findings_to_ask(
     characters, whatever the finding's status — the population its set plan
     names (``jev_prereg.FINDINGS_POPULATION``) — never an operator's, Jev's,
     or one raised before migration 0015 named its writer. Never a title with
-    a content block on record, which the road refuses for good; and, for the
-    set at its registered version under ``model``, never a title answered
-    ``ok`` or retired by ``max_failed`` failed calls, nor one whose job is
-    waiting or was planned today (see the section's comment). Reads the
-    title, its writer, when it was opened and its ref, and nothing else of a
-    finding.
+    a content block on record, which the road refuses for good: recorded
+    about it, or about a hypothesis's title holding the same words, which is
+    sent as the same state, ``{"title": …}`` (:func:`_blocked`; the first
+    cut read the first alone, D2's review); and, for the set at its
+    registered version under ``model``, never a title answered ``ok`` or
+    retired by ``max_failed`` failed calls, nor one whose job is waiting or
+    was planned today (see the section's comment). Reads the title, its
+    writer, when it was opened and its ref, and nothing else of a finding.
     """
     prefix, suffix = _key_around(
         question_set.name, question_set.version, "finding_title", day
@@ -2090,9 +2131,12 @@ async def ask_outcomes(
     every answer it holds was valid; ``failed_calls``, the responses refused
     whole and the calls that failed, and ``retired``, whether they have reached
     ``max_failed``; ``blocked``, a vendor content block on record for the
-    subject from any set; and ``waiting``, a ``jev_ask`` job of the set about it
-    queued or running. Statuses alone: no option, probability or margin is
-    read, so nothing built from this can show an answer.
+    subject's state from any set, recorded about the subject or about one of
+    another type sent as the same state (``jev_questions.same_state_subjects``),
+    as the road holds it (:func:`_blocked`; D2's review); and ``waiting``, a
+    ``jev_ask`` job of the set about it queued or running. Statuses alone: no
+    option, probability or margin is read, so nothing built from this can
+    show an answer.
     """
     if not subject_ids:
         return {}
@@ -2124,7 +2168,8 @@ async def ask_outcomes(
                EXISTS (
                    SELECT 1 FROM jev_requests b
                    WHERE b.error_kind = 'content_block'
-                     AND b.subject_type = $4 AND b.subject_id = s.subject_id
+                     AND b.subject_type = ANY($6::text[])
+                     AND b.subject_id = s.subject_id
                ) AS blocked,
                EXISTS (
                    SELECT 1 FROM jobs j
@@ -2141,6 +2186,7 @@ async def ask_outcomes(
         model,
         subject_type,
         list(subject_ids),
+        list(_same_state_subjects(subject_type)),
     )
     return {
         row["subject_id"]: {

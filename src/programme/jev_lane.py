@@ -63,11 +63,15 @@ In order, the first that applies decides:
 4. **Content blocked** — a call about exactly this text was answered with a
    content block, so it is not sent again, by any set, a probe of one
    included, and nor is an answer about it read back. ``content_blocked``.
-   Text only — a web excerpt or a hypothesis title, the states a content
-   filter could object to. An enumerated state is labels computed in code, a
-   403 page about one is likelier an edge's than a verdict on its content,
-   and holding it for good would take that state out of the forward clock,
-   so it is held by nothing: its failure is recorded, and it is asked again.
+   Text only — a web excerpt, a hypothesis title or a finding title, the
+   states a content filter could object to. Held by the state sent, so a
+   hypothesis's title and a finding's holding the same words, both sent as
+   ``{"title": …}``, are held together whichever was blocked; the planner's
+   reads hold the same (``jev_questions.same_state_subjects``). An enumerated
+   state is labels computed in code, a 403 page about one is likelier an
+   edge's than a verdict on its content, and holding it for good would take
+   that state out of the forward clock, so it is held by nothing: its failure
+   is recorded, and it is asked again.
 5. **Replayed** — the canonical answer exists. Nothing is written or sent. A
    canonical row recorded by another pack raises before anything is sent: no
    answer crosses from one question set to another (open item 15).
@@ -921,9 +925,10 @@ async def _web_gate(
 def _is_text(question_set: QuestionSet) -> bool:
     """
     Whether ``question_set`` asks about text a content filter could object to:
-    a content-addressed text state, a web excerpt or a hypothesis title
-    (:data:`jev_questions.TEXT_SUBJECT_FIELD`). Only such a state is held by a
-    content block; an enumerated one is labels computed in code.
+    a content-addressed text state, a web excerpt, a hypothesis title or a
+    finding title (:data:`jev_questions.TEXT_SUBJECT_FIELD`). Only such a state
+    is held by a content block, by its hash, whichever subject the block was
+    recorded about; an enumerated one is labels computed in code.
     """
     return question_set.state_model in jev_questions.TEXT_SUBJECT_FIELD
 

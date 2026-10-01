@@ -24,6 +24,10 @@ script it. What must hold:
 * **Asked once and replayed**: one title held by two findings is asked once
   by each set, and asked again by the other finding's ref it is replayed from
   its row, with no call.
+* **A block on the same words holds both titles** (D2's review): a
+  hypothesis's title and a finding's holding the same words are one state,
+  which the road holds by its hash whichever was blocked; the planner,
+  ``preview`` and ``suggestions`` hold it too, either way round.
 * **What preview shows is what would leave** (docs/09, section 13,
   ``TestPreviewIsThePlanners``): on the same rows, preview's subjects are the
   planner's, in its order, and each state it prints is the state the handler
@@ -574,6 +578,145 @@ class TestAskedOnceAndReplayed:
         replayed = await jev_jobs.run_ask(conn, {**payload, "source_id": older}, KEY)
         assert replayed["replayed"] is True and replayed["status"] == "ok"
         assert len(vendor.calls) == calls, "the replay made a call"
+
+
+# ---------------------------------------------------------------------------
+# A block on the same words holds both titles
+# ---------------------------------------------------------------------------
+
+
+async def _asks_about(conn: asyncpg.Connection, subject_id: str) -> list[str]:
+    """The keys of every ``jev_ask`` job about ``subject_id``, oldest first."""
+    rows = await conn.fetch(
+        "SELECT dedupe_key FROM jobs WHERE kind = 'jev_ask' "
+        "AND payload->>'subject_id' = $1 ORDER BY created_at, dedupe_key",
+        subject_id,
+    )
+    return [row["dedupe_key"] for row in rows]
+
+
+class TestABlockOnTheSameWordsHoldsBothTitles:
+    """
+    D2's review (D2RS-1, D2RT-1), end to end. A hypothesis's title and a
+    finding's holding the same words are sent as one state, ``{"title": …}``,
+    and the road holds a vendor's content block by that state's hash, across
+    every set. The first cut's reads held a block by its subject type alone,
+    so the planner queued the other kind's asks about the words every UTC
+    day, each refused before any call and never retired, since a refusal
+    writes no row; ``preview`` listed the words as about to leave, and
+    ``suggestions`` said "not asked yet". Here the planner, ``preview`` and
+    ``suggestions`` hold what the road holds, on rows the shipped jobs wrote.
+    """
+
+    async def test_a_block_on_a_hypothesis_title_holds_the_findings(
+        self,
+        db: tuple[str, asyncpg.Connection],
+        monkeypatch: pytest.MonkeyPatch,
+        vendor: _Vendor,
+    ) -> None:
+        dsn, conn = db
+        title = "Invented Look-Ahead in an Invented Signal"
+        address = text_sha256(title)
+        await _hypothesis(conn, title, at=RAISED)
+        finding = await _finding(conn, title)
+        vendor.failing[title] = "content_block"
+        await flag_repo.set_flag(conn, FINDINGS, False, "test")
+        await flag_repo.set_flag(conn, GUARDRAILS, True, "test")
+        await _loop(monkeypatch, dsn)
+        blocks = await conn.fetch(
+            "SELECT question_set, subject_type FROM jev_requests "
+            "WHERE error_kind = 'content_block'"
+        )
+        assert [tuple(row) for row in blocks] == [
+            ("guardrail.card", "hypothesis_title")
+        ]
+
+        await flag_repo.set_flag(conn, FINDINGS, True, "test")
+        calls = len(vendor.about(title))
+        road = await jev_lane.ask(
+            conn,
+            question_set=OWNER,
+            state=jev_questions.FindingTitleState(title=title),
+            subject_type="finding_title",
+            subject_id=address,
+            as_of=RAISED,
+            api_key=KEY,
+        )
+        assert road.status == "content_blocked", "the road no longer holds it"
+
+        day = datetime.now(UTC).date()
+        for question_set in (OWNER, SEVERITY):
+            report = await jev_eval.preview_report(
+                conn, question_set=question_set, limit=10, day=day
+            )
+            assert report["would_plan"] is True, report["not_planned_because"]
+            assert address not in {s["subject_id"] for s in report["subjects"]}
+        statuses = {
+            row["ref"]: row["asks"]
+            for row in (await jev_eval.suggestions_report(conn))["findings"]
+        }
+        assert statuses[finding] == {
+            OWNER.name: "held: a vendor content block, so never sent again",
+            SEVERITY.name: "held: a vendor content block, so never sent again",
+        }
+        for days in (1, 2, 3):
+            await _plan_and_drain(conn, dsn, datetime.now(UTC) + timedelta(days=days))
+        assert [
+            key for key in await _asks_about(conn, address) if "findings." in key
+        ] == [], "a findings set's ask about the blocked words was planned"
+        assert len(vendor.about(title)) == calls, "a call about the words left"
+
+    async def test_a_block_on_a_finding_title_holds_the_hypothesis(
+        self,
+        db: tuple[str, asyncpg.Connection],
+        monkeypatch: pytest.MonkeyPatch,
+        vendor: _Vendor,
+    ) -> None:
+        """The other way round: C8's title sets, which D2 put beside it."""
+        dsn, conn = db
+        title = "Invented Survivorship in an Invented Index"
+        address = text_sha256(title)
+        await _finding(conn, title)
+        await _hypothesis(conn, title, at=RAISED)
+        vendor.failing[title] = "content_block"
+        await _loop(monkeypatch, dsn)
+        blocked = await conn.fetch(
+            "SELECT DISTINCT subject_type FROM jev_requests "
+            "WHERE error_kind = 'content_block'"
+        )
+        assert [row["subject_type"] for row in blocked] == ["finding_title"]
+
+        for area in (GUARDRAILS, RESEARCH):
+            await flag_repo.set_flag(conn, area, True, "test")
+        calls = len(vendor.about(title))
+        card = jev_questions.GUARDRAIL_CARD
+        road = await jev_lane.ask(
+            conn,
+            question_set=card,
+            state=jev_questions.HypothesisTitleState(title=title),
+            subject_type="hypothesis_title",
+            subject_id=address,
+            as_of=RAISED,
+            api_key=KEY,
+        )
+        assert road.status == "content_blocked", "the road no longer holds it"
+
+        day = datetime.now(UTC).date()
+        for question_set in (card, jev_questions.RESEARCH_HYPOTHESIS):
+            report = await jev_eval.preview_report(
+                conn, question_set=question_set, limit=10, day=day
+            )
+            assert report["would_plan"] is True, report["not_planned_because"]
+            assert address not in {s["subject_id"] for s in report["subjects"]}
+        for days in (0, 1, 2):
+            await _plan_and_drain(conn, dsn, datetime.now(UTC) + timedelta(days=days))
+        titles = ("guardrail.card", "research.hypothesis")
+        assert [
+            key
+            for key in await _asks_about(conn, address)
+            if key.startswith(tuple(f"jev_ask:{name}@" for name in titles))
+        ] == [], "a title set's ask about the blocked words was planned"
+        assert len(vendor.about(title)) == calls, "a call about the words left"
 
 
 # ---------------------------------------------------------------------------

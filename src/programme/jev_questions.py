@@ -395,6 +395,67 @@ TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
 #: ``{JobErrorState: "system"}`` (docs/09, section 2.1).
 STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType({})
 
+
+def _text_sent_alone(model: type[BaseModel]) -> str | None:
+    """
+    The field a text state model sends its text under, if that field is all it
+    sends; ``None`` for a model that is not text, or sends anything beside it.
+    """
+    field = TEXT_SUBJECT_FIELD.get(model)
+    if field is None or set(model.model_fields) != {field}:
+        return None
+    return field
+
+
+def same_state_subjects(subject_type: str) -> tuple[str, ...]:
+    """
+    The subject types whose state, about the same text, is the very state a
+    ``subject_type`` subject is sent as, in :data:`STATE_SUBJECT`'s order and
+    ``subject_type`` among them; and none for a subject that is not text.
+
+    The road holds a vendor's content block by the hash of the state sent,
+    across every set and subject (``jev_lane``, step 4), and a text subject is
+    the sha256 of its text, so two text subjects with one id are one state
+    exactly when their models send that text alone under the same field: a
+    :class:`HypothesisTitleState` and a :class:`FindingTitleState` both send
+    ``{"title": text}``, so a block recorded about a hypothesis's title holds a
+    finding's of the same words, and the other way round, while a
+    :class:`WebExcerptState` sends ``{"excerpt": text}``, another state, which
+    neither title's block holds. A model sending its text beside anything else
+    shares its state with no other subject: it is held, conservatively, by a
+    block on its own subject alone. An enumerated state is held by no block
+    at all (docs/08 open item 36), so a subject that is not text has none.
+
+    The reads that plan an ask, and the one that says how an ask came out,
+    hold a block by subject, so each reads it across these
+    (``jev_repo._blocked``, ``jev_repo.ask_outcomes``): the first cut read a
+    block on its own subject type alone, and the planner queued, every UTC
+    day, a findings ask the road refused for good for a block about the
+    hypothesis title holding its words, never retiring it, since a refusal
+    writes no row (D2's review).
+    ``tests/unit/test_jev_questions.py::TestTheSubjectsSentAsOneState`` holds
+    this to the hash of what each registered set sends.
+    """
+    models = [
+        model
+        for model, subject in STATE_SUBJECT.items()
+        if subject == subject_type and model in TEXT_SUBJECT_FIELD
+    ]
+    if not models:
+        return ()
+    fields = {_text_sent_alone(model) for model in models}
+    if len(fields) != 1 or None in fields:
+        return (subject_type,)
+    (field,) = fields
+    return tuple(
+        dict.fromkeys(
+            subject
+            for model, subject in STATE_SUBJECT.items()
+            if _text_sent_alone(model) == field
+        )
+    )
+
+
 #: Lanes whose states carry no text at all (phase D): the ops lane's is a
 #: failed job's error reduced to a closed vocabulary, this system's own
 #: records. A set in one registers only declaring ``internal_detail``, so the
@@ -2006,6 +2067,7 @@ __all__ = [
     "get",
     "question_set_problem",
     "registration_problem",
+    "same_state_subjects",
     "screen_problem",
     "state_model_problem",
 ]

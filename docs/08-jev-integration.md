@@ -251,7 +251,7 @@ pinned model said, it is recorded once, and asking again would not check it.
 | Another 4xx, 408 for instance | | `TypeSafeAPIError` | Recorded by class |
 | No HTTP response | | `TypeSafeAPIConnectionError`, `TypeSafeAPITimeoutError` | Transient. **No request id exists** |
 | Malformed 200 | | `TypeSafeAPIResponseValidationError` | Judged by the validator from the raw body, like any 2xx; the SDK's objection is kept beside the verdict |
-| A 403 whose body is not JSON | 403 | `TypeSafePermissionDeniedError` | For text — a web excerpt, a hypothesis title — the state is not sent again, and the document it came from is quarantined, as a possible content block. A precaution: it rests on one unverified third-party report, and the verification found no primary evidence for it. An enumerated state is not held: it is labels computed in code, nothing a filter could object to, so an edge's 403 page is the likelier cause, and holding it for good would take it out of the forward clock |
+| A 403 whose body is not JSON | 403 | `TypeSafePermissionDeniedError` | For text — a web excerpt, a hypothesis title or, from D2, a finding title — the state is not sent again, and a web document it came from is quarantined, as a possible content block. A precaution: it rests on one unverified third-party report, and the verification found no primary evidence for it. An enumerated state is not held: it is labels computed in code, nothing a filter could object to, so an edge's 403 page is the likelier cause, and holding it for good would take it out of the forward clock |
 
 As built in phase B, the client classes every failure by `error_kind` —
 `auth`, `content_block`, `invalid_request`, `rate_limited`, `server`,
@@ -4393,12 +4393,31 @@ titles of model-written findings, whatever their status, of 1 to 200
 characters, by content address computed in SQL, newest first by `opened_at`
 then `ref`, each with the newest finding holding it, and never a title with
 a content block on record, answered `ok` or retired under the pin, or waiting
-or planned today. The authentication and 422 holds stand, and the detail
-switch is not read for either set. `tests/unit/test_jev_plan.py::TestTheFindingsRules`
+or planned today. A block counts whichever title recorded it: a finding's
+title and a hypothesis's holding the same words are sent as one state,
+`{"title": …}`, which the road holds a block by the hash of, across every set
+(`jev_lane`, step 4), so `findings_to_ask`, C8's `hypotheses_to_ask` and
+`ask_outcomes` read a block across the subject types sent as the same state,
+`jev_questions.same_state_subjects`, and an excerpt of the same words, another
+state, holds neither. The first cut read a block on its own subject type
+alone, and a test pinned it: a block on a hypothesis's title left the finding
+holding its words planned every UTC day, each job refused by the road before
+any call and never retired, since a refusal writes no row, while `preview`
+listed the words as about to leave and `suggestions` said "not asked yet" —
+and the other way round for C8's title sets (D2's review). The authentication
+and 422 holds stand, and the detail switch is not read for either set.
+`tests/unit/test_jev_plan.py::TestTheFindingsRules`
 and `::TestTheSwitchMatrix`, all 256 cases of the programme, Jev, the
 findings, ops and guardrails areas, the arming and detail switches and a key,
 built up from D2; `tests/integration/test_jev_repo.py::TestTheFindingTitleRead`
-and `::TestFindingsToAsk`, each filter held by a case only it refuses.
+and `::TestFindingsToAsk`, each filter held by a case only it refuses; and,
+for the block, `tests/unit/test_jev_questions.py::TestTheSubjectsSentAsOneState`,
+which holds `same_state_subjects` to the hash of what each registered set
+sends, `test_jev_repo.py::TestHypothesesToAsk` and `::TestWhatSuggestionsReads`
+each way round, and
+`tests/integration/test_jev_findings.py::TestABlockOnTheSameWordsHoldsBothTitles`,
+the planner, `preview` and `suggestions` end to end on rows the shipped jobs
+wrote.
 
 **The chips** (the scope's 3, sixth point; design sections 6.1 and 6.4).
 `jev_chips` is pure, the standard library alone, and API-importable

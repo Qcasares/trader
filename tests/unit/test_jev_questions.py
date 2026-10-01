@@ -82,6 +82,7 @@ from typing_extensions import TypedDict
 
 from src.programme import jev_catalogue
 from src.programme import jev_questions as jq
+from src.programme.jev_hash import state_hash
 from src.programme.jev_questions import QuestionSet
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1864,6 +1865,93 @@ class TestTheFindingTitle:
             jq.FINDINGS_OWNER.dump_state(jq.HypothesisTitleState(title="x"))
         with pytest.raises(TypeError):
             jq.GUARDRAIL_CARD.dump_state(jq.FindingTitleState(title="x"))
+
+
+class TestTheSubjectsSentAsOneState:
+    """
+    D2's review (D2RS-1, D2RT-1). The road holds a vendor's content block by
+    the hash of the state sent, across every set and subject (``jev_lane``,
+    step 4), and a hypothesis's title and a finding's holding the same words
+    are sent as one state, ``{"title": …}``. The planner's reads and
+    ``suggestions`` hold a block by subject, so each reads the subject types
+    sent as the same state through ``jev_questions.same_state_subjects``,
+    held here to the hash of what each registered set sends.
+    """
+
+    def test_the_two_titles_are_one_state_and_an_excerpt_another(self) -> None:
+        titles = ("hypothesis_title", "finding_title")
+        assert jq.same_state_subjects("hypothesis_title") == titles
+        assert jq.same_state_subjects("finding_title") == titles
+        assert jq.same_state_subjects("web_excerpt") == ("web_excerpt",)
+
+    @pytest.mark.parametrize("subject_type", ["probe", "session", "not_a_subject"])
+    def test_a_subject_that_is_not_text_is_held_by_no_block(
+        self, subject_type: str
+    ) -> None:
+        """The road holds an enumerated state by no block (open item 36)."""
+        assert jq.same_state_subjects(subject_type) == ()
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "x",
+            "Invented Fills Assumed at Prices No Venue Gave",
+            "€" * jq.FINDING_TITLE_MAX_CHARS,
+            'An "invented" back\\slash, a tab\tand a line\nbreak',
+        ],
+        ids=["one-character", "a-title", "at-the-smallest-cap", "escaped"],
+    )
+    def test_it_is_the_roads_own_identity(self, text: str) -> None:
+        """
+        For every pair of registered sets asking about text, what each sends
+        about the same words has one state hash exactly when each subject is
+        among the other's same-state subjects: the identity the road holds a
+        block by, read from what is sent rather than from the tables.
+        """
+        asking = [
+            question_set
+            for question_set in jq.REGISTRY.values()
+            if question_set.state_model in jq.TEXT_SUBJECT_FIELD
+        ]
+        assert {jq.STATE_SUBJECT[q.state_model] for q in asking} == set(
+            jq.TEXT_SUBJECT_PROVENANCE
+        ), "a text subject no registered set asks about would go unchecked"
+        sent = {
+            question_set.name: question_set.dump_state(
+                question_set.state_model(
+                    **{jq.TEXT_SUBJECT_FIELD[question_set.state_model]: text}
+                )
+            )
+            for question_set in asking
+        }
+        for one, other in itertools.product(asking, repeat=2):
+            same = state_hash(sent[one.name]) == state_hash(sent[other.name])
+            shared = jq.STATE_SUBJECT[other.state_model] in jq.same_state_subjects(
+                jq.STATE_SUBJECT[one.state_model]
+            )
+            assert same == shared, (one.name, other.name)
+
+    def test_only_a_text_sent_alone_under_one_field_shares_a_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A test-only model sending its text alone as ``title`` is sent as the
+        titles are, so it joins them; one sending a ``title`` beside other
+        fields is another state for the same words, so it shares with nothing
+        but itself, and no title's block is read as its own.
+        """
+        _with_subject(monkeypatch, _Titled, "test_titled", "title")
+        _with_subject(monkeypatch, _Labelled, "test_labelled", "title")
+        titles = ("hypothesis_title", "finding_title", "test_titled")
+        for subject_type in titles:
+            assert jq.same_state_subjects(subject_type) == titles, subject_type
+        assert jq.same_state_subjects("test_labelled") == ("test_labelled",)
+        alone = _Titled(title="Invented").model_dump(mode="json")
+        beside = _Labelled(title="Invented", kind="idea", urgent=False).model_dump(
+            mode="json"
+        )
+        assert state_hash(alone) == state_hash({"title": "Invented"})
+        assert state_hash(beside) != state_hash(alone)
 
 
 #: Each text state model and the constant its length cap is read from, as the
