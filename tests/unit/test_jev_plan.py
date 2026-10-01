@@ -47,6 +47,7 @@ FLAG_QUERY = "SELECT value FROM system_flags WHERE key = $1"
 MODEL = jev_catalogue.DEFAULT_MODEL
 AREA_DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
 AREA_RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
+AREA_GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
 
 #: Monday 2026-09-28, 14:00 UTC: before the day's cutoff.
 MORNING = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
@@ -90,6 +91,13 @@ class Queue:
     canonical: list[dict[str, Any]] = field(default_factory=list)
     quarantined: set[str] = field(default_factory=set)
     canonical_asked: list[tuple[datetime, datetime]] = field(default_factory=list)
+    #: What each subject read returns (phases C7 and C8), and every read made.
+    screens: list[dict[str, Any]] = field(default_factory=list)
+    descriptions: list[dict[str, Any]] = field(default_factory=list)
+    titles: list[dict[str, Any]] = field(default_factory=list)
+    subject_reads: list[dict[str, Any]] = field(default_factory=list)
+    auth_held: bool = False
+    refused_sets: set[str] = field(default_factory=set)
 
     async def enqueue(self, *args: Any, **kwargs: Any) -> Any:
         bound = _ENQUEUE.bind(*args, **kwargs)
@@ -126,6 +134,73 @@ class Queue:
     async def content_quarantined(self, conn: Any, content_sha256: str) -> int | None:
         return 1 if content_sha256 in self.quarantined else None
 
+    async def pending_asks(self, conn: Any, sets: Any) -> int:
+        return sum(
+            1
+            for job in self.jobs.values()
+            if job["kind"] == "jev_ask"
+            and job["payload"]["set"] in sets
+            and job["status"] in ("queued", "running")
+        )
+
+    async def auth_failed_today(self, conn: Any) -> bool:
+        return self.auth_held
+
+    async def set_refused(
+        self, conn: Any, *, question_set: str, version: int, model: str
+    ) -> bool:
+        return question_set in self.refused_sets
+
+    async def documents_to_screen(
+        self, conn: Any, *, screen: Any, model: str, limit: int, day: date
+    ) -> list[dict[str, Any]]:
+        self.subject_reads.append(
+            {
+                "read": "screen",
+                "set": screen,
+                "model": model,
+                "limit": limit,
+                "day": day,
+            }
+        )
+        return self.screens[:limit]
+
+    async def documents_to_describe(
+        self,
+        conn: Any,
+        *,
+        screen: Any,
+        catalogue: Any,
+        model: str,
+        limit: int,
+        day: date,
+    ) -> list[dict[str, Any]]:
+        self.subject_reads.append(
+            {
+                "read": "describe",
+                "set": catalogue,
+                "screen": screen,
+                "model": model,
+                "limit": limit,
+                "day": day,
+            }
+        )
+        return self.descriptions[:limit]
+
+    async def hypotheses_to_ask(
+        self, conn: Any, *, question_set: Any, model: str, limit: int, day: date
+    ) -> list[dict[str, Any]]:
+        self.subject_reads.append(
+            {
+                "read": "titles",
+                "set": question_set,
+                "model": model,
+                "limit": limit,
+                "day": day,
+            }
+        )
+        return self.titles[:limit]
+
 
 @pytest.fixture
 def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
@@ -137,6 +212,12 @@ def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
         "pending_jobs",
         "canonical_requests_between",
         "content_quarantined",
+        "pending_asks",
+        "auth_failed_today",
+        "set_refused",
+        "documents_to_screen",
+        "documents_to_describe",
+        "hypotheses_to_ask",
     ):
         monkeypatch.setattr(jev_repo, name, getattr(fake, name))
     return fake
@@ -161,14 +242,22 @@ PROGRAMME = ["true", "false", '"true"', None]
 JEV = ["true", "false", None]
 DECISIONS = ["true", "false", None]
 RESEARCH = ["true", "false", '"true"', None]
+GUARDRAILS = ["true", "false", None]
 PIN = [json.dumps(MODEL), json.dumps("jev-latest"), None]
 KEY = [True, False]
+
+#: One subject for each of the subject reads (phases C7 and C8), invented.
+SCREEN_SUBJECT = {"content_sha256": "a1" * 32, "document_id": 7, "blocked": False}
+DESCRIBE_SUBJECT = {"content_sha256": "c3" * 32, "document_id": 9}
+TITLE_SUBJECT = {"subject_id": "b2" * 32, "ref": "H-0007"}
 
 
 class TestItIsDark:
     @pytest.mark.parametrize(
-        ("programme", "jev", "decisions", "research", "pin", "key"),
-        list(itertools.product(PROGRAMME, JEV, DECISIONS, RESEARCH, PIN, KEY)),
+        ("programme", "jev", "decisions", "research", "guardrails", "pin", "key"),
+        list(
+            itertools.product(PROGRAMME, JEV, DECISIONS, RESEARCH, GUARDRAILS, PIN, KEY)
+        ),
     )
     async def test_nothing_unless_every_switch_the_pin_and_a_key_allow_it(
         self,
@@ -177,15 +266,25 @@ class TestItIsDark:
         jev: str | None,
         decisions: str | None,
         research: str | None,
+        guardrails: str | None,
         pin: str | None,
         key: bool,
     ) -> None:
+        """
+        From phases C7 and C8 the matrix has the guardrails area too, and a
+        subject waiting for every set, so an ask planned without its area, or
+        not planned with it, shows here.
+        """
+        queue.screens = [SCREEN_SUBJECT]
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
         rows = _switches(
             **{
                 flags.PROGRAMME_ENABLED: programme,
                 flags.JEV_ENABLED: jev,
                 AREA_DECISIONS: decisions,
                 AREA_RESEARCH: research,
+                AREA_GUARDRAILS: guardrails,
                 flags.JEV_MODEL: pin,
             }
         )
@@ -193,14 +292,28 @@ class TestItIsDark:
         open_ = programme == "true" and jev == "true" and pin == json.dumps(MODEL)
         if not (open_ and key):
             assert planned == [] and queue.jobs == {}
+            assert queue.subject_reads == []
             return
         kinds = {queue.jobs[k]["kind"] for k in planned}
         expected = {"jev_probe"}
         if decisions == "true":
             expected |= {"ingest_reference_bars", "jev_regime"}
         if research == "true":
-            expected.add("jev_web_ingest")
+            expected |= {"jev_web_ingest", "jev_ask"}
+        if guardrails == "true":
+            expected.add("jev_ask")
         assert kinds == expected, "a rule planned without its area, or not with it"
+        asked = {
+            queue.jobs[k]["payload"]["set"]
+            for k in planned
+            if queue.jobs[k]["kind"] == "jev_ask"
+        }
+        sets: set[str] = set()
+        if guardrails == "true":
+            sets |= {"guardrail.injection", "guardrail.card"}
+        if research == "true":
+            sets |= {"research.catalogue", "research.hypothesis"}
+        assert asked == sets, "a set asked without its own area, or not with it"
 
     async def test_with_no_key_not_even_a_switch_is_read(self, queue: Queue) -> None:
         conn = _Conn(_switches())
@@ -385,9 +498,7 @@ class TestTheWebIngest:
         assert "jev_web_ingest:pwb-readme:2026-09-29" in planned
         assert not [k for k in queue.jobs if k.endswith("2026-09-28")]
 
-    async def test_planning_again_the_same_day_adds_nothing(
-        self, queue: Queue
-    ) -> None:
+    async def test_planning_again_the_same_day_adds_nothing(self, queue: Queue) -> None:
         rows = _switches(**self.RESEARCH_ON)
         await _plan(rows)
         for status in ("queued", "running", "succeeded", "failed"):
@@ -689,3 +800,255 @@ class TestTheReasks:
         queue.jobs.clear()
         second = [k for k in await _plan() if k.startswith("jev_reask")]
         assert first == second and first
+
+
+# ---------------------------------------------------------------------------
+# The asks (phases C7 and C8)
+# ---------------------------------------------------------------------------
+
+#: Both areas the asks need, and not the forward clock's.
+ASKS_ON = {AREA_DECISIONS: "false", AREA_RESEARCH: "true", AREA_GUARDRAILS: "true"}
+
+
+def _asks(queue: Queue, name: str | None = None) -> list[dict[str, Any]]:
+    return [
+        job
+        for job in queue.jobs.values()
+        if job["kind"] == "jev_ask" and name in (None, job["payload"]["set"])
+    ]
+
+
+def _screens(n: int, *, blocked: int = 0) -> list[dict[str, Any]]:
+    """``n`` contents for the screen, the first ``blocked`` with a block on record."""
+    return [
+        {"content_sha256": f"{i:064x}", "document_id": i, "blocked": i <= blocked}
+        for i in range(1, n + 1)
+    ]
+
+
+class TestTheAsks:
+    """
+    Phases C7 and C8: each set behind its own lane's area, no more of it a
+    pass than its cap, within its lane's share, what the subject reads return
+    and nothing else, and never the text in a payload.
+    """
+
+    def test_the_sets_and_their_caps_are_the_designs(self) -> None:
+        from src.programme import jev_jobs
+
+        assert dict(jev_plan.ASKS_PER_PASS) == {
+            "guardrail.injection": 25,
+            "guardrail.card": 10,
+            "research.catalogue": 25,
+            "research.hypothesis": 10,
+        }
+        assert set(jev_plan.ASKS_PER_PASS) == set(jev_jobs.ASKABLE)
+        assert (jev_plan.ASK_PRIORITY, jev_plan.ASK_ATTEMPTS) == (0, 3)
+        assert jev_plan.ASK_ATTEMPTS == jev_repo.MAX_FAILED_CALLS
+        assert jev_plan.REASK_PRIORITY < jev_plan.ASK_PRIORITY
+        assert jev_plan.ASK_PRIORITY < jev_plan.INGEST_PRIORITY
+
+    async def test_each_subject_is_one_job_naming_its_row_and_never_its_text(
+        self, queue: Queue
+    ) -> None:
+        queue.screens = [SCREEN_SUBJECT]
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        planned = await _plan(_switches(**ASKS_ON))
+        day = "2026-09-28"
+        web, title, described = "a1" * 32, "b2" * 32, "c3" * 32
+        expected = {
+            f"jev_ask:guardrail.injection@1:web_excerpt:{web}:{day}": (
+                "web_excerpt",
+                web,
+                7,
+            ),
+            f"jev_ask:guardrail.card@1:hypothesis_title:{title}:{day}": (
+                "hypothesis_title",
+                title,
+                "H-0007",
+            ),
+            f"jev_ask:research.catalogue@1:web_excerpt:{described}:{day}": (
+                "web_excerpt",
+                described,
+                9,
+            ),
+            f"jev_ask:research.hypothesis@1:hypothesis_title:{title}:{day}": (
+                "hypothesis_title",
+                title,
+                "H-0007",
+            ),
+        }
+        assert [k for k in planned if k.startswith("jev_ask:")] == list(expected)
+        for key, (subject_type, subject_id, source_id) in expected.items():
+            job = queue.jobs[key]
+            name = key.split(":")[1].split("@")[0]
+            assert job["kind"] == "jev_ask"
+            assert job["payload"] == {
+                "set": name,
+                "version": 1,
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "source_id": source_id,
+            }
+            assert (job["priority"], job["max_attempts"]) == (0, 3)
+            assert job["scheduled_for"] == MORNING
+            assert key == jev_repo.ask_job_key(
+                name, 1, subject_type, subject_id, date(2026, 9, 28)
+            )
+
+    async def test_each_read_is_for_its_set_the_pin_today_and_the_pass_cap(
+        self, queue: Queue
+    ) -> None:
+        from src.programme import jev_questions
+
+        await _plan(_switches(**ASKS_ON))
+        reads = {(read["read"], read["set"].name): read for read in queue.subject_reads}
+        assert set(reads) == {
+            ("screen", "guardrail.injection"),
+            ("titles", "guardrail.card"),
+            ("describe", "research.catalogue"),
+            ("titles", "research.hypothesis"),
+        }
+        for (_, name), read in reads.items():
+            assert read["set"] is jev_questions.REGISTRY[name]
+            assert read["model"] == MODEL
+            assert read["day"] == date(2026, 9, 28)
+            assert read["limit"] == jev_plan.ASKS_PER_PASS[name]
+        screen = reads[("describe", "research.catalogue")]["screen"]
+        assert screen is jev_questions.REGISTRY["guardrail.injection"]
+
+    async def test_the_day_is_the_utc_days(self, queue: Queue) -> None:
+        queue.screens = [SCREEN_SUBJECT]
+        night = datetime(2026, 9, 29, 1, 0, tzinfo=UTC)
+        planned = await _plan(_switches(**ASKS_ON), now=night)
+        assert [k for k in planned if k.startswith("jev_ask:")] == [
+            f"jev_ask:guardrail.injection@1:web_excerpt:{'a1' * 32}:2026-09-29"
+        ]
+
+    async def test_no_more_of_a_set_a_pass_than_its_cap(self, queue: Queue) -> None:
+        queue.screens = _screens(40)
+        queue.titles = [
+            {"subject_id": f"{i:064x}", "ref": f"H-{i:04d}"} for i in range(1, 30)
+        ]
+        await _plan(_switches(**ASKS_ON))
+        assert len(_asks(queue, "guardrail.injection")) == 25
+        assert len(_asks(queue, "guardrail.card")) == 10
+        assert len(_asks(queue, "research.hypothesis")) == 10
+
+    async def test_never_beyond_the_lanes_share(self, queue: Queue) -> None:
+        """
+        A budget of 10 gives the guardrail and research lanes 3 calls each;
+        the screen, planned first, takes the guardrail lane's three, and the
+        card check none.
+        """
+        assert jev_catalogue.lane_budget(10, "guardrail") == 3
+        queue.screens = _screens(10)
+        queue.titles = [TITLE_SUBJECT]
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert len(_asks(queue, "guardrail.injection")) == 3
+        assert _asks(queue, "guardrail.card") == []
+        assert len(_asks(queue, "research.hypothesis")) == 1
+
+    async def test_one_call_left_plans_one_ask(self, queue: Queue) -> None:
+        queue.screens = _screens(10)
+        queue.calls_today["guardrail"] = 2
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert len(_asks(queue, "guardrail.injection")) == 1
+
+    async def test_asks_already_waiting_count_against_their_lane(
+        self, queue: Queue
+    ) -> None:
+        """
+        Three card checks queued from an earlier pass fill the guardrail lane's
+        three calls, so no screen is planned; the research lane's are its own.
+        """
+        for n in range(3):
+            queue.jobs[f"elsewhere:{n}"] = {
+                "kind": "jev_ask",
+                "status": "queued" if n else "running",
+                "payload": {"set": "guardrail.card"},
+            }
+        queue.screens = _screens(5)
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert _asks(queue, "guardrail.injection") == []
+        assert len(_asks(queue, "research.catalogue")) == 1
+
+    async def test_finished_asks_do_not_count_against_the_lane(
+        self, queue: Queue
+    ) -> None:
+        for n, status in enumerate(("succeeded", "failed", "cancelled")):
+            queue.jobs[f"elsewhere:{n}"] = {
+                "kind": "jev_ask",
+                "status": status,
+                "payload": {"set": "guardrail.card"},
+            }
+        queue.screens = _screens(5)
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert len(_asks(queue, "guardrail.injection")) == 3
+
+    async def test_content_a_block_is_on_record_for_is_planned_with_no_call_left(
+        self, queue: Queue
+    ) -> None:
+        """
+        The screen's ask about blocked content makes no call — the road refuses
+        it for the block, and its follow-up quarantines the content — so it is
+        planned when the lane has no call left, and takes none.
+        """
+        queue.calls_today["guardrail"] = 3
+        queue.screens = _screens(4, blocked=2)
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert [job["payload"]["source_id"] for job in _asks(queue)] == [1, 2]
+
+    async def test_nothing_is_asked_while_an_authentication_failure_holds(
+        self, queue: Queue
+    ) -> None:
+        queue.auth_held = True
+        queue.screens = _screens(2)
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        planned = await _plan(_switches(**ASKS_ON))
+        assert _asks(queue) == [] and queue.subject_reads == []
+        assert "jev_probe:2026-09-28" in planned
+
+    async def test_a_set_the_vendor_refused_is_not_asked(self, queue: Queue) -> None:
+        queue.refused_sets = {"guardrail.injection"}
+        queue.screens = _screens(2)
+        queue.titles = [TITLE_SUBJECT]
+        await _plan(_switches(**ASKS_ON))
+        assert _asks(queue, "guardrail.injection") == []
+        assert len(_asks(queue, "guardrail.card")) == 1
+
+    async def test_a_set_not_registered_is_not_asked(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """And the catalogue is asked about nothing with no screen to clear it."""
+        from src.programme import jev_questions
+
+        monkeypatch.delitem(jev_questions.REGISTRY, "guardrail.injection")
+        queue.screens = _screens(2)
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        await _plan(_switches(**ASKS_ON))
+        assert {job["payload"]["set"] for job in _asks(queue)} == {
+            "guardrail.card",
+            "research.hypothesis",
+        }
+
+    async def test_planning_again_the_same_day_adds_nothing(self, queue: Queue) -> None:
+        queue.screens = [SCREEN_SUBJECT]
+        rows = _switches(**ASKS_ON)
+        await _plan(rows)
+        before = dict(queue.jobs)
+        assert [k for k in await _plan(rows) if k.startswith("jev_ask:")] == []
+        assert queue.jobs == before
+        later = await _plan(rows, now=MORNING + timedelta(days=1))
+        assert [k for k in later if k.startswith("jev_ask:")] == [
+            f"jev_ask:guardrail.injection@1:web_excerpt:{'a1' * 32}:2026-09-29"
+        ]
+
+    async def test_the_areas_are_read_by_their_own_reader(self, queue: Queue) -> None:
+        conn = _Conn(_switches(**ASKS_ON))
+        await jev_plan.plan(conn, now=MORNING, key_available=True)
+        assert {AREA_GUARDRAILS, AREA_RESEARCH} <= set(conn.asked)

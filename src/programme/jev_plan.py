@@ -43,6 +43,21 @@ Each with the area it needs, what it enqueues, when, and under which key:
   ``jev_web_ingest:{source}:{UTC date}``, with the payload ``{"source":
   <name>}`` and nothing else: the page fetched is the allow-list's, never one a
   payload names.
+* **The asks** (phases C7 and C8) — each set its lane's area; ``jev_ask``,
+  now, under ``jev_ask:{set}@{version}:{subject_type}:{subject_id}:{UTC
+  date}`` (``jev_repo.ask_job_key``), at most :data:`ASKS_PER_PASS` of a set
+  a pass: the injection screen (25) and the card check (10) behind
+  guardrails, the catalogue (25) and the hypothesis categories (10) behind
+  research. The payload names the set, its version, the subject and the row
+  its text is read from, never the text. The subjects are ``jev_repo``'s
+  reads: stored content the screen has not answered, content a block is on
+  record for first; content the screen cleared, for the catalogue, and never
+  any other; model-written hypothesis titles within their cap, newest first.
+  Each read leaves out a subject whose job is waiting or was planned today,
+  and retires one after three failed calls; the day in the key lets a later
+  day's plan ask again about a subject whose job failed. No ask is planned
+  while an authentication failure recorded today holds every lane, nor of a
+  set the vendor refused with a 422 at its version under the pin.
 
 The daily probe proves each day, on a fixed state whose answer is known, that
 the key, the pin and the validator still work, and gives a daily series of the
@@ -58,8 +73,10 @@ Spend
 ~~~~~
 A job that makes a call is enqueued only while its lane's share of the day's
 budget (``jev_catalogue.LANE_BUDGET_PERCENT``) has a call left once the calls
-already made today and the jobs already waiting are counted. The reference job
-and the web ingest make no call. Every enqueue names its kind as a literal, so
+already made today and the jobs already waiting are counted: the ``jev_ask``
+jobs of a lane's sets among them, from phase C7. The reference job, the web
+ingest and the screen's ask about content a block is on record for make no
+call. Every enqueue names its kind as a literal, so
 ``tests/unit/test_job_ownership.py`` can hold each to exactly one owner, and the
 reference job's priority by name (``REFERENCE_PRIORITY``), which a test holds
 below every kind on the live path, so the worker claims the live ingest first.
@@ -77,8 +94,9 @@ spanned thirty seconds (docs/08 open item 39).
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
+from types import MappingProxyType
 from typing import Any
 
 import asyncpg
@@ -114,6 +132,31 @@ INGEST_ATTEMPTS = 3
 
 #: The area the web ingest needs.
 INGEST_AREA = "research"
+
+#: The ``jev_ask`` jobs (phases C7 and C8): behind the forward clock, the
+#: probe and the web ingest, ahead of the re-asks; three attempts, the failed
+#: calls that retire a subject (``jev_repo.MAX_FAILED_CALLS``).
+ASK_PRIORITY = 0
+ASK_ATTEMPTS = 3
+
+#: Every set a ``jev_ask`` job asks, with the most one pass may plan of it
+#: (design C7 and C8). Each is planned behind its own lane's area, within its
+#: lane's share: the injection screen and the card check the guardrails',
+#: the catalogue and the hypothesis categories the research area's.
+ASKS_PER_PASS: Mapping[str, int] = MappingProxyType(
+    {
+        "guardrail.injection": 25,
+        "guardrail.card": 10,
+        "research.catalogue": 25,
+        "research.hypothesis": 10,
+    }
+)
+
+#: The catalogue's set: asked only about content the screen cleared.
+CATALOGUE_SET_NAME = "research.catalogue"
+
+#: The two sets asked about a hypothesis's title.
+TITLE_SET_NAMES = ("guardrail.card", "research.hypothesis")
 
 #: The forward clock's job: above the probe and every research ask, since a
 #: session missed is missed for good; and with the queue's backoff, 20
@@ -158,11 +201,22 @@ LANE_KINDS: Mapping[str, tuple[str, ...]] = {
 REGIME_SET_NAME = "decision.regime"
 
 
+def _lane_asks(lane: str) -> tuple[str, ...]:
+    """The sets a ``jev_ask`` job asks whose answers are recorded in ``lane``."""
+    return tuple(
+        name
+        for name in ASKS_PER_PASS
+        if (question_set := jev_questions.REGISTRY.get(name)) is not None
+        and question_set.lane == lane
+    )
+
+
 class _Room:
     """
     Calls each lane may still be planned today: its share of the budget, less
     the calls it made since UTC midnight, less the jobs already waiting to make
-    one. Read once a pass and counted down as jobs are planned.
+    one — of its kinds, and, from phase C7, the ``jev_ask`` jobs of its sets.
+    Read once a pass and counted down as jobs are planned.
     """
 
     def __init__(self, conn: asyncpg.Connection, budget: int) -> None:
@@ -174,7 +228,11 @@ class _Room:
         if lane not in self._left:
             share = jev_catalogue.lane_budget(self._budget, lane)
             spent = await jev_repo.requests_today(self._conn, lane)
-            waiting = await jev_repo.pending_jobs(self._conn, LANE_KINDS[lane])
+            waiting = 0
+            if kinds := LANE_KINDS.get(lane, ()):
+                waiting += await jev_repo.pending_jobs(self._conn, kinds)
+            if sets := _lane_asks(lane):
+                waiting += await jev_repo.pending_asks(self._conn, sets)
             self._left[lane] = share - spent - waiting
         return self._left[lane]
 
@@ -210,6 +268,7 @@ async def plan(
         planned += await _plan_clock(conn, now, room)
     if await flags.jev_area_enabled(conn, INGEST_AREA):
         planned += await _plan_ingest(conn, now)
+    planned += await _plan_asks(conn, now, model, room)
     planned += await _plan_reasks(conn, now, model, room)
     if planned:
         logger.info("Jev planner queued %s", ", ".join(planned))
@@ -315,6 +374,129 @@ async def _plan_ingest(conn: asyncpg.Connection, now: datetime) -> list[str]:
     return planned
 
 
+async def _plan_asks(
+    conn: asyncpg.Connection, now: datetime, model: str, room: _Room
+) -> list[str]:
+    """
+    The ``jev_ask`` jobs (phases C7 and C8), set by set, each behind its own
+    lane's area: at most :data:`ASKS_PER_PASS` of a set a pass, a job that can
+    make a call only while its lane's share has one left, due now, under
+    ``jev_repo.ask_job_key``. What each set is asked about is ``jev_repo``'s
+    to read: :func:`jev_repo.documents_to_screen`,
+    :func:`jev_repo.documents_to_describe` — content the screen cleared, and
+    nothing else — and :func:`jev_repo.hypotheses_to_ask`.
+
+    Nothing while an authentication failure recorded today holds every lane,
+    and nothing of a set the vendor refused with a 422 at its version under
+    the pin: the road would refuse each such ask before any call, so each job
+    would only fail.
+    """
+    if await jev_repo.auth_failed_today(conn):
+        return []
+    day = now.astimezone(UTC).date()
+    planned: list[str] = []
+    for name in ASKS_PER_PASS:
+        question_set = jev_questions.REGISTRY.get(name)
+        if question_set is None:
+            continue
+        area = jev_catalogue.LANE_AREA.get(question_set.lane)
+        if area is None or not await flags.jev_area_enabled(conn, area):
+            continue
+        if await jev_repo.set_refused(
+            conn, question_set=name, version=question_set.version, model=model
+        ):
+            continue
+        subjects = await _ask_subjects(conn, question_set, model, day)
+        planned += await _enqueue_asks(conn, now, question_set, subjects, room)
+    return planned
+
+
+async def _ask_subjects(
+    conn: asyncpg.Connection,
+    question_set: jev_questions.QuestionSet,
+    model: str,
+    day: date,
+) -> list[tuple[str, object, bool]]:
+    """
+    What ``question_set`` is to be asked about: each subject's address, the
+    row its text is read from, and whether its ask can make a call. Only the
+    screen's ask about content a block is on record for cannot: the road
+    refuses it for the block before any call, and its follow-up quarantines
+    the content.
+    """
+    limit = ASKS_PER_PASS[question_set.name]
+    if question_set.name == jev_questions.SCREEN_SET_NAME:
+        rows = await jev_repo.documents_to_screen(
+            conn, screen=question_set, model=model, limit=limit, day=day
+        )
+        return [
+            (row["content_sha256"], row["document_id"], not row["blocked"])
+            for row in rows
+        ]
+    if question_set.name == CATALOGUE_SET_NAME:
+        screen = jev_questions.REGISTRY.get(jev_questions.SCREEN_SET_NAME)
+        if screen is None:
+            return []
+        rows = await jev_repo.documents_to_describe(
+            conn,
+            screen=screen,
+            catalogue=question_set,
+            model=model,
+            limit=limit,
+            day=day,
+        )
+        return [(row["content_sha256"], row["document_id"], True) for row in rows]
+    if question_set.name in TITLE_SET_NAMES:
+        rows = await jev_repo.hypotheses_to_ask(
+            conn, question_set=question_set, model=model, limit=limit, day=day
+        )
+        return [(row["subject_id"], row["ref"], True) for row in rows]
+    return []
+
+
+async def _enqueue_asks(
+    conn: asyncpg.Connection,
+    now: datetime,
+    question_set: jev_questions.QuestionSet,
+    subjects: Sequence[tuple[str, object, bool]],
+    room: _Room,
+) -> list[str]:
+    """
+    One ``jev_ask`` job for each subject, in the order given, until the lane's
+    share has no call left: the payload names the set, its version, the
+    subject and the row its text is read from, never the text.
+    """
+    day = now.astimezone(UTC).date()
+    subject_type = jev_questions.STATE_SUBJECT[question_set.state_model]
+    planned: list[str] = []
+    for subject_id, source_id, calls in subjects:
+        if calls and await room.left(question_set.lane) <= 0:
+            break
+        key = jev_repo.ask_job_key(
+            question_set.name, question_set.version, subject_type, subject_id, day
+        )
+        added = await job_repo.enqueue(
+            conn,
+            "jev_ask",
+            {
+                "set": question_set.name,
+                "version": question_set.version,
+                "subject_type": subject_type,
+                "subject_id": subject_id,
+                "source_id": source_id,
+            },
+            priority=ASK_PRIORITY,
+            max_attempts=ASK_ATTEMPTS,
+            scheduled_for=now,
+            dedupe_key=key,
+        )
+        if calls:
+            room.take(question_set.lane)
+        if added is not None:
+            planned.append(key)
+    return planned
+
+
 async def _plan_reasks(
     conn: asyncpg.Connection, now: datetime, model: str, room: _Room
 ) -> list[str]:
@@ -398,6 +580,10 @@ async def _queued(conn: asyncpg.Connection, key: str) -> bool:
 
 
 __all__ = [
+    "ASKS_PER_PASS",
+    "ASK_ATTEMPTS",
+    "ASK_PRIORITY",
+    "CATALOGUE_SET_NAME",
     "INGEST_AREA",
     "INGEST_ATTEMPTS",
     "INGEST_PRIORITY",
@@ -410,6 +596,7 @@ __all__ = [
     "REGIME_ATTEMPTS",
     "REGIME_PRIORITY",
     "RETRY_BACKOFF_STEP",
+    "TITLE_SET_NAMES",
     "attempts_spanning",
     "plan",
 ]

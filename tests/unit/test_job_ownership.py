@@ -1387,6 +1387,7 @@ def test_the_programme_owns_the_forward_clock_and_the_reasks() -> None:
         "jev_reask",
         "ingest_reference_bars",
         "jev_web_ingest",
+        "jev_ask",
     ):
         assert kinds.get(kind) == {"src/programme/jev_plan.py"}, (kind, kinds.get(kind))
     assert "ingest_reference_bars" in HANDLERS

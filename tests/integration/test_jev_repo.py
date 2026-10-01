@@ -47,7 +47,7 @@ import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
-from src.programme import jev_clock, jev_repo  # noqa: E402
+from src.programme import jev_clock, jev_questions, jev_repo  # noqa: E402
 from src.programme.jev_hash import text_sha256  # noqa: E402
 
 TEST_DSN = os.environ.get("TEST_DATABASE_URL", "")
@@ -1907,3 +1907,471 @@ class TestThePlannerOnAQueueWithHistory:
             "jev_regime:decision.regime@1:2026-09-28",
             "jev_regime:decision.regime@1:2026-09-29",
         ]
+
+
+# ---------------------------------------------------------------------------
+# What each set is to be asked about (phases C7 and C8)
+# ---------------------------------------------------------------------------
+#
+# The planner's unit rig fakes these reads, so every filter of each is held
+# here, on the shipped schema, by a case only that filter refuses.
+
+SCREEN = jev_questions.GUARDRAIL_INJECTION
+CATALOGUE = jev_questions.RESEARCH_CATALOGUE
+HYPOTHESIS = jev_questions.RESEARCH_HYPOTHESIS
+TODAY = date(2026, 9, 28)
+
+
+def _about(asked: Any, text: str, /, **overrides: Any) -> dict[str, Any]:
+    """A request's fields for the set ``asked`` about ``text``."""
+    web = asked.state_model is jev_questions.WebExcerptState
+    return {
+        "question_set": asked.name,
+        "question_set_version": asked.version,
+        "pack_hash": asked.pack_hash,
+        "lane": asked.lane,
+        "provenance": asked.provenance,
+        "subject_type": "web_excerpt" if web else "hypothesis_title",
+        "subject_id": text_sha256(text),
+        **overrides,
+    }
+
+
+async def _asked(
+    conn: asyncpg.Connection,
+    asked: Any,
+    text: str,
+    status: str = "ok",
+    /,
+    answers: tuple[Answer, ...] | None = None,
+    **overrides: Any,
+) -> int:
+    """One request of the set ``asked`` about ``text``, as the lane records one."""
+    status = overrides.pop("status", status)
+    if answers is None and asked is SCREEN and status == "ok":
+        answers = (CLEAR,)
+    return await _record(
+        conn, status, answers=answers, **_about(asked, text, **overrides)
+    )
+
+
+async def _to_screen(conn: asyncpg.Connection, **kwargs: Any) -> list[dict[str, Any]]:
+    arguments = {"screen": SCREEN, "model": MODEL, "limit": 25, "day": TODAY}
+    return await jev_repo.documents_to_screen(conn, **{**arguments, **kwargs})
+
+
+async def _to_describe(conn: asyncpg.Connection, **kwargs: Any) -> list[dict[str, Any]]:
+    arguments = {
+        "screen": SCREEN,
+        "catalogue": CATALOGUE,
+        "model": MODEL,
+        "limit": 25,
+        "day": TODAY,
+    }
+    return await jev_repo.documents_to_describe(conn, **{**arguments, **kwargs})
+
+
+async def _titles(conn: asyncpg.Connection, **kwargs: Any) -> list[dict[str, Any]]:
+    arguments = {"question_set": HYPOTHESIS, "model": MODEL, "limit": 10, "day": TODAY}
+    return await jev_repo.hypotheses_to_ask(conn, **{**arguments, **kwargs})
+
+
+async def _ask_job(
+    conn: asyncpg.Connection,
+    question_set: Any,
+    subject_id: str,
+    *,
+    status: str = "queued",
+    day: date = TODAY,
+) -> uuid.UUID:
+    """A ``jev_ask`` job as the planner enqueues one, under its key."""
+    web = question_set.state_model is jev_questions.WebExcerptState
+    subject_type = "web_excerpt" if web else "hypothesis_title"
+    return await _job(
+        conn,
+        "jev_ask",
+        status=status,
+        key=jev_repo.ask_job_key(
+            question_set.name, question_set.version, subject_type, subject_id, day
+        ),
+        payload={
+            "set": question_set.name,
+            "version": question_set.version,
+            "subject_type": subject_type,
+            "subject_id": subject_id,
+            "source_id": 1,
+        },
+    )
+
+
+def _subjects(rows: list[dict[str, Any]], key: str = "content_sha256") -> list[str]:
+    return [row[key] for row in rows]
+
+
+class TestTheAskKey:
+    def test_it_is_the_designs(self) -> None:
+        assert (
+            jev_repo.ask_job_key(
+                "guardrail.injection", 1, "web_excerpt", "ab" * 32, TODAY
+            )
+            == f"jev_ask:guardrail.injection@1:web_excerpt:{'ab' * 32}:2026-09-28"
+        )
+
+    async def test_waiting_asks_are_counted_by_their_set(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        before = await jev_repo.pending_asks(conn, [SCREEN.name])
+        for n, status in enumerate(("queued", "running", "succeeded", "failed")):
+            await _ask_job(conn, SCREEN, f"{n:064x}", status=status)
+        await _ask_job(conn, CATALOGUE, f"{9:064x}")
+        await _job(conn, "jev_probe")
+        assert await jev_repo.pending_asks(conn, [SCREEN.name]) == before + 2
+        assert await jev_repo.pending_asks(conn, [SCREEN.name, CATALOGUE.name]) == (
+            before + 3
+        )
+        assert await jev_repo.pending_asks(conn, ["research.invented"]) == 0
+
+
+class TestDocumentsToScreen:
+    async def test_stored_content_is_asked_about_once_by_its_earliest_document(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text, other = _text(), _text()
+        first = await _document(conn, text)
+        await _document(conn, text, source="another_feed")
+        second = await _document(conn, other)
+        assert await _to_screen(conn) == [
+            {
+                "content_sha256": text_sha256(text),
+                "document_id": first,
+                "blocked": False,
+            },
+            {
+                "content_sha256": text_sha256(other),
+                "document_id": second,
+                "blocked": False,
+            },
+        ]
+
+    async def test_content_quarantined_under_any_source_is_never_asked_about(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _document(conn, text)
+        await _quarantine(conn, await _document(conn, text, source="another_feed"))
+        assert await _to_screen(conn) == []
+
+    @pytest.mark.parametrize(
+        "answer", [CLEAR, FLAGGED, TIED], ids=["cleared", "flagged", "a-tie"]
+    )
+    async def test_content_the_screen_answered_ok_is_not_asked_again(
+        self, conn: asyncpg.Connection, answer: Answer
+    ) -> None:
+        """
+        Whatever the answer said: an ``ok`` row is canonical, so a tie, which
+        measured nothing, would only replay, and holds the text where it is.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text, answers=(answer,))
+        assert await _to_screen(conn) == []
+
+    async def test_a_failed_call_is_asked_again_until_the_third(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Section 10h of the scope: a response refused whole is ``invalid``, and
+        an ``invalid`` row is never canonical, so it replays nothing and the
+        content is asked again; so is a call that failed. The third failed call
+        retires it.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text, "invalid", answers=(_invalid(CLEAR, "x"),))
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+        await _asked(conn, SCREEN, text, "error", **_failed("timeout"))
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+        await _asked(conn, SCREEN, text, "error", **_failed("server"))
+        assert await _to_screen(conn) == []
+        assert _subjects(await _to_screen(conn, max_failed=4)) == [text_sha256(text)]
+
+    @pytest.mark.parametrize(
+        "elsewhere",
+        [
+            {"lane": "probe"},
+            {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+            {"question_set_version": 2},
+            {"question_set": CATALOGUE.name, "lane": "research"},
+        ],
+        ids=["a-probe", "another-pin", "another-version", "another-set"],
+    )
+    async def test_only_the_sets_own_rows_under_the_pin_count(
+        self, conn: asyncpg.Connection, elsewhere: dict[str, Any]
+    ) -> None:
+        """
+        A probe's answer, another judge's, another version's or another set's
+        neither clears the content for this screen nor counts against it.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text, **elsewhere)
+        # A failed call names no answering model: nothing answered it.
+        failed = {k: v for k, v in elsewhere.items() if k != "model_answered"}
+        for _ in range(3):
+            await _asked(conn, SCREEN, text, "error", **_failed("timeout"), **failed)
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    async def test_content_a_block_is_on_record_for_comes_first_whatever_else(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Section 10d of the scope: content still in use with a block on record,
+        from any set, is planned for the screen, whose ask the road refuses for
+        the block and whose follow-up quarantines it — cleared, answered or
+        retired as it may be.
+        """
+        plain, blocked = _text(), _text()
+        await _document(conn, plain)
+        await _document(conn, blocked)
+        await _asked(conn, SCREEN, blocked)
+        for _ in range(3):
+            await _asked(conn, SCREEN, blocked, "error", **_failed("timeout"))
+        await _asked(conn, CATALOGUE, blocked, "error", **_failed("content_block"))
+        rows = await _to_screen(conn)
+        assert [(row["content_sha256"], row["blocked"]) for row in rows] == [
+            (text_sha256(blocked), True),
+            (text_sha256(plain), False),
+        ]
+
+    async def test_quarantined_content_is_not_asked_about_for_its_block(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _quarantine(conn, await _document(conn, text))
+        await _asked(conn, SCREEN, text, "error", **_failed("content_block"))
+        assert await _to_screen(conn) == []
+
+    @pytest.mark.parametrize(
+        ("status", "day", "excluded"),
+        [
+            ("queued", TODAY - timedelta(days=3), True),
+            ("running", TODAY - timedelta(days=1), True),
+            ("succeeded", TODAY, True),
+            ("failed", TODAY, True),
+            ("failed", TODAY - timedelta(days=1), False),
+            ("cancelled", TODAY - timedelta(days=1), False),
+        ],
+    )
+    async def test_a_subject_waiting_or_planned_today_is_left_out(
+        self, conn: asyncpg.Connection, status: str, day: date, excluded: bool
+    ) -> None:
+        """
+        A job waiting, whatever day planned it, or planned today under the
+        key, finished or not, leaves the subject out; a finished job of an
+        earlier day does not, so a later day asks again.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _ask_job(conn, SCREEN, text_sha256(text), status=status, day=day)
+        assert (await _to_screen(conn) == []) is excluded
+
+    async def test_another_sets_job_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _document(conn, text)
+        await _ask_job(conn, CATALOGUE, text_sha256(text))
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    async def test_at_most_the_limit_earliest_first(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        texts = [_text() for _ in range(5)]
+        for text in texts:
+            await _document(conn, text)
+        rows = await _to_screen(conn, limit=3)
+        assert _subjects(rows) == [text_sha256(text) for text in texts[:3]]
+
+
+class TestDocumentsToDescribe:
+    async def test_content_the_screen_cleared_is_described(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text, unscreened = _text(), _text()
+        document = await _document(conn, text)
+        await _document(conn, unscreened)
+        await _asked(conn, SCREEN, text)
+        assert await _to_describe(conn) == [
+            {"content_sha256": text_sha256(text), "document_id": document}
+        ]
+
+    @pytest.mark.parametrize(
+        "screened",
+        [
+            {"answers": (FLAGGED,)},
+            {"answers": (TIED,)},
+            {"answers": (_invalid(CLEAR, "noul_invalid"),)},
+            {"status": "invalid", "answers": (CLEAR,)},
+            {"lane": "probe"},
+            {"pack_hash": "6" * 64},
+            {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+            {"answers": (dataclasses.replace(CLEAR, question_key="about_trading"),)},
+        ],
+        ids=[
+            "flagged",
+            "a-tie",
+            "an-invalid-answer-naming-false",
+            "a-response-refused-whole",
+            "a-probe",
+            "another-version-of-the-screen",
+            "another-model",
+            "another-question",
+        ],
+    )
+    async def test_nothing_but_a_clearance_lets_the_catalogue_ask(
+        self, conn: asyncpg.Connection, screened: dict[str, Any]
+    ) -> None:
+        """
+        Section 10i of the scope: among these, an answer that is not valid but
+        still names ``false``, which only the validity filter refuses. The
+        catalogue is never asked about content the screen has not cleared.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text, **screened)
+        assert await _to_describe(conn) == []
+
+    async def test_content_quarantined_or_blocked_is_not_described(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        quarantined, blocked = _text(), _text()
+        await _quarantine(conn, await _document(conn, quarantined))
+        await _document(conn, blocked)
+        for text in (quarantined, blocked):
+            await _asked(conn, SCREEN, text)
+        await _asked(conn, SCREEN, blocked, "error", **_failed("content_block"))
+        assert await _to_describe(conn) == []
+
+    async def test_described_or_retired_content_is_not_asked_again(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        described, failing = _text(), _text()
+        for text in (described, failing):
+            await _document(conn, text)
+            await _asked(conn, SCREEN, text)
+        await _asked(conn, CATALOGUE, described)
+        await _asked(conn, CATALOGUE, failing, "error", **_failed("timeout"))
+        await _asked(conn, CATALOGUE, failing, "invalid", answers=())
+        assert _subjects(await _to_describe(conn)) == [text_sha256(failing)]
+        await _asked(conn, CATALOGUE, failing, "error", **_failed("rate_limited"))
+        assert await _to_describe(conn) == []
+
+    async def test_a_subject_waiting_or_planned_today_is_left_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        waiting, planned, earlier = _text(), _text(), _text()
+        for text in (waiting, planned, earlier):
+            await _document(conn, text)
+            await _asked(conn, SCREEN, text)
+        yesterday = TODAY - timedelta(days=1)
+        await _ask_job(conn, CATALOGUE, text_sha256(waiting), day=yesterday)
+        await _ask_job(conn, CATALOGUE, text_sha256(planned), status="succeeded")
+        await _ask_job(
+            conn, CATALOGUE, text_sha256(earlier), status="failed", day=yesterday
+        )
+        assert _subjects(await _to_describe(conn)) == [text_sha256(earlier)]
+
+
+async def _hypothesis(
+    conn: asyncpg.Connection,
+    title: str,
+    *,
+    origin: str = "model",
+    at: datetime | None = None,
+) -> str:
+    """A hypothesis written at ``at``; returns its ref."""
+    ref = f"H-{uuid.uuid4().hex[:8]}"
+    await conn.execute(
+        "INSERT INTO hypotheses (id, ref, title, owner, origin, created_at) "
+        "VALUES ($1, $2, $3, 'programme', $4, $5)",
+        uuid.uuid4(),
+        ref,
+        title,
+        origin,
+        at or datetime(2026, 9, 27, 12, tzinfo=UTC),
+    )
+    return ref
+
+
+class TestHypothesesToAsk:
+    async def test_model_written_titles_newest_first_by_their_address(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        older = await _hypothesis(
+            conn, "Invented Carry in Bonds", at=datetime(2026, 9, 1, tzinfo=UTC)
+        )
+        newer = await _hypothesis(
+            conn, "Invented Momentum in Shares", at=datetime(2026, 9, 2, tzinfo=UTC)
+        )
+        await _hypothesis(conn, "An Operator's Invented Idea", origin="operator")
+        assert await _titles(conn) == [
+            {"ref": newer, "subject_id": text_sha256("Invented Momentum in Shares")},
+            {"ref": older, "subject_id": text_sha256("Invented Carry in Bonds")},
+        ]
+
+    async def test_the_address_is_the_one_the_lane_computes(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """SQL's sha256 of the UTF-8 title is ``jev_hash.text_sha256``, beyond ASCII."""
+        title = "Été ✓ 日本 momentum, an invented title"
+        await _hypothesis(conn, title)
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_a_title_over_its_cap_is_not_asked_about(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        at_cap = "A" * jev_questions.TITLE_MAX_CHARS
+        await _hypothesis(conn, at_cap)
+        await _hypothesis(conn, "B" * (jev_questions.TITLE_MAX_CHARS + 1))
+        await _hypothesis(conn, "")
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(at_cap)]
+
+    async def test_one_title_held_by_two_hypotheses_is_one_subject(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Value in Mid-Caps"
+        await _hypothesis(conn, title, at=datetime(2026, 9, 1, tzinfo=UTC))
+        newest = await _hypothesis(conn, title, at=datetime(2026, 9, 3, tzinfo=UTC))
+        assert await _titles(conn) == [
+            {"ref": newest, "subject_id": text_sha256(title)}
+        ]
+
+    async def test_answered_retired_blocked_or_waiting_titles_are_left_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        answered, failing, blocked, waiting, plain = (
+            f"Invented Title {n}" for n in range(5)
+        )
+        for title in (answered, failing, blocked, waiting, plain):
+            await _hypothesis(conn, title)
+        await _asked(conn, HYPOTHESIS, answered)
+        for _ in range(3):
+            await _asked(conn, HYPOTHESIS, failing, "error", **_failed("server"))
+        await _asked(
+            conn,
+            jev_questions.GUARDRAIL_CARD,
+            blocked,
+            "error",
+            **_failed("content_block"),
+        )
+        await _ask_job(conn, HYPOTHESIS, text_sha256(waiting))
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(plain)]
+
+    async def test_another_sets_answer_leaves_the_title_for_this_one(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Seasonality in Grain"
+        await _hypothesis(conn, title)
+        await _asked(conn, jev_questions.GUARDRAIL_CARD, title)
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
+        assert await _titles(conn, question_set=jev_questions.GUARDRAIL_CARD) == []

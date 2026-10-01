@@ -2,9 +2,11 @@
 jev_repo.py
 -----------
 Every query the Jev ledger answers: what the lanes write, and what the control
-plane will read; and, for the forward clock, its planner and the harness, what
-the queue says about their jobs, since a job's error is the durable record of
-why a session went unmeasured.
+plane will read; for the forward clock, its planner and the harness, what the
+queue says about their jobs, since a job's error is the durable record of why
+a session went unmeasured; and, from phases C7 and C8, what the planner is to
+ask each set about — stored web content and the programme's hypothesis titles
+— read beside the ledger's answers and the queue's jobs.
 
 No SDK and no model client, so ``src/api`` may import it. It reads and writes
 rows and knows nothing about how an answer was obtained: ``jev_client``, which
@@ -45,8 +47,13 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from src.programme import jev_questions
 from src.programme.jev_hash import text_sha256
-from src.programme.jev_questions import SCREEN_CLEAR_ARGMAX, SCREEN_QUESTION
+from src.programme.jev_questions import (
+    SCREEN_CLEAR_ARGMAX,
+    SCREEN_QUESTION,
+    QuestionSet,
+)
 
 if TYPE_CHECKING:
     from src.programme.jev_validate import ValidatedAnswer
@@ -1080,6 +1087,309 @@ async def pending_jobs(conn: asyncpg.Connection, kinds: Sequence[str]) -> int:
         list(kinds),
     )
     return int(count or 0)
+
+
+async def pending_asks(conn: asyncpg.Connection, sets: Sequence[str]) -> int:
+    """
+    How many ``jev_ask`` jobs asking one of ``sets`` are queued or running:
+    calls already coming in those sets' lanes, which the planner counts
+    against each lane's share as it counts :func:`pending_jobs` (phase C7).
+    """
+    count = await conn.fetchval(
+        "SELECT COUNT(*) FROM jobs WHERE kind = 'jev_ask' "
+        "AND payload->>'set' = ANY($1::text[]) "
+        "AND status IN ('queued', 'running')",
+        list(sets),
+    )
+    return int(count or 0)
+
+
+# ---------------------------------------------------------------------------
+# Reads for the planner: what each set is to be asked about (phases C7, C8)
+# ---------------------------------------------------------------------------
+#
+# Each returns at most ``limit`` subjects, never one whose ``jev_ask`` job for
+# the set is already waiting — queued or running, whatever day it was planned
+# — or was planned today, finished or not, under :func:`ask_job_key`; and
+# never one with ``max_failed`` failed calls for the set, its version and the
+# pin, which retires it. A failed call is a response refused whole
+# (``invalid``) or a call that failed (``error``): neither is an answer, an
+# ``invalid`` row is never canonical (:func:`find_canonical`), and so neither
+# replays, and the subject is asked again on a later day until the third. A
+# subject with an ``ok`` answer is never returned again, whatever the answer
+# said: that row is canonical, and asking again would only replay it.
+
+#: How many failed calls retire a subject for a set, its version and the pin:
+#: three, the attempts one ``jev_ask`` job has (design C7).
+MAX_FAILED_CALLS = 3
+
+#: Marks where the subject goes in :func:`ask_job_key`, so the reads below
+#: match the key the planner enqueues under without spelling it a second time.
+_SUBJECT_MARK = "\x00"
+
+
+def ask_job_key(
+    name: str, version: int, subject_type: str, subject_id: str, day: date
+) -> str:
+    """
+    The dedupe key of the ``jev_ask`` job asking set ``name`` at ``version``
+    about one subject on one UTC day:
+    ``jev_ask:{set}@{version}:{subject_type}:{subject_id}:{day}``.
+
+    The planner enqueues under it and the reads below exclude a subject by it,
+    so it is spelled once. The day lets a later day's plan ask again about a
+    subject whose job failed, until its failed calls retire it.
+    """
+    return f"jev_ask:{name}@{version}:{subject_type}:{subject_id}:{day.isoformat()}"
+
+
+def _key_around(
+    name: str, version: int, subject_type: str, day: date
+) -> tuple[str, str]:
+    """:func:`ask_job_key` either side of its subject, for SQL to join it in."""
+    prefix, _, suffix = ask_job_key(
+        name, version, subject_type, _SUBJECT_MARK, day
+    ).partition(_SUBJECT_MARK)
+    return prefix, suffix
+
+
+#: Web content in use: each content address once, with the earliest document
+#: holding it, and never content quarantined under any source.
+_CONTENT_IN_USE = """
+    content AS (
+        SELECT content_sha256, MIN(id) AS document_id
+        FROM web_documents
+        GROUP BY content_sha256
+        HAVING NOT bool_or(quarantined)
+    )
+"""
+
+
+def _not_waiting(subject: str) -> str:
+    """No ``jev_ask`` job of the set ($1 at $2) about ``subject`` waiting or
+    planned today ($5 and $6 either side of the subject in today's key)."""
+    return f"""
+        NOT EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.kind = 'jev_ask'
+              AND j.payload->>'set' = $1
+              AND j.payload->>'version' = $2::int::text
+              AND j.payload->>'subject_id' = {subject}
+              AND (j.status IN ('queued', 'running')
+                   OR j.dedupe_key = $5 || {subject} || $6)
+        )
+    """
+
+
+def _unanswered(subject_type: str, subject: str) -> str:
+    """No ``ok`` answer outside the probe lane from the set ($1 at $2) under
+    the pin ($3), and fewer than $4 failed calls."""
+    return f"""
+        NOT EXISTS (
+            SELECT 1 FROM jev_requests r
+            WHERE r.question_set = $1 AND r.question_set_version = $2::int
+              AND r.subject_type = '{subject_type}' AND r.subject_id = {subject}
+              AND r.model_requested = $3
+              AND r.status = 'ok' AND r.lane <> 'probe'
+        )
+        AND (
+            SELECT COUNT(*) FROM jev_requests f
+            WHERE f.question_set = $1 AND f.question_set_version = $2::int
+              AND f.subject_type = '{subject_type}' AND f.subject_id = {subject}
+              AND f.model_requested = $3
+              AND f.status IN ('invalid', 'error') AND f.lane <> 'probe'
+        ) < $4
+    """
+
+
+def _blocked(subject_type: str, subject: str) -> str:
+    """A vendor content block on record for the subject, from any set."""
+    return f"""
+        EXISTS (
+            SELECT 1 FROM jev_requests b
+            WHERE b.error_kind = 'content_block'
+              AND b.subject_type = '{subject_type}' AND b.subject_id = {subject}
+        )
+    """
+
+
+async def documents_to_screen(
+    conn: asyncpg.Connection,
+    *,
+    screen: QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+    max_failed: int = MAX_FAILED_CALLS,
+) -> list[dict[str, Any]]:
+    """
+    The stored web content the injection screen is to be asked about on
+    ``day``: at most ``limit``, each content once, by its address
+    (``content_sha256``), with the earliest document holding it
+    (``document_id``) and whether a content block is on record for it
+    (``blocked``). Content quarantined under any source is never returned.
+
+    First, content a vendor content block was recorded for, by any set: the
+    road refuses the screen's ask about it before any call, for the block, and
+    the job's follow-up quarantines the content (``jev_jobs``). So a
+    quarantine that failed to write after a block is made by a later job,
+    planned here on a later pass, whatever the content's screen rows say.
+
+    Then content the screen, at its registered version and under ``model``,
+    has not answered ``ok``, with fewer than ``max_failed`` failed calls (see
+    the section's comment): an answer that cleared the text lets the catalogue
+    be asked, one that flagged it has quarantined it, and one that was not
+    measured — a tie, say — is canonical and would only replay, which holds the
+    text unscreened under this version and pin. Earliest document first.
+    """
+    prefix, suffix = _key_around(screen.name, screen.version, "web_excerpt", day)
+    rows = await conn.fetch(
+        f"""
+        WITH {_CONTENT_IN_USE},
+        subjects AS (
+            SELECT c.content_sha256, c.document_id,
+                   {_blocked("web_excerpt", "c.content_sha256")} AS blocked
+            FROM content c
+        )
+        SELECT s.content_sha256, s.document_id, s.blocked
+        FROM subjects s
+        WHERE {_not_waiting("s.content_sha256")}
+          AND (s.blocked OR ({_unanswered("web_excerpt", "s.content_sha256")}))
+        ORDER BY s.blocked DESC, s.document_id
+        LIMIT $7
+        """,
+        screen.name,
+        screen.version,
+        model,
+        max_failed,
+        prefix,
+        suffix,
+        _page(limit),
+    )
+    return [dict(row) for row in rows]
+
+
+async def documents_to_describe(
+    conn: asyncpg.Connection,
+    *,
+    screen: QuestionSet,
+    catalogue: QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+    max_failed: int = MAX_FAILED_CALLS,
+) -> list[dict[str, Any]]:
+    """
+    The stored web content the catalogue is to be asked about on ``day``: at
+    most ``limit``, each content once, with the earliest document holding it,
+    earliest first.
+
+    Only content the injection screen cleared as :func:`screened_clean` reads
+    a clearance — a canonical answer, ``ok`` and outside the probe lane, from
+    the screen's registered pack, answered by ``model``, whose screen question
+    has a *valid* answer of the clear argmax — joined here by the content's
+    address rather than the state's hash, which for a web excerpt name the
+    same text. An answer that is not valid is not a clearance, whatever argmax
+    it carries. Never content quarantined under any source or with a content
+    block on record; and, for the catalogue at its registered version under
+    ``model``, never content answered ``ok`` or retired by ``max_failed``
+    failed calls (see the section's comment).
+    """
+    prefix, suffix = _key_around(catalogue.name, catalogue.version, "web_excerpt", day)
+    rows = await conn.fetch(
+        f"""
+        WITH {_CONTENT_IN_USE}
+        SELECT c.content_sha256, c.document_id
+        FROM content c
+        WHERE EXISTS (
+                SELECT 1 FROM jev_requests s
+                JOIN jev_answers a ON a.request_id = s.id
+                WHERE s.subject_type = 'web_excerpt'
+                  AND s.subject_id = c.content_sha256
+                  AND s.pack_hash = $8
+                  AND s.status = 'ok' AND s.lane <> 'probe'
+                  AND s.model_answered = $3
+                  AND a.question_key = $9 AND a.valid AND a.argmax = $10
+              )
+          AND NOT {_blocked("web_excerpt", "c.content_sha256")}
+          AND {_unanswered("web_excerpt", "c.content_sha256")}
+          AND {_not_waiting("c.content_sha256")}
+        ORDER BY c.document_id
+        LIMIT $7
+        """,
+        catalogue.name,
+        catalogue.version,
+        model,
+        max_failed,
+        prefix,
+        suffix,
+        _page(limit),
+        screen.pack_hash,
+        SCREEN_QUESTION,
+        SCREEN_CLEAR_ARGMAX,
+    )
+    return [dict(row) for row in rows]
+
+
+async def hypotheses_to_ask(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+    max_failed: int = MAX_FAILED_CALLS,
+) -> list[dict[str, Any]]:
+    """
+    The hypothesis titles ``question_set`` is to be asked about on ``day``:
+    at most ``limit``, newest first, each title once, by its content address
+    (``subject_id``, ``encode(sha256(convert_to(title, 'UTF8')), 'hex')``, the
+    address ``jev_hash.text_sha256`` gives the text), with the newest
+    hypothesis holding it (``ref``).
+
+    Only titles the programme's own model wrote (``origin = 'model'``; an
+    operator's text would be a subject of its own, docs/08 open item 28) of
+    one to ``jev_questions.TITLE_MAX_CHARS`` characters, the handler's own
+    limits. Never a title with a content block on record, which the road
+    refuses for good; and, for the set at its registered version under
+    ``model``, never a title answered ``ok`` or retired by ``max_failed``
+    failed calls (see the section's comment).
+    """
+    prefix, suffix = _key_around(
+        question_set.name, question_set.version, "hypothesis_title", day
+    )
+    rows = await conn.fetch(
+        f"""
+        WITH titles AS (
+            SELECT DISTINCT ON (subject_id) subject_id, ref, created_at
+            FROM (
+                SELECT h.ref, h.created_at,
+                       encode(sha256(convert_to(h.title, 'UTF8')), 'hex')
+                           AS subject_id
+                FROM hypotheses h
+                WHERE h.origin = 'model'
+                  AND char_length(h.title) BETWEEN 1 AND $8
+            ) written
+            ORDER BY subject_id, created_at DESC, ref DESC
+        )
+        SELECT t.ref, t.subject_id
+        FROM titles t
+        WHERE NOT {_blocked("hypothesis_title", "t.subject_id")}
+          AND {_unanswered("hypothesis_title", "t.subject_id")}
+          AND {_not_waiting("t.subject_id")}
+        ORDER BY t.created_at DESC, t.ref DESC
+        LIMIT $7
+        """,
+        question_set.name,
+        question_set.version,
+        model,
+        max_failed,
+        prefix,
+        suffix,
+        _page(limit),
+        jev_questions.TITLE_MAX_CHARS,
+    )
+    return [dict(row) for row in rows]
 
 
 async def first_job_session(
