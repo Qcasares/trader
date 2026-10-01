@@ -73,8 +73,13 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "accuracy_all_items_wilson_low": 0.81,
         "majority_baseline_accuracy": 0.40,
         "keyword_baseline_accuracy": 0.55,
-        "vs_majority_diff_low": 0.30,
-        "vs_keyword_diff_low": 0.10,
+        # Of the items only one of the two got right, Jev got 90 of 100 against
+        # the majority label and 60 of 90 against the keyword rule: each
+        # beaten by the exact one-sided sign test at the gate level.
+        "vs_majority_jev_right_only": 90,
+        "vs_majority_baseline_right_only": 10,
+        "vs_keyword_jev_right_only": 60,
+        "vs_keyword_baseline_right_only": 30,
         "flip_rate": 0.02,
         "flip_rate_n": jev_prereg.MIN_FLIP_PAIRS,
         "flip_rate_near_threshold": 0.08,
@@ -105,7 +110,12 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
     # one-sided lower bound at the gate level, 0.748, falls short of 0.80.
     "held_out": ({"accuracy_at_threshold": 0.85}, []),
     "majority": ({"majority_baseline_accuracy": 0.82}, []),
-    "keyword": ({"vs_keyword_diff_low": 0.0}, []),
+    # Seven of seven discordant items Jev's way, which the bootstrap called a
+    # win: its exact chance, 1 in 128, is above the gate's 1 in 200.
+    "keyword": (
+        {"vs_keyword_jev_right_only": 7, "vs_keyword_baseline_right_only": 0},
+        [],
+    ),
     "uniform_flips": ({"flip_rate": jev_prereg.MAX_FLIP_RATE + 0.01}, []),
     "near_threshold_flips": (
         {"flip_rate_near_threshold_n": jev_prereg.MIN_FLIP_PAIRS - 1},
@@ -210,6 +220,13 @@ class TestUsable:
             ({"keyword_baseline_accuracy": None}, "keyword"),
             ({"accuracy_all_items_wilson_low": 0.5}, "keyword"),
             ({"accuracy_wilson_low": None}, "majority"),
+            ({"vs_keyword_jev_right_only": None}, "keyword"),
+            ({"vs_majority_baseline_right_only": True}, "majority"),
+            ({"vs_majority_jev_right_only": -1}, "majority"),
+            (
+                {"vs_keyword_jev_right_only": 30, "vs_keyword_baseline_right_only": 20},
+                "keyword",
+            ),
             ({"flip_rate": None}, "uniform_flips"),
             ({"flip_rate_n": None}, "uniform_flips"),
             ({"flip_rate_near_threshold": 0.11}, "near_threshold_flips"),
@@ -260,6 +277,30 @@ class TestUsable:
         verdict = usable(row, earlier=[], pin=PIN, plan_hash=plan or "")
         refused = (False, None, ["held_out"])
         assert verdict == ((True, 0.42, []) if borne_out else refused)
+
+    def test_a_baseline_is_beaten_by_the_exact_sign_test_alone(self) -> None:
+        """
+        The paired difference's bootstrap interval is reported and gates
+        nothing: a bound above 0 beside 7 of 7 discordant items does not beat
+        the baseline, and a bound below 0 beside 60 of 90 does not stop it.
+        The exact test at the gate level decides — 8 of 8 is the fewest that
+        can.
+        """
+        for low, counts, beaten in (
+            (0.30, (7, 0), False),
+            (0.005, (5, 0), False),
+            (-0.20, (60, 30), True),
+            (None, (8, 0), True),
+            (0.30, (7, 1), False),
+        ):
+            row = _usable_row(
+                vs_keyword_diff_low=low,
+                vs_keyword_jev_right_only=counts[0],
+                vs_keyword_baseline_right_only=counts[1],
+            )
+            ok, _, reasons = _verdict(row)
+            assert ("keyword" not in reasons) is beaten, (low, counts, reasons)
+            assert ok is beaten
 
     def test_no_pin_and_no_plan_match_nothing(self) -> None:
         row = _usable_row()

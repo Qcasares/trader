@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import random
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -33,6 +34,9 @@ from src.programme.jev_stats import (
     cohen_kappa,
     flip_rate,
     proportion,
+    sign_test,
+    sign_test_beats,
+    sign_test_can_decide,
     wilson,
 )
 
@@ -375,6 +379,15 @@ class TestTheCalibrationBins:
     def test_nothing_is_no_bins(self) -> None:
         assert calibration_bins([], []) == []
 
+    def test_each_bins_interval_is_at_the_level_asked(self) -> None:
+        """The caller's reporting level, which the row records as ``ci_level``."""
+        (wide,) = calibration_bins([0.8, 0.85], [True, False], level=0.99)
+        assert wide["wilson"] == pytest.approx(list(wilson(1, 2, 0.99)))
+        (default,) = calibration_bins([0.8, 0.85], [True, False])
+        assert default["wilson"] == pytest.approx(list(wilson(1, 2, 0.95)))
+        with pytest.raises(ValueError):
+            calibration_bins([0.5], [True], level=1.0)
+
     def test_a_defect_is_refused(self) -> None:
         with pytest.raises(ValueError):
             calibration_bins([1.2], [True])
@@ -551,6 +564,124 @@ class TestTheFlipCount:
         assert proportion(flipped, n) == 0.0
 
 
+def _tail(better: int, worse: int) -> Fraction:
+    """The sign test's chance written again: P(X >= better), X ~ Bin(d, 1/2)."""
+    d = better + worse
+    return Fraction(sum(math.comb(d, k) for k in range(better, d + 1)), 2**d)
+
+
+def _clopper_pearson_lower(k: int, n: int, level: float) -> float:
+    """
+    The one-sided Clopper-Pearson lower bound at ``level`` of k successes in
+    n, by bisection on the exact binomial tail: the p at which P(X >= k | p)
+    is 1 - level. Written apart from the module, which never computes it.
+    """
+    if k == 0:
+        return 0.0
+    low, high = 0.0, 1.0
+    for _ in range(200):
+        p = (low + high) / 2
+        tail = sum(math.comb(n, j) * p**j * (1 - p) ** (n - j) for j in range(k, n + 1))
+        if tail < 1 - level:
+            low = p
+        else:
+            high = p
+    return (low + high) / 2
+
+
+class TestTheSignTest:
+    """
+    Whether Jev beats a baseline is decided by the items only one of the two
+    got right, by the exact one-sided sign test at the gate level (docs/08,
+    C9): a percentile bootstrap of the paired difference, resampling a few
+    such items, puts its bound at the point estimate, so it said "beats" on
+    seven of seven in Jev's favour, whose exact chance is 1 in 128 against
+    the gate's 1 in 200.
+    """
+
+    @pytest.mark.parametrize(
+        ("better", "worse", "chance"),
+        [
+            (1, 0, Fraction(1, 2)),
+            (5, 0, Fraction(1, 32)),
+            (6, 0, Fraction(1, 64)),
+            (7, 0, Fraction(1, 128)),
+            (8, 0, Fraction(1, 256)),
+            (3, 1, Fraction(5, 16)),
+            (0, 5, Fraction(1)),
+            (2, 2, Fraction(11, 16)),
+        ],
+    )
+    def test_hand_worked_values(
+        self, better: int, worse: int, chance: Fraction
+    ) -> None:
+        assert sign_test(better, worse) == float(chance)
+
+    def test_it_is_the_tail_written_again(self) -> None:
+        rng = random.Random(14)
+        for _ in range(300):
+            better, worse = rng.randint(0, 80), rng.randint(0, 80)
+            if better + worse == 0:
+                continue
+            assert sign_test(better, worse) == float(_tail(better, worse))
+
+    @pytest.mark.parametrize("discordant", [1, 3, 5, 6, 7])
+    def test_every_split_of_fewer_than_eight_is_too_few_at_the_gate(
+        self, discordant: int
+    ) -> None:
+        """The reviewers' cases: n = 1 to 7, and 5, 6 or 7 of 200, all one way."""
+        level = jev_prereg.GATE_CI
+        assert not sign_test_can_decide(discordant, level)
+        assert not sign_test_beats(discordant, 0, level)
+
+    def test_eight_of_eight_beats_at_the_gate_and_seven_of_eight_does_not(
+        self,
+    ) -> None:
+        level = jev_prereg.GATE_CI
+        assert sign_test_can_decide(8, level)
+        assert sign_test_beats(8, 0, level)
+        assert not sign_test_beats(7, 1, level)
+
+    def test_beating_is_the_clopper_pearson_bound_above_one_half(self) -> None:
+        """
+        Equivalent statements of one test: the chance below 1 - level, and the
+        one-sided exact lower bound on Jev's share of the discordant items
+        above one half.
+        """
+        for level in (0.95, jev_prereg.GATE_CI):
+            for d in range(1, 31):
+                for better in range(d + 1):
+                    bound = _clopper_pearson_lower(better, d, level)
+                    if abs(bound - 0.5) < 1e-9:
+                        continue
+                    assert sign_test_beats(better, d - better, level) is (
+                        bound > 0.5
+                    ), (better, d, level)
+
+    def test_the_level_is_compared_as_written(self) -> None:
+        """
+        0.995 is 199/200 exactly: a chance a binary 1 - 0.995 would misjudge
+        cannot be, since every chance has a power of two below it, but the
+        comparison is exact anyway, and the level as written decides it.
+        """
+        assert 1 - 0.995 != 0.005
+        assert sign_test_beats(8, 0, 0.995)
+        assert not sign_test_beats(7, 0, 0.995)
+        assert sign_test_beats(7, 0, 0.99)
+
+    def test_no_discordant_item_is_no_test(self) -> None:
+        assert sign_test(0, 0) is None
+        assert sign_test_beats(0, 0, 0.995) is False
+        assert not sign_test_can_decide(0, 0.995)
+
+    @pytest.mark.parametrize(
+        ("better", "worse"), [(-1, 3), (3, -1), (True, 2), (2.0, 1), (None, 1)]
+    )
+    def test_a_count_is_a_count(self, better: object, worse: object) -> None:
+        with pytest.raises((TypeError, ValueError)):
+            sign_test(better, worse)  # type: ignore[arg-type]
+
+
 class TestNothingIsNeverZero:
     """
     The property the module exists for, fed to every function at once: empty
@@ -566,6 +697,7 @@ class TestNothingIsNeverZero:
         assert calibration_bins([], []) == []
         assert cohen_kappa([], []) is None
         assert flip_rate([]) == (0, 0)
+        assert sign_test(0, 0) is None
         assert _search([]) == ThresholdChoice("not_attempted")
 
     @pytest.mark.parametrize("n", [1, 7, 150])

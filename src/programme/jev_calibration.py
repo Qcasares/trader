@@ -44,7 +44,9 @@ analysis plans in force; on the held-out test split with at least
 ``MIN_TEST_ITEMS``; on items the model cannot have been trained on; with a
 threshold chosen and a coverage measured at it; beating both baselines —
 accuracy's lower bound above each, over the valid answers and over every
-item, and each paired difference's lower bound above 0 at the gate level;
+item, and Jev better on the items only one of the two got right by the
+exact one-sided sign test at the gate level, where the design named the
+paired difference's bootstrap bound (``_beats`` says why);
 with the uniform and the near-threshold flip rates measured on enough pairs
 and below their limits; on a test set no earlier version's evaluation used;
 and the newest evaluation of its key.
@@ -255,8 +257,16 @@ def _beats(evaluation: Mapping[str, Any], baseline: str) -> bool:
     """
     The baseline measured; accuracy's lower bound above it, over the valid
     answers as the design names it and over every item as design 10.1
-    compares it, since the baseline answers every item; and the paired
-    difference's lower bound, a one-sided bound at the gate level, above 0.
+    compares it, since the baseline answers every item; and Jev better on
+    the items only one of the two got right by the exact one-sided sign test
+    at the gate level (``jev_stats.sign_test_beats``).
+
+    Not the paired difference's bootstrap bound, which design 10.1 named:
+    over a few discordant items a percentile bootstrap understates their
+    uncertainty, and at seven of seven in Jev's favour its bound is the
+    point estimate while the exact chance of that split is 1 in 128, above
+    the 1 in 200 the gate claims. The bootstrap interval is reported, at the
+    reporting level, and gates nothing.
     """
     measured = _number(evaluation.get(f"{baseline}_baseline_accuracy"))
     if measured is None:
@@ -265,8 +275,11 @@ def _beats(evaluation: Mapping[str, Any], baseline: str) -> bool:
         bound = _number(evaluation.get(low))
         if bound is None or not bound > measured:
             return False
-    difference = _number(evaluation.get(f"vs_{baseline}_diff_low"))
-    return difference is not None and difference > 0
+    better = evaluation.get(f"vs_{baseline}_jev_right_only")
+    worse = evaluation.get(f"vs_{baseline}_baseline_right_only")
+    if not (_at_least(better, 0) and _at_least(worse, 0)):
+        return False
+    return jev_stats.sign_test_beats(better, worse, jev_prereg.GATE_CI)
 
 
 def _flips_within(

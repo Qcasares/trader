@@ -108,6 +108,7 @@ ADDED: dict[str, Any] = {
             "keyword_baseline_ref",
             "answers_sha256",
             "ci_level",
+            "gate_ci_level",
             "n_valid",
             "n_escape",
             "n_invalid",
@@ -132,9 +133,13 @@ ADDED: dict[str, Any] = {
             "vs_majority_diff",
             "vs_majority_diff_low",
             "vs_majority_diff_high",
+            "vs_majority_jev_right_only",
+            "vs_majority_baseline_right_only",
             "vs_keyword_diff",
             "vs_keyword_diff_low",
             "vs_keyword_diff_high",
+            "vs_keyword_jev_right_only",
+            "vs_keyword_baseline_right_only",
             "flip_rate_n",
             "flip_rate_low_margin",
             "flip_rate_low_margin_n",
@@ -223,6 +228,7 @@ def _measured(**overrides: Any) -> dict[str, Any]:
         keyword_baseline_ref="jev_prereg.keyword_label keywords/v1, reading excerpt",
         answers_sha256="c" * 64,
         ci_level=0.95,
+        gate_ci_level=0.995,
         n_valid=180,
         n_escape=10,
         n_invalid=15,
@@ -249,9 +255,15 @@ def _measured(**overrides: Any) -> dict[str, Any]:
         vs_majority_diff=0.12,
         vs_majority_diff_low=0.02,
         vs_majority_diff_high=0.22,
+        # 0.12 of 200 items is 24 more Jev got right alone than the baseline
+        # did, and 0.22 is 44.
+        vs_majority_jev_right_only=30,
+        vs_majority_baseline_right_only=6,
         vs_keyword_diff=0.22,
         vs_keyword_diff_low=0.10,
         vs_keyword_diff_high=0.33,
+        vs_keyword_jev_right_only=50,
+        vs_keyword_baseline_right_only=6,
         threshold_outcome="chosen",
         threshold_statistic="covered_accuracy",
         threshold_target=0.80,
@@ -306,6 +318,16 @@ TRIPLES = (
     "vs_keyword_diff",
 )
 
+#: Each paired difference's discordant items: Jev right alone, the baseline
+#: right alone.
+DISCORDANT: dict[str, tuple[str, str]] = {
+    f"vs_{baseline}_diff": (
+        f"vs_{baseline}_jev_right_only",
+        f"vs_{baseline}_baseline_right_only",
+    )
+    for baseline in ("majority", "keyword")
+}
+
 #: The single proportions, each outside [0, 1] on either side.
 SINGLE_PROPORTIONS = (
     "balanced_accuracy",
@@ -340,7 +362,8 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         for name in ("accuracy", "accuracy_all_items", "accuracy_at_threshold")
     ],
     *[
-        (f"ci_level {value}", {"ci_level": value}, "jev_evaluations_ci_level")
+        (f"{column} {value}", {column: value}, "jev_evaluations_ci_level")
+        for column in ("ci_level", "gate_ci_level")
         for value in (0.0, 1.0, 1.5, -0.5)
     ],
     ("brier above 2", _triple("brier", 2.1, 2.2, 2.3), "jev_evaluations_brier_range"),
@@ -353,31 +376,64 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
     ("climatology below 0", {"brier_reference": -0.1}, "jev_evaluations_brier_range"),
     ("kappa above 1", {"labeller_kappa": 1.5}, "jev_evaluations_kappa_range"),
     ("kappa below -1", {"labeller_kappa": -1.5}, "jev_evaluations_kappa_range"),
+    # A difference is its discordant items over n (below), so its point is in
+    # [-1, 1] by its counts; what the range adds is its interval's outer ends.
     *[
         (
-            f"{name} {side}",
-            _triple(name, *values),
+            f"{name}'s {side} bound {where}",
+            {f"{name}_{side}": value},
             "jev_evaluations_differences_range",
         )
         for name in ("vs_majority_diff", "vs_keyword_diff")
-        for side, values in (
-            ("above 1", (1.1, 1.2, 1.3)),
-            ("below -1", (-1.3, -1.2, -1.1)),
-        )
+        for side, where, value in (("high", "above 1", 1.2), ("low", "below -1", -1.2))
     ],
     *[
         (
             f"{name} outside its interval",
-            _triple(name, *values),
+            {**_triple(name, *values), **counts},
             "jev_evaluations_intervals_hold_their_estimates",
         )
-        for name, values in (
-            ("accuracy", (0.73, 0.90, 0.85)),
-            ("accuracy_all_items", (0.65, 0.60, 0.78)),
-            ("accuracy_at_threshold", (0.83, 0.95, 0.94)),
-            ("brier", (0.25, 0.20, 0.36)),
-            ("vs_majority_diff", (0.02, 0.30, 0.22)),
-            ("vs_keyword_diff", (0.10, 0.05, 0.33)),
+        for name, values, counts in (
+            ("accuracy", (0.73, 0.90, 0.85), {}),
+            ("accuracy_all_items", (0.65, 0.60, 0.78), {}),
+            ("accuracy_at_threshold", (0.83, 0.95, 0.94), {}),
+            ("brier", (0.25, 0.20, 0.36), {}),
+            (
+                "vs_majority_diff",
+                (0.02, 0.30, 0.22),
+                {"vs_majority_jev_right_only": 66},
+            ),
+            (
+                "vs_keyword_diff",
+                (0.10, 0.05, 0.33),
+                {"vs_keyword_jev_right_only": 16},
+            ),
+        )
+    ],
+    # The discordant items: present with their difference and never without
+    # it, and the difference their arithmetic over n.
+    *[
+        case
+        for baseline, (better, worse) in (("majority", (30, 6)), ("keyword", (50, 6)))
+        for case in (
+            (
+                f"a {baseline} difference without its items",
+                {
+                    f"vs_{baseline}_jev_right_only": None,
+                    f"vs_{baseline}_baseline_right_only": None,
+                },
+                "jev_evaluations_differences_from_their_items",
+            ),
+            (
+                f"{baseline} items without their difference",
+                _triple(f"vs_{baseline}_diff", None, None, None),
+                "jev_evaluations_differences_from_their_items",
+            ),
+            (
+                f"a {baseline} difference its items do not make",
+                {f"vs_{baseline}_jev_right_only": better + 1},
+                "jev_evaluations_differences_from_their_items",
+            ),
         )
     ],
     *[
@@ -394,7 +450,8 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
     *[
         (
             f"{name}'s interval without it",
-            {name: None},
+            # A difference goes with its items, so they go with it here.
+            {name: None, **dict.fromkeys(DISCORDANT.get(name, ()))},
             "jev_evaluations_estimates_carry_their_intervals",
         )
         for name in TRIPLES
@@ -434,6 +491,25 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
     *[
         (f"{column} negative", {column: -1}, "jev_evaluations_counts_outside_n")
         for column in ("n_contested", "n_other_plans", "n_plan_unknown")
+    ],
+    # The discordant items: each a count, and the two of one baseline within
+    # n, each case keeping the difference their arithmetic.
+    *[
+        (
+            f"{baseline}: {what}",
+            {
+                f"vs_{baseline}_jev_right_only": better,
+                f"vs_{baseline}_baseline_right_only": worse,
+                **_triple(f"vs_{baseline}_diff", *interval),
+            },
+            "jev_evaluations_counts_within_n",
+        )
+        for baseline in ("majority", "keyword")
+        for what, better, worse, interval in (
+            ("Jev right alone on fewer than none", -1, 0, (-0.1, -0.005, 0.1)),
+            ("the baseline right alone on fewer than none", 0, -1, (-0.1, 0.005, 0.1)),
+            ("more discordant items than items", 113, 89, (0.02, 0.12, 0.22)),
+        )
     ],
     (
         "answers that do not add up to n",

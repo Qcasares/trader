@@ -72,8 +72,14 @@ prints "not measured: no labelled items".
   Wilson lower bound, never a point estimate.
 * **Both baselines answer every item**, so Jev is compared with them over
   every scored item, an answer that was not valid or not asked counted as
-  wrong; a difference "beats" only when its one-sided lower bound at the
-  gate level is above 0.
+  wrong. The paired difference is reported with its bootstrap interval at the
+  reporting level; Jev "beats" a baseline only by the exact one-sided sign
+  test, at the gate level, of the items only one of the two got right, which
+  the row records (``jev_stats.sign_test``), and "too few to say" where not
+  even every one of them going Jev's way could reach the level.
+* **Every level is the row's**: each interval at its ``ci_level`` and each
+  gate at its ``gate_ci_level``, as recorded, never the plan in force when it
+  is read.
 * **A figure over nothing is "not measured"**, never 0 or 0.00, and nothing is
   sorted by a figure, so an unknown is never sorted as a low.
 
@@ -828,6 +834,7 @@ class Evaluation:
     code_commit: str | None
     possibly_in_training: bool
     ci_level: float
+    gate_ci_level: float
     n: int
     n_per_class: dict[str, int]
     n_valid: int
@@ -856,9 +863,13 @@ class Evaluation:
     vs_majority_diff: float | None
     vs_majority_diff_low: float | None
     vs_majority_diff_high: float | None
+    vs_majority_jev_right_only: int
+    vs_majority_baseline_right_only: int
     vs_keyword_diff: float | None
     vs_keyword_diff_low: float | None
     vs_keyword_diff_high: float | None
+    vs_keyword_jev_right_only: int
+    vs_keyword_baseline_right_only: int
     threshold_outcome: str
     threshold_statistic: str | None
     threshold_target: float | None
@@ -1346,7 +1357,10 @@ def build_evaluation(
             base_rate = sum(truths) / len(truths)
             reference = jev_stats.brier_noul([base_rate] * len(truths), truths)
             bins = jev_stats.calibration_bins(
-                p_true, truths, jev_prereg.CALIBRATION_BINS
+                p_true,
+                truths,
+                jev_prereg.CALIBRATION_BINS,
+                level=jev_prereg.REPORT_CI,
             )
         else:
             distributions = [dict(i.answer["probabilities"]) for i in valid]
@@ -1369,12 +1383,19 @@ def build_evaluation(
                 [float(i.answer["probabilities"][i.predicted]) for i in valid],
                 [i.correct for i in valid],
                 jev_prereg.CALIBRATION_BINS,
+                level=jev_prereg.REPORT_CI,
             )
         assert brier is not None
         brier_low, brier_high = _holding(brier, interval)
 
     # Both baselines answer every scored item; Jev is compared with each on
-    # the same items, its answers that were not valid, or not asked, wrong.
+    # the same items, its answers that were not valid, or not asked, wrong:
+    # the paired difference with its bootstrap interval, reported at the
+    # reporting level like every other interval, and the discordant items
+    # it is made of, which alone decide whether Jev beats the baseline — by
+    # the exact one-sided sign test at the gate level, never by the
+    # bootstrap, whose bound over a few discordant items sits at the point
+    # estimate (jev_stats.sign_test).
     majority = max(options, key=lambda c: (n_per_class.get(c, 0), -options.index(c)))
     majority_right = [i.label == majority for i in scored]
     keyword_right_all = [guesses[i.subject] == i.label for i in scored]
@@ -1392,11 +1413,16 @@ def build_evaluation(
             _difference,
             resamples=jev_prereg.BOOTSTRAP_RESAMPLES,
             seed=seed,
-            # Each end of a two-sided interval at 2g - 1 is a one-sided bound
-            # at g: the gate's level.
-            level=2 * jev_prereg.GATE_CI - 1,
+            level=jev_prereg.REPORT_CI,
         )
-        comparisons[baseline] = (point, *_holding(point, interval))
+        jev_only = sum(1 for jev, base in pairs if jev and not base)
+        baseline_only = sum(1 for jev, base in pairs if base and not jev)
+        comparisons[baseline] = (
+            point,
+            *_holding(point, interval),
+            jev_only,
+            baseline_only,
+        )
 
     # The threshold: searched on the development split's scored items alone,
     # never on an upper bound, and measured on the test split's. Whether the
@@ -1530,6 +1556,7 @@ def build_evaluation(
         code_commit=None,
         possibly_in_training=in_training,
         ci_level=jev_prereg.REPORT_CI,
+        gate_ci_level=jev_prereg.GATE_CI,
         n=n,
         n_per_class=n_per_class,
         n_valid=len(valid),
@@ -1558,9 +1585,13 @@ def build_evaluation(
         vs_majority_diff=comparisons["majority"][0],
         vs_majority_diff_low=comparisons["majority"][1],
         vs_majority_diff_high=comparisons["majority"][2],
+        vs_majority_jev_right_only=comparisons["majority"][3],
+        vs_majority_baseline_right_only=comparisons["majority"][4],
         vs_keyword_diff=comparisons["keyword"][0],
         vs_keyword_diff_low=comparisons["keyword"][1],
         vs_keyword_diff_high=comparisons["keyword"][2],
+        vs_keyword_jev_right_only=comparisons["keyword"][3],
+        vs_keyword_baseline_right_only=comparisons["keyword"][4],
         threshold_outcome=choice.outcome,
         threshold_statistic=statistic,
         threshold_target=target_value,
@@ -2309,10 +2340,55 @@ def _count_of(share: float | None, n: int | None) -> int | None:
     return round(share * n)
 
 
-def _interval(low: Any, high: Any, level: str = "Wilson 95%") -> str:
+def _interval(low: Any, high: Any, label: str) -> str:
     if low is None or high is None:
         return ""
-    return f" ({level}: {said(low)} to {said(high)})"
+    return f" ({label}: {said(low)} to {said(high)})"
+
+
+def _level(value: Any) -> str | None:
+    """A level a row recorded, as printed — 95%, 99.5% — or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return f"{value:.1%}".replace(".0%", "%")
+
+
+def _beaten(e: Mapping[str, Any], column: str, name: str, gate: float | None) -> str:
+    """
+    Whether Jev beat a baseline, in the words the row's discordant items
+    allow: by the exact one-sided sign test at the row's gate level, "beats
+    it" or "does not beat it", with the items it rests on and its chance;
+    "too few to say" where not even every one of them going Jev's way could
+    reach the level; never from the bootstrap interval, whose bound over a
+    few such items sits at the point estimate.
+    """
+    jev_only = e.get(f"vs_{column}_jev_right_only")
+    base_only = e.get(f"vs_{column}_baseline_right_only")
+    counts = (jev_only, base_only)
+    if gate is None or not all(
+        isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in counts
+    ):
+        return "not measured whether Jev is the better of the two"
+    differ = jev_only + base_only
+    which = (
+        f"they differ on {differ} item{'' if differ == 1 else 's'}, Jev right "
+        f"alone on {jev_only} and {name} right alone on {base_only}"
+    )
+    if not jev_stats.sign_test_can_decide(differ, gate):
+        return (
+            f"{which}: too few for the exact one-sided sign test at "
+            f"{_level(gate)} to say"
+        )
+    chance = jev_stats.sign_test(jev_only, base_only)
+    verdict = (
+        "beats it"
+        if jev_stats.sign_test_beats(jev_only, base_only, gate)
+        else "does not beat it"
+    )
+    return (
+        f"{which}; exact one-sided sign test at {_level(gate)}, p = "
+        f"{chance:.3g}: {verdict}"
+    )
 
 
 def format_evaluation(evaluation: Mapping[str, Any]) -> str:
@@ -2320,13 +2396,21 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
     One evaluation, every figure with its n and its interval, in the words
     design section 10.3 allows: "agreed with the labeller on k of n answered
     items", never "Jev is x% accurate"; "upper bound" on every figure of an
-    evaluation possibly in training; a baseline "beaten" only when the
-    difference's one-sided lower bound at the gate level is above 0; a
+    evaluation possibly in training; a baseline "beaten" only by the exact
+    one-sided sign test of the items only one of the two got right, at the
+    gate level, and never on a bootstrap bound or a point estimate; a
     threshold "chosen on the dev split, measured on the test split", and
-    none printed as 0. A figure not measured says so, and no list is sorted
-    by a figure.
+    none printed as 0. Every level printed is the one the row recorded —
+    ``ci_level`` for each interval, ``gate_ci_level`` for each gate — never
+    the plan in force when it is read. A figure not measured says so, and no
+    list is sorted by a figure.
     """
     e = evaluation
+    reported = _level(e.get("ci_level"))
+    gate_value = e.get("gate_ci_level")
+    gate = None if _level(gate_value) is None else float(gate_value)
+    wilson = f"Wilson {reported}" if reported else "Wilson, level not recorded"
+    bootstrap = f"bootstrap {reported}" if reported else "bootstrap, level not recorded"
     labeller = e["dataset_ref"]
     readme = (
         " (the README's own grouping, never ground truth)"
@@ -2364,7 +2448,7 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             f"accuracy: agreed with {labeller} on "
             f"{_count_of(e['accuracy'], n_valid)} of {n_valid} answered items "
             f"({str(e['dataset_sha256'])[:12]}, {e['split']}) = {said(e['accuracy'])}"
-            + _interval(e["accuracy_wilson_low"], e["accuracy_wilson_high"])
+            + _interval(e["accuracy_wilson_low"], e["accuracy_wilson_high"], wilson)
             + bound
         )
     if e.get("accuracy_all_items") is None:
@@ -2375,7 +2459,9 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             f"wrong: {_count_of(e['accuracy_all_items'], e['n'])} of {e['n']} = "
             f"{said(e['accuracy_all_items'])}"
             + _interval(
-                e["accuracy_all_items_wilson_low"], e["accuracy_all_items_wilson_high"]
+                e["accuracy_all_items_wilson_low"],
+                e["accuracy_all_items_wilson_high"],
+                wilson,
             )
             + bound
         )
@@ -2390,7 +2476,7 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
         recall = (
             f"recall {figures['correct']} of {figures['n']} = "
             f"{said(figures['recall'])}"
-            + _interval(*(figures["recall_wilson"] or (None, None)))
+            + _interval(*(figures["recall_wilson"] or (None, None)), wilson)
         )
         if figures["precision"] is None:
             precision = f"precision not measured (predicted {figures['predicted']})"
@@ -2398,7 +2484,7 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             precision = (
                 f"precision {figures['correct']} of {figures['predicted']} = "
                 f"{said(figures['precision'])}"
-                + _interval(*(figures["precision_wilson"] or (None, None)))
+                + _interval(*(figures["precision_wilson"] or (None, None)), wilson)
             )
         keyword = figures["keyword"]
         lines.append(
@@ -2411,14 +2497,14 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
     else:
         lines.append(
             f"Brier: {said(e['brier'])} over {n_valid} valid answers"
-            + _interval(e["brier_ci_low"], e["brier_ci_high"], "bootstrap 95%")
+            + _interval(e["brier_ci_low"], e["brier_ci_high"], bootstrap)
             + f", beside its climatology {said(e['brier_reference'])}{bound}"
         )
     for b in e.get("calibration_bins") or []:
         lines.append(
             f"  stated p in [{b['low']:.1f}, {b['high']:.1f}]: {b['n']} answers, "
             f"mean {said(b['mean_p'])}, agreement {said(b['agreement'])}"
-            + _interval(*(b["wilson"] or (None, None)))
+            + _interval(*(b["wilson"] or (None, None)), wilson)
         )
     lines.append(
         f"baselines on the same {e['n']} items: the majority label, in-sample "
@@ -2435,11 +2521,10 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
         if point is None:
             lines.append(f"Jev minus {name}: not measured")
             continue
-        beats = "beats it" if low is not None and low > 0 else "does not beat it"
         lines.append(
-            f"Jev minus {name} on the same {e['n']} items: {point:+.3f} "
-            f"[{said(low)}, {said(high)}], one-sided bounds at "
-            f"{jev_prereg.GATE_CI:.1%}: {beats}{bound}"
+            f"Jev minus {name} on the same {e['n']} items: {point:+.3f}"
+            + _interval(low, high, bootstrap)
+            + f"; {_beaten(e, column, name, gate)}{bound}"
         )
     outcome = e.get("threshold_outcome")
     if outcome == "chosen":
@@ -2451,14 +2536,20 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             + _interval(
                 e["accuracy_at_threshold_wilson_low"],
                 e["accuracy_at_threshold_wilson_high"],
+                wilson,
             )
             if e.get("accuracy_at_threshold") is not None
             else f"{statistic} not measured (n = {said(tested)})"
         )
+        by = (
+            f" by its one-sided Wilson lower bound at {_level(gate)}"
+            if gate is not None
+            else ""
+        )
         lines.append(
             f"threshold: margin >= {said(e['threshold'])}, chosen on the dev split "
-            f"to reach {said(e['threshold_target'])}, measured on the test split: "
-            f"coverage {said(e['coverage_at_threshold'])}, {measured}"
+            f"to reach {said(e['threshold_target'])}{by}, measured on the test "
+            f"split: coverage {said(e['coverage_at_threshold'])}, {measured}"
         )
     elif outcome == "none_found":
         lines.append(
@@ -2489,10 +2580,10 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             lines.append(f"flips, {name}: not measured (n = {n} pairs)")
             continue
         k = _count_of(share, n)
-        interval = jev_stats.wilson(k, n, jev_prereg.REPORT_CI)
+        interval = jev_stats.wilson(k, n, float(e["ci_level"])) if reported else None
         lines.append(
             f"flips, {name}: {k} of {n} re-asked requests changed their argmax = "
-            f"{said(share)}" + _interval(*(interval or (None, None)))
+            f"{said(share)}" + _interval(*(interval or (None, None)), wilson)
         )
     lag = e.get("flip_median_lag_hours")
     lines.append(

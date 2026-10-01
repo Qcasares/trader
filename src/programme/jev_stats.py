@@ -8,7 +8,8 @@ anything. Pure: the standard library alone
 Phase C4 landed the two the forward clock's report needs, a proportion and its
 Wilson interval; phase C9 adds what an evaluation against labels needs: the
 Brier score of a Choice and of a Noul, a seeded bootstrap interval, the
-calibration bins, the threshold search, Cohen's kappa and the flip count. One
+calibration bins, the threshold search, Cohen's kappa, the flip count, and the
+exact sign test by which a baseline is beaten or not (:func:`sign_test`). One
 rule runs through every function, because the research UI is a machine for
 fooling yourself: **a figure computed over nothing is ``None``, never 0.** A
 coverage of "0 of 0 sessions" is not a coverage of zero, and printed as 0.00
@@ -36,6 +37,7 @@ import random
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from fractions import Fraction
 from statistics import NormalDist
 from typing import Literal, TypeVar
 
@@ -196,15 +198,19 @@ def _quantile(ordered: Sequence[float], q: float) -> float:
 
 
 def calibration_bins(
-    probabilities: Sequence[float], correct: Sequence[bool], bins: int = 10
+    probabilities: Sequence[float],
+    correct: Sequence[bool],
+    bins: int = 10,
+    *,
+    level: float = 0.95,
 ) -> list[dict]:
     """
     The stated probabilities in ``bins`` equal bins of [0, 1], the last
     closed, and for each bin anything fell in: its bounds, how many answers
     (``n``), their mean stated probability (``mean_p``), how often the
-    outcome held (``agreement``), and that share's Wilson interval at 95%,
-    the reporting level. A bin nothing fell in is left out rather than shown
-    as a bin of zero.
+    outcome held (``agreement``), and that share's Wilson interval at
+    ``level``, the caller's reporting level. A bin nothing fell in is left out
+    rather than shown as a bin of zero.
 
     ``probabilities`` are a Choice's top probability or a Noul's ``p(true)``;
     ``correct`` is whether the top option was the label, or whether the label
@@ -214,6 +220,7 @@ def calibration_bins(
     _same_length(probabilities, correct)
     if isinstance(bins, bool) or not isinstance(bins, int) or bins < 1:
         raise ValueError(f"bins is a positive count, got {bins!r}")
+    _check_level(level)
     members: dict[int, list[tuple[float, bool]]] = {}
     for p, outcome in zip(probabilities, correct, strict=True):
         value = _probability(p)
@@ -225,7 +232,7 @@ def calibration_bins(
     for index in sorted(members):
         inside = members[index]
         held = sum(1 for _, outcome in inside if outcome)
-        interval = wilson(held, len(inside))
+        interval = wilson(held, len(inside), level)
         found.append(
             {
                 "low": index / bins,
@@ -370,6 +377,71 @@ def cohen_kappa(first: Sequence[str], second: Sequence[str]) -> float | None:
     return (observed - expected) / (1.0 - expected)
 
 
+# ---------------------------------------------------------------------------
+# A paired comparison
+# ---------------------------------------------------------------------------
+
+
+def sign_test(better: int, worse: int) -> float | None:
+    """
+    The exact one-sided sign test of two raters scored on the same items —
+    McNemar's test, exact: of the ``better + worse`` items on which one was
+    right and the other wrong, ``better`` went the first's way, and this is
+    the chance of at least that many were each such item as likely to go
+    either way. ``None`` when they never differ, which says nothing either
+    way. Computed exactly (:func:`sign_test_beats` compares it exactly) and
+    rounded only here, for printing.
+
+    Why exact, and why the discordant items: the items both raters got right
+    or both got wrong say nothing about which is better, and a percentile
+    bootstrap of the paired difference, resampling few discordant items,
+    understates how uncertain their split is — with every one of seven in
+    the first's favour its bound sits at the point estimate, and the exact
+    chance of that split is 1 in 128.
+    """
+    tail = _sign_tail(better, worse)
+    return None if tail is None else float(tail)
+
+
+def sign_test_beats(better: int, worse: int, level: float) -> bool:
+    """
+    Whether the first rater beats the second at ``level``, one-sided: the
+    exact sign test's chance (:func:`sign_test`) below ``1 - level``, compared
+    as exact fractions of the level as written, so 0.995 is 199/200 and no
+    binary rounding decides a verdict. Equivalent to the one-sided
+    Clopper-Pearson lower bound at ``level`` of the first's share of the
+    discordant items lying above one half. ``False`` when they never differ.
+    """
+    _check_level(level)
+    tail = _sign_tail(better, worse)
+    return tail is not None and tail < 1 - Fraction(repr(float(level)))
+
+
+def sign_test_can_decide(discordant: int, level: float) -> bool:
+    """
+    Whether ``discordant`` items could ever be enough for
+    :func:`sign_test_beats` at ``level``: only if all of them going one way
+    is rarer than ``1 - level``. Below that the comparison is too few to
+    say, whichever way they went — at 0.995, fewer than eight.
+    """
+    _check_counts(0, discordant)
+    _check_level(level)
+    return Fraction(1, 2**discordant) < 1 - Fraction(repr(float(level)))
+
+
+def _sign_tail(better: int, worse: int) -> Fraction | None:
+    for name, value in (("better", better), ("worse", worse)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} is a count, got {value!r}")
+        if value < 0:
+            raise ValueError(f"{name} is a count, got {value}")
+    discordant = better + worse
+    if discordant == 0:
+        return None
+    ways = sum(math.comb(discordant, k) for k in range(better, discordant + 1))
+    return Fraction(ways, 2**discordant)
+
+
 def flip_rate(pairs: Sequence[tuple[str | None, str | None]]) -> tuple[int, int]:
     """
     ``(flipped, n)``: of the pairs whose two argmaxes are both present — a
@@ -427,5 +499,8 @@ __all__ = [
     "cohen_kappa",
     "flip_rate",
     "proportion",
+    "sign_test",
+    "sign_test_beats",
+    "sign_test_can_decide",
     "wilson",
 ]

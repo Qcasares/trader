@@ -1233,6 +1233,7 @@ class TestWhatAnEvaluationCounts:
         ) == (pytest.approx(low), pytest.approx(high))
         assert evaluation.n_per_class == {"equities": 5}
         assert evaluation.ci_level == jev_prereg.REPORT_CI
+        assert evaluation.gate_ci_level == jev_prereg.GATE_CI
 
     def test_nothing_valid_is_not_measured_and_never_zero(self) -> None:
         book = _Book()
@@ -1605,11 +1606,40 @@ class TestTheBaselines:
         assert evaluation.accuracy_all_items == 0.25
         assert evaluation.vs_keyword_diff == pytest.approx(0.25 - 0.75)
         assert evaluation.vs_majority_diff == pytest.approx(0.25 - 0.5)
-        for name in ("majority", "keyword"):
+        # The items only one of the two got right: against the keyword rule
+        # the treasury and the shares, both its; against the majority label,
+        # equities, the bond ladder Jev's and the two unasked equities its.
+        assert (
+            evaluation.vs_keyword_jev_right_only,
+            evaluation.vs_keyword_baseline_right_only,
+        ) == (0, 2)
+        assert (
+            evaluation.vs_majority_jev_right_only,
+            evaluation.vs_majority_baseline_right_only,
+        ) == (1, 2)
+        jev = [True, False, False, False]
+        for name, base in (
+            ("majority", [False, False, True, True]),
+            ("keyword", [True, True, True, False]),
+        ):
             low = getattr(evaluation, f"vs_{name}_diff_low")
             point = getattr(evaluation, f"vs_{name}_diff")
             high = getattr(evaluation, f"vs_{name}_diff_high")
             assert low <= point <= high
+            # Reported at the reporting level, as every interval of the row.
+            interval = jev_stats.bootstrap_interval(
+                list(zip(jev, base, strict=True)),
+                lambda pairs: (
+                    (sum(j for j, _ in pairs) - sum(b for _, b in pairs)) / len(pairs)
+                ),
+                resamples=jev_prereg.BOOTSTRAP_RESAMPLES,
+                seed=jev_eval.seed_of(evaluation.dataset_sha256),
+                level=jev_prereg.REPORT_CI,
+            )
+            assert interval is not None
+            assert (low, high) == pytest.approx(
+                (min(interval[0], point), max(interval[1], point))
+            )
         assert evaluation.keyword_baseline_ref == (
             "jev_prereg.keyword_label keywords/v1, reading excerpt"
         )
@@ -2298,21 +2328,121 @@ class TestWhatTheTextSays:
         text = jev_eval.format_evaluation(book.evaluate(labelled_by=readme).row())
         assert "the README's own grouping, never ground truth" in text
 
-    def test_beats_only_on_a_lower_bound_above_zero(self) -> None:
-        evaluation = self._evaluation()
-        text = jev_eval.format_evaluation(
-            {**evaluation.row(), "vs_majority_diff": 0.3, "vs_majority_diff_low": 0.0}
+    @pytest.mark.parametrize(
+        ("counts", "said_of_it"),
+        [
+            ((1, 0), "too few for the exact one-sided sign test at 99.5% to say"),
+            ((7, 0), "too few for the exact one-sided sign test at 99.5% to say"),
+            ((8, 0), "p = 0.00391: beats it"),
+            ((30, 20), "p = 0.101: does not beat it"),
+            ((60, 30), ": beats it"),
+            ((None, None), "not measured whether Jev is the better of the two"),
+        ],
+    )
+    def test_beats_only_by_the_exact_sign_test_at_the_gate(
+        self, counts: tuple[int | None, int | None], said_of_it: str
+    ) -> None:
+        """
+        A bootstrap interval clear of zero says nothing about beating: only
+        the items one of the two got right decide it, by the exact one-sided
+        sign test at the level the row recorded for its gates.
+        """
+        row = {
+            **self._evaluation().row(),
+            "vs_majority_diff": 0.3,
+            "vs_majority_diff_low": 0.01,
+            "vs_majority_diff_high": 0.5,
+            "vs_majority_jev_right_only": counts[0],
+            "vs_majority_baseline_right_only": counts[1],
+        }
+        (line,) = [
+            line
+            for line in jev_eval.format_evaluation(row).splitlines()
+            if line.startswith("Jev minus the majority label")
+        ]
+        assert line.endswith(said_of_it), line
+        assert "(bootstrap 95%: 0.010 to 0.500)" in line
+        beaten = "beats it" in line.replace("does not beat it", "")
+        assert beaten is (counts in ((8, 0), (60, 30)))
+
+    def test_the_reviewers_comparisons_are_too_few_to_say(self) -> None:
+        """
+        One item, Jev right and the keyword rule wrong, and 200 items with
+        five, six or seven discordant, all in Jev's favour: the bootstrap's
+        bound sat above 0 on each and "beats it" was printed. The exact chance
+        of each split is 1/2, 1/32, 1/64 or 1/128, none below the gate's
+        1/200, so none can be called.
+        """
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        one = book.evaluate()
+        assert (one.vs_keyword_jev_right_only, one.vs_keyword_baseline_right_only) == (
+            1,
+            0,
         )
-        assert "does not beat it" in text
-        text = jev_eval.format_evaluation(
-            {
-                **evaluation.row(),
-                "vs_majority_diff": 0.3,
-                "vs_majority_diff_low": 0.01,
-                "vs_majority_diff_high": 0.5,
-            }
+        assert (one.vs_keyword_diff_low, one.vs_keyword_diff_high) == (1.0, 1.0)
+        assert "too few" in jev_eval.format_evaluation(one.row())
+        words = [
+            ("Bond", "bonds"),
+            ("Gold", "commodities"),
+            ("Currency", "currencies"),
+            ("Bitcoin", "cryptocurrencies"),
+        ]
+        for discordant in (5, 6, 7):
+            book, made, i = _Book(), 0, 0
+            while made < 200:
+                word, label = words[i % 4]
+                text = (
+                    f"Invented Fictional Pattern {i}"
+                    if made < discordant
+                    else f"Invented {word} Timing {i}"
+                )
+                i += 1
+                if _split(text) != "test":
+                    continue
+                book.label(text, label)
+                book.answer(text, label)
+                made += 1
+            evaluation = book.evaluate("test")
+            assert (
+                evaluation.vs_keyword_jev_right_only,
+                evaluation.vs_keyword_baseline_right_only,
+            ) == (discordant, 0)
+            assert evaluation.vs_keyword_diff_low > 0
+            row = _recorded(evaluation)
+            assert not jev_calibration._beats(row, "keyword")
+            text = jev_eval.format_evaluation(row)
+            (line,) = [
+                line for line in text.splitlines() if "minus the keyword rule" in line
+            ]
+            assert "too few" in line and "beats it" not in line, line
+
+    def test_every_level_printed_is_the_rows_own(self) -> None:
+        """
+        A row recorded under a plan with other levels is printed with its
+        own: every interval at its ``ci_level``, every gate at its
+        ``gate_ci_level``, and a row that recorded none says so rather than
+        borrowing the plan in force.
+        """
+        book, _, _ = _threshold_book()
+        row = book.evaluate("test").row()
+        assert (row["ci_level"], row["gate_ci_level"]) == (
+            jev_prereg.REPORT_CI,
+            jev_prereg.GATE_CI,
         )
-        assert "beats it" in text.replace("does not beat it", "")
+        other = jev_eval.format_evaluation(
+            {**row, "ci_level": 0.9, "gate_ci_level": 0.99}
+        )
+        assert "Wilson 90%" in other and "bootstrap 90%" in other
+        assert "Wilson 95%" not in other and "bootstrap 95%" not in other
+        assert "one-sided Wilson lower bound at 99%" in other
+        assert "99.5%" not in other
+        unrecorded = jev_eval.format_evaluation(
+            {**row, "ci_level": None, "gate_ci_level": None}
+        )
+        assert "Wilson, level not recorded" in unrecorded
+        assert "95%" not in unrecorded and "99.5%" not in unrecorded
 
     def test_the_report_is_in_the_order_read_and_never_by_a_figure(
         self,

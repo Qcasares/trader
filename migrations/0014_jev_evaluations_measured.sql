@@ -52,13 +52,28 @@
 -- `[0-9]` rather than `\d`, and PostgreSQL's `$`, which matches only at the
 -- end of the string, so neither a Unicode digit nor a trailing newline passes.
 --
--- Two counts beyond design C9's block
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Columns beyond design C9's block
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 -- `n_other_plans` and `n_plan_unknown`: labelled items set apart because their
 -- answer was recorded under analysis plans other than those in force, or
 -- under plans the queue cannot name (docs/08, C7+C8, "The plans an answer was
 -- recorded under"). Neither is scored, and neither is in `n`; a count the row
 -- did not keep is one the report could not show.
+--
+-- `gate_ci_level`: the one-sided level the row's gates were judged at — the
+-- threshold's search and the test a baseline is beaten by — beside
+-- `ci_level`, the two-sided level of every interval the row reports, the
+-- paired differences' bootstrap intervals among them. A row says what level
+-- each of its figures was computed at, rather than leaving it to the plan in
+-- force when it is read.
+--
+-- `vs_<baseline>_jev_right_only` and `vs_<baseline>_baseline_right_only`: of
+-- the scored items, those Jev got right and the baseline wrong, and the other
+-- way round. Jev beats a baseline only by the exact one-sided sign test of
+-- these at the gate level (McNemar's, exact); the items both got right or
+-- both wrong say nothing about which is better, and a percentile bootstrap
+-- of the difference over a few such items understates their uncertainty.
+-- The difference is these two counts over `n`, and a CHECK holds it so.
 
 ALTER TABLE jev_evaluations
     ADD COLUMN split TEXT NOT NULL DEFAULT 'all'
@@ -67,6 +82,7 @@ ALTER TABLE jev_evaluations
     ADD COLUMN keyword_baseline_ref TEXT,
     ADD COLUMN answers_sha256 TEXT,
     ADD COLUMN ci_level DOUBLE PRECISION,
+    ADD COLUMN gate_ci_level DOUBLE PRECISION,
     ADD COLUMN n_valid INT,
     ADD COLUMN n_escape INT,
     ADD COLUMN n_invalid INT,
@@ -93,9 +109,13 @@ ALTER TABLE jev_evaluations
     ADD COLUMN vs_majority_diff DOUBLE PRECISION,
     ADD COLUMN vs_majority_diff_low DOUBLE PRECISION,
     ADD COLUMN vs_majority_diff_high DOUBLE PRECISION,
+    ADD COLUMN vs_majority_jev_right_only INT,
+    ADD COLUMN vs_majority_baseline_right_only INT,
     ADD COLUMN vs_keyword_diff DOUBLE PRECISION,
     ADD COLUMN vs_keyword_diff_low DOUBLE PRECISION,
     ADD COLUMN vs_keyword_diff_high DOUBLE PRECISION,
+    ADD COLUMN vs_keyword_jev_right_only INT,
+    ADD COLUMN vs_keyword_baseline_right_only INT,
     ADD COLUMN flip_rate_n INT,
     ADD COLUMN flip_rate_low_margin DOUBLE PRECISION,
     ADD COLUMN flip_rate_low_margin_n INT,
@@ -131,8 +151,12 @@ ALTER TABLE jev_evaluations
         AND flip_rate_near_threshold BETWEEN 0 AND 1
         AND labeller_agreement BETWEEN 0 AND 1
     ),
-    -- The level every reported interval was computed at.
-    ADD CONSTRAINT jev_evaluations_ci_level CHECK (ci_level > 0 AND ci_level < 1),
+    -- The two-sided level every interval the row reports was computed at,
+    -- and the one-sided level its gates were judged at.
+    ADD CONSTRAINT jev_evaluations_ci_level CHECK (
+        ci_level > 0 AND ci_level < 1
+        AND gate_ci_level > 0 AND gate_ci_level < 1
+    ),
     -- A Choice's Brier score sums a squared error over its options, at most 2;
     -- a Noul's is at most 1. Its climatology is one.
     ADD CONSTRAINT jev_evaluations_brier_range CHECK (
@@ -142,6 +166,26 @@ ALTER TABLE jev_evaluations
         AND brier_reference BETWEEN 0 AND 2
     ),
     ADD CONSTRAINT jev_evaluations_kappa_range CHECK (labeller_kappa BETWEEN -1 AND 1),
+    -- A paired difference is its discordant items: Jev right where the
+    -- baseline was wrong, less the other way round, over n. The three are
+    -- present together, and the point is their arithmetic, to well within
+    -- what a double's rounding of a mean could move.
+    ADD CONSTRAINT jev_evaluations_differences_from_their_items CHECK (
+        num_nulls(vs_majority_diff, vs_majority_jev_right_only,
+                  vs_majority_baseline_right_only) IN (0, 3)
+        AND (num_nulls(vs_majority_diff, vs_majority_jev_right_only,
+                       vs_majority_baseline_right_only) > 0
+             OR abs(vs_majority_diff * n
+                    - (vs_majority_jev_right_only
+                       - vs_majority_baseline_right_only)) < 1e-6)
+        AND num_nulls(vs_keyword_diff, vs_keyword_jev_right_only,
+                      vs_keyword_baseline_right_only) IN (0, 3)
+        AND (num_nulls(vs_keyword_diff, vs_keyword_jev_right_only,
+                       vs_keyword_baseline_right_only) > 0
+             OR abs(vs_keyword_diff * n
+                    - (vs_keyword_jev_right_only
+                       - vs_keyword_baseline_right_only)) < 1e-6)
+    ),
     -- Jev's accuracy over every item less a baseline's, both proportions.
     ADD CONSTRAINT jev_evaluations_differences_range CHECK (
         vs_majority_diff BETWEEN -1 AND 1
@@ -203,6 +247,12 @@ ALTER TABLE jev_evaluations
         AND flip_rate_low_margin_n BETWEEN 0 AND n
         AND flip_rate_near_threshold_n BETWEEN 0 AND n
         AND labeller_agreement_n BETWEEN 0 AND n
+        AND vs_majority_jev_right_only >= 0
+        AND vs_majority_baseline_right_only >= 0
+        AND vs_majority_jev_right_only + vs_majority_baseline_right_only <= n
+        AND vs_keyword_jev_right_only >= 0
+        AND vs_keyword_baseline_right_only >= 0
+        AND vs_keyword_jev_right_only + vs_keyword_baseline_right_only <= n
     ),
     ADD CONSTRAINT jev_evaluations_counts_outside_n CHECK (
         n_contested >= 0 AND n_other_plans >= 0 AND n_plan_unknown >= 0
