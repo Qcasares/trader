@@ -117,7 +117,7 @@ from typing import Any
 import asyncpg
 
 from src.programme import flags, jev_repo, web_fetch, web_sources
-from src.programme.job_errors import JobFailedError
+from src.programme.job_errors import JobFailedError, described
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ async def run_job(conn: asyncpg.Connection, payload: dict[str, Any]) -> dict[str
         )
     except Exception as error:  # noqa: BLE001 - reported by class, never by message
         raise JobFailedError(
-            f"storing the snapshot of {name} failed ({_described(error)}); "
+            f"storing the snapshot of {name} failed ({described(error)}); "
             "nothing from it was stored",
             retry=True,
         ) from None
@@ -366,18 +366,6 @@ def _reason(
     if content in earlier:
         return earlier_reason(earlier[content])
     return None
-
-
-def _described(error: BaseException) -> str:
-    """An error by its class, SQLSTATE and constraint: nothing it quoted."""
-    parts = [type(error).__name__]
-    sqlstate = getattr(error, "sqlstate", None)
-    if isinstance(sqlstate, str) and sqlstate:
-        parts.append(f"SQLSTATE {sqlstate}")
-    constraint = getattr(error, "constraint_name", None)
-    if isinstance(constraint, str) and constraint:
-        parts.append(f"constraint {constraint}")
-    return ", ".join(parts)
 
 
 __all__ = [

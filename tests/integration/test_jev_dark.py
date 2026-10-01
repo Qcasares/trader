@@ -33,6 +33,7 @@ ledger refuses DELETE. Skipped unless ``TEST_DATABASE_URL`` is set.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 import os
@@ -235,6 +236,13 @@ _PAYLOADS: dict[str, dict[str, Any]] = {
     "jev_regime": {"session": "2026-09-28", "set": "decision.regime", "version": 1},
     "jev_reask": {"request_id": 1},
     "jev_web_ingest": {"source": "pwb-readme"},
+    "jev_ask": {
+        "set": "guardrail.injection",
+        "version": 1,
+        "subject_type": "web_excerpt",
+        "subject_id": hashlib.sha256(b"An Invented Title").hexdigest(),
+        "source_id": 1,
+    },
 }
 
 

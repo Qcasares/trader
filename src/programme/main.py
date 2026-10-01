@@ -44,11 +44,12 @@ failing while an operator has them off.
 
 Before each drain, at most once a minute, the planner puts whatever Jev work is
 due in the queue (``jev_plan``): the daily probe, the forward clock's jobs, the
-re-asks and, from phase C6, the daily web ingest. On its own connection and
-inside its own ``try``, so a planner that fails costs a minute of planning and
-never a drain; and dark on its own terms, planning nothing unless the
-programme, Jev, a usable pin and a key all allow it. The drain and its one
-claim are what they were.
+re-asks, from phase C6 the daily web ingest, and from phases C7 and C8 the
+``jev_ask`` jobs, each asking one set about one stored text. On its own
+connection and inside its own ``try``, so a planner that fails costs a minute
+of planning and never a drain; and dark on its own terms, planning nothing
+unless the programme, Jev, a usable pin and a key all allow it. The drain and
+its one claim are what they were.
 
 The web ingest (``web_ingest``) is the one kind here that asks Jev nothing: it
 fetches a page and stores what it reads. It needs no key to do that, so the
@@ -269,6 +270,11 @@ JEV_HANDLERS: dict[str, JevHandler] = {
     # One allow-listed page, fetched, read, screened and stored, calling
     # nothing (web_ingest); planned once a UTC day per source by jev_plan.
     "jev_web_ingest": _jev_web_ingest,
+    # One set asked about one stored text, once an attempt (jev_jobs): the
+    # injection screen and the catalogue about a web excerpt, from phase C7,
+    # and the two title sets about a hypothesis's title, from phase C8; the
+    # subjects planned by jev_plan.
+    "jev_ask": jev_jobs.run_ask,
 }
 
 

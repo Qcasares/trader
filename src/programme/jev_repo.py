@@ -639,6 +639,30 @@ async def content_blocked(conn: asyncpg.Connection, state_hash: str) -> bool:
     )
 
 
+async def content_block_request(
+    conn: asyncpg.Connection, *, subject_type: str, subject_id: str
+) -> int | None:
+    """
+    The earliest request about this subject that the vendor answered with a
+    content block, or ``None``.
+
+    What the ``jev_ask`` and ``jev_reask`` jobs name when they quarantine web
+    text a block was recorded for (``jev_jobs.quarantine_if_blocked``): the
+    road refuses the text as ``content_blocked`` by its state hash, and for a
+    web excerpt the subject is its content's address, which the lane holds to
+    the sha256 of the text sent, so the two find the same rows. Answered from
+    the partial index on ``error_kind``.
+    """
+    request_id = await conn.fetchval(
+        "SELECT MIN(id) FROM jev_requests "
+        "WHERE error_kind = 'content_block' AND subject_type = $1 "
+        "AND subject_id = $2",
+        subject_type,
+        subject_id,
+    )
+    return int(request_id) if request_id is not None else None
+
+
 async def content_quarantined(
     conn: asyncpg.Connection, content_sha256: str
 ) -> int | None:
