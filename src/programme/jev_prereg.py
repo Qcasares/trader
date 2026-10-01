@@ -54,15 +54,39 @@ What the plan holds, and what it does not
 The global plan: the split, the size floors, the margin grid a threshold is
 searched on, each lane's target, the confidence levels, the bootstrap, the
 calibration bins, the flip limits, the re-ask sample, the "too few to say"
-floor and the regime rule. Phase C7 and C8 add a plan per question set beside
-the sets they register; no set plan exists yet, and ``usable`` (C9) is what
-will one day read them. Nothing here is consumed by anything that acts.
+floor and the regime rule. Nothing here is consumed by anything that acts.
+
+The set plans (phases C7 and C8)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each question set the research and guardrail lanes ask has a plan of its own
+(:func:`set_plan`), registered with the set and golden-hashed beside it
+(:data:`GOLDEN_SET_PLAN_HASHES`), with an append-only released history in the
+test, as the global plan has: per question, the class whose answer acts, the
+target its statistic must meet — a lane's target raised, never lowered — and
+the keyword baseline Jev is measured against, a pure, deterministic function of
+the text whose rules are data hashed into the plan. ``decision.regime`` is the
+global plan's ``regime`` section, and the connectivity probe measures the
+vendor, not a set, so neither has one.
+
+A plan is in force for the answers recorded under it, and for no others. So
+every ``jev_ask`` job writes the set plan's version and hash, and the global
+plan's, into its result as it asks (``jev_jobs.run_ask``), as the regime job
+writes the global plan into its result; and the harness (C9) scores an answer
+only under the plans in force when it was recorded. A baseline chosen after
+the answers cannot be applied to them: a changed plan is a new
+:data:`SET_PLAN_VERSIONS` entry, with its hash appended, and the answers
+recorded under the old one stay scored under the old one.
+
+The global plan is unchanged by them: :data:`PLAN_VERSION` and
+:data:`GOLDEN_PLAN_HASH` are as phase C4 released them.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import timedelta
 from types import MappingProxyType
@@ -374,24 +398,420 @@ def _as_data(value: Any) -> Any:
     return value
 
 
+# ---------------------------------------------------------------------------
+# The set plans (phases C7 and C8)
+# ---------------------------------------------------------------------------
+
+#: Each planned set's plan version, by the set's name and version. Bumped
+#: whenever anything its plan holds changes; the test's released history gains
+#: the new hash and keeps every old one. A set version with no entry has no
+#: plan, and ``jev_jobs.run_ask`` asks nothing for it.
+SET_PLAN_VERSIONS: Mapping[tuple[str, int], int] = MappingProxyType(
+    {
+        ("guardrail.injection", 1): 1,
+        ("research.catalogue", 1): 1,
+        ("research.hypothesis", 1): 1,
+        ("guardrail.card", 1): 1,
+    }
+)
+
+#: What :func:`set_plan_hash` returns for each planned set at its plan version
+#: in :data:`SET_PLAN_VERSIONS`. Not part of the plans it pins.
+GOLDEN_SET_PLAN_HASHES: Mapping[tuple[str, int], str] = MappingProxyType(
+    {
+        ("guardrail.injection", 1): (
+            "2ba46f373fb98c836610d952cfa2d8737b53d8f30db6c2147d6c97bd14eff8f7"
+        ),
+        ("research.catalogue", 1): (
+            "9ab204c87f7517215d9a63bac26cee7a853232d8dffba31c6f434ca0a5292deb"
+        ),
+        ("research.hypothesis", 1): (
+            "1f7274a6d9d39de92d22806edf09d0da49c29804ca44ce64797873e36a07f050"
+        ),
+        ("guardrail.card", 1): (
+            "a72753b5ea04d5af9392657928d777be19b9bbbbd9e013700f2e97e0d231956d"
+        ),
+    }
+)
+
+#: Per question: the class whose answer would act, ``None`` where no answer
+#: acts, and the target the statistic must meet before a threshold is chosen,
+#: read as its lane's is (:data:`LANE_TARGETS`) — a Wilson lower bound at the
+#: gate level — and never below its lane's. A guardrail's answer acts on its
+#: ``true`` (a text quarantined, a card refused), so its precision is what is
+#: measured; a research answer is a suggestion, measured by its accuracy.
+SET_TARGETS: Mapping[tuple[str, str], Mapping[str, Any]] = MappingProxyType(
+    {
+        ("guardrail.injection", "addressed_to_ai"): MappingProxyType(
+            {
+                "acting_class": "true",
+                "statistic": "covered_precision_of_the_acting_class",
+                "at_least": 0.90,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("research.catalogue", "asset_class"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("research.catalogue", "mechanism"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("research.hypothesis", "asset_class"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("research.hypothesis", "mechanism"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        ("guardrail.card", "performance_claim"): MappingProxyType(
+            {
+                "acting_class": "true",
+                "statistic": "covered_precision_of_the_acting_class",
+                "at_least": 0.90,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+    }
+)
+
+#: The injection screen's keyword baseline: the code screen, version 1, whose
+#: rule data is named by its hash, so the plan pins the exact rules the screen
+#: is measured against. It answers ``true`` when any rule fires on the excerpt.
+#: A copy, since this module loads the standard library alone: the test holds
+#: it to ``web_sources.CODE_SCREEN_VERSION``, ``code_screen_sha256()`` and
+#: ``GOLDEN_CODE_SCREEN_SHA256``.
+CODE_SCREEN_BASELINE: Mapping[str, Any] = MappingProxyType(
+    {
+        "rule": "web_sources.code_screen",
+        "version": 1,
+        "rules_sha256": (
+            "95cc9a98bff72231934da34b8d475668af04ee84a966c86073850958e88e1984"
+        ),
+        "true_when": "a rule fires",
+    }
+)
+
+#: The card check's keyword baseline: ``claims.find_performance_claim`` on the
+#: title, ``true`` when it finds a claim. Its terms, how near a number must be
+#: to one, and what a number is are copied here, and the test holds each to
+#: ``claims``' own, so the plan pins the rule the check is measured against.
+PERFORMANCE_CLAIM_BASELINE: Mapping[str, Any] = MappingProxyType(
+    {
+        "rule": "claims.find_performance_claim",
+        "terms": (
+            "sharpe",
+            "sortino",
+            "calmar",
+            "cagr",
+            "return",
+            "returns",
+            "drawdown",
+            "alpha",
+            "profit",
+            "profitable",
+            "pnl",
+            "p&l",
+            "win rate",
+            "hit rate",
+            "annualised",
+            "annualized",
+            "outperform",
+        ),
+        "proximity": 40,
+        "number": r"-?\d+(?:[.,]\d+)?%?",
+        "true_when": "a claim is found",
+    }
+)
+
+#: The label a keyword rule gives text none of its keywords is in: the
+#: escape of both catalogue questions. A rule never answers anything else
+#: without a keyword, and never ``other_mechanism``.
+KEYWORD_FALLBACK = "insufficient_evidence"
+
+#: How :func:`keyword_label` finds a keyword, by name, so a change to the
+#: finding is a change to every plan that names it: ``keywords/v1`` is the
+#: matcher below.
+KEYWORD_MATCHER = "keywords/v1"
+
+#: The ordered keyword rules for a strategy's asset class: the first rule any
+#: of whose keywords the text holds gives its label; :data:`KEYWORD_FALLBACK`
+#: otherwise. Design part C7's rules, as data. "Crypto words" are the design's
+#: phrase; this is the list this build chose for it.
+ASSET_CLASS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "cryptocurrencies",
+        ("crypto", "cryptocurrency", "bitcoin", "ethereum", "blockchain"),
+    ),
+    (
+        "bonds",
+        (
+            "bond",
+            "treasury",
+            "yield",
+            "fixed income",
+            "sovereign",
+            "credit",
+            "term premium",
+            "interest rate",
+        ),
+    ),
+    ("commodities", ("commodity", "gold", "silver", "oil", "crude", "metal", "grain")),
+    ("currencies", ("currency", "foreign exchange", "fx", "carry")),
+    ("derivatives", ("option", "volatility", "vix", "covered call", "derivative")),
+    (
+        "multi_asset",
+        ("multi-asset", "asset allocation", "risk parity", "tactical", "portfolio of"),
+    ),
+    ("equities", ("equity", "stock", "share", "company", "capm", "size effect")),
+)
+
+#: The ordered keyword rules for a strategy's source of return, read as
+#: :data:`ASSET_CLASS_KEYWORDS` is. ``diversif*`` is the design's stem,
+#: ``diversif``, written as one: it is found at the start of a word, in any
+#: ending. Every other keyword is a whole word, as the design wrote it, so
+#: ``season`` finds "seasons" and not "seasonality", which no keyword names.
+MECHANISM_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("trend_or_momentum", ("momentum", "trend")),
+    ("reversal", ("reversal", "mean reversion", "overreaction")),
+    ("value", ("value", "book-to-market")),
+    ("carry", ("carry", "yield")),
+    ("size", ("size", "small")),
+    ("low_risk", ("low volatility", "low beta", "betting against beta")),
+    ("seasonality", ("season", "calendar", "month", "weekday", "holiday")),
+    ("event", ("auction", "earnings", "announcement", "intervention")),
+    ("sentiment", ("media", "tone", "sentiment", "news", "attention")),
+    (
+        "allocation",
+        ("risk parity", "optimisation", "optimization", "allocation", "diversif*"),
+    ),
+)
+
+#: The words a keyword's plural never falls on: in "portfolio of" the noun is
+#: the one before.
+_NOT_PLURALISED = frozenset({"of"})
+
+#: What a keyword ending in this is: a stem, found at the start of a word.
+_STEM = "*"
+
+
+def plural(word: str) -> str:
+    """
+    ``word``'s regular English plural, by rule and nothing else: a ``y`` after
+    a consonant becomes ``ies``; a word ending in ``s``, ``x``, ``z``, ``ch``
+    or ``sh`` takes ``es``; every other word takes ``s``. Irregular plurals are
+    not read, and a word the rule makes nonsense of ("news") merely gains a
+    form no text holds.
+    """
+    if len(word) > 1 and word.endswith("y") and word[-2] not in "aeiou":
+        return word[:-1] + "ies"
+    if word.endswith(("s", "x", "z", "ch", "sh")):
+        return word + "es"
+    return word + "s"
+
+
+def keyword_forms(keyword: str) -> tuple[str, ...]:
+    """
+    The forms :func:`keyword_label` finds ``keyword`` in: as written, and with
+    its last word that is not "of" in the plural (:func:`plural`); a stem,
+    ending ``*``, in its one form. Every keyword of every rule, so the rule a
+    plan names is the one the docs describe:
+    ``tests/unit/test_jev_prereg.py`` holds the forms of the whole list to a
+    table written there.
+    """
+    if keyword.endswith(_STEM):
+        return (keyword,)
+    words = keyword.split(" ")
+    last = max(i for i, word in enumerate(words) if word not in _NOT_PLURALISED)
+    pluralised = [*words[:last], plural(words[last]), *words[last + 1 :]]
+    return (keyword, " ".join(pluralised))
+
+
+@functools.cache
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """
+    One keyword, in every form, as whole words of casefolded text: neither end
+    beside a letter or a digit, so "Turmoil in the Soil" holds no "oil"; and
+    its words apart by any run of spaces and hyphens, whichever the keyword
+    was written with, so "fixed-income" is "fixed income". A stem keeps no
+    boundary at its end.
+    """
+    alternatives = []
+    for form in keyword_forms(keyword):
+        stem = form.endswith(_STEM)
+        words = re.split(r"[ -]", form.removesuffix(_STEM))
+        body = r"[\s-]+".join(re.escape(word) for word in words)
+        alternatives.append(body if stem else body + r"(?![^\W_])")
+    return re.compile(r"(?<![^\W_])(?:" + "|".join(alternatives) + ")")
+
+
+def keyword_label(rules: Sequence[tuple[str, Sequence[str]]], text: str) -> str:
+    """
+    What an ordered keyword rule says of ``text``: the label of the first rule
+    any of whose keywords ``text`` holds, read casefolded and as whole words
+    (:func:`_keyword_pattern`), each keyword in its forms
+    (:func:`keyword_forms`); :data:`KEYWORD_FALLBACK` when none does. Pure and
+    deterministic: the text alone decides it.
+    """
+    folded = text.casefold()
+    for label, keywords in rules:
+        if any(_keyword_pattern(keyword).search(folded) for keyword in keywords):
+            return label
+    return KEYWORD_FALLBACK
+
+
+def _keyword_baseline(
+    rules: Sequence[tuple[str, Sequence[str]]], reads: str
+) -> dict[str, Any]:
+    return {
+        "rule": "jev_prereg.keyword_label",
+        "matcher": KEYWORD_MATCHER,
+        "reads": reads,
+        "rules": rules,
+        "fallback": KEYWORD_FALLBACK,
+    }
+
+
+def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
+    """
+    Every set plan, by set name and version, built from the constants above
+    each time it is read, so a constant moved is a plan moved: per question,
+    its target (:data:`SET_TARGETS`) and its keyword baseline.
+    """
+
+    def question(name: str, key: str, baseline: Mapping[str, Any]) -> dict:
+        return {**SET_TARGETS[(name, key)], "keyword_baseline": baseline}
+
+    catalogue = {
+        "asset_class": _keyword_baseline(ASSET_CLASS_KEYWORDS, "excerpt"),
+        "mechanism": _keyword_baseline(MECHANISM_KEYWORDS, "excerpt"),
+    }
+    hypothesis = {
+        "asset_class": _keyword_baseline(ASSET_CLASS_KEYWORDS, "title"),
+        "mechanism": _keyword_baseline(MECHANISM_KEYWORDS, "title"),
+    }
+    questions = {
+        ("guardrail.injection", 1): {
+            "addressed_to_ai": question(
+                "guardrail.injection",
+                "addressed_to_ai",
+                {**CODE_SCREEN_BASELINE, "reads": "excerpt"},
+            ),
+        },
+        ("research.catalogue", 1): {
+            key: question("research.catalogue", key, baseline)
+            for key, baseline in catalogue.items()
+        },
+        ("research.hypothesis", 1): {
+            key: question("research.hypothesis", key, baseline)
+            for key, baseline in hypothesis.items()
+        },
+        ("guardrail.card", 1): {
+            "performance_claim": question(
+                "guardrail.card",
+                "performance_claim",
+                {**PERFORMANCE_CLAIM_BASELINE, "reads": "title"},
+            ),
+        },
+    }
+    return {
+        key: {
+            "set": key[0],
+            "version": key[1],
+            "plan_version": SET_PLAN_VERSIONS[key],
+            "questions": planned,
+        }
+        for key, planned in questions.items()
+        if key in SET_PLAN_VERSIONS
+    }
+
+
+def set_plan(name: str, version: int) -> dict[str, Any] | None:
+    """
+    The plan of ``name`` at ``version``, as data, or ``None`` if it has none:
+    what :func:`set_plan_hash` hashes.
+    """
+    found = _set_plans().get((name, version))
+    return None if found is None else _as_data(found)
+
+
+def set_plan_hash(name: str, version: int) -> str | None:
+    """
+    sha256 of :func:`set_plan` as compact JSON with its mappings' keys sorted,
+    as :func:`plan_hash` hashes the global plan; ``None`` for a set with no
+    plan.
+    """
+    plan = set_plan(name, version)
+    if plan is None:
+        return None
+    text = json.dumps(
+        plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def plans_in_force(name: str, version: int) -> dict[str, Any] | None:
+    """
+    The global plan's version and hash and ``name``'s own plan's: what a job
+    records beside an answer it asks for, so the harness scores the answer
+    only under the plans in force when it was recorded, and never by a
+    baseline chosen after it. ``None`` when the set has no plan; a set with
+    none is asked nothing (``jev_jobs.run_ask``).
+    """
+    hashed = set_plan_hash(name, version)
+    if hashed is None:
+        return None
+    return {
+        "plan_version": PLAN_VERSION,
+        "plan_hash": plan_hash(),
+        "set_plan_version": SET_PLAN_VERSIONS[(name, version)],
+        "set_plan_hash": hashed,
+    }
+
+
 __all__ = [
     "ANY_OF",
+    "ASSET_CLASS_KEYWORDS",
     "BOOTSTRAP_RESAMPLES",
     "BOOTSTRAP_SEED_RULE",
     "CALIBRATION_BINS",
+    "CODE_SCREEN_BASELINE",
     "DEV_SPLIT_TENTHS",
     "GATE_CI",
     "GATE_FAMILY",
     "GOLDEN_PLAN_HASH",
+    "GOLDEN_SET_PLAN_HASHES",
+    "KEYWORD_FALLBACK",
+    "KEYWORD_MATCHER",
     "LANE_TARGETS",
     "MARGIN_GRID",
     "MAX_FLIP_RATE",
     "MAX_FLIP_RATE_NEAR_THRESHOLD",
+    "MECHANISM_KEYWORDS",
     "MIN_COVERED",
     "MIN_DEV_ITEMS",
     "MIN_FLIP_PAIRS",
     "MIN_TEST_ITEMS",
     "NEAR_THRESHOLD",
+    "PERFORMANCE_CLAIM_BASELINE",
     "PLAN_VERSION",
     "REASKS_PER_DAY",
     "REASK_AFTER",
@@ -400,12 +820,20 @@ __all__ = [
     "REGIME_BASELINE_RULE",
     "REGIME_SLEEVES",
     "REPORT_CI",
+    "SET_PLAN_VERSIONS",
+    "SET_TARGETS",
     "TOO_FEW_PER_CLASS",
     "ReaskStratum",
     "global_plan",
+    "keyword_forms",
+    "keyword_label",
     "plan_hash",
+    "plans_in_force",
+    "plural",
     "reask_sample",
     "reask_stratum",
     "regime_baseline",
+    "set_plan",
+    "set_plan_hash",
     "split_of",
 ]
