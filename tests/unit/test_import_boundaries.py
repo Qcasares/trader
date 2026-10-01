@@ -2562,10 +2562,14 @@ def test_the_jev_module_the_runners_may_load_loads_no_other() -> None:
 #: nothing else, however it is imported. ``claims`` joined in phase C8, when
 #: the performance-claim check moved out of ``author``, which prompts a
 #: generative model, so that reading the rule no longer loads one; phase C9's
-#: ``jev_calibration`` and the statistics it adds to ``jev_stats`` joined in C9.
+#: ``jev_calibration`` and the statistics it adds to ``jev_stats`` joined in C9;
+#: and phase D2's ``jev_chips``, which phase E's pages compute their chips
+#: with, holding copies of ``gates``' and ``roles``' values rather than load
+#: either (``tests/unit/test_jev_chips.py::TestTheCopies``).
 PURE_PROGRAMME_MODULES = (
     "src.programme.claims",
     "src.programme.jev_calibration",
+    "src.programme.jev_chips",
     "src.programme.jev_hash",
     "src.programme.jev_prereg",
     "src.programme.jev_stats",
