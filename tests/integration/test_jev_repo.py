@@ -1544,7 +1544,9 @@ class TestEvaluations:
         self, conn: asyncpg.Connection
     ) -> None:
         bins = [{"low": 0.9, "high": 1.0, "n": 12, "accuracy": 0.75}]
-        await _evaluation(conn, flip_rate=0.0, calibration_bins=json.dumps(bins))
+        await _evaluation(
+            conn, flip_rate=0.0, flip_rate_n=12, calibration_bins=json.dumps(bins)
+        )
         (evaluation,) = await jev_repo.list_evaluations(conn)
         assert evaluation["flip_rate"] == 0.0
         assert evaluation["accuracy"] is None

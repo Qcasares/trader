@@ -2,7 +2,8 @@
 test_jev_schema.py
 ------------------
 Migrations 0012 and 0013, the Jev ledger and its switches, against real
-PostgreSQL.
+PostgreSQL. Migration 0014, what an evaluation measured, is
+``test_jev_evaluations.py``'s.
 
 Every rule in it is a trigger, a CHECK or an index, so none of it can be proved
 without the database that enforces it. Each refusal is asserted by attempting
@@ -1772,8 +1773,21 @@ class TestEvaluations:
     async def test_a_genuine_zero_is_kept_as_one(
         self, conn: asyncpg.Connection
     ) -> None:
+        """
+        From migration 0014 a flip rate says how many pairs it was measured
+        on and an accuracy carries its interval
+        (``tests/integration/test_jev_evaluations.py``); zero is kept either way.
+        """
         stored = await _insert(
-            conn, "jev_evaluations", _evaluation_row(flip_rate=0.0, accuracy=0.0)
+            conn,
+            "jev_evaluations",
+            _evaluation_row(
+                flip_rate=0.0,
+                flip_rate_n=12,
+                accuracy=0.0,
+                accuracy_wilson_low=0.0,
+                accuracy_wilson_high=0.05,
+            ),
         )
         assert (stored["flip_rate"], stored["accuracy"]) == (0.0, 0.0)
 
