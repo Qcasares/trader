@@ -82,8 +82,13 @@ prints "not measured: no labelled items".
   (``jev_calibration.usable``, ``held_out``).
 * **Both baselines answer every item**, so Jev is compared with them over
   every scored item, an answer that was not valid or not asked counted as
-  wrong. The paired difference is reported with its bootstrap interval at the
-  reporting level; Jev "beats" a baseline only by the exact one-sided sign
+  wrong. The findings sets' second baseline (phase D2) is no keyword rule but
+  ``findings.recorded``: who raised the earliest model-written finding
+  holding the title, or the severity it was recorded at
+  (``jev_repo.finding_records``), read here and never on the side that asks,
+  and never exported to a labeller. The paired difference is reported with
+  its bootstrap interval at the reporting level; Jev "beats" a baseline only
+  by the exact one-sided sign
   test, at the gate level, of the items only one of the two got right, which
   the row records (``jev_stats.sign_test``), and "too few to say" where not
   even every one of them going Jev's way could reach the level.
@@ -281,8 +286,10 @@ NO_GROUND_TRUTH: Mapping[str, str] = {
     ),
 }
 
-#: The subjects a label may be of: text, which a person can read and judge.
-TEXT_SUBJECTS = ("web_excerpt", "hypothesis_title")
+#: The subjects a label may be of: text, which a person can read and judge —
+#: a web excerpt, a hypothesis title and, from phase D2, a finding's title
+#: (docs/09, section 3.7).
+LABELLED_SUBJECTS = ("web_excerpt", "hypothesis_title", "finding_title")
 
 #: The splits an evaluation may be recorded over: the held-out test split,
 #: which a gate reads, or every labelled item, which holds it. Each is a look
@@ -962,7 +969,11 @@ class Ledger:
     and ``texts`` each subject's date and text; ``pairs`` the question's
     canonical answers beside their re-asks under the model, and ``reasks``
     the re-ask jobs by key, which name the stratum and plan each was sampled
-    under.
+    under. From phase D2, ``records`` holds, for each finding-title subject,
+    who raised the earliest finding of its population holding the title and
+    the severity it was recorded at (``jev_repo.finding_records``): what the
+    ``findings.recorded`` baseline answers with, read here and nowhere on the
+    side that asks.
     """
 
     labels: Sequence[Mapping[str, Any]]
@@ -972,6 +983,9 @@ class Ledger:
     texts: Mapping[jev_repo.Subject, str]
     pairs: Sequence[Mapping[str, Any]]
     reasks: Mapping[str, Mapping[str, Any]]
+    records: Mapping[jev_repo.Subject, Mapping[str, Any]] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1012,10 +1026,10 @@ def question_problem(
     if question_key not in dict(question_set.questions):
         return f"{question_set.name} v{question_set.version} asks no {question_key!r}"
     subject_type = jev_questions.STATE_SUBJECT.get(question_set.state_model)
-    if subject_type not in TEXT_SUBJECTS:
+    if subject_type not in LABELLED_SUBJECTS:
         return (
             f"{question_set.name} is asked about a {subject_type!r}, and a label "
-            "is of text: a web excerpt or a hypothesis title"
+            "is of text: a web excerpt, a hypothesis title or a finding title"
         )
     plan = jev_prereg.set_plan(question_set.name, question_set.version)
     if plan is None or question_key not in plan["questions"]:
@@ -1045,21 +1059,56 @@ def options_of(question_set: jev_questions.QuestionSet, question_key: str) -> li
 
 
 def keyword_baseline(
-    question_set: jev_questions.QuestionSet, question_key: str
-) -> tuple[Callable[[str], str], str]:
+    question_set: jev_questions.QuestionSet,
+    question_key: str,
+    *,
+    records: Mapping[jev_repo.Subject, Mapping[str, Any]] | None = None,
+) -> tuple[Callable[[jev_repo.Subject, str], str], str]:
     """
     The keyword baseline the question's set plan registered, as a function
-    of the item's text, and how the evaluation names it. Only the rule the
-    plan names, as the plan holds it: the injection screen's is the code
-    screen at the version and rule data the plan hashed, and is refused if
-    the screen running now is another; the catalogue's and the hypotheses'
-    are the plan's own ordered keyword rules; the card's the claims check
-    with the plan's terms.
+    of the item — its subject beside its text — and how the evaluation names
+    it. Only the rule the plan names, as the plan holds it: the injection
+    screen's is the code screen at the version and rule data the plan hashed,
+    and is refused if the screen running now is another; the catalogue's and
+    the hypotheses' are the plan's own ordered keyword rules; the card's the
+    claims check with the plan's terms. From phase D2 the findings sets' is
+    ``findings.recorded``: the value the plan names — who raised the
+    finding, or its severity — of the earliest finding of the population
+    holding the title, from ``records`` (``jev_repo.finding_records``), and
+    refused if the plan registered another order or writer than the one the
+    harness reads (docs/09, section 3.4). Each rule but the last reads the
+    text alone.
     """
     plan = jev_prereg.set_plan(question_set.name, question_set.version)
     assert plan is not None  # question_problem first
     baseline = plan["questions"][question_key]["keyword_baseline"]
     rule = baseline["rule"]
+    if rule == "findings.recorded":
+        reads = baseline["reads"]
+        if (
+            reads not in jev_repo.FINDING_RECORD_COLUMNS
+            or baseline["origin"] != "model"
+            or tuple(baseline["order"]) != jev_repo.FINDING_RECORD_ORDER
+        ):
+            raise Refused(
+                f"{question_set.name}'s plan registers a recorded baseline the "
+                "harness does not read; nothing is measured against it"
+            )
+        held = records or {}
+
+        def recorded(subject: jev_repo.Subject, text: str) -> str:
+            record = held.get(subject)
+            if record is None:
+                raise Refused(
+                    f"no finding of the population holds the title "
+                    f"{subject[1][:12]}…, so the recorded baseline cannot answer it"
+                )
+            return str(record[reads])
+
+        return recorded, (
+            f"findings.recorded, reading {reads} of the earliest model-written "
+            "finding holding the title"
+        )
     if rule == "web_sources.code_screen":
         if (
             baseline["version"] != web_sources.CODE_SCREEN_VERSION
@@ -1070,7 +1119,7 @@ def keyword_baseline(
                 f"{question_set.name}'s baseline; nothing is measured against it"
             )
 
-        def screen(text: str) -> str:
+        def screen(subject: jev_repo.Subject, text: str) -> str:
             flagged = web_sources.code_screen(text) is not None
             return jev_calibration.TRUE if flagged else jev_calibration.FALSE
 
@@ -1085,7 +1134,7 @@ def keyword_baseline(
                 f"{question_set.name}'s baseline; nothing is measured against it"
             )
 
-        def claim(text: str) -> str:
+        def claim(subject: jev_repo.Subject, text: str) -> str:
             found = claims.find_performance_claim(text) is not None
             return jev_calibration.TRUE if found else jev_calibration.FALSE
 
@@ -1093,7 +1142,7 @@ def keyword_baseline(
     if rule == "jev_prereg.keyword_label":
         rules = tuple((label, tuple(keywords)) for label, keywords in baseline["rules"])
         return (
-            lambda text: jev_prereg.keyword_label(rules, text),
+            lambda subject, text: jev_prereg.keyword_label(rules, text),
             f"jev_prereg.keyword_label {baseline['matcher']}, reading "
             f"{baseline['reads']}",
         )
@@ -1355,7 +1404,9 @@ def build_evaluation(
 
     # Per label class, over every scored item: recall, and the precision of
     # the answers choosing it, Jev's and the keyword rule's.
-    keyword, keyword_ref = keyword_baseline(question_set, question_key)
+    keyword, keyword_ref = keyword_baseline(
+        question_set, question_key, records=ledger.records
+    )
     guesses: dict[jev_repo.Subject, str] = {}
     for item in scored:
         text = ledger.texts.get(item.subject)
@@ -1364,7 +1415,7 @@ def build_evaluation(
                 f"the text of {item.subject[0]} {item.subject[1][:12]} is not "
                 "stored, so the keyword baseline cannot answer it"
             )
-        guesses[item.subject] = keyword(text)
+        guesses[item.subject] = keyword(item.subject, text)
     n_per_class = {c: sum(1 for i in scored if i.label == c) for c in options}
     n_per_class = {c: count for c, count in n_per_class.items() if count}
     per_class: dict[str, Any] = {}
@@ -1740,6 +1791,7 @@ async def read_ledger(
         texts=await jev_repo.subject_texts(conn, subjects),
         pairs=pairs,
         reasks=reasks,
+        records=await jev_repo.finding_records(conn, subjects),
     )
 
 

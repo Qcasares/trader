@@ -52,6 +52,8 @@ MODEL = jev_catalogue.DEFAULT_MODEL
 AREA_DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
 AREA_RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
 AREA_GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
+AREA_FINDINGS = f"{flags.JEV_AREA_PREFIX}findings"
+AREA_OPS = f"{flags.JEV_AREA_PREFIX}ops"
 
 #: Monday 2026-09-28, 14:00 UTC: before the day's cutoff.
 MORNING = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
@@ -101,6 +103,8 @@ class Queue:
     screens: list[dict[str, Any]] = field(default_factory=list)
     descriptions: list[dict[str, Any]] = field(default_factory=list)
     titles: list[dict[str, Any]] = field(default_factory=list)
+    #: What the findings sets' read returns (phase D2).
+    findings: list[dict[str, Any]] = field(default_factory=list)
     subject_reads: list[dict[str, Any]] = field(default_factory=list)
     auth_held: bool = False
     refused_sets: set[str] = field(default_factory=set)
@@ -214,6 +218,20 @@ class Queue:
         )
         return self.titles[:limit]
 
+    async def findings_to_ask(
+        self, conn: Any, *, question_set: Any, model: str, limit: int, day: date
+    ) -> list[dict[str, Any]]:
+        self.subject_reads.append(
+            {
+                "read": "findings",
+                "set": question_set,
+                "model": model,
+                "limit": limit,
+                "day": day,
+            }
+        )
+        return self.findings[:limit]
+
 
 @pytest.fixture
 def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
@@ -231,6 +249,7 @@ def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
         "documents_to_screen",
         "documents_to_describe",
         "hypotheses_to_ask",
+        "findings_to_ask",
     ):
         monkeypatch.setattr(jev_repo, name, getattr(fake, name))
     monkeypatch.setattr(jev_repo, "screen_flag", fake.screen_flag)
@@ -269,6 +288,8 @@ SCREEN_SUBJECT = {
 }
 DESCRIBE_SUBJECT = {"content_sha256": "c3" * 32, "document_id": 9}
 TITLE_SUBJECT = {"subject_id": "b2" * 32, "ref": "H-0007"}
+#: And one for the findings sets' read (phase D2).
+FINDING_SUBJECT = {"subject_id": "f6" * 32, "ref": "F-0042"}
 
 
 class TestItIsDark:
@@ -292,11 +313,15 @@ class TestItIsDark:
         """
         From phases C7 and C8 the matrix has the guardrails area too, and a
         subject waiting for every set, so an ask planned without its area, or
-        not planned with it, shows here.
+        not planned with it, shows here. From phase D2 a finding's title waits
+        too, with the findings area never switched on, so a findings set
+        planned behind another area's switch shows here as well
+        (:class:`TestTheSwitchMatrix` switches the findings area itself).
         """
         queue.screens = [SCREEN_SUBJECT]
         queue.descriptions = [DESCRIBE_SUBJECT]
         queue.titles = [TITLE_SUBJECT]
+        queue.findings = [FINDING_SUBJECT]
         rows = _switches(
             **{
                 flags.PROGRAMME_ENABLED: programme,
@@ -901,6 +926,8 @@ class TestTheAsks:
             "guardrail.card": 10,
             "research.catalogue": 25,
             "research.hypothesis": 10,
+            "findings.owner": 10,
+            "findings.severity": 10,
         }
         assert set(jev_plan.ASKS_PER_PASS) == set(jev_jobs.ASKABLE)
         assert (jev_plan.ASK_PRIORITY, jev_plan.ASK_ATTEMPTS) == (0, 3)
@@ -1371,3 +1398,348 @@ class TestTheDetailSwitchGatesPlanning:
         assert _reasks(queue) == []
         await _plan_reading(_switches(**ASKS_ON, **DETAIL_ON))
         assert [job["payload"]["request_id"] for job in _reasks(queue)] == [1]
+
+
+# ---------------------------------------------------------------------------
+# Phase D2: the findings sets
+# ---------------------------------------------------------------------------
+
+#: The findings area on, and every other area the asks read off.
+FINDINGS_ON = {
+    AREA_DECISIONS: "false",
+    AREA_RESEARCH: "false",
+    AREA_GUARDRAILS: "false",
+    AREA_FINDINGS: "true",
+}
+
+#: The two findings sets, in the order the planner plans them.
+FINDING_SETS = ("findings.owner", "findings.severity")
+
+
+def _planned_asks(queue: Queue, name: str) -> list[dict[str, Any]]:
+    """The ``jev_ask`` jobs of ``name`` the planner queued, by their keys."""
+    return [
+        job
+        for key, job in queue.jobs.items()
+        if key.startswith("jev_ask:") and job["payload"]["set"] == name
+    ]
+
+
+def _findings(n: int) -> list[dict[str, Any]]:
+    """``n`` invented finding titles, newest first, as the read returns them."""
+    return [{"subject_id": f"{i:064x}", "ref": f"F-{i:04d}"} for i in range(1, n + 1)]
+
+
+class TestTheFindingsRules:
+    """
+    Phase D2 (docs/09, section 5.2): ``findings.owner`` and
+    ``findings.severity`` are planned behind the findings area and no other,
+    at most ten of each a pass, each ask one call from the findings lane's
+    share, under ``jev_repo.ask_job_key``, about what
+    ``jev_repo.findings_to_ask`` returns and in its order — newest first —
+    and nothing that would call while the vendor holds them.
+    """
+
+    def test_the_sets_are_the_findings_lanes_and_their_area_the_findings(
+        self,
+    ) -> None:
+        for name in FINDING_SETS:
+            question_set = jev_questions.REGISTRY[name]
+            assert question_set.lane == "findings"
+            assert jev_catalogue.LANE_AREA["findings"] == "findings"
+            assert jev_plan.ASKS_PER_PASS[name] == 10
+            assert name in jev_plan.FINDING_SET_NAMES
+        assert jev_plan.FINDING_SET_NAMES == FINDING_SETS
+        assert jev_catalogue.lane_budget(500, "findings") == 50
+
+    async def test_each_finding_is_one_job_naming_its_ref_and_never_its_title(
+        self, queue: Queue
+    ) -> None:
+        queue.findings = [FINDING_SUBJECT]
+        planned = await _plan(_switches(**FINDINGS_ON))
+        address = FINDING_SUBJECT["subject_id"]
+        expected = [
+            f"jev_ask:{name}@1:finding_title:{address}:2026-09-28"
+            for name in FINDING_SETS
+        ]
+        assert [key for key in planned if key.startswith("jev_ask:")] == expected
+        for key, name in zip(expected, FINDING_SETS, strict=True):
+            job = queue.jobs[key]
+            plans = jev_prereg.plans_in_force(name, 1)
+            assert plans is not None
+            assert job["kind"] == "jev_ask"
+            assert job["payload"] == {
+                "set": name,
+                "version": 1,
+                "subject_type": "finding_title",
+                "subject_id": address,
+                "source_id": "F-0042",
+                **plans,
+            }, "the plans in force are named, and nothing else is"
+            assert (job["priority"], job["max_attempts"]) == (0, 3)
+            assert job["scheduled_for"] == MORNING
+            assert key == jev_repo.ask_job_key(
+                name, 1, "finding_title", address, date(2026, 9, 28)
+            )
+
+    async def test_each_read_is_for_its_set_the_pin_today_and_the_pass_cap(
+        self, queue: Queue
+    ) -> None:
+        await _plan(_switches(**FINDINGS_ON))
+        reads = [(read["read"], read["set"].name) for read in queue.subject_reads]
+        assert reads == [("findings", name) for name in FINDING_SETS]
+        for read in queue.subject_reads:
+            name = read["set"].name
+            assert read["set"] is jev_questions.REGISTRY[name]
+            assert read["model"] == MODEL
+            assert read["day"] == date(2026, 9, 28)
+            assert read["limit"] == 10
+
+    async def test_the_findings_area_and_no_other(self, queue: Queue) -> None:
+        """
+        Behind the findings area, read through its own reader: neither the
+        research area, which plans the hypothesis titles, nor the guardrails,
+        which plans the card check, stands for it, and with it off not one
+        finding is read.
+        """
+        queue.findings = [FINDING_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        conn = await _plan_reading(_switches(**ASKS_ON))
+        assert AREA_FINDINGS in conn.asked
+        assert {job["payload"]["set"] for job in _asks(queue)} == {
+            "guardrail.card",
+            "research.hypothesis",
+        }
+        assert "findings" not in {read["read"] for read in queue.subject_reads}
+
+        queue.subject_reads.clear()
+        await _plan_reading(_switches(**FINDINGS_ON))
+        assert {read["read"] for read in queue.subject_reads} == {"findings"}
+        assert {job["payload"]["set"] for job in _asks(queue)} >= set(FINDING_SETS)
+
+    @pytest.mark.parametrize(
+        "stored", ['"true"', "1", "false", None], ids=["string", "one", "off", "none"]
+    )
+    async def test_only_json_true_is_on(
+        self, queue: Queue, stored: str | None
+    ) -> None:
+        queue.findings = [FINDING_SUBJECT]
+        await _plan(_switches(**{**FINDINGS_ON, AREA_FINDINGS: stored}))
+        assert _asks(queue) == []
+        assert queue.subject_reads == []
+
+    async def test_no_more_than_ten_of_each_a_pass(self, queue: Queue) -> None:
+        queue.findings = _findings(30)
+        await _plan(_switches(**FINDINGS_ON))
+        for name in FINDING_SETS:
+            refs = [job["payload"]["source_id"] for job in _asks(queue, name)]
+            assert refs == [f"F-{i:04d}" for i in range(1, 11)], "newest first"
+
+    async def test_never_beyond_the_findings_share(self, queue: Queue) -> None:
+        """
+        A budget of 100 gives the findings lane 10 calls, which the owner
+        set, planned first, takes whole; a budget of 50, five.
+        """
+        queue.findings = _findings(30)
+        await _plan(_switches(**FINDINGS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "100"}))
+        assert len(_asks(queue, "findings.owner")) == 10
+        assert _asks(queue, "findings.severity") == []
+
+    async def test_the_share_is_the_findings_lanes_and_no_others(
+        self, queue: Queue
+    ) -> None:
+        """
+        Calls the research and guardrail lanes made today take nothing from
+        the findings lane; its own do, and a budget of 50 leaves it five.
+        """
+        queue.findings = _findings(30)
+        queue.calls_today.update({"research": 12, "guardrail": 12, "findings": 3})
+        await _plan(_switches(**FINDINGS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "50"}))
+        assert len(_asks(queue, "findings.owner")) == 2
+        assert _asks(queue, "findings.severity") == []
+
+    async def test_asks_already_waiting_count_against_the_findings_share(
+        self, queue: Queue
+    ) -> None:
+        """
+        A severity ask waiting from an earlier pass, and an owner ask running,
+        hold two of the five calls a budget of 50 gives the lane, leaving the
+        owner set, planned first, three; finished ones hold none, and a
+        waiting card check is the guardrail lane's.
+        """
+        waiting = [
+            ("running", "findings.owner"),
+            ("queued", "findings.severity"),
+            ("succeeded", "findings.owner"),
+            ("failed", "findings.severity"),
+            ("queued", "guardrail.card"),
+        ]
+        for n, (status, name) in enumerate(waiting):
+            queue.jobs[f"elsewhere:{n}"] = {
+                "kind": "jev_ask",
+                "status": status,
+                "payload": {"set": name},
+            }
+        queue.findings = _findings(30)
+        await _plan(_switches(**FINDINGS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "50"}))
+        assert len(_planned_asks(queue, "findings.owner")) == 3
+        assert _planned_asks(queue, "findings.severity") == []
+
+    async def test_one_job_per_address(self, queue: Queue) -> None:
+        """
+        A title is asked about by its address, once a set a day: two rows
+        naming one address — the read returns each once, newest first — make
+        one job, keyed by the address and never by the finding.
+        """
+        address = "e5" * 32
+        queue.findings = [
+            {"subject_id": address, "ref": "F-0009"},
+            {"subject_id": address, "ref": "F-0003"},
+        ]
+        planned = await _plan(_switches(**FINDINGS_ON))
+        for name in FINDING_SETS:
+            (job,) = _asks(queue, name)
+            assert job["payload"]["source_id"] == "F-0009"
+        assert len([key for key in planned if key.startswith("jev_ask:")]) == 2
+
+    async def test_planning_again_the_same_day_adds_nothing(self, queue: Queue) -> None:
+        queue.findings = [FINDING_SUBJECT]
+        rows = _switches(**FINDINGS_ON)
+        await _plan(rows)
+        before = dict(queue.jobs)
+        assert [k for k in await _plan(rows) if k.startswith("jev_ask:")] == []
+        assert queue.jobs == before
+
+    async def test_nothing_is_planned_while_an_authentication_failure_holds(
+        self, queue: Queue
+    ) -> None:
+        """Every findings ask would call, so none is planned, nor its read made."""
+        queue.auth_held = True
+        queue.findings = [FINDING_SUBJECT]
+        planned = await _plan(_switches(**FINDINGS_ON))
+        assert _asks(queue) == []
+        assert queue.subject_reads == []
+        assert "jev_probe:2026-09-28" in planned
+
+    async def test_a_set_the_vendor_refused_is_not_asked(self, queue: Queue) -> None:
+        queue.refused_sets = {"findings.owner"}
+        queue.findings = [FINDING_SUBJECT]
+        await _plan(_switches(**FINDINGS_ON))
+        assert _asks(queue, "findings.owner") == []
+        assert len(_asks(queue, "findings.severity")) == 1
+        assert [read["set"].name for read in queue.subject_reads] == [
+            "findings.severity"
+        ]
+
+    async def test_a_set_with_no_plan_is_planned_nothing(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = jev_prereg.plans_in_force
+
+        def only_severity(name: str, version: int) -> dict[str, Any] | None:
+            return real(name, version) if name == "findings.severity" else None
+
+        monkeypatch.setattr(jev_prereg, "plans_in_force", only_severity)
+        queue.findings = [FINDING_SUBJECT]
+        await _plan(_switches(**FINDINGS_ON))
+        assert {job["payload"]["set"] for job in _asks(queue)} == {"findings.severity"}
+
+    async def test_the_detail_switch_is_not_read_for_them(self, queue: Queue) -> None:
+        """Neither set declares ``internal_detail``: a title is all it sends."""
+        queue.findings = [FINDING_SUBJECT]
+        conn = await _plan_reading(_switches(**FINDINGS_ON))
+        assert len(_asks(queue)) == 2
+        assert flags.JEV_SEND_INTERNAL_DETAIL not in conn.asked
+        for name in FINDING_SETS:
+            assert jev_questions.REGISTRY[name].internal_detail is False
+
+    async def test_a_findings_answer_is_reasked_behind_the_findings_area(
+        self, queue: Queue
+    ) -> None:
+        """
+        The re-ask sample draws from every canonical answer, so a findings
+        set's answer is re-asked, as a probe, only while the findings area is
+        on.
+        """
+        owner = jev_questions.REGISTRY["findings.owner"]
+        queue.canonical = [
+            _canonical(
+                1,
+                _hash("00000000"),
+                question_set=owner.name,
+                question_set_version=owner.version,
+                pack_hash=owner.pack_hash,
+                lane="findings",
+                subject_type="finding_title",
+                subject_id=FINDING_SUBJECT["subject_id"],
+            )
+        ]
+        await _plan(_switches(**{**FINDINGS_ON, AREA_FINDINGS: "false"}))
+        assert _reasks(queue) == []
+        await _plan(_switches(**FINDINGS_ON))
+        assert [job["payload"]["request_id"] for job in _reasks(queue)] == [1]
+
+
+#: Every switch the matrix sets, as phase D reads them, and the key: the
+#: master switch, Jev's, the findings, ops and guardrails areas, the arming
+#: switch and the detail switch (docs/09, section 13; D4 builds the rest of
+#: the matrix's expectations on this one).
+MATRIX = (
+    flags.PROGRAMME_ENABLED,
+    flags.JEV_ENABLED,
+    AREA_FINDINGS,
+    AREA_OPS,
+    AREA_GUARDRAILS,
+    flags.JEV_ARM_CARD_CHECK,
+    flags.JEV_SEND_INTERNAL_DETAIL,
+)
+
+
+class TestTheSwitchMatrix:
+    """
+    docs/09, section 13 (D4, built up from D2): programme, Jev, findings, ops,
+    guardrails, arm and detail, each on or off, with a key or without — all
+    256 cases — and a subject waiting for every set. Each rule is planned
+    exactly when its conjunction holds: the probe on programme, Jev and a key;
+    the guardrail sets on those and the guardrails area; the findings sets on
+    those and the findings area. Until phase D3 registers ``ops.job_error`` the
+    ops area plans nothing, and until D4 the arming switch has no consumer; so
+    each, and the detail switch, alone or with anything else, plans nothing of
+    its own. The research and decisions areas stay off, which
+    :class:`TestItIsDark` covers.
+    """
+
+    @pytest.mark.parametrize(
+        ("switches", "key"),
+        [
+            (dict(zip(MATRIX, values[:-1], strict=True)), values[-1])
+            for values in itertools.product([True, False], repeat=len(MATRIX) + 1)
+        ],
+    )
+    async def test_each_rule_is_planned_exactly_when_its_conjunction_holds(
+        self, queue: Queue, switches: dict[str, bool], key: bool
+    ) -> None:
+        queue.screens = [SCREEN_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        queue.findings = [FINDING_SUBJECT]
+        rows = _switches(
+            **{AREA_DECISIONS: "false", AREA_RESEARCH: "false"},
+            **{name: "true" if on else "false" for name, on in switches.items()},
+        )
+        planned = await _plan(rows, key=key)
+        open_ = (
+            switches[flags.PROGRAMME_ENABLED] and switches[flags.JEV_ENABLED] and key
+        )
+        if not open_:
+            assert planned == [] and queue.jobs == {}
+            assert queue.subject_reads == []
+            return
+        expected = {"jev_probe:2026-09-28"}
+        sets: set[str] = set()
+        if switches[AREA_GUARDRAILS]:
+            sets |= {"guardrail.injection", "guardrail.card"}
+        if switches[AREA_FINDINGS]:
+            sets |= set(FINDING_SETS)
+        assert {k for k in planned if not k.startswith("jev_ask:")} == expected
+        assert {job["payload"]["set"] for job in _asks(queue)} == sets
+        assert {read["set"].name for read in queue.subject_reads} == sets

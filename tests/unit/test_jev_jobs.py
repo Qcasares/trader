@@ -17,8 +17,10 @@ weight, each failing silently if it goes:
 * **An ask asks one registered set about one stored text, once, and only text
   that may be asked about.** Content quarantined under any source is asked
   nothing; the code screen reads the stored excerpt again as it stands now and
-  quarantines a hit; a title is sent only if the programme's own model wrote
-  it and it fits its cap, refused by the cap itself before any state is built.
+  quarantines a hit; a title — a hypothesis's or, from phase D2, a finding's,
+  each read by column list and never with its card or its detail — is sent
+  only if the programme's own model wrote it and it fits its own cap, refused
+  by the cap itself before any state is built.
 * **No text reaches a job's error or its result.** pydantic's errors quote the
   input they refused, and so can a driver's; both are replaced by what code
   writes, naming a row by its id alone.
@@ -163,17 +165,53 @@ class TestAskVerdict:
 # The fakes the ask and the re-ask share
 # ---------------------------------------------------------------------------
 
-#: An invented excerpt and an invented title.
+#: An invented excerpt, an invented hypothesis title and an invented finding
+#: title.
 EXCERPT = "Quiet Momentum in Invented Mid-Cap Shares"
 EXCERPT_SHA = text_sha256(EXCERPT)
 TITLE = "Invented Carry in Fictional Bond Futures"
 TITLE_SHA = text_sha256(TITLE)
+FINDING = "Invented Fills Assumed at Prices No Venue Gave"
+FINDING_SHA = text_sha256(FINDING)
 FETCHED = datetime(2026, 9, 28, 6, 0, tzinfo=UTC)
 CREATED = datetime(2026, 9, 27, 12, 30, tzinfo=UTC)
+OPENED = datetime(2026, 9, 28, 9, 15, tzinfo=UTC)
 
-#: The sets asked about a stored web excerpt, and those asked about a title.
+#: The sets asked about a stored web excerpt, those asked about a hypothesis's
+#: title, and, from phase D2, those asked about a finding's title.
 WEB_SETS = ("guardrail.injection", "research.catalogue")
 TITLE_SETS = ("research.hypothesis", "guardrail.card")
+FINDING_SETS = ("findings.owner", "findings.severity")
+ASKED_SETS = (*WEB_SETS, *TITLE_SETS, *FINDING_SETS)
+
+
+def _subject_of(name: str) -> tuple[str, str, str, object, datetime, str]:
+    """
+    What a set is asked about, as these tests invent it: the subject's type,
+    its text and address, the row its text is read from, the instant it
+    describes, and how a job's error names that row.
+    """
+    if name in WEB_SETS:
+        return "web_excerpt", EXCERPT, EXCERPT_SHA, 7, FETCHED, "document 7"
+    if name in FINDING_SETS:
+        return (
+            "finding_title",
+            FINDING,
+            FINDING_SHA,
+            "F-0042",
+            OPENED,
+            "finding F-0042",
+        )
+    return "hypothesis_title", TITLE, TITLE_SHA, "H-0007", CREATED, "hypothesis H-0007"
+
+
+#: What the ask rig's ``loaded`` calls each kind of row it reads, by the
+#: subject its text is.
+_KIND = {
+    "web_excerpt": "document",
+    "hypothesis_title": "hypothesis",
+    "finding_title": "finding",
+}
 
 #: A marker that must never reach a job's error, planted in the text asked
 #: about wherever a failure could quote it.
@@ -378,18 +416,22 @@ def _canonical(**overrides: Any) -> dict[str, Any]:
 
 
 def _text_canonical(name: str, **overrides: Any) -> dict[str, Any]:
-    """A canonical answer of a set asked about a text: an excerpt or a title."""
+    """
+    A canonical answer of a set asked about a text: an excerpt, a hypothesis's
+    title or a finding's.
+    """
     question_set = REGISTRY[name]
-    web = name in WEB_SETS
+    subject_type, text, address, _, instant, _ = _subject_of(name)
+    field = "excerpt" if name in WEB_SETS else "title"
     row = _canonical(
         lane=question_set.lane,
         question_set=name,
         question_set_version=question_set.version,
         pack_hash=question_set.pack_hash,
-        state={"excerpt": EXCERPT} if web else {"title": TITLE},
-        subject_type="web_excerpt" if web else "hypothesis_title",
-        subject_id=EXCERPT_SHA if web else TITLE_SHA,
-        as_of=FETCHED if web else CREATED,
+        state={field: text},
+        subject_type=subject_type,
+        subject_id=address,
+        as_of=instant,
     )
     row.update(overrides)
     return row
@@ -647,7 +689,7 @@ class TestAReaskOfText:
     enumerated state, and a probe's answer quarantines nothing.
     """
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_it_asks_the_rows_own_text_once_as_a_probe(
         self, rig: Rig, name: str
     ) -> None:
@@ -739,7 +781,9 @@ class TestAReaskOfText:
         assert rig.quarantine.written == [(EXCERPT_SHA, BLOCK_REASON)]
         assert failed.value.error.endswith("; its content is quarantined (2 documents)")
 
-    @pytest.mark.parametrize("name", [DECISION_REGIME.name, *TITLE_SETS])
+    @pytest.mark.parametrize(
+        "name", [DECISION_REGIME.name, *TITLE_SETS, *FINDING_SETS]
+    )
     @pytest.mark.parametrize(
         "met",
         [
@@ -753,10 +797,11 @@ class TestAReaskOfText:
     ) -> None:
         """
         Section 10g of the scope: the follow-up is web text's alone. A title
-        is held by the road, and an enumerated state by nothing; neither is
-        held to the code screen, looked up in quarantine or quarantined. Run
-        against a title as well as a regime state, so widening the condition
-        to every text state fails here.
+        — a hypothesis's or, from phase D2, a finding's — is held by the road,
+        and an enumerated state by nothing; neither is held to the code
+        screen, looked up in quarantine or quarantined. Run against a title as
+        well as a regime state, so widening the condition to every text state
+        fails here.
         """
         rig.canonical = (
             _canonical() if name == DECISION_REGIME.name else _text_canonical(name)
@@ -823,15 +868,25 @@ def _hypothesis(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+def _finding(**overrides: Any) -> dict[str, Any]:
+    """
+    A finding as ``jev_repo.get_finding_title`` returns one: its ref, title,
+    origin and when it was opened, and nothing else (docs/09, section 5.1).
+    """
+    row = {"ref": "F-0042", "title": FINDING, "origin": "model", "opened_at": OPENED}
+    row.update(overrides)
+    return row
+
+
 def _payload(name: str, **overrides: Any) -> dict[str, Any]:
     """A ``jev_ask`` payload as the planner writes one, the plans in force in it."""
-    web = name in WEB_SETS
+    subject_type, _, address, source_id, _, _ = _subject_of(name)
     payload = {
         "set": name,
         "version": REGISTRY[name].version,
-        "subject_type": "web_excerpt" if web else "hypothesis_title",
-        "subject_id": EXCERPT_SHA if web else TITLE_SHA,
-        "source_id": 7 if web else "H-0007",
+        "subject_type": subject_type,
+        "subject_id": address,
+        "source_id": source_id,
         **(jev_prereg.plans_in_force(name, REGISTRY[name].version) or {}),
     }
     payload.update(overrides)
@@ -842,6 +897,7 @@ def _payload(name: str, **overrides: Any) -> dict[str, Any]:
 class AskRig:
     document: dict[str, Any] | None = field(default_factory=_document)
     hypothesis: dict[str, Any] | None = field(default_factory=_hypothesis)
+    finding: dict[str, Any] | None = field(default_factory=_finding)
     request: dict[str, Any] | None = field(
         default_factory=lambda: {"id": 88, "model_answered": PIN}
     )
@@ -867,6 +923,15 @@ class AskRig:
                 "a title set read the card through repo.get_hypothesis"
             )
 
+        async def get_finding_title(conn: Any, ref: str) -> dict[str, Any] | None:
+            self.loaded.append(("finding", ref))
+            return self.finding
+
+        async def list_findings(conn: Any, *args: Any, **kwargs: Any) -> None:
+            raise AssertionError(
+                "a findings set read a finding's detail through repo.list_findings"
+            )
+
         async def get_request(conn: Any, request_id: int) -> dict[str, Any] | None:
             assert self.request is None or request_id == self.request["id"]
             return self.request
@@ -883,6 +948,8 @@ class AskRig:
         monkeypatch.setattr(jev_repo, "get_document", get_document)
         monkeypatch.setattr(jev_repo, "get_hypothesis_title", get_hypothesis_title)
         monkeypatch.setattr(repo, "get_hypothesis", get_hypothesis)
+        monkeypatch.setattr(jev_repo, "get_finding_title", get_finding_title)
+        monkeypatch.setattr(repo, "list_findings", list_findings)
         monkeypatch.setattr(jev_repo, "get_request", get_request)
         monkeypatch.setattr(jev_lane, "ask", ask)
         self.quarantine.install(monkeypatch)
@@ -906,33 +973,69 @@ def ask_rig(monkeypatch: pytest.MonkeyPatch) -> AskRig:
 class TestWhatIsAskable:
     def test_it_asks_exactly_the_registered_sets_asked_about_text(self) -> None:
         """
-        Every set whose state is a text — the web sets and the title sets —
-        and nothing else: the probe and the regime have jobs of their own.
+        Every set whose state is a text — the web sets, the title sets and,
+        from phase D2, the findings sets — and nothing else: the probe and the
+        regime have jobs of their own.
         """
         text_sets = {
             name
             for name, question_set in REGISTRY.items()
             if question_set.state_model in jev_questions.TEXT_SUBJECT_FIELD
         }
-        assert set(jev_jobs.ASKABLE) == text_sets == {*WEB_SETS, *TITLE_SETS}
+        assert set(jev_jobs.ASKABLE) == text_sets == set(ASKED_SETS)
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     def test_each_is_asked_about_its_own_states_subject(self, name: str) -> None:
         question_set = REGISTRY[name]
         subject = jev_questions.STATE_SUBJECT[question_set.state_model]
         assert jev_jobs.ASKABLE[name].subject_type == subject
+        assert subject == _subject_of(name)[0]
         web = question_set.state_model in jev_questions.WEB_STATE_MODELS
         assert web is (name in WEB_SETS)
 
     def test_only_the_web_sets_have_a_follow_up(self) -> None:
-        """The title sets change nothing; design C8's shadow."""
+        """
+        The title sets change nothing, design C8's shadow, and nor do the
+        findings sets: a suggested owner or severity is recorded in the ledger
+        alone (docs/09, section 6.1).
+        """
         followed = {
             name for name, askable in jev_jobs.ASKABLE.items() if askable.follow_up
         }
         assert followed == set(WEB_SETS)
+        assert all(jev_jobs.ASKABLE[name].follow_up is None for name in FINDING_SETS)
 
     def test_the_ask_is_the_programmes_handler(self) -> None:
         assert main.JEV_HANDLERS["jev_ask"] is jev_jobs.run_ask
+
+
+#: The registered sets with a job of their own, which no ``jev_ask`` asks: the
+#: connectivity probe (``jev_probe``) and the regime (``jev_regime``).
+OWN_JOB_SETS = frozenset({"probe.connectivity", DECISION_REGIME.name})
+
+
+class TestASKABLE:
+    def test_it_covers_exactly_the_registered_text_and_skeleton_sets(self) -> None:
+        """
+        docs/09, section 13 (D2/D3). Read from the registry the other way
+        round from :class:`TestWhatIsAskable`: every registered set but the two
+        with a job of their own is asked by a ``jev_ask`` job, and each such
+        set's state is a text the registry knows the writer of. A set
+        registered later whose state is neither — phase D3's job-error
+        skeleton, until its subject is named — fails here rather than being
+        registered and never asked, or asked by a road that does not know it.
+        """
+        assert OWN_JOB_SETS <= set(REGISTRY)
+        asked = set(REGISTRY) - OWN_JOB_SETS
+        assert set(jev_jobs.ASKABLE) == asked
+        for name in asked:
+            state_model = REGISTRY[name].state_model
+            assert state_model in jev_questions.TEXT_SUBJECT_FIELD, name
+            subject = jev_questions.STATE_SUBJECT[state_model]
+            assert subject in jev_questions.TEXT_SUBJECT_PROVENANCE, name
+            assert REGISTRY[name].provenance == (
+                jev_questions.TEXT_SUBJECT_PROVENANCE[subject]
+            ), name
 
 
 class TestTheAsk:
@@ -981,7 +1084,25 @@ class TestTheAsk:
         assert asked["as_of"] == CREATED, "the instant the title was written"
         assert ask_rig.loaded == [("hypothesis", "H-0007")]
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    async def test_it_asks_once_about_the_finding_title(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        await ask_rig.run(_payload(name))
+        (asked,) = ask_rig.asks
+        assert asked["question_set"] is REGISTRY[name]
+        assert asked["probe"] is False
+        assert type(asked["state"]) is jev_questions.FindingTitleState
+        assert REGISTRY[name].dump_state(asked["state"]) == {"title": FINDING}
+        assert (asked["subject_type"], asked["subject_id"]) == (
+            "finding_title",
+            FINDING_SHA,
+        )
+        assert asked["as_of"] == OPENED, "the instant the finding was raised"
+        assert asked["api_key"] == KEY
+        assert ask_rig.loaded == [("finding", "F-0042")]
+
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_the_answer_is_recorded_with_the_plans_in_force(
         self, ask_rig: AskRig, name: str
     ) -> None:
@@ -1002,7 +1123,7 @@ class TestTheAsk:
             result["set_plan_version"] == jev_prereg.SET_PLAN_VERSIONS[(name, version)]
         )
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     def test_the_payloads_plans_are_the_plans_in_force(self, name: str) -> None:
         """The names a payload's plans go by are those ``plans_in_force`` gives."""
         plans = jev_prereg.plans_in_force(name, REGISTRY[name].version)
@@ -1010,7 +1131,7 @@ class TestTheAsk:
         assert tuple(plans) == jev_jobs.PLAN_KEYS == PLAN_KEYS
         assert set(PLAN_KEYS) <= jev_jobs.ASK_PAYLOAD_KEYS
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     @pytest.mark.parametrize("key", PLAN_KEYS)
     async def test_a_job_planned_under_other_plans_asks_nothing(
         self, ask_rig: AskRig, name: str, key: str
@@ -1028,7 +1149,7 @@ class TestTheAsk:
         assert result["plans_in_force"] == jev_prereg.plans_in_force(name, 1)
         assert ask_rig.asks == [] and ask_rig.loaded == []
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_a_response_refused_whole_is_recorded_with_its_plans(
         self, ask_rig: AskRig, name: str
     ) -> None:
@@ -1098,7 +1219,7 @@ class TestTheAsk:
         failed = await ask_rig.fails(_payload("guardrail.injection"))
         assert failed.result is None
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_a_set_with_no_plan_is_asked_nothing(
         self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
@@ -1214,6 +1335,9 @@ class TestWhatIsNotAsked:
             ("guardrail.injection", "hypothesis_title"),
             ("research.catalogue", "session"),
             ("guardrail.card", "web_excerpt"),
+            ("guardrail.card", "finding_title"),
+            ("findings.owner", "hypothesis_title"),
+            ("findings.severity", "web_excerpt"),
         ],
     )
     async def test_a_subject_of_another_type_fails_for_good(
@@ -1247,17 +1371,23 @@ class TestWhatIsNotAsked:
             ("guardrail.injection", True),
             ("research.hypothesis", 7),
             ("guardrail.card", "  "),
+            ("findings.owner", 42),
+            ("findings.severity", ""),
+            ("findings.owner", None),
         ],
     )
     async def test_a_row_named_by_another_kind_of_id_fails_for_good(
         self, ask_rig: AskRig, name: str, source_id: object
     ) -> None:
-        """A document by its id, a hypothesis by its ref, and nothing else."""
+        """
+        A document by its id, a hypothesis or a finding by its ref, and
+        nothing else.
+        """
         failed = await ask_rig.fails(_payload(name, source_id=source_id))
         assert failed.retry is False
         assert ask_rig.asks == [] and ask_rig.loaded == []
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     @pytest.mark.parametrize("version", [0, 2])
     async def test_another_version_completes_superseded(
         self, ask_rig: AskRig, name: str, version: int
@@ -1271,16 +1401,17 @@ class TestWhatIsNotAsked:
         assert result["registered_version"] == REGISTRY[name].version
         assert ask_rig.asks == [] and ask_rig.loaded == []
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_a_row_not_stored_fails_for_good(
         self, ask_rig: AskRig, name: str
     ) -> None:
-        ask_rig.document = ask_rig.hypothesis = None
+        ask_rig.document = ask_rig.hypothesis = ask_rig.finding = None
         failed = await ask_rig.fails(_payload(name))
         assert failed.retry is False
         assert ask_rig.asks == []
+        assert ask_rig.loaded == [(_KIND[_subject_of(name)[0]], _subject_of(name)[3])]
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_a_row_that_does_not_hold_the_subject_fails_for_good(
         self, ask_rig: AskRig, name: str
     ) -> None:
@@ -1288,13 +1419,12 @@ class TestWhatIsNotAsked:
         other = f"{CANARY} An Invented Other Title"
         ask_rig.document = _document(excerpt=other)
         ask_rig.hypothesis = _hypothesis(title=other)
+        ask_rig.finding = _finding(title=other)
         failed = await ask_rig.fails(_payload(name))
         assert failed.retry is False
         assert ask_rig.asks == []
         assert CANARY not in failed.error
-        assert ("document 7" if name in WEB_SETS else "hypothesis H-0007") in (
-            failed.error
-        )
+        assert _subject_of(name)[5] in failed.error
 
     @pytest.mark.parametrize("name", WEB_SETS)
     async def test_quarantined_content_fails_without_a_call(
@@ -1366,7 +1496,7 @@ class TestWhatIsNotAsked:
         assert CANARY not in failed.error and "_QuotingError" in failed.error
         assert ask_rig.asks == [] and ask_rig.quarantine.written == []
 
-    @pytest.mark.parametrize("name", TITLE_SETS)
+    @pytest.mark.parametrize("name", [*TITLE_SETS, *FINDING_SETS])
     async def test_a_title_is_never_looked_up_for_a_flag(
         self, ask_rig: AskRig, name: str
     ) -> None:
@@ -1498,7 +1628,7 @@ class TestWhatIsNotAsked:
         assert failed.error.startswith("hypothesis H-0007's text does not make")
         assert ask_rig.asks == []
 
-    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("name", ASKED_SETS)
     async def test_anything_else_raised_is_reported_by_its_class_alone(
         self, ask_rig: AskRig, name: str
     ) -> None:
@@ -1510,11 +1640,176 @@ class TestWhatIsNotAsked:
         ask_rig.raises = _QuotingError(f"invalid byte sequence near {CANARY}")
         failed = await ask_rig.fails(_payload(name))
         assert failed.retry is True
-        source = "7" if name in WEB_SETS else "'H-0007'"
+        source = repr(_subject_of(name)[3])
         assert failed.error == (
             f"asking {name} about the row {source} failed (_QuotingError, SQLSTATE "
             "22021, constraint an_invented_constraint); its text is not quoted"
         )
+
+
+#: The most characters a finding title the findings sets ask about may hold.
+FINDING_CAP = jev_questions.FINDING_TITLE_MAX_CHARS
+
+
+class TestTheFindingAsk:
+    """
+    Phase D2 (docs/09, sections 3 and 5.1; design M10 and M11). A findings
+    set asks about a finding's title and nothing else of it, and only a title
+    the programme's own model wrote, within ``FINDING_TITLE_MAX_CHARS``: an
+    operator's finding, Jev's, and one raised before migration 0015 named its
+    writer (``'unknown'``) are never sent, and the cap refuses an overlong
+    title itself, before any state is built, never pydantic.
+    """
+
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    @pytest.mark.parametrize(
+        ("origin", "chars", "asked"),
+        [
+            ("model", 1, True),
+            ("model", 46, True),
+            ("model", FINDING_CAP, True),
+            ("model", FINDING_CAP + 1, False),
+            ("model", 300, False),
+            ("operator", 46, False),
+            ("jev", 46, False),
+            ("unknown", 46, False),
+            ("operator", FINDING_CAP, False),
+        ],
+        ids=[
+            "model-one-character",
+            "model-short",
+            "model-at-the-cap",
+            "model-one-over",
+            "model-at-the-hypothesis-cap",
+            "operator",
+            "jev",
+            "unknown",
+            "operator-at-the-cap",
+        ],
+    )
+    async def test_only_a_model_written_title_within_the_cap(
+        self, ask_rig: AskRig, name: str, origin: str, chars: int, asked: bool
+    ) -> None:
+        title = ("Invented " * 40)[: chars - 1] + "Q"
+        assert len(title) == chars
+        ask_rig.finding = _finding(origin=origin, title=title)
+        payload = _payload(name, subject_id=text_sha256(title))
+        if asked:
+            result = await ask_rig.run(payload)
+            assert result["status"] == "ok"
+            assert len(ask_rig.asks) == 1
+            return
+        failed = await ask_rig.fails(payload)
+        assert failed.retry is False
+        assert ask_rig.asks == []
+        assert ask_rig.loaded == [("finding", "F-0042")]
+        assert title not in failed.error
+        if origin != "model":
+            assert failed.error == (
+                f"finding F-0042 was written by {origin!r}, not by the "
+                "programme's model; only a model-written finding's title is "
+                "sent; nothing was asked"
+            )
+        else:
+            assert failed.error.startswith(
+                f"finding F-0042's title is {chars} characters, over the "
+                f"{FINDING_CAP} a finding-title state carries"
+            )
+
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    async def test_the_cap_refuses_not_pydantic(
+        self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """
+        The state's own limit would refuse an overlong title too, as
+        pydantic's error, so a refusal that came from it would hide a missing
+        cap. The refusal must be the cap's, worded as the cap's, and come
+        before any state is built — so building one is spied on, and must not
+        happen. One character over 200 is under the hypothesis titles' 300,
+        so a handler holding a finding to that cap fails here too.
+        """
+        built: list[object] = []
+        real = jev_questions.FindingTitleState
+
+        class Spy(real):  # type: ignore[valid-type, misc]
+            def __init__(self, **data: Any) -> None:
+                built.append(data)
+                super().__init__(**data)
+
+        monkeypatch.setattr(jev_questions, "FindingTitleState", Spy)
+        title = "A" * (FINDING_CAP + 1)
+        assert len(title) < jev_questions.TITLE_MAX_CHARS
+        ask_rig.finding = _finding(title=title)
+        failed = await ask_rig.fails(_payload(name, subject_id=text_sha256(title)))
+        assert failed.retry is False
+        assert failed.error.startswith("finding F-0042's title is 201 characters")
+        assert "over the 200 a finding-title state carries" in failed.error
+        assert built == [], "a state was built before the cap refused the title"
+        assert ask_rig.asks == []
+
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    async def test_the_cap_is_its_own_constant(
+        self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """
+        A lower cap refuses a title the state model would take, so the number
+        the handler holds a finding's title to is ``FINDING_TITLE_MAX_CHARS``
+        itself; and the hypothesis titles' cap, moved, refuses nothing here.
+        """
+        monkeypatch.setattr(jev_questions, "TITLE_MAX_CHARS", 10)
+        await ask_rig.run(_payload(name))
+        assert len(ask_rig.asks) == 1
+        monkeypatch.setattr(jev_questions, "FINDING_TITLE_MAX_CHARS", 30)
+        assert len(FINDING) > 30
+        failed = await ask_rig.fails(_payload(name))
+        assert "over the 30 a finding-title state carries" in failed.error
+        assert len(ask_rig.asks) == 1
+
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    async def test_the_state_is_the_title_alone(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        """
+        Only the title is sent: never who raised the finding or how severe it
+        was recorded — what the ``findings.recorded`` baseline compares an
+        answer with — nor its status, detail, remediation or close note. The
+        read names its four columns (:class:`TestTheTitleProjection`); a row
+        that carried the rest, as ``SELECT *`` would, still sends the title
+        alone, and the job's result holds none of it either.
+        """
+        ask_rig.finding = _finding(
+            raised_by="adversarial_reviewer",
+            severity="critical",
+            status="acknowledged",
+            candidate_id=3,
+            detail_md=f"{CANARY} the detail",
+            remediation=f"{CANARY} the remediation",
+            close_note=f"{CANARY} the close note",
+        )
+        result = await ask_rig.run(_payload(name))
+        (asked,) = ask_rig.asks
+        assert type(asked["state"]) is jev_questions.FindingTitleState
+        assert set(type(asked["state"]).model_fields) == {"title"}
+        sent = REGISTRY[name].dump_state(asked["state"])
+        assert sent == {"title": FINDING}
+        for withheld in (CANARY, "adversarial_reviewer", "critical", "acknowledged"):
+            assert withheld not in json.dumps(sent)
+            assert withheld not in json.dumps(result, default=str)
+        assert FINDING not in json.dumps(result, default=str)
+
+    async def test_a_title_that_cannot_make_its_state_is_not_quoted(
+        self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        title = f"{CANARY} " * 40
+        monkeypatch.setattr(jev_questions, "FINDING_TITLE_MAX_CHARS", 10_000)
+        ask_rig.finding = _finding(title=title)
+        failed = await ask_rig.fails(
+            _payload("findings.severity", subject_id=text_sha256(title))
+        )
+        assert failed.retry is False
+        assert CANARY not in failed.error
+        assert failed.error.startswith("finding F-0042's text does not make")
+        assert ask_rig.asks == []
 
 
 class TestWhatAnAnswerChanges:
@@ -1680,7 +1975,7 @@ class TestWhatAnAnswerChanges:
         )
         assert len(ask_rig.asks) == 2
 
-    @pytest.mark.parametrize("name", TITLE_SETS)
+    @pytest.mark.parametrize("name", [*TITLE_SETS, *FINDING_SETS])
     @pytest.mark.parametrize(
         "result",
         [
@@ -2776,6 +3071,12 @@ class TestTheTitleProjection:
     card, the decision's rationale and every column a later migration adds
     (docs/09, D-SAFE-2). At ``23dee2b`` every title ask read the card that
     way; the rig's ``repo.get_hypothesis`` now fails any test that reaches it.
+    From phase D2 the findings sets read a finding the same way — its ref,
+    title, origin and when it was opened — through
+    ``jev_repo.get_finding_title``, never ``repo.list_findings``, whose
+    ``SELECT *`` would hand this side a finding's detail, remediation and
+    close note, who raised it and its recorded severity (docs/09, section
+    5.1); the rig's ``repo.list_findings`` fails any test that reaches it.
     """
 
     @pytest.mark.parametrize("name", TITLE_SETS)
@@ -2824,6 +3125,47 @@ class TestTheTitleProjection:
                 return None
 
         assert await jev_repo.get_hypothesis_title(Conn(), "H-9999") is None
+        assert await jev_repo.get_finding_title(Conn(), "F-9999") is None
+
+    @pytest.mark.parametrize("name", FINDING_SETS)
+    async def test_the_findings_sets_load_by_column_list(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        assert jev_jobs.ASKABLE[name].subject_type == "finding_title"
+        result = await ask_rig.run(_payload(name))
+        assert ask_rig.loaded == [("finding", "F-0042")]
+        assert result["status"] == "ok"
+        assert set(ask_rig.finding) == set(jev_repo.FINDING_TITLE_COLUMNS)
+
+    async def test_the_finding_read_names_its_four_columns(self) -> None:
+        class Conn:
+            def __init__(self) -> None:
+                self.asked: list[tuple[str, tuple[object, ...]]] = []
+
+            async def fetchrow(self, query: str, *args: object) -> dict[str, Any]:
+                self.asked.append((query, args))
+                return _finding()
+
+        conn = Conn()
+        row = await jev_repo.get_finding_title(conn, "F-0042")
+        ((query, args),) = conn.asked
+        assert args == ("F-0042",)
+        selected = re.fullmatch(
+            r"\s*SELECT\s+(?P<columns>.+?)\s+FROM\s+findings\s+"
+            r"WHERE\s+ref\s*=\s*\$1\s*",
+            query,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert selected is not None, query
+        columns = [column.strip() for column in selected["columns"].split(",")]
+        assert tuple(columns) == jev_repo.FINDING_TITLE_COLUMNS
+        assert jev_repo.FINDING_TITLE_COLUMNS == (
+            "ref",
+            "title",
+            "origin",
+            "opened_at",
+        )
+        assert row == _finding()
 
 
 class TestTheCardCheckChangesNothing:
@@ -2861,9 +3203,11 @@ class TestTheCardCheckChangesNothing:
             ("src.programme.jev_repo", "quarantine_content"),
             ("src.programme.jev_repo", "content_block_request"),
             ("src.programme.jev_repo", "get_hypothesis_title"),
+            ("src.programme.jev_repo", "get_finding_title"),
             ("src.programme.web_sources", "code_screen"),
         } <= set(reach.reached)
         assert ("src.programme.repo", "get_hypothesis") not in set(reach.reached)
+        assert ("src.programme.repo", "list_findings") not in set(reach.reached)
 
     def test_the_writers_it_looks_for_are_found(self) -> None:
         """Guards the guard: the scanner sees the writers that do exist."""

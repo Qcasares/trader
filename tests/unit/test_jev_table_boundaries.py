@@ -1829,6 +1829,9 @@ def test_the_roots_are_every_handler_every_askable_part_and_the_planner() -> Non
         ("src.programme.jev_jobs", "run_reask"),
         ("src.programme.jev_forward", "collect"),
         ("src.programme.jev_jobs", "_load_hypothesis"),
+        ("src.programme.jev_jobs", "_load_finding"),
+        ("src.programme.jev_jobs", "_admit_finding"),
+        ("src.programme.jev_jobs", "_finding_state"),
         ("src.programme.jev_jobs", "_screen_follow_up"),
         ("src.programme.jev_plan", "plan"),
     } <= roots
@@ -1859,7 +1862,8 @@ def test_the_jev_side_never_reads_detail() -> None:
 def test_the_detail_walk_reaches_the_reads_it_judges() -> None:
     """
     Guards the guard: the walk reaches the Jev side's reads of hypotheses —
-    the title sets' and the planner's — and judges statements on the tables it
+    the title sets' and the planner's — and, from phase D2, of findings — the
+    findings sets' and the planner's — and judges statements on the tables it
     guards, so a walk that reached nothing could not pass for one that found
     nothing.
     """
@@ -1870,6 +1874,8 @@ def test_the_detail_walk_reaches_the_reads_it_judges() -> None:
     assert {
         ("src.programme.jev_repo", "get_hypothesis_title"),
         ("src.programme.jev_repo", "hypotheses_to_ask"),
+        ("src.programme.jev_repo", "get_finding_title"),
+        ("src.programme.jev_repo", "findings_to_ask"),
         ("src.programme.jev_eval", "evaluate"),
     } <= set(reach.reached)
     judged = {
@@ -1881,6 +1887,13 @@ def test_the_detail_walk_reaches_the_reads_it_judges() -> None:
     # The title reads interpolate a module constant, which is read as its
     # text, so the scan judges their column lists rather than skipping them.
     assert any("encode(sha256(convert_to(h.title" in text for text in judged)
+    judged = {
+        text
+        for _, text in _sql_texts(graph.sources["src.programme.jev_repo"])
+        if "findings" in _tables_read(text)
+    }
+    assert any("FROM findings WHERE ref" in text for text in judged), judged
+    assert any("encode(sha256(convert_to(f.title" in text for text in judged)
 
 
 #: A synthetic ``repo``: the two ``SELECT *`` readers the walk must refuse, a
@@ -2247,6 +2260,174 @@ def test_the_detail_walk_finds_each_read(handler: str) -> None:
 def test_the_detail_walk_passes_what_reads_no_detail(handler: str) -> None:
     graph = _synthetic(_detail_tree(handler))
     assert _detail_reads(graph, _HANDLER_ROOT) == []
+
+
+# ---------------------------------------------------------------------------
+# What the findings sets' baseline reads, the side that asks never reads
+# ---------------------------------------------------------------------------
+#
+# Phase D2 (docs/09, section 3.4): the findings sets are measured against
+# ``findings.recorded``, who raised the finding and the severity it was
+# recorded at. An ask that read either could hand the model what its answer is
+# compared with; so from every root that asks, no reachable statement that
+# reads ``findings`` names either, and only the harness reads them
+# (``jev_repo.finding_records``).
+
+#: The two values the recorded baseline answers with.
+RECORDED_COLUMNS = frozenset({"raised_by", "severity"})
+
+
+def _recorded_read(statement: str) -> str | None:
+    """What in ``statement`` reads who raised a finding or its severity."""
+    parsed = _parsed(statement)
+    if parsed is None or not set(parsed.reads.values()) & {"findings", _UNNAMED}:
+        return None
+    for kind, value in parsed.tokens:
+        if kind == "word" and value in RECORDED_COLUMNS:
+            return f"reads {value} from findings"
+    return None
+
+
+def _recorded_reads(graph: Any, roots: list[tuple[str, str]]) -> list[str]:
+    """Every reached definition holding a statement :func:`_recorded_read` finds."""
+    reach = _reach_from(graph, roots)
+    found: dict[str, None] = {}
+    judged: dict[str, list[tuple[int, str]]] = {}
+    for (module, name), nodes in sorted(reach.reached.items(), key=lambda i: i[0]):
+        if module not in judged:
+            judged[module] = [
+                (line, read)
+                for line, text in _sql_texts(graph.sources[module])
+                if (read := _recorded_read(text))
+            ]
+        for first, last in _spans(nodes):
+            for line, read in judged[module]:
+                if first <= line <= last:
+                    found[f"{module}.{name} (line {line}): {read}"] = None
+    unread = (f"a load the scan cannot read: {load}" for load in reach.unreadable)
+    found.update(dict.fromkeys(unread))
+    return list(found)
+
+
+def test_the_ask_side_never_reads_what_the_findings_baseline_reads() -> None:
+    """
+    From every handler, every askable set's load, admission, state and
+    follow-up, and the planner: no read of who raised a finding or its
+    severity. ``jev_repo.get_finding_title`` names neither.
+    """
+    from tests.unit.test_import_boundaries import _real_graph
+
+    offences = _recorded_reads(_real_graph(), _jev_roots())
+    assert not offences, (
+        "the side that asks reads what the findings baseline reads:\n"
+        + "\n".join(offences)
+    )
+
+
+def test_the_recorded_scan_finds_the_harness_reading_them() -> None:
+    """
+    Guards the guard: from the harness's commands, which do read them, the
+    scan finds ``jev_repo.finding_records`` and nothing on the side that asks.
+    """
+    from tests.unit.test_import_boundaries import _real_graph
+
+    offences = _recorded_reads(_real_graph(), HARNESS_ROOTS)
+    assert any("src.programme.jev_repo.finding_records" in o for o in offences)
+    reach = _reach_from(_real_graph(), _jev_roots())
+    assert ("src.programme.jev_repo", "finding_records") not in set(reach.reached)
+    assert ("src.programme.jev_repo", "get_finding_title") in set(reach.reached)
+
+
+#: A synthetic ``repo`` for the recorded scan: the baseline's read, a title
+#: read by column list, and readers of other tables naming the same words.
+_RECORDED_REPO = '''
+async def finding_records(conn, subjects):
+    return await conn.fetch(
+        "SELECT raised_by, severity FROM findings WHERE origin = 'model'"
+    )
+
+async def get_finding_title(conn, ref):
+    return await conn.fetchrow(
+        "SELECT ref, title, origin, opened_at FROM findings WHERE ref = $1", ref
+    )
+'''
+
+
+def _recorded_tree(handler: str) -> dict[str, str]:
+    return {
+        "src/__init__.py": "",
+        "src/programme/__init__.py": "",
+        "src/programme/jev_repo.py": _RECORDED_REPO,
+        "src/programme/jev_jobs.py": handler,
+    }
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(
+            "from src.programme import jev_repo\n"
+            "async def handle(conn):\n"
+            "    return await jev_repo.finding_records(conn, [])\n",
+            id="the-baselines-read",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetchrow(\n"
+            "        'SELECT f.title, f.severity FROM findings f '\n"
+            "        'WHERE f.ref = $1', 'F'\n"
+            "    )\n",
+            id="the-severity-beside-the-title",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetch(\n"
+            "        'SELECT c.id FROM candidates c JOIN findings f '\n"
+            "        'ON f.candidate_id = c.id WHERE f.raised_by = $1', 'risk'\n"
+            "    )\n",
+            id="a-raiser-in-a-filter",
+        ),
+        pytest.param(
+            "async def handle(conn, table='findings'):\n"
+            "    return await conn.fetch(f'SELECT raised_by FROM {table}')\n",
+            id="a-table-it-cannot-name",
+        ),
+    ],
+)
+def test_the_recorded_scan_finds_each_read(handler: str) -> None:
+    graph = _synthetic(_recorded_tree(handler))
+    assert _recorded_reads(graph, _HANDLER_ROOT)
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(
+            "from src.programme import jev_repo\n"
+            "async def handle(conn):\n"
+            "    return await jev_repo.get_finding_title(conn, 'F-1')\n",
+            id="the-title-by-column-list",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetch(\n"
+            "        \"SELECT severity FROM jev_labels WHERE question_set = $1\", 's'\n"
+            "    )\n",
+            id="a-word-of-another-table",
+        ),
+        pytest.param(
+            "from src.programme import jev_repo\n"
+            "async def handle(conn):\n"
+            "    return None\n"
+            "async def elsewhere(conn):\n"
+            "    return await jev_repo.finding_records(conn, [])\n",
+            id="a-reader-nothing-reached-calls",
+        ),
+    ],
+)
+def test_the_recorded_scan_passes_what_reads_neither(handler: str) -> None:
+    graph = _synthetic(_recorded_tree(handler))
+    assert _recorded_reads(graph, _HANDLER_ROOT) == []
 
 
 # ---------------------------------------------------------------------------

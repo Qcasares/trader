@@ -1167,6 +1167,9 @@ class _Book:
         self.texts: dict[tuple[str, str], str] = {}
         self.pairs: list[dict[str, Any]] = []
         self.reasks: dict[str, dict[str, Any]] = {}
+        #: Who raised each finding title's earliest finding and at what
+        #: severity (phase D2's ``jev_repo.finding_records``).
+        self.records: dict[tuple[str, str], dict[str, Any]] = {}
         self._ids = iter(range(1, 1_000_000))
         self.plans = (
             jev_prereg.plans_in_force(question_set.name, question_set.version) or {}
@@ -1266,7 +1269,16 @@ class _Book:
             texts=dict(self.texts),
             pairs=list(self.pairs),
             reasks=dict(self.reasks),
+            records=dict(self.records),
         )
+
+    def record(
+        self, text: str, *, raised_by: str = "execution", severity: str = "high"
+    ) -> tuple[str, str]:
+        """The finding of the population holding ``text`` first, as read."""
+        subject = self.subject(text)
+        self.records[subject] = {"raised_by": raised_by, "severity": severity}
+        return subject
 
     def evaluate(
         self, split: str = "all", labelled_by: str = LABELLER, model: str = MODEL
@@ -1279,6 +1291,292 @@ class _Book:
             split=split,  # type: ignore[arg-type]
             ledger=self.ledger(),
         )
+
+
+OWNER = jev_questions.FINDINGS_OWNER
+SEVERITY = jev_questions.FINDINGS_SEVERITY
+
+#: The day ``jev-1.13.0`` was first observed, and a moment on it, which an
+#: item dated then may predate.
+FIRST_SEEN = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+ON_THE_DAY = datetime.combine(FIRST_SEEN, time(18), UTC)
+
+
+def _findings_book(question_set: Any = None) -> _Book:
+    """A book for a findings set: its question, asked about finding titles."""
+    question_set = question_set or OWNER
+    (key,) = dict(question_set.questions)
+    return _Book(question_set, key)
+
+
+def _finding_titles(count: int, words: str = "Invented Finding") -> list[str]:
+    return [f"{words} {i}" for i in range(count)]
+
+
+class TestTheNewSubjects:
+    """
+    docs/09, section 3.7 (D2): a finding's title is a subject a label may be
+    of, dated, read and chosen by the findings sets' population.
+    """
+
+    def test_question_problem_admits_finding_title_and_job_error(self) -> None:
+        """
+        Both findings sets' questions may be evaluated, and the subjects a
+        label may be of are exactly those of the registered sets with ground
+        truth: phase D3's job error joins them when ``ops.job_error`` is
+        registered, and this fails until it does.
+        """
+        assert jev_eval.question_problem(OWNER, "owning_role") is None
+        assert jev_eval.question_problem(SEVERITY, "severity") is None
+        assert "finding_title" in jev_eval.LABELLED_SUBJECTS
+        measured = {
+            jev_questions.STATE_SUBJECT[question_set.state_model]
+            for name, question_set in jev_questions.REGISTRY.items()
+            if name not in jev_eval.NO_GROUND_TRUTH
+            and name != jev_eval.PROBE_SET_NAME
+        }
+        assert set(jev_eval.LABELLED_SUBJECTS) == measured
+        problem = jev_eval.question_problem(
+            jev_questions.REGISTRY[jev_eval.PROBE_SET_NAME], "about_the_sun"
+        )
+        assert problem is not None and "a finding title" in problem
+
+    def test_dates_texts_and_populations(self) -> None:
+        """
+        An item is dated by when its finding was raised, so a findings set's
+        evaluation searches a threshold only where every item it reads was
+        raised after the model was first observed; an item no finding of the
+        population holds has no text, and the baseline cannot answer it.
+        """
+        book = _findings_book()
+        titles = _finding_titles(4)
+        for title in titles:
+            book.label(title, "execution")
+            book.answer(title, "execution")
+            book.record(title)
+        assert book.evaluate().possibly_in_training is False
+        for dated in (ON_THE_DAY, None):
+            book.dates[book.subject(titles[0])] = dated
+            assert book.evaluate().possibly_in_training is True, dated
+        del book.texts[book.subject(titles[1])]
+        with pytest.raises(jev_eval.Refused, match="is not stored"):
+            book.evaluate()
+
+    async def test_the_export_reads_the_population_of_finding_titles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        titles = _finding_titles(3, "Invented Unfilled Stop")
+        rows = [
+            {"subject_type": "finding_title", "subject_id": text_sha256(t), "text": t}
+            for t in titles
+        ]
+        asked: list[dict[str, Any]] = []
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            asked.append(kwargs)
+            return rows
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        for question_set in (OWNER, SEVERITY):
+            (key,) = dict(question_set.questions)
+            text = await jev_eval.export_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=question_set,
+                question_key=key,
+                sample=None,
+                include_quarantined=False,
+            )
+            lines = list(csv.reader(io.StringIO(text)))
+            assert tuple(lines[0]) == jev_eval.EXPORT_COLUMNS
+            assert sorted(line[2] for line in lines[1:]) == sorted(titles)
+        assert asked == [{"subject_type": "finding_title"}] * 2
+
+
+class TestTheRecordedBaseline:
+    """
+    docs/09, section 3.4: the findings sets' baseline is ``findings.recorded``
+    — who raised the earliest model-written finding holding the title, or the
+    severity it was recorded at — answered from the record, never the text.
+    """
+
+    def test_owner_and_severity_compare_with_raised_by_and_severity(self) -> None:
+        for question_set, reads, recorded, label in (
+            (OWNER, "raised_by", ("execution", "platform"), "execution"),
+            (SEVERITY, "severity", ("high", "low"), "high"),
+        ):
+            book = _findings_book(question_set)
+            titles = _finding_titles(4, f"Invented {reads}")
+            for n, title in enumerate(titles):
+                book.label(title, label)
+                book.answer(title, label)
+                value = recorded[0] if n < 3 else recorded[1]
+                book.record(title, **{reads: value})
+            evaluation = book.evaluate()
+            assert evaluation.keyword_baseline_accuracy == pytest.approx(3 / 4)
+            assert evaluation.keyword_baseline_ref == (
+                f"findings.recorded, reading {reads} of the earliest "
+                "model-written finding holding the title"
+            )
+            assert evaluation.per_class[label]["keyword"] == {
+                "predicted": 3,
+                "correct": 3,
+                "precision": 1.0,
+                "recall": pytest.approx(3 / 4),
+            }
+            assert (
+                evaluation.vs_keyword_jev_right_only,
+                evaluation.vs_keyword_baseline_right_only,
+            ) == (1, 0)
+
+    def test_the_other_value_is_never_read(self) -> None:
+        """The owner set reads who raised it, never the severity; and back."""
+        book = _findings_book(OWNER)
+        title = "Invented Finding Read One Way"
+        book.label(title, "execution")
+        book.answer(title, "execution")
+        book.record(title, raised_by="execution", severity="execution")
+        assert book.evaluate().keyword_baseline_accuracy == 1.0
+        book.records[book.subject(title)] = {
+            "raised_by": "platform",
+            "severity": "execution",
+        }
+        assert book.evaluate().keyword_baseline_accuracy == 0.0
+
+    def test_the_baseline_never_reads_the_text(self) -> None:
+        book = _findings_book(SEVERITY)
+        title = "Invented Finding Whose Words Say Critical"
+        book.label(title, "low")
+        book.answer(title, "low")
+        book.record(title, severity="low")
+        before = book.evaluate().keyword_baseline_accuracy
+        book.texts[book.subject(title)] = "critical critical critical"
+        assert book.evaluate().keyword_baseline_accuracy == before == 1.0
+
+    def test_an_item_with_no_record_is_refused(self) -> None:
+        book = _findings_book()
+        title = "Invented Finding Nobody Raised"
+        book.label(title, "execution")
+        book.answer(title, "execution")
+        with pytest.raises(jev_eval.Refused, match="recorded baseline cannot answer"):
+            book.evaluate()
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"reads": "detail_md"},
+            {"origin": "operator"},
+            {"order": ["ref", "opened_at"]},
+        ],
+        ids=["reads-another-column", "another-writer", "another-order"],
+    )
+    def test_a_plan_registering_another_rule_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, changed: dict[str, Any]
+    ) -> None:
+        """
+        The harness reads raised_by or severity of the earliest model-written
+        finding by opened_at then ref; a plan naming any other rule measures
+        against nothing the harness reads, and is refused rather than run.
+        """
+        real = jev_prereg.set_plan
+
+        def moved(name: str, version: int) -> dict[str, Any] | None:
+            plan = real(name, version)
+            if plan is None or name != OWNER.name:
+                return plan
+            question = dict(plan["questions"]["owning_role"])
+            question["keyword_baseline"] = {**question["keyword_baseline"], **changed}
+            return {**plan, "questions": {"owning_role": question}}
+
+        monkeypatch.setattr(jev_prereg, "set_plan", moved)
+        with pytest.raises(jev_eval.Refused, match="does not read"):
+            jev_eval.keyword_baseline(OWNER, "owning_role", records={})
+
+    def test_the_rule_the_harness_reads_is_the_plans(self) -> None:
+        """What finding_records reads and orders by is what the plans name."""
+        for question_set in (OWNER, SEVERITY):
+            plan = jev_prereg.set_plan(question_set.name, question_set.version)
+            assert plan is not None
+            (question,) = plan["questions"].values()
+            baseline = question["keyword_baseline"]
+            assert baseline["rule"] == "findings.recorded"
+            assert baseline["reads"] in jev_repo.FINDING_RECORD_COLUMNS
+            assert tuple(baseline["order"]) == jev_repo.FINDING_RECORD_ORDER
+            assert baseline["origin"] == "model"
+            assert baseline["exported_to_labellers"] is False
+
+
+class TestTheExportStaysBlind:
+    """
+    docs/09, section 3.5: a findings set's export shows the subject, its
+    address and the title, and withholds who raised the finding, its
+    severity, its status, its candidate and every answer.
+    """
+
+    async def test_no_raiser_severity_status_or_raw_error_is_exported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        title = "Invented Finding With Much Beside It"
+        rows = [
+            {
+                "subject_type": "finding_title",
+                "subject_id": text_sha256(title),
+                "text": title,
+                # A repository that handed over more than it reads: none of it
+                # may reach the file.
+                "raised_by": "adversarial_review",
+                "severity": "critical",
+                "status": "acknowledged",
+                "candidate_id": "c-0001",
+                "detail_md": "CANARY detail",
+            }
+        ]
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return rows
+
+        async def no_records(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the export read what the baseline reads")
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        monkeypatch.setattr(jev_repo, "finding_records", no_records)
+        for question_set in (OWNER, SEVERITY):
+            (key,) = dict(question_set.questions)
+            text = await jev_eval.export_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=question_set,
+                question_key=key,
+                sample=None,
+                include_quarantined=True,
+            )
+            lines = list(csv.reader(io.StringIO(text)))
+            assert lines == [
+                list(jev_eval.EXPORT_COLUMNS),
+                ["finding_title", text_sha256(title), title],
+            ]
+            withheld = ("adversarial_review", "critical", "acknowledged", "c-0001")
+            for value in (*withheld, "CANARY"):
+                assert value not in text, value
+
+    def test_the_population_read_names_no_withheld_column(self) -> None:
+        """
+        By its source: the read a findings export is chosen from names the
+        title, its address and the order it is chosen in, and none of who
+        raised it, its severity, its status, its candidate or its detail.
+        """
+        source = inspect.getsource(jev_repo.subjects_to_label)
+        branch = source.split('subject_type == "finding_title"', 1)[1]
+        branch = branch.split("else:", 1)[0]
+        for column in (
+            "raised_by",
+            "severity",
+            "status",
+            "candidate_id",
+            "detail_md",
+            "remediation",
+            "close_note",
+            "*",
+        ):
+            assert column not in branch, column
 
 
 class TestTheEvaluationIsTheTable:
