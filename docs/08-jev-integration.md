@@ -474,11 +474,12 @@ belongs to phase H.
 
 Phase B built the programme's half of this, dark: the ledger, the pure
 modules, `jev_client`, `jev_lane` and the programme's job loop. Phase C6
-built `web_ingest.py`, which stores what it reads and asks nothing: the arrow
-from it to the lane below is C7's, whose jobs ask about the excerpts it
-stored. The signal loader and everything on the engine's side are what the
-later phases build. Every switch named here reads as off when it cannot be
-read.
+built `web_ingest.py`, which stores what it reads and asks nothing; the arrow
+from it to the lane below is C7's `jev_ask` jobs, which ask the injection
+screen, and then the catalogue, about the excerpts it stored, as C8's ask the
+title sets about the programme's hypotheses. The signal loader and everything
+on the engine's side are what the later phases build. Every switch named here
+reads as off when it cannot be read.
 
 ```
    web content, allow-listed          daily_bars
@@ -513,25 +514,26 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | Module | Role |
 |---|---|
 | `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000 |
-| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels |
+| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels. C7+C8 register `guardrail.injection`, `research.catalogue`, `research.hypothesis` and `guardrail.card`, v1 each, and `HypothesisTitleState`, a title of 1 to `TITLE_MAX_CHARS` (300) characters |
 | `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
 | `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state. From C4, `regime_state_problem` says why it would be `None`, for a job's error |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined` |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined`. From C7+C8, the one writer of `jev_labels` (`record_label`, and `record_label_once` for a source's headings), what each set is to be asked about (`documents_to_screen`, `documents_to_describe`, `hypotheses_to_ask`), the `jev_ask` jobs waiting, the earliest content block on record for a subject, and `ask_job_key` |
 | `jev_clock.py` | C4. Holds no client and is not runner-only, so phase E may read the cutoff. The forward clock's times — the reference bars at a session's close plus 45 minutes (the worker's ingest time), the collection at plus 50, the cutoff at plus 60 (the worker's decision time) — the sessions the planner plans, the signal's and the jobs' names, `sleeve_symbol`, and the bar loader, which reads `adj_close` from `yfinance` alone |
 | `jev_forward.py` | C4, runner-only. `collect`, the `jev_regime` job: one session's regime, asked before the cutoff by the database's clock, at most one call an attempt — an attempt whose call got no response is retried and asks again — and one answer recorded at most once; never a backfill and never a `missing` row |
-| `jev_jobs.py` | C4, runner-only. `ask_verdict`, what an ask came to as a job's error and retry, and `run_reask`, the `jev_reask` job |
-| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area |
-| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test |
+| `jev_jobs.py` | C4, runner-only. `run_reask`, the `jev_reask` job; from C7+C8, `run_ask`, the `jev_ask` job — one registered set asked about one stored text, a web excerpt read through the code screen or a model-written title within its cap — and what an answer changes (`ASKABLE`), a quarantine and nothing else. Re-exports `ask_verdict` |
+| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area; from C7+C8, the `jev_ask` jobs, each set behind its lane's area |
+| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test; from C7+C8, a plan for each set asked about text, with its keyword baseline, recorded with every answer (`plans_in_force`) |
 | `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the rest |
 | `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client |
-| `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS` |
+| `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS`; from C7+C8, `ask_verdict` and `NOT_ASKED`, moved out of `jev_jobs`, and `described`, an error by its class, SQLSTATE and constraint, moved out of `web_ingest` |
+| `claims.py` | C8. Pure, the standard library alone. The performance-claim check — `PERFORMANCE_TERMS`, `find_performance_claim`, `NUMERIC_BY_DESIGN`, `reject_performance_claims`, `PerformanceClaimError` — moved verbatim out of `author.py`, which re-exports every name and screens a hypothesis's title with it too |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
 | `jev_check.py` | Runner-only. `python -m src.programme.jev_check`: whether a key works, asked of TypeSafe's own host. Lists the models the key may use with `jev_client.list_models` (no tokens), which settles that TypeSafe's host accepts the key and not the pin: the listing names the aliases only, and a versioned id is accepted unlisted. It stops if the key is refused, then asks the connectivity probe once through `jev_client.ask`, whose answer proves the pin, and judges any 2xx body with `jev_validate` exactly as the lane does, against `PROBE_EXPECTED`. Records nothing and prints no secret, withholding any run of the key a vendor might echo; exit 0 pass, 1 fail, 2 no key, 3 no verdict — a network failure, a rate limit or a vendor fault, which says nothing about the key. `jev-check.yml` runs it by dispatch with the `TYPESAFE_API_KEY` repository secret and nothing else |
 | `jev_lane.py` | Runner-only. One ask of one question set: check the arguments and the subject, the switches, the pin, the web gate and the content block, hash, look up, and unless the answer is on record, the key, the vendor's standing refusals, the budget and the lane's slice of it, and the size; then call once, validate, write. `run_probe` is the `jev_probe` job's handler. Building each lane's state from its sources, and routing its answers, arrive with the lanes from phase C. It reaches none of `client.py`, `author.py`, `panel.py` or `tick.py`, so on the signal path the cascade ends at Jev |
 | `web_sources.py` | Phase C5. Pure, and importable by the API. The allow-list, one page written out in full, checked when the module loads and recorded as written; the README parser, which keeps titles and refuses a page that has changed shape, a line it cannot read among them; the excerpt normaliser, idempotent; the code screen, version 1, its rules and readings data and its hash pinned beside them and in a released history; `screen_cell`, what becomes of a row; the labeller a source's grouping is recorded as |
 | `web_fetch.py` | Phase C5. Runner-only, and the only module in `src/programme` that imports `aiohttp`. Fetches an allow-list entry, by identity and as written, once: no redirects, no environment, global addresses only, verified TLS, fixed headers, a size cap as declared, received and inflated, strict type and UTF-8, 200 only, one attempt. Imported by `web_ingest` alone |
-| `web_ingest.py` | Phase C6, runner-only, and the one importer of `web_fetch`. The `jev_web_ingest` job: re-read the programme's switch, the research area and the pin, and run only while a key is set (read in `main`'s wrapper for that and nothing else), fetch the allow-listed page outside any transaction, parse it with the source's parser, store what `web_sources.screen_cell` decides for each row in one transaction through `jev_repo`, its locks taken in content order, quarantine by content, and call nothing; no key reaches it. Its result is counts and hashes. The SEC EDGAR feed the plan also named is not planned for phase C |
+| `web_ingest.py` | Phase C6, runner-only, and the one importer of `web_fetch`. The `jev_web_ingest` job: re-read the programme's switch, the research area and the pin, and run only while a key is set (read in `main`'s wrapper for that and nothing else), fetch the allow-listed page outside any transaction, parse it with the source's parser, store what `web_sources.screen_cell` decides for each row in one transaction through `jev_repo`, its locks taken in content order, quarantine by content, and call nothing; no key reaches it. Its result is counts and hashes. From C7, it records the README's own headings as labels of the catalogue's asset class. The SEC EDGAR feed the plan also named is not planned for phase C |
 
 ### Outside `src/programme/`
 
@@ -654,17 +656,18 @@ forgot to is held to them anyway.
 
 ## Lanes
 
-Planned. None of these lanes exists yet. Phase B built the one road they
-will all take, `jev_lane.ask`, and registered two question sets: the
-connectivity probe, and `decision.regime` v1, which nothing asks yet. Phase
-C's first pull request moved every rule a lane could forget into that road. A set's
-version is a field of its own, pinned with its golden hash, so the sets
-below are named without one.
+Planned, except where a row says what is built. Phase B built the one road
+every lane takes, `jev_lane.ask`, and registered two question sets: the
+connectivity probe, and `decision.regime` v1, which the forward clock asks
+from C4. Phase C's first pull request moved every rule a lane could forget
+into that road, and C7+C8 registered the research and guardrail sets below,
+dark and in shadow. A set's version is a field of its own, pinned with its
+golden hash, so the sets below are named without one.
 
 | Lane | Question sets | State | What Jev may do | What it may never do |
 |---|---|---|---|---|
-| Research | `research.catalogue` (asset class, mechanism, whether daily OHLCV suffices, rebalance horizon), `research.news` (relevance, event type, tone). `guardrail.injection` ("contains instructions addressed to an AI") runs first | Allow-listed web excerpts | Label the catalogue page; rank a shortlist `author.py` may use to prioritise; quarantine what the injection screen flags | Satisfy any gate criterion |
-| Guardrails | Card checks beside `find_performance_claim`: a performance claim, an untestable falsification test | Hypothesis cards, as titles unless the detail switch is on | A "yes" rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
+| Research | `research.catalogue` (asset class, mechanism), built in C7; `research.hypothesis` (the same two questions about a hypothesis's title), built in C8; `research.news` (relevance, event type, tone), not planned. `guardrail.injection` ("addressed to an AI system"), built in C7, runs first | Allow-listed web excerpts; the programme's model-written hypothesis titles | Today: be recorded and planned on, the catalogue only for text the screen cleared; quarantine what the injection screen flags. Later: label the catalogue page; rank a shortlist `author.py` may use to prioritise | Satisfy any gate criterion |
+| Guardrails | `guardrail.card` (a performance claim), built in C8 beside `find_performance_claim`, in shadow; an untestable falsification test, planned | Hypothesis titles; cards as titles unless the detail switch is on | Today: be recorded and change nothing. Later, once calibrated (phase D): a "yes" rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
 | Findings routing | Owning role (the twelve plus "unclear"), likely duplicate, suggested severity | Findings, as titles unless the detail switch is on | Suggest | Write `severity` or `status`. Findings it raises carry `raised_by='jev:<set>'`, never in `VETO_ROLES` |
 | Ops triage | Job errors, reconciliation discrepancies, data-quality alerts, through a redactor | Free text only; code handles structured cases first | Show chips on System > Jobs | Resume anything, or touch the kill switch |
 | Recorded signals | `signal.news_tone` | Web content | Be recorded and scored going forward | Be loaded by the decision path. The loader's filter excludes web provenance by construction |
@@ -776,7 +779,7 @@ six below the table, beside a UI pull request that is not phase C's.
 |---|---|---|
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
-| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W, C5, C4 and C6 done |
+| C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **In progress**: C1+C2, W, C5, C4, C6 and C7+C8 done |
 | D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
@@ -798,7 +801,7 @@ pull request beside them because it merges first, though it is not phase C.
 | C4 | The forward clock starts, with the restart schedules moved clear of it | C1+C2, W | **Done** |
 | C5 | Web sources (pure: the allow-list, the parser, the normaliser and the code screen) and the fetcher, dark | C1+C2 | **Done** |
 | C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | **Done** |
-| C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | Not started |
+| C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | **Done** |
 | C9 | The evaluation harness, migration 0014 | C4, C7+C8 | Not started |
 
 ### Phase A, as built
@@ -1449,8 +1452,9 @@ and nothing else (`jev_questions.screen_problem`): the gate lets the screen
 alone ask about unscreened text, so a second question in it would be answered
 about exactly that text. Registration refuses any other set under the screen's
 name, and one placed in the registry by hand is no screen: it is asked nothing
-about unscreened text, and its answers clear nothing. No screen is registered
-until C7, so today every web ask is unscreened: the gate fails closed.
+about unscreened text, and its answers clear nothing. No screen was
+registered until C7, so until then every web ask was unscreened: the gate
+failed closed (C7+C8 below registers `guardrail.injection`).
 `test_jev_lane.py::TestTheWebGate`, and on real `web_documents` and screen
 rows, `tests/integration/test_jev_lane.py::TestTheWebGate` and
 `test_jev_repo.py::TestTheWebReads`, where each filter of the screen's read is
@@ -2776,8 +2780,8 @@ title of the page carries a token of its own, each beginning with one marker,
 and the marker is looked for too, so a title that leaves by any road is found,
 not only the watched one's: the first cut watched a single title, and the
 mutation check put the page's first title in the job's result and passed it.
-Until C7 asks, that one column is the only one: CLAUDE.md's row says one
-column for now.
+Until C7 asks, that one column is the only one: CLAUDE.md's row said one
+column for now, and says two from C7+C8 (below).
 
 **Where C6 departs from the design and its scope.** C5 changed the contract
 first: the job stores what `screen_cell` decides, rather than screening the
@@ -2804,6 +2808,322 @@ zero for this one, and `main`'s wrapper is marked as wrapping `run_job` so the
 scan reads the module that holds the work. The design's `jev_labels` writes
 wait for C7, which records the README's grouping as labels with the catalogue
 set.
+
+#### C7+C8: the injection screen, the catalogue, hypothesis categories and the card check, in shadow
+
+The first sets asked about text. Four are registered: `guardrail.injection`
+v1, the injection screen, and `research.catalogue` v1, asked about a stored
+web excerpt; `research.hypothesis` v1 and `guardrail.card` v1, asked about the
+title of a hypothesis the programme's own model wrote. One job asks each of
+them, `jev_ask` (`jev_jobs.run_ask`), about one subject, once an attempt; the
+planner plans it behind each set's lane's area. Dark twice over: the
+guardrails and research areas are seeded off, so nothing is planned, and no
+call has been made. And in shadow: a card check's answer, and every answer
+about a title, is recorded and changes nothing; what a web answer may change
+is one thing, a quarantine.
+
+**The four sets.** Design section 5's words, word for word, through the real
+registration rules (`jev_questions.py`); the caps a question names,
+`EXCERPT_MAX_CHARS` and `TITLE_MAX_CHARS` (300), are rendered from their
+constants. The hashes of the words as merged are design section 5's table
+exactly:
+
+| Set | Lane, provenance, state | Pack hash | Questions hash |
+|---|---|---|---|
+| `guardrail.injection` v1 | guardrail, web, `WebExcerptState` | `85229106…84068ab6` | `99cdb403…1c00f746` |
+| `research.catalogue` v1 | research, web, `WebExcerptState` | `d3872677…18a3976d` | `d2608515…8ebbfc18` |
+| `research.hypothesis` v1 | research, model, `HypothesisTitleState` | `35124e76…4eb0e0eb` | `5a75a21d…03513a57` |
+| `guardrail.card` v1 | guardrail, model, `HypothesisTitleState` | `3f98bbc1…e0ebd455` | `47c322e7…1b42c130` |
+
+The screen satisfies `screen_problem`: it asks `addressed_to_ai`, as a Noul,
+and nothing else. `GOLDEN_PACK_HASHES` gains the four, the test's append-only
+`RELEASED_PACK_HASHES` and `RELEASED_QUESTION_HASHES` a row each, and the
+registry test is an exact pin of the six sets. `HypothesisTitleState` (one
+field, `title`, 1 to 300 characters) joins `STATE_SUBJECT` as
+`hypothesis_title` and `TEXT_SUBJECT_FIELD` as `title`. The design's wording
+rules are tests over the whole registry
+(`tests/unit/test_jev_questions.py::TestEverySetIsWrittenPlainly`): the escape
+option comes last, no question is asked with a negation, the instructions
+open with the question, every backticked name is a field of the state, and
+every cap is rendered from its constant — read by executing the module's own
+source with the constant moved, so a cap typed as a literal fails.
+
+**The performance-claim check leaves the model runner** (C8). `claims.py` is
+new and pure: `PERFORMANCE_TERMS`, `find_performance_claim`,
+`NUMERIC_BY_DESIGN`, `reject_performance_claims` and `PerformanceClaimError`,
+moved verbatim, `author` re-exporting every name, so
+`author.find_performance_claim` is `claims.find_performance_claim`.
+`author.propose_hypothesis` now screens the title too, with
+`reject_performance_claims({"title": title, **card})` (the design's F11), and
+`claims` joins the modules a fresh interpreter proves load nothing
+(`tests/unit/test_claims.py`, `test_import_boundaries.py::test_the_pure_modules_load_nothing`).
+
+**The `jev_ask` job.** Its payload is the set, its version, the subject's type
+and address, and the row its text is read from — a document by its id, a
+hypothesis by its ref — never the text, which the handler reads again from
+that row. In order, the first that applies deciding:
+
+| # | Condition | Outcome |
+|---|---|---|
+| 0 | The payload is not those five names, its set is not one the job asks, or its subject type is not the set's | fail, no retry |
+| 1 | Its version is not the registered set's | complete, `superseded` |
+| 2 | The set has no analysis plan | fail, no retry |
+| 3 | The row is not stored, or its text is not the subject | fail, no retry |
+| 4 | The text may not be asked about (below) | fail, no retry |
+| 5 | The state cannot be built | fail, no retry, nothing quoted |
+| 6 | The one ask, its follow-up, then the verdict | as `job_errors.ask_verdict` |
+
+Step 4, for web text: content quarantined under any source is asked nothing;
+then the code screen reads the stored excerpt again, as it stands now, and a
+hit is quarantined by content with `web_sources.quarantine_reason` and fails
+the job, so a rule the screen gained since the page was read applies before
+any model is asked. For a title: only one the programme's model wrote
+(`origin = 'model'`; open item 28), and only within `TITLE_MAX_CHARS`, refused
+by that number before any state is built, so the refusal is the cap's and
+never pydantic's. Step 5: pydantic's `ValidationError` quotes the input it
+refused, so it is replaced by an error naming the document's id or the
+hypothesis's ref alone; anything else steps 3 to 6 raise — a read, a
+quarantine's write, the ask, the follow-up — is reported by its class,
+SQLSTATE and constraint (`job_errors.described`, moved there from
+`web_ingest`) and retried. The result is labels and numbers: the subject, the
+plans in force (below), the status, the request, whether it replayed, and per
+question its validity, reason, argmax, margin and, for a Noul, its
+probability.
+
+What an answer changes is the design's table and nothing more:
+
+| Set | Answer | Follow-up |
+|---|---|---|
+| `guardrail.injection` | valid, argmax `true` | the content is quarantined, under every source: `jev guardrail.injection v1: addressed_to_ai p=0.87 (request N, <model>); not calibrated` |
+| | valid, argmax `false` | none; the catalogue may now be planned |
+| | invalid, or a tie, in an `ok` response | none: held, under this version and pin, since the canonical row replays |
+| any web set | a content block, this call's or one on record | the content is quarantined: `vendor content block on request N (a 403 whose body is not JSON; an unverified precaution, docs/08 fact 4)` |
+| `research.catalogue`, `research.hypothesis`, `guardrail.card` | anything else | none: recorded, acted on by nothing |
+
+A title is never quarantined: quarantine is a stored document's, and a
+blocked title is held by the road alone. Nothing that writes `hypotheses`,
+`candidates` or `findings` is reachable from `jev_jobs`
+(`tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing`, below).
+
+**A block's quarantine survives a failed write.** The block's `error` row
+commits on its own before the follow-up runs, so a quarantine that then fails
+— a deadlock, a dropped connection — leaves the block on record and the
+content in use. So the block is found two ways: this call's row of kind
+`content_block`, or, on any later ask about the same text, which the road
+refuses before a call as `content_blocked`, the earliest block on record for
+the content (`jev_repo.content_block_request`). The failed attempt is retried;
+the retry makes no call and quarantines. And when every attempt fails,
+`jev_repo.documents_to_screen` plans the screen, on a later pass, for any
+content still in use that a block is on record for, whatever its screen rows
+say — the catalogue's block of text the screen had cleared among them — and
+that job, too, makes no call and quarantines
+(`tests/unit/test_jev_jobs.py::TestWhatAnAnswerChanges::test_a_quarantine_that_failed_to_write_is_made_by_the_next_attempt`;
+`tests/integration/test_jev_research.py::TestABlocksQuarantineSurvivesAFailedWrite`,
+both ways, on PostgreSQL).
+
+**Re-asks of text.** `run_reask` reads a re-asked web excerpt through the code
+screen first, as `run_ask` does, quarantining it on a hit and asking nothing,
+and asks nothing about content quarantined since (the scope's 10c; C4's
+planner checked quarantine alone). A content block met by a re-ask of web
+text quarantines it; a block met by a re-ask of a title or of an enumerated
+state touches nothing, tested against a regime state and a hypothesis title
+both, so widening the condition to every text state fails a test (10g). A
+probe's answer never quarantines. Since a state may now hold text, a stored
+state that no longer validates fails the re-ask without quoting it, and a
+failure of the screen, the ask or the follow-up is reported by its class and
+retried, where C4's let it propagate.
+
+`ask_verdict` and `NOT_ASKED` moved from `jev_jobs` to `job_errors`, which
+`jev_jobs` re-exports: `jev_jobs` now loads the code screen, and the forward
+clock, which reads the verdict too, may load no web module at all. The
+one-call scan counts per handler now that one module holds two that ask: every
+call to the road reachable from a handler within its module, through a table
+of follow-ups as well, one each for the ask and the re-ask, and none in the
+module unreached (`tests/unit/test_job_ownership.py::TestEveryJevHandlerMakesAtMostOneCall`).
+
+**The card check changes nothing** (the scope's 10f). The design's test read
+`raise_finding`, `decide_hypothesis` and `create_candidate` by name, and the
+first build's version of it missed a writer taken under an alias. Now it is a
+walk over `test_import_boundaries`' import graph from every definition in
+`jev_jobs`: a definition is reached when anything reached refers to it,
+called or not — by its module's name for it, an import under any alias, a
+chain of attributes, a re-export through a module or a package, a star import,
+`getattr` with a literal — and a module referred to as a value (passed,
+stored, read through `vars` or `__dict__`, handed to `getattr` with a computed
+name, or loaded by a literal name) is reached whole; a load by a name the scan
+cannot read is refused. Every reached definition is checked by the shared
+write scanner, `_table_writes`, for a write of `hypotheses`, `candidates` or
+`findings`. It reaches the lane's `ask`, the quarantine, `repo.get_hypothesis`
+and the code screen, and none of the writers the scan finds in `repo`; each of
+21 spellings must trip it on a synthetic tree, and 3 that only read must not.
+The tick's half of design C8 — it loads no `jev_*` or `web_*` module — is
+`test_import_boundaries.py::test_no_model_runner_loads_a_jev_or_web_module`,
+as before.
+
+**A plan for each set, and the plan recorded with each answer.** `jev_prereg`
+gains one plan per set, beside it, golden-hashed with an append-only released
+history in the test; a registered set asking a question with no plan fails a
+test, the connectivity probe exempt and `decision.regime` under the global
+plan's regime section. Each target is its lane's target or higher, never
+lower, and is met, as the global plan's are, by its statistic's Wilson lower
+bound at the gate level. The global plan did not change: `PLAN_VERSION` 1, `GOLDEN_PLAN_HASH`
+`f744c2d8…2daf7caf`.
+
+| Set, question | Acting class | Target | Keyword baseline | Set plan hash |
+|---|---|---|---|---|
+| `guardrail.injection`, `addressed_to_ai` | `true` | covered precision ≥ 0.90 | the code screen, version 1, its rule data's hash in the plan | `2ba46f37…14eff8f7` |
+| `research.catalogue`, `asset_class` and `mechanism` | — | covered accuracy ≥ 0.80 | the ordered keyword rules of design C7, as data | `9ab204c8…a5292deb` |
+| `research.hypothesis`, `asset_class` and `mechanism` | — | covered accuracy ≥ 0.80 | the same rules, on the title | `1f7274a6…6a07f050` |
+| `guardrail.card`, `performance_claim` | `true` | covered precision ≥ 0.90 | `claims.find_performance_claim(title) is not None`, its terms, proximity and number pattern in the plan | `a72753b5…d231956d` |
+
+The keyword baselines are pure and deterministic, and match whole words of the
+casefolded text, so "Turmoil in the Soil" holds no "oil"; the design's "crypto
+words" are `crypto`, `cryptocurrency`, `bitcoin`, `ethereum` and `blockchain`.
+The first build's docs claimed a plural rule its data broke (10b); now the
+plurals are generated in code by one stated rule — a `y` after a consonant
+becomes `ies`, a word ending `s`, `x`, `z`, `ch` or `sh` takes `es`, every
+other takes `s` — applied to every keyword's last word that is not "of", a
+keyword ending `*` being a stem matched at the start of a word (`diversif*`),
+and the test holds the forms of the whole list to a table written there and
+the labels to a copy of the rules written as literals
+(`tests/unit/test_jev_prereg.py::TestTheKeywordRules`). Each `jev_ask` job
+writes the plans in force into its result — the global plan's version and hash
+and the set's own (`jev_prereg.plans_in_force`) — as the regime job writes the
+plan in force into its result and the planner into each re-ask's payload, and
+a set with no plan is asked nothing (10a). **The harness (C9) scores an answer
+only under the plans in force when it was recorded**, never by a baseline
+chosen after the answers.
+
+**The planner.** Four rules beside C4's and C6's, each set behind its own
+lane's area:
+
+| Rule | Area | Kind | When | Key | Priority / attempts | Most a pass |
+|---|---|---|---|---|---|---|
+| Injection screen | guardrails | `jev_ask` | now | `jev_ask:{set}@{v}:{subject_type}:{subject_id}:{UTC date}` | 0 / 3 | 25 |
+| Card check | guardrails | `jev_ask` | now | as above | 0 / 3 | 10 |
+| Catalogue | research | `jev_ask` | now | as above | 0 / 3 | 25 |
+| Hypothesis categories | research | `jev_ask` | now | as above | 0 / 3 | 10 |
+
+Each within its lane's share, the `jev_ask` jobs already waiting in a lane
+counted against it (`jev_repo.pending_asks`); the kind is spelled as a literal
+at its one enqueue, and the key is spelled once, `jev_repo.ask_job_key`, for
+the planner and for the reads that exclude by it. The subjects are
+`jev_repo`'s: `documents_to_screen` — content in use, quarantined under no
+source, the screen has not answered `ok` under the pin, and first, content a
+block is on record for (above), whose ask makes no call and is planned with
+no call left; `documents_to_describe` — content the screen cleared, as
+`screened_clean` reads a clearance, a *valid* answer of the clear argmax, and
+nothing else, so the catalogue is never planned for text that is not screened
+clean; and `hypotheses_to_ask` — model-written titles of 1 to
+`TITLE_MAX_CHARS` characters, by the content address computed in SQL
+(`encode(sha256(convert_to(title, 'UTF8')), 'hex')`, which the tests hold to
+`jev_hash.text_sha256` beyond ASCII), one subject per title, newest first.
+Each leaves out a subject whose job is waiting, whatever day planned it, or was
+planned today, finished or not, and retires one after three failed calls for
+the set, its version and the pin; a failed call is a response refused whole
+(`invalid`) or a call that failed (`error`). An `invalid` row is never
+canonical, so it replays nothing and the subject is asked again on a later day
+until the third; an `ok` answer is never asked again, whatever it said (the
+first build's docstring said a response refused whole was not asked again
+because its canonical row replays, which was false: 10h). No ask is planned
+while an authentication failure recorded today holds every lane, nor of a set
+the vendor refused with a 422 at its version under the pin.
+`tests/unit/test_jev_plan.py::TestTheAsks`, the planner's dark matrix now with
+the guardrails area and a subject waiting for every set, and every filter of
+each read on PostgreSQL by a case only it refuses
+(`tests/integration/test_jev_repo.py::TestDocumentsToScreen`,
+`::TestDocumentsToDescribe`, `::TestHypothesesToAsk`) — a screen answer that
+is not valid but names `false` among them (10i).
+
+**The README's own headings, as labels.** The ingest now records, in the
+snapshot's one transaction and in content order, the source's heading for
+each excerpt stored and in use that the snapshot lists under exactly one
+heading: `jev_repo.record_label_once` — `ON CONFLICT ON CONSTRAINT
+jev_labels_once_per_labeller DO NOTHING RETURNING id` — with the catalogue at
+its registered version, question `asset_class`, the excerpt's address, the
+heading's label from the parser's `Entry.label`, the labeller
+`web_sources.dataset_labeller` of every kept row's heading label and excerpt,
+and the note "the README's own section heading". The label is written to
+`jev_labels` and never into the excerpt. The headings are counted over every
+row the parser read, a copy the screen dropped as decoration included, so a
+title under two headings anywhere in the snapshot has no one label, and is
+counted (10e). Reading the same page again records nothing; a changed grouping
+is a new labeller. The result gains `labels`, counts only — `recorded`,
+`already`, `several_headings` — and `test_jev_table_boundaries.py` holds
+`jev_labels` to `jev_repo`'s two inserts with the shared write scanner.
+
+**Tests.** Beside those named above: `tests/integration/test_jev_research.py`
+drives the whole of it through the programme's loop on PostgreSQL, with a
+fake of `jev_client.ask` — a page ingested, screened content by content and
+described only once cleared, a flagged text quarantined in the design's
+words; a tie held, never screened again nor described, on any later day; one
+ask quarantining a text stored under two sources; three failed calls retiring
+a subject, which is planned again by its own key on a later day and not while
+its job waits; the labels recorded once; the two ways a block's quarantine
+survives; and the hypothesis and card asks leaving `hypotheses`, `candidates`
+and `findings` as they were under every outcome — `true`, `false`, a response
+refused whole, a timeout, a content block. `tests/sdk/test_jev_research_over_http.py`
+screens and describes one stored excerpt through the planner, the handler,
+the lane, the real client and SDK and the fake TypeSafe server, each request
+exactly `{"excerpt": …}`, and replays the screen with no request leaving. The
+integration dark matrix turns five switches in all 32 combinations: a stored
+text is asked about only with both the guardrails and the research areas on,
+and either alone sends nothing about it. Every new control was mutated and
+restored in turn, and each mutation failed a test; one, the planner's repair
+of a blocked text, first survived, because the test's blocked text had one
+failed screen call and was planned again by the ordinary rule anyway, and the
+test now blocks the catalogue's call after the screen cleared the text, which
+only the repair brings back.
+
+**The canary, end to end** (invariant I7). A page whose every title carries a
+token under one marker is fetched over local HTTPS by the real fetcher —
+admitting 127.0.0.1 in the address check inside the test alone, as C6's
+canary does — read, screened and described through the programme's loop; the
+marker is then in `web_documents.excerpt` and `jev_requests.state` and in no
+other text or JSON column of any table, read from `information_schema`
+(`programme_runs.actions`, `jobs.payload`, `jobs.result` and `jobs.error`
+among them), in no log record at DEBUG and in no job's payload, result or
+error. One title is refused as its state is built, by a validator whose
+message quotes it, and its job's error names the document and nothing more.
+Two columns hold web text now, and CLAUDE.md's row says so.
+
+**The first build's review, item by item** (the scope's section 10). (a) The
+plans are recorded with each answer, and C9 scores under them. (b) The
+plurals are generated by the stated rule and tested over the whole list, and
+keywords match whole words. (c) A web re-ask is read through the code screen
+first. (d) A block's quarantine is derivable and repeated: the next ask about
+the text makes it, and a later pass plans the ask that will. (e) Headings are
+counted over every row read. (f) The card-check scan follows references,
+aliases included, over the import graph, proved on synthetic trees. (g) The
+re-ask's block follow-up is tested against a title as well as a regime state.
+(h) The reads' docstrings say what they do, and the behaviour they describe is
+tested. (i) The title cap is held by a spy on the state's construction and by
+a cap lowered below the state's own limit, and the clearance's validity by an
+invalid answer naming `false`.
+
+**Where C7+C8 departs from the design and its scope.** `Askable` carries what
+the handler needs beyond the design's five fields — the text in the row, an
+admission step that may refuse it, and how an error names the row — and
+`run_ask` reports anything steps 3 to 6 raise by class, a read or a
+quarantine's write as well as the ask. `ask_verdict`, `NOT_ASKED` and
+`described` moved to `job_errors`. The re-ask's state rebuild is guarded and
+its failures reported by class, where C4's propagated. `documents_to_screen`
+plans content a block is on record for, where the design's row left such
+content out: that is the scope's 10d repair, and the ask makes no call.
+`documents_to_describe` and `hypotheses_to_ask` leave out blocked subjects,
+which the road refuses for good; the reads match a clearance by the content's
+address rather than the state's hash, which name the same text; only `invalid`
+and `error` rows are failed calls, a refusal recording no call. The planner
+reads the authentication hold and the 422 hold, which the design left to the
+road, so that it plans no job, a subject a day, that could only fail. The
+labeller is computed over every kept row, a quarantined one included, as C6's
+`kept` reads; the injection reason names the model that answered, read back
+from its request. The scope's `test_the_card_check_changes_nothing` is a class
+of tests, the walk and its proofs. The set plans landed before the job, since
+the job records them. The SDK test calls the handler itself rather than the
+loop's drain, so the probe the planner also plans takes none of the scripted
+replies. And the Lanes table above now names the questions the catalogue asks
+(open item 29).
 
 ### Open items Phase C found
 
@@ -2838,10 +3158,10 @@ Numbered on from Phase B's.
     needs an `operator`-provenance set with words of its own, and a subject
     type of its own: a hypothesis title is recorded as `model`
     (`jev_questions.TEXT_SUBJECT_PROVENANCE`), whichever set asks about it.
-29. **The Lanes table's catalogue set is the plan's, not the design's.** It
-    names four `research.catalogue` questions, a rebalancing horizon among
-    them; the set phase C registers asks two, asset class and mechanism.
-    Corrected when that set lands (C7).
+29. ~~**The Lanes table's catalogue set is the plan's, not the design's.**~~
+    *Closed by C7+C8:* the table named four `research.catalogue` questions, a
+    rebalancing horizon among them; it now names the two the registered set
+    asks, asset class and mechanism, and says which sets are built.
 30. **The trading calendar's end moves with the process.** `calendar.nyse`
     passes no `end`, so `exchange_calendars` builds XNYS to its default, one
     year from the day the library was imported (`GLOBAL_DEFAULT_END`); XNYS
@@ -2860,8 +3180,9 @@ Numbered on from Phase B's.
     screen is evaluated only on what the allow-list fetched and on operator
     labels.
 32. **Operator cards posted to `POST /programme/hypotheses` never pass
-    `reject_performance_claims`.** Once C8 moves the check into the pure
-    `claims` module, the API may import it to close this.
+    `reject_performance_claims`.** C8 has moved the check into the pure
+    `claims` module, which loads nothing, so the API may now import it to
+    close this; the route is phase E's, and unchanged.
 33. **A 422 hold is permanent per set version and pin.** A spurious 422 from
     the vendor disables a set until a reworded version, which the released
     questions hashes force to change its words. Deliberate: it fails closed.
@@ -3013,6 +3334,37 @@ Numbered on from Phase B's.
     two such jobs run at once take their locks in one order, so neither ends
     in a deadlock (both from C6's review). Neither changes what is stored, and
     both are on the jobs' rows.
+54. **The injection screen quarantines on an uncalibrated argmax.** A valid
+    `true` — any probability above one half — quarantines the text, as design
+    C7's table says, and its reason says it is not calibrated. Whether one half
+    is the right line is C9's to measure, against the code screen as baseline
+    and the 0.90 covered-precision target; a different line would be a change
+    to the follow-up, recorded as a change of the set's plan.
+55. **A held text stays held for its version and pin.** A tie, or another
+    screen answer that measured nothing, is canonical and replays, so the text
+    is never screened again and never described until a new version of the
+    screen or a new pin. Nothing lists held texts yet; phase E's status page
+    is the place.
+56. **The screen is planned before the card check in the guardrail lane's
+    share.** A backlog of stored text that fills the lane's calls each day
+    would hold the card checks back until it clears. At the seeded budget the
+    lane has 175 calls a day and the page about sixty titles, so it is not
+    reached today.
+57. **A source's labels accumulate a labeller per version of its page.** The
+    labeller is the snapshot's grouping at its hash, so a title added or moved
+    is a new labeller, labelling every item again; each labels an item once.
+    The harness (C9) must choose which labeller an answer is measured against
+    — the one in force when the answer was recorded, say — rather than pool
+    them.
+58. **Blocked content whose quarantine keeps failing is planned once a day.**
+    The screen's ask about it makes no call, and the job stops once the write
+    succeeds; it repeats only while the database refuses the quarantine.
+59. **The canary cannot see what a real vendor echoes.** It runs against a
+    fake of `jev_client.ask`, and the SDK test against a fake server modelling
+    the documented contract, whose response holds answers and no state. A
+    vendor that echoed the request into its response would put web text in
+    `jev_requests.raw_body`, a third column; the first real answer settles it,
+    and the canary reads that column like every other.
 
 ## Inputs needed from the operator
 
