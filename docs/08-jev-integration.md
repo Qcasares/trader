@@ -4585,6 +4585,39 @@ and `::TestSuggestions::test_each_hold_is_read_for_its_own_set_and_named`.
   `test_jev_eval.py::TestWhatEvaluateRefuses::test_every_planned_question_may_be_evaluated`;
   the next commit mends it. A bisect should step over it.
 
+**D2's review.** Seven findings, each checked against the code and each
+real, two of them the same defect found from two sides. Each change to the
+code but a comment's has a case that failed before it, and each case added
+to hold an existing control fails when that control is removed. Each is
+recorded beside what it changed, above, or below as an open item:
+
+- a block on the same words holds both titles: a finding's title and a
+  hypothesis's holding the same words are one state, which the road holds a
+  block by the hash of, while the planner's reads, `preview` and
+  `suggestions` read a block on their own subject type alone, so the other
+  kind's asks were planned every UTC day, each refused for good and never
+  retired, and a test of the first cut pinned it (D2RS-1, D2RT-1; the
+  planner, above, and `jev_questions.same_state_subjects`);
+- `preview` reads the state limit, as the road does, and says nothing would
+  be sent where the road would refuse a state for its size, a limit of 0 or
+  one nobody can read included; and, beyond the finding, the day's spend,
+  which the road refuses on whatever a lane's share has left (D2RW-1; the
+  harness, above);
+- `suggestions` says "unknown" for a model-written finding when no usable pin
+  is set, since nothing is read without one, never "not asked" (D2RW-2);
+- the harness measures a keyword baseline with the fallback its plan
+  recorded, and refuses a plan that records none (D2RW-3; their plans,
+  above);
+- four controls no test held now have a case each, and every control this
+  review touched was removed in turn and caught by a named test, fourteen in
+  all (D2RT-2; what holds it, above);
+- the comment above `jev_repo._FINDING_ADDRESS` says which reads take the
+  findings sets' population and which, `open_findings`, does not (D2RT-3);
+- and, found while fixing the first, the re-ask planner reads no block at
+  all, so a re-ask the road refuses unrecorded can be drawn, and the flip
+  rates count it neither way; which pairs they should count is the plan's
+  to decide (open item 85).
+
 ### Open items Phase D found
 
 Numbered on from Phase C's, as design section 14 numbers them. Each says the
@@ -4648,6 +4681,27 @@ pull request it belongs to; D1 builds the ones it names.
     set would send is read from the stored excerpts and the planner's rules
     instead; a preview that withheld which content the screen cleared, or one
     readable only by someone who will never label, is left for review.
+85. **A re-ask of an answer whose words a block has since reached is drawn,
+    and refused unrecorded** (D2, found by D2's review). The re-ask planner
+    (`jev_plan._reaskable`) reads no content block: it leaves out web text
+    quarantined since or flagged by the screen, and nothing else. So a
+    canonical answer about a title — a hypothesis's or, from D2, a finding's,
+    the two one state for the same words — whose words a vendor's block
+    reached before its re-ask is drawn, by any set of either title, is drawn
+    the next UTC day all the same, and the road refuses the re-ask before any
+    call, writing nothing. The job fails once, since a re-ask is drawn only
+    the day after its answer, and as nothing was recorded the canonical
+    answer has no re-ask on record (`jev_repo.probe_pairs` pairs it with a
+    probe row): the flip rates count it neither as a comparison nor as a
+    re-ask not compared, which plan version 2 reads against the limits in
+    the worst case (M5). The same holds for any re-ask the road refuses
+    without a row — a standing refusal, a switch turned off, no key — so "a
+    re-ask that could not be compared is counted" covers the re-asks that
+    reached the ledger. The two hypothesis-title sets could meet the block
+    case before D2. Leaving such text out of the draw, or counting a drawn
+    re-ask the road refused as not compared, would each change which pairs
+    the flip limits count, which is the plan's to decide, not a planner's;
+    left for review.
 
 ## Inputs needed from the operator
 
