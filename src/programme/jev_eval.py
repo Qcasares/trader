@@ -7,7 +7,7 @@ The Jev evaluation harness, from the command line.
     DATABASE_URL=… python -m src.programme.jev_eval forward [--since DATE] [--json]
     DATABASE_URL=… python -m src.programme.jev_eval forward-audit [--since DATE]
     DATABASE_URL=… python -m src.programme.jev_eval evaluate --set S --key K \\
-        --labelled-by L [--split test|all] [--model M] [--record [--commit SHA]]
+        --labelled-by L --split dev|test|all [--model M] [--record [--commit SHA]]
     DATABASE_URL=… python -m src.programme.jev_eval labels export --set S \\
         --key K --blind [--sample N] [--include-quarantined]
     DATABASE_URL=… python -m src.programme.jev_eval labels import --file F \\
@@ -43,12 +43,18 @@ TestTheCommandsOnPostgres``.
 What an evaluation may say (phase C9)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``evaluate`` measures one question of one registered set, at its registered
-version, against exactly one labeller, for one pinned model, on the held-out
-test split or on every item, by design section 10.1's definitions, binding
-(:func:`evaluate`, :func:`build_evaluation`). It is a dry run that writes
-nothing unless ``--record``, which refuses without a clean 40-hex commit. What
-it refuses outright: ``decision.regime``, which has no ground truth for the
-present regime, its numbers being ``forward``'s; a question with no plan
+version, against exactly one labeller, for one pinned model, by design section
+10.1's definitions, binding (:func:`evaluate`, :func:`build_evaluation`), over
+the split ``--split`` names, which has no default. ``test`` and ``all`` read
+the held-out test items, a look the gate's level is spent on, so from plan
+version 2 each is taken only with ``--record``, which refuses without a clean
+40-hex commit, and ``jev_calibration.usable`` refuses a fifth look of a set,
+version and question under any model (M3). ``dev`` reads the development
+split's items alone — the threshold's search, and no label, answer or date of
+a test item — and is never recorded. The rule is held in :func:`execute`, which
+``main`` and every caller of the harness's commands reach (:func:`look_problem`).
+What it refuses outright: ``decision.regime``, which has no ground truth for
+the present regime, its numbers being ``forward``'s; a question with no plan
 registered before the answers; and nothing labelled, which writes nothing and
 prints "not measured: no labelled items".
 
@@ -276,9 +282,23 @@ NO_GROUND_TRUTH: Mapping[str, str] = {
 #: The subjects a label may be of: text, which a person can read and judge.
 TEXT_SUBJECTS = ("web_excerpt", "hypothesis_title")
 
-#: The splits an evaluation may be computed over: the held-out test split,
-#: which a gate reads, or every labelled item.
+#: The splits an evaluation may be recorded over: the held-out test split,
+#: which a gate reads, or every labelled item, which holds it. Each is a look
+#: at the held-out items (``jev_prereg.LOOKED_AT_SPLITS``, which a test holds
+#: equal), so from plan version 2 each is computed only to be recorded
+#: (:func:`look_problem`): a look nobody records is a look ``usable`` cannot
+#: count.
 SPLITS = ("test", "all")
+
+#: The development split: the threshold search's own items. ``evaluate
+#: --split dev`` reads them and nothing of the test split — no label, answer
+#: or date of a test item — and is never recorded (plan version 2, M3), so an
+#: operator can see how the search stands without spending a look.
+DEV_SPLIT = "dev"
+
+#: What ``evaluate --split`` takes. It has no default, so nobody looks at the
+#: test split by accident.
+EVALUATE_SPLITS = (DEV_SPLIT, *SPLITS)
 
 #: What ``evaluate`` prints, and writes nothing, over no labelled item.
 NOTHING_LABELLED = "not measured: no labelled items"
@@ -1230,19 +1250,24 @@ def build_evaluation(
     question_key: str,
     labelled_by: str,
     model: str,
-    split: Literal["all", "test"],
+    split: Literal["all", "test", "dev"],
     ledger: Ledger,
 ) -> Evaluation:
     """
     One evaluation from rows already read: pure, so every definition of
     design section 10.1 is tested without a database. See :func:`evaluate`
     for what it is, and the module docstring for the rules it keeps.
+
+    Over :data:`DEV_SPLIT` it reads the development split's items alone —
+    their labels, answers and dates — and so its search, and measures
+    nothing at the threshold, which is the test split's to bear out
+    (``tests/unit/test_jev_eval.py::TestLooks``).
     """
     problem = question_problem(question_set, question_key)
     if problem is not None:
         raise Refused(problem)
-    if split not in SPLITS:
-        raise Refused(f"the split is test or all, not {split!r}")
+    if split not in EVALUATE_SPLITS:
+        raise Refused(f"the split is dev, test or all, not {split!r}")
     name, version = question_set.name, question_set.version
     question = dict(question_set.questions)[question_key]
     options = options_of(question_set, question_key)
@@ -1284,12 +1309,16 @@ def build_evaluation(
                 standing=standing,
             )
         )
-    in_split = [i for i in items if split == "all" or i.split == "test"]
+    if split == DEV_SPLIT:
+        # The search's own items, and nothing of the test split: no label, no
+        # answer and no date of a test item is read below.
+        items = [i for i in items if i.split == DEV_SPLIT]
+    in_split = [i for i in items if split == "all" or i.split == split]
     scored = [i for i in in_split if i.standing == "scored"]
     other_plans = sum(1 for i in in_split if i.standing == "other_plans")
     plan_unknown = sum(1 for i in in_split if i.standing == "plan_unknown")
     contested_here = sum(
-        1 for s in contested if split == "all" or jev_prereg.split_of(*s) == "test"
+        1 for s in contested if split == "all" or jev_prereg.split_of(*s) == split
     )
     if not scored:
         apart = ""
@@ -1490,6 +1519,8 @@ def build_evaluation(
         threshold_dataset = dataset_sha256(
             [(*i.subject, i.label) for i in items if i.split == "dev"]
         )
+    if choice.outcome == "chosen" and split != DEV_SPLIT:
+        assert threshold is not None
         tested = [i for i in scored if i.split == "test"]
         covered = [
             i for i in tested if i.valid and float(i.answer["margin"]) >= threshold
@@ -1711,7 +1742,7 @@ async def evaluate(
     question_key: str,
     labelled_by: str,
     model: str,
-    split: Literal["all", "test"],
+    split: Literal["all", "test", "dev"],
 ) -> Evaluation:
     """
     One question of ``question_set`` against exactly one labeller's labels,
@@ -1720,6 +1751,11 @@ async def evaluate(
     Reads only; :class:`Refused` for a set with no ground truth, a question
     with no plan registered before its answers, a labeller or model nobody
     may name, and nothing labelled.
+
+    The function computes whatever split it is asked for: the rule that a
+    look at the held-out items is recorded binds the harness's own commands
+    (:func:`execute`), and a caller of this function, or anyone reading the
+    test split by hand, is outside the protocol (docs/08 open item 79).
     """
     if question_set is not jev_questions.REGISTRY.get(question_set.name):
         raise Refused(f"{question_set.name} v{question_set.version} is not registered")
@@ -2193,7 +2229,9 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
     split — never one labeller's standing for another's — each with whether
     it could arm a threshold and every reason it could not
     (``jev_calibration.usable``, against the pin and the plans in force now),
-    and the quarantines by what made them.
+    how many of its set, version and question's looks at the held-out items
+    are spent, under every model (plan version 2, M3), and the quarantines by
+    what made them.
     """
     pin = await flags.jev_model(conn)
     entries = []
@@ -2219,6 +2257,7 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
                 "usable": usable,
                 "usable_threshold": threshold,
                 "not_usable_because": reasons,
+                "looks_spent": looks_spent(row, everything),
             }
         )
     return {
@@ -2228,6 +2267,31 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
             await jev_repo.quarantine_reasons(conn)
         ),
     }
+
+
+def looks_spent(
+    evaluation: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> int:
+    """
+    How many looks at the held-out items the set, version and question of
+    ``evaluation`` have spent: the recorded rows among ``rows`` of that
+    identity (``jev_prereg.LOOKS_COUNTED_BY``, never the model) on a split
+    that holds the test items (``jev_prereg.LOOKED_AT_SPLITS``), ``evaluation``
+    among them where it is one. What ``report`` prints beside each row, so an
+    operator sees how many of the ``jev_prereg.MAX_LOOKS`` are left before a
+    new set version is the only way to arm (docs/08 open item 78).
+    """
+
+    def identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return tuple(row.get(column) for column in jev_prereg.LOOKS_COUNTED_BY)
+
+    counted = {
+        row.get("id"): row
+        for row in [*rows, evaluation]
+        if identity(row) == identity(evaluation)
+        and row.get("split") in jev_prereg.LOOKED_AT_SPLITS
+    }
+    return len(counted)
 
 
 # ---------------------------------------------------------------------------
@@ -2597,11 +2661,20 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             if gate is not None
             else ""
         )
-        lines.append(
-            f"threshold: margin >= {said(e['threshold'])}, chosen on the dev split "
-            f"to reach {said(e['threshold_target'])}{by}, measured on the test "
-            f"split: coverage {said(e['coverage_at_threshold'])}, {measured}"
-        )
+        if e.get("split") == DEV_SPLIT:
+            lines.append(
+                f"threshold: margin >= {said(e['threshold'])}, chosen on the dev "
+                f"split to reach {said(e['threshold_target'])}{by}; the dev split "
+                "reads no test item, so nothing is measured at it here, and only "
+                "a recorded look at the test split bears it out"
+            )
+        else:
+            lines.append(
+                f"threshold: margin >= {said(e['threshold'])}, chosen on the dev "
+                f"split to reach {said(e['threshold_target'])}{by}, measured on "
+                f"the test split: coverage {said(e['coverage_at_threshold'])}, "
+                f"{measured}"
+            )
     elif outcome == "none_found":
         lines.append(
             "threshold: none found on the dev split; every lane stays "
@@ -2666,11 +2739,15 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             f"{said(e.get('labeller_kappa'))}"
         )
     commit = e.get("code_commit")
-    lines.append(
-        f"commit {commit}"
-        if commit
-        else "dry run: nothing recorded; --record writes it"
-    )
+    if commit:
+        lines.append(f"commit {commit}")
+    elif e.get("split") == DEV_SPLIT:
+        lines.append(
+            "the development split's search: no look at the held-out items, and "
+            "never recorded"
+        )
+    else:
+        lines.append("dry run: nothing recorded; --record writes it")
     return "\n".join(lines)
 
 
@@ -2682,10 +2759,21 @@ def format_report(report: Mapping[str, Any]) -> str:
     for entry in report["evaluations"]:
         lines.append("")
         lines.append(format_evaluation(entry["evaluation"]))
+        e = entry["evaluation"]
+        looks = entry.get("looks_spent")
+        lines.append(
+            f"looks at the held-out items of {e['question_set']} "
+            f"v{e['question_set_version']} {e['question_key']}, under every model: "
+            + (
+                "not counted"
+                if looks is None
+                else f"{looks} of {jev_prereg.MAX_LOOKS} spent"
+            )
+        )
         if entry["usable"]:
             lines.append(
                 f"usable as a calibration, at margin >= "
-                f"{said(entry['usable_threshold'])}; nothing in phase C arms one"
+                f"{said(entry['usable_threshold'])}; nothing that acts reads it"
             )
         else:
             reasons = "; ".join(
@@ -2761,7 +2849,16 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_.add_argument(
         "--labelled-by", "--labeller", dest="labelled_by", required=True
     )
-    evaluate_.add_argument("--split", choices=SPLITS, default="test")
+    evaluate_.add_argument(
+        "--split",
+        choices=EVALUATE_SPLITS,
+        required=True,
+        help=(
+            "required, with no default: dev, the search's own items, never "
+            "recorded; or test or all, a look at the held-out items, taken only "
+            "with --record"
+        ),
+    )
     evaluate_.add_argument("--model", help="a pinned model; the pin by default")
     evaluate_.add_argument("--record", action="store_true")
     evaluate_.add_argument("--commit", help="the commit --record records under")
@@ -2945,12 +3042,54 @@ async def _run(arguments: argparse.Namespace, dsn: str) -> str:
         await conn.close()
 
 
+def look_problem(arguments: argparse.Namespace) -> str | None:
+    """
+    Why ``arguments`` would take a look at the held-out items that nothing
+    counts, or record what is not a look, or ``None`` (plan version 2, M3).
+
+    ``evaluate --split test`` and ``--split all`` read the test split, so
+    each is a look, and ``jev_calibration.usable`` counts recorded looks
+    alone: one taken as a dry run would be a look the gate's level was never
+    spent on, and labelling until a dry run passed, then recording that one,
+    is optional stopping. So each needs ``--record``. ``--split dev`` reads
+    the search's own items and no test item, so it is never recorded: it is
+    no look, and a row of it would be one ``usable`` could not read as one.
+    """
+    if getattr(arguments, "command", None) != "evaluate":
+        return None
+    split, record = arguments.split, bool(arguments.record)
+    if split in jev_prereg.LOOKED_AT_SPLITS and not record:
+        return (
+            f"--split {split} reads the held-out test items, a look the gate's "
+            f"level is spent on, and each of the {jev_prereg.MAX_LOOKS} looks a "
+            "set, version and question has is recorded: add --record to take "
+            "it, or read the development split with --split dev, which spends "
+            "none; nothing was read"
+        )
+    if split == DEV_SPLIT and record:
+        return (
+            "--split dev is the development split's search, which reads no test "
+            "item and is never recorded; record a look with --split test or "
+            "--split all; nothing was read"
+        )
+    return None
+
+
 async def execute(arguments: argparse.Namespace, dsn: str) -> int:
     """
     Run one parsed command against ``dsn`` and print what it found: 0 when
     it ran, 1 when the harness refused it, with why, on standard error.
+
+    Every command the harness runs comes through here, ``main`` included, so
+    the rule on looks is held here (:func:`look_problem`), before any
+    connection is made: ``tests/unit/test_jev_eval.py::TestLooks``, and on
+    PostgreSQL ``tests/integration/test_jev_evaluations.py::
+    TestTheCommandsOnPostgres``.
     """
     try:
+        problem = look_problem(arguments)
+        if problem is not None:
+            raise Refused(problem)
         output = await _run(arguments, dsn)
     except Refused as refused:
         print(str(refused), file=sys.stderr)

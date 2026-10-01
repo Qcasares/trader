@@ -1944,9 +1944,11 @@ READERS = (
         "export_labels",
         id="labels export",
     ),
+    # The one evaluation a command runs without recording: the development
+    # split's search (plan version 2, M3).
     pytest.param(
         ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
-        + ["--labelled-by", TESTER],
+        + ["--labelled-by", TESTER, "--split", "dev"],
         "evaluate",
         id="evaluate",
     ),
@@ -1999,11 +2001,41 @@ class TestTheCommandsOnPostgres:
         written: asyncpg.Connection,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """
+        From plan version 2 the one dry run is the development split's search
+        (M3): it runs, reads the five development items and no test item, and
+        records nothing.
+        """
         before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
         argv = ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
-        argv += ["--labelled-by", TESTER, "--split", "all"]
+        argv += ["--labelled-by", TESTER, "--split", "dev", "--json"]
         assert await _run(argv, ledger.dsn) == jev_eval.EXIT_OK
-        assert "dry run: nothing recorded" in capsys.readouterr().out
+        shown = json.loads(capsys.readouterr().out)
+        assert (shown["split"], shown["n"], shown["code_commit"]) == ("dev", 5, None)
+        assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
+
+    @pytest.mark.parametrize("split", ["test", "all"])
+    async def test_a_look_at_the_held_out_items_is_recorded_or_refused(
+        self,
+        ledger: SimpleNamespace,
+        written: asyncpg.Connection,
+        capsys: pytest.CaptureFixture[str],
+        split: str,
+    ) -> None:
+        """
+        A dry look at the test split is refused through ``execute``, as
+        ``main`` runs it, before the ledger is read; and ``--split dev`` is
+        never recorded. Nothing is written either way.
+        """
+        before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
+        argv = ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
+        argv += ["--labelled-by", TESTER]
+        assert await _run([*argv, "--split", split], ledger.dsn) == (
+            jev_eval.EXIT_REFUSED
+        )
+        assert "add --record" in capsys.readouterr().err
+        dev = [*argv, "--split", "dev", "--record", "--commit", COMMIT]
+        assert await _run(dev, ledger.dsn) == jev_eval.EXIT_REFUSED
         assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
 
     @pytest.mark.parametrize(

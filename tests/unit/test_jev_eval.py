@@ -2151,6 +2151,209 @@ def _git(status: str | None, head: str | None = "a" * 40) -> Any:
     return git
 
 
+def _evaluate_argv(split: str | None, *extra: str) -> list[str]:
+    argv = [
+        "evaluate",
+        "--set",
+        "research.catalogue",
+        "--key",
+        "asset_class",
+        "--labelled-by",
+        LABELLER,
+    ]
+    if split is not None:
+        argv += ["--split", split]
+    return [*argv, *extra]
+
+
+class TestLooks:
+    """
+    Plan version 2, M3 (docs/09, section 3.2): each set, version and question
+    has ``MAX_LOOKS`` looks at the held-out items, and ``usable`` counts the
+    recorded ones, so the harness takes no look it does not record. ``--split
+    test`` and ``--split all`` need ``--record``; ``--split dev``, the
+    search's own items, never records and reads no test item; and ``--split``
+    has no default. The rule is held in ``jev_eval.execute``, which ``main``
+    and every caller of the harness's commands reach, the integration suite's
+    included.
+    """
+
+    def _connect(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        connected: list[str] = []
+
+        async def connect(dsn: str) -> Any:
+            connected.append(dsn)
+            raise AssertionError("a refused look connected to the ledger")
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://reader@db/trader")
+        monkeypatch.setattr(jev_eval.asyncpg, "connect", connect)
+        return connected
+
+    @pytest.mark.parametrize("split", ["test", "all"])
+    def test_a_held_out_look_must_be_recorded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        split: str,
+    ) -> None:
+        connected = self._connect(monkeypatch)
+        assert jev_eval.main(_evaluate_argv(split)) == jev_eval.EXIT_REFUSED
+        assert connected == []
+        error = capsys.readouterr().err
+        assert f"--split {split} reads the held-out test items" in error
+        assert "add --record" in error
+
+    def test_the_dev_split_is_never_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        connected = self._connect(monkeypatch)
+        argv = _evaluate_argv("dev", "--record", "--commit", "c" * 40)
+        assert jev_eval.main(argv) == jev_eval.EXIT_REFUSED
+        assert connected == []
+        assert "--split dev is the development split's search" in (
+            capsys.readouterr().err
+        )
+
+    def test_split_has_no_default(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Nobody looks at the test split by accident: naming none is a usage error."""
+        connected = self._connect(monkeypatch)
+        assert jev_eval.main(_evaluate_argv(None)) == jev_eval.EXIT_USAGE
+        assert jev_eval.main(_evaluate_argv(None, "--record")) == jev_eval.EXIT_USAGE
+        assert jev_eval.main(_evaluate_argv("train")) == jev_eval.EXIT_USAGE
+        assert connected == []
+        assert "--split" in capsys.readouterr().err
+        for split in ("dev", "test", "all"):
+            parsed = jev_eval._parser().parse_args(_evaluate_argv(split))
+            assert parsed.split == split
+
+    @pytest.mark.parametrize(
+        ("split", "record", "refused"),
+        [
+            ("test", False, True),
+            ("all", False, True),
+            ("dev", True, True),
+            ("test", True, False),
+            ("all", True, False),
+            ("dev", False, False),
+        ],
+    )
+    async def test_execute_refuses_a_dry_look_at_held_out_items(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        split: str,
+        record: bool,
+        refused: bool,
+    ) -> None:
+        """
+        ``execute`` is what ``main`` and the integration suite's ``_run`` both
+        call once the command line is parsed, so the rule holds for each:
+        refused before any connection, whatever the ledger holds.
+        """
+        reached: list[str] = []
+
+        async def run(arguments: Any, dsn: str) -> str:
+            reached.append(arguments.split)
+            return "ran"
+
+        monkeypatch.setattr(jev_eval, "_run", run)
+        argv = _evaluate_argv(split, *(("--record",) if record else ()))
+        arguments = jev_eval._parser().parse_args(argv)
+        code = await jev_eval.execute(arguments, "postgresql://reader@db/trader")
+        assert (code == jev_eval.EXIT_REFUSED) is refused
+        assert (reached == []) is refused
+
+    def test_the_rule_reads_the_plans_splits(self) -> None:
+        """
+        The recorded splits are the plan's looks, and the commands' are those
+        and the development split: one vocabulary, held here.
+        """
+        assert jev_eval.SPLITS == jev_prereg.LOOKED_AT_SPLITS
+        assert jev_eval.EVALUATE_SPLITS == (jev_eval.DEV_SPLIT, *jev_eval.SPLITS)
+        assert jev_eval.DEV_SPLIT == "dev"
+
+    def test_the_dev_split_never_records_and_reads_no_test_item(self) -> None:
+        """
+        A dev evaluation reads the development split's items alone: change
+        every test item's label, answer and date and it does not move; it
+        holds no test item; and nothing is measured at a threshold, which is
+        the test split's to bear out.
+        """
+        book, dev, test = _threshold_book()
+        before = book.evaluate("dev")
+        assert before.split == "dev"
+        assert before.threshold_outcome == "chosen"
+        assert before.n == len(dev)
+        assert (
+            before.coverage_at_threshold,
+            before.n_at_threshold,
+            before.accuracy_at_threshold,
+        ) == (None, None, None)
+        assert before.code_commit is None
+        for text in test:
+            subject = book.subject(text)
+            book.labels = [
+                {**row, "label": "bonds"}
+                if (row["subject_type"], row["subject_id"]) == subject
+                else row
+                for row in book.labels
+            ]
+            book.answer(text, "currencies", margin=0.99)
+            book.dates[subject] = None
+        after = book.evaluate("dev")
+        assert after == before
+        # The same changes move the test split's evaluation, which reads them.
+        assert book.evaluate("test") != _threshold_book()[0].evaluate("test")
+        text = jev_eval.format_evaluation(before.row())
+        assert "the dev split reads no test item" in text
+        assert "never recorded" in text
+        assert "dry run" not in text
+
+    def test_report_prints_the_looks_each_identity_has_spent(self) -> None:
+        """
+        Every recorded row of the set, version and question on a split holding
+        the test items, under every model and labeller, is a look spent.
+        """
+        base = {
+            "question_set": "research.catalogue",
+            "question_set_version": 1,
+            "question_key": "asset_class",
+        }
+        rows = [
+            {**base, "id": 1, "split": "test", "model": "jev-1.13.0"},
+            {**base, "id": 2, "split": "all", "model": "jev-1.14.0"},
+            {**base, "id": 3, "split": "test", "question_key": "mechanism"},
+            {**base, "id": 4, "split": "test", "question_set_version": 2},
+        ]
+        assert jev_eval.looks_spent(rows[0], rows) == 2
+        assert jev_eval.looks_spent(rows[2], rows) == 1
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        row = _recorded(book.evaluate("all"))
+        text = jev_eval.format_report(
+            {
+                "pin": MODEL,
+                "evaluations": [
+                    {
+                        "evaluation": row,
+                        "usable": False,
+                        "usable_threshold": None,
+                        "not_usable_because": ["looks"],
+                        "looks_spent": 4,
+                    }
+                ],
+                "quarantined_content": {},
+            }
+        )
+        assert (
+            "looks at the held-out items of research.catalogue v1 asset_class, "
+            "under every model: 4 of 4 spent"
+        ) in text
+        assert jev_calibration.REASONS["looks"] in text
+
+
 class TestTheCommitARecordNames:
     def test_named_by_the_flag_then_the_environment_then_git(self) -> None:
         commit = "0123456789abcdef0123456789abcdef01234567"
@@ -2201,6 +2404,8 @@ class TestTheCommitARecordNames:
                 "asset_class",
                 "--labelled-by",
                 LABELLER,
+                "--split",
+                "test",
                 "--record",
             ]
         )
@@ -2939,8 +3144,12 @@ class TestTheCommandsThatWrite:
         labels = tmp_path / "labels.csv"
         labels.write_bytes(_labels_file(_row()))
         book = _Book()
-        book.label("Invented Bond Timing", "bonds")
-        book.answer("Invented Bond Timing", "bonds")
+        # One item of each split: the test split's for the recorded look, and
+        # the development split's for --split dev, which reads no test item.
+        assert jev_prereg.split_of(*book.subject("Invented Bond Timing")) == "test"
+        for text in ("Invented Bond Timing", _texts_in("dev", 1)[0]):
+            book.label(text, "bonds")
+            book.answer(text, "bonds")
 
         async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
             return {s: "Invented Bond Timing" for s in subjects}
@@ -2997,12 +3206,16 @@ class TestTheCommandsThatWrite:
                     "asset_class",
                     "--labelled-by",
                     LABELLER,
+                    "--split",
+                    "test",
                     "--record",
                     "--commit",
                     "c" * 40,
                 ],
                 ["record_evaluation"],
             ),
+            # The one evaluation that is not recorded: the development
+            # split's search, which reads no test item (plan version 2, M3).
             "evaluate": (
                 [
                     "evaluate",
@@ -3012,6 +3225,8 @@ class TestTheCommandsThatWrite:
                     "asset_class",
                     "--labelled-by",
                     LABELLER,
+                    "--split",
+                    "dev",
                 ],
                 [],
             ),
