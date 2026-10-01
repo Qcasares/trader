@@ -69,7 +69,9 @@ prints "not measured: no labelled items".
   open item 65).
 * **The threshold is the development split's**, searched on its items alone
   and measured on the test split's; the figure a gate reads is a one-sided
-  Wilson lower bound, never a point estimate.
+  Wilson lower bound, never a point estimate, and a threshold is usable only
+  where the test split's own bound meets the target too
+  (``jev_calibration.usable``, ``held_out``).
 * **Both baselines answer every item**, so Jev is compared with them over
   every scored item, an answer that was not valid or not asked counted as
   wrong. The paired difference is reported with its bootstrap interval at the

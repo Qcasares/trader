@@ -636,17 +636,19 @@ whole and leaves it at 0012.
 
 Migration `0014_jev_evaluations_measured.sql`, phase C9's, adds to
 `jev_evaluations` what design section 10.1 defines and 0012 had no column
-for: the split (`all` or `test`), the analysis plans' hash, the keyword
-baseline's name, the answers' hash and the reporting level; the answers
-counted valid, escape, not valid and not asked, beside the items contested,
-answered under other plans and under plans unknown, and the distinct states;
-accuracy over every item with its interval, the per-class figures and the
-Brier score's climatology; the threshold's outcome, statistic, target,
-development dataset and the test items measured at it, with accuracy there;
-each baseline's paired difference with its bounds; the low-margin and
-near-threshold flip rates and every rate's pair count, with the median lag;
-and labeller agreement, kappa and its n. Every measurement is nullable, NULL
-meaning not measured, and seventeen named CHECKs hold the rest (C9 below),
+for: the split (`all` or `test`, required, `all` by default), the analysis
+plans' hash, the keyword baseline's name, the answers' hash, the reporting
+level and the gate level; the answers counted valid, escape, not valid and not
+asked, beside the items contested, answered under other plans and under plans
+unknown, and the distinct states; accuracy over every item with its interval,
+the per-class figures and the Brier score's climatology; the threshold's
+outcome, statistic, target, development dataset and the test items measured
+at it, with accuracy there; each baseline's paired difference with its bounds
+and the discordant items it is made of; the low-margin and near-threshold
+flip rates and every rate's pair count and re-asks not compared, with the
+median lag; and labeller agreement, kappa and its n. Every measurement is
+nullable, NULL meaning not measured, and eighteen named CHECKs hold the rest
+(C9 below),
 **`NOT possibly_in_training OR threshold IS NULL`** and
 **`model ~ '^jev-[0-9]+\.[0-9]+\.[0-9]+$'`** among them. Added while no
 database holds an evaluation; over one holding a row its rules refuse, 0014
@@ -3310,7 +3312,7 @@ writes labels and evaluations, through `jev_repo`, in three commands alone.
 | Command | What it does |
 |---|---|
 | `evaluate --set S --key K --labelled-by L [--split test\|all] [--model M] [--record [--commit SHA]] [--json]` | One question of one registered set against exactly one labeller's labels, for one pinned model — the pin by default — over the held-out test split by default. A dry run, printing every figure with its n and interval and "dry run: nothing recorded", unless `--record`, which writes the row and refuses without a commit: `--commit`, else `GIT_COMMIT`, else `git rev-parse HEAD` on a tree with nothing uncommitted, 40 lowercase hex digits in each case. Refuses `decision.regime` ("its numbers are forward's"), a question no set plan registered, a labeller that is no labeller, a model that is not pinned, and nothing labelled under the plans in force: "not measured: no labelled items", with how many items were set apart, on standard error, and nothing written |
-| `labels export --set S --key K --blind [--sample N] [--include-quarantined]` | CSV of `subject_type, subject_id, text` and nothing else: every stored subject of the set's kind — web content in use, the earliest document's excerpt, or each title the programme's model wrote within the cap — in the order of their addresses, the first N where a sample is asked for. No answer is read, so neither what a labeller sees nor which subjects can depend on what Jev said. `--blind` is required, so no export can be asked for that is not |
+| `labels export --set S --key K --blind [--sample N] [--include-quarantined]` | CSV of `subject_type, subject_id, text` and nothing else: every stored subject of the set's kind — web content, each once by its earliest document's excerpt, or each title the programme's model wrote within the cap — in the order of their addresses, the first N where a sample is asked for. Which subjects is decided by the stored texts and the code alone: web text the code screen, run on it now, flags is left out unless `--include-quarantined`, a quarantine made by code from the words, which no set is ever asked about, and nothing else is. Content Jev's own injection screen quarantined, or a vendor's content block, is exported like any other, since leaving it out chose the subjects by what was answered: the first cut left out every quarantined content, so a labeller of the screen never saw one of its `true` answers (C9's review). No answer, request or quarantine is read, so neither what a labeller sees nor which subjects can depend on what Jev or the vendor said. For the catalogue, content the screen quarantined is never described, and counts as not asked. `--blind` is required, so no export can be asked for that is not |
 | `labels import --file F (--as operator:NAME \| --source DATASET)` | A UTF-8 CSV of `question_set, question_set_version, question_key, subject_type, subject_id, label`, optionally `note` and `text`, and no other column, an answer column above all. Every row is checked first: the set registered and the version its own, a question its plan plans, the subject its kind of text by a content address that is stored, the label one of the question's options and never its escape, a `text`, where given, the text the address names, each item once; and no item this labeller has labelled otherwise, since a label revised after the answers are seen is not ground truth. One refused row and nothing is recorded. A person is `operator:NAME`, lower case; a dataset is `source:DATASET@` the first twelve hex digits of the file's sha256, and an allow-listed source's name is refused, its labeller being the ingest's |
 | `labels copy --set S --key K --from-version A --to-version B` | Each label of the key at A, by its own labeller, to B, the registered version, noted "copied from vA", where the key's type and options, with their descriptions and in order, are A's exactly. A version no longer registered has its words only in the requests it was asked with, so they are read from there, and a version never asked is refused |
 | `report [--json]` | The newest evaluation of each set, version, key, model, labeller and split, every figure with its n and interval, "UPPER BOUND" wherever it may be in training; whether it could arm a threshold and each reason it could not (`jev_calibration.usable`, against the pin and the plans in force now); and the quarantines, in design section 10.3's words only: "k by the code screen v1; k by Jev's screen (not calibrated); k by vendor content blocks" |
@@ -3349,19 +3351,35 @@ The majority baseline is in-sample, which favours it, ties going to the first
 option; the keyword baseline is the one the set plan registered — the plan's
 keyword rules for the catalogue and the hypotheses, the code screen v1 at the
 rules hash the plan holds for the screen, refused if the screen running is
-another, and the claims check for the card — and each comparison is a paired
-bootstrap of Jev minus the baseline over the same items, each end a one-sided
-bound at the gate level. The threshold is searched on the development split
-alone, on the margin grid, the smallest with at least 30 covered whose
-statistic's one-sided Wilson lower bound at the gate level meets the set
-plan's target — covered accuracy, or covered precision of the acting class
-`true` for the guardrails — `not_attempted` below 100 development items or on
-an upper bound, `none_found`, or `chosen`, and then measured on the test
-split; a test split's own labels never move it
-(`tests/unit/test_jev_stats.py::TestTheThreshold`). The flip rates are C4's
-pairs, each counted only in the stratum and under the global plan its re-ask
-was sampled under, the near-threshold rate from either stratum within 0.10 of
-the threshold once one is chosen, with the uniform stratum's median lag.
+another, and the claims check for the card. Each comparison is Jev minus the
+baseline over the same items, reported with its paired bootstrap interval at
+the reporting level like every other interval, beside the items only one of
+the two got right, which the row records; Jev beats a baseline only by the
+exact one-sided sign test of those items at the gate level (McNemar's, exact:
+`jev_stats.sign_test`), and the text says "too few to say" where not even
+every one of them going Jev's way could reach it — fewer than eight at 0.995.
+The bootstrap gates nothing: over a few discordant items it understates their
+uncertainty, and the first cut, which gated on its bound, called one item of
+one, and five, six or seven of 200 all Jev's way, a win at exact chances of
+1/2 to 1/128 against the gate's 1/200 (C9's review). The threshold is searched
+on the development split alone, on the margin grid, the smallest with at least
+30 covered whose statistic's one-sided Wilson lower bound at the gate level
+meets the set plan's target — covered accuracy, or covered precision of the
+acting class `true` for the guardrails — `not_attempted` below 100
+development items or on an upper bound, `none_found`, or `chosen`, and then
+measured on the test split; a test split's own labels never move it
+(`tests/unit/test_jev_eval.py::TestTheThreshold::test_the_threshold_depends_only_on_the_dev_split`).
+The flip rates are C4's pairs, each counted only in the stratum and under the
+global plan its re-ask was sampled under, the near-threshold rate from either
+stratum within 0.10 of the threshold once one is chosen, read as the decimals
+the margins were written as (in binary a margin exactly 0.10 away fell out of
+20 of the grid's 91 edges), with the uniform stratum's median lag; and in each
+the re-asks whose pair could not be compared — a re-ask, or its canonical
+answer, not valid, failed or refused — are counted with the row and printed
+beside the rate, "k of n compared re-asks ...; m re-asked, j not compared",
+never dropped from both counts. Every level the text prints is the row's own:
+`ci_level` for each interval and `gate_ci_level` for each gate, never the plan
+in force when it is read.
 Labeller agreement compares each item with the earliest label another
 labeller gave it, a dataset's page versions being one labeller, with Cohen's
 kappa. The dataset's hash is of its sorted `(subject_type, subject_id,
@@ -3408,10 +3426,22 @@ and every reason it could not, each enough alone (one test each,
 `tests/unit/test_jev_calibration.py::TestUsable`): another set version or a
 key its plan does not plan, another model than the pin, other plans than
 those in force, not the test split, fewer than 200 items, possibly in
-training, no threshold chosen or no coverage at it, either baseline not
-beaten, a uniform or near-threshold flip rate not measured on 30 pairs or
-above its limit, a test set an earlier version's evaluation used, or a newer
-evaluation of its key. `card_verdict` never accepts what the code's check
+training, no threshold chosen or no coverage at it, a threshold the held-out
+test split does not bear out, either baseline not beaten, a uniform or
+near-threshold flip rate not measured on 30 pairs or above its limit, a test
+set an earlier version's evaluation used, or a newer evaluation of its key.
+The held-out reason (`held_out`) holds the test split to the rule the search
+applied on the development split: at least 30 test items measured at the
+threshold, a coverage above 0, and the statistic's one-sided Wilson lower
+bound at the gate level at least the plan's target. The threshold is the
+smallest of fifty margins that cleared its target on the development split,
+so that bound flatters by construction, and the first cut read nothing the
+test split measured: a threshold at which every covered test answer was
+wrong — 0 of 30, or the card check's covered precision 0 of 22 — was reported
+usable (C9's review;
+`tests/unit/test_jev_eval.py::TestAThresholdTheTestSplitRefutes`). A baseline
+is beaten only by the exact sign test of the items one of the two got right
+(above), never by the difference's bootstrap bound. `card_verdict` never accepts what the code's check
 rejected and, armed, can only add a rejection; `document_path` takes no
 calibration, a code flag quarantining whatever Jev said and a text being
 described only on a valid `false` with no code flag
@@ -3422,28 +3452,54 @@ that can move money (`test_import_boundaries.py::test_nothing_that_acts_loads_th
 and `::test_nothing_that_can_move_money_loads_the_calibration`); and
 `jev_calibration`, with `jev_stats`, is in the fresh-interpreter check that a
 pure module loads nothing (`::test_the_pure_modules_load_nothing`), it alone
-allowed `jev_prereg`.
+allowed `jev_prereg` and `jev_stats`, both pure, for the plan and the gates'
+statistics.
 
-**Migration 0014.** The columns are those above (Schema). Its CHECKs, each
-named and each tolerant of NULL: every proportion in [0, 1], 0012's columns
-among them; the reporting level strictly between 0 and 1; the Brier score and
-its climatology in [0, 2]; kappa in [−1, 1]; each difference in [−1, 1]; an
+**Migration 0014.** The columns are those above (Schema), and from C9's
+review three more kinds: `gate_ci_level` beside `ci_level`, each comparison's
+discordant items (`vs_<baseline>_jev_right_only`,
+`vs_<baseline>_baseline_right_only`), and each flip rate's re-asks not
+compared (`flip_rate_not_compared` and the low-margin and near-threshold
+strata's). The split is required, `all` by default; every measurement is
+nullable, NULL meaning not measured. Its eighteen CHECKs, each named and each
+tolerant of NULL: every proportion in [0, 1], 0012's columns among them; both
+levels strictly between 0 and 1; the Brier score and its climatology in
+[0, 2]; kappa in [−1, 1]; each difference in [−1, 1], and its discordant
+items present with it and making it, (Jev's − the baseline's) over n; an
 estimate held by its interval, and an estimate and its two bounds all present
-or all absent; every count within n, and the three that sit outside it
-non-negative; valid, not valid and not asked adding up to n, the escapes
-within the valid; each flip rate present exactly when its pairs are more than
-none, and the lag only beside uniform pairs; the threshold's group —
+or all absent; every count within n — the discordant items of a baseline,
+and the re-asks of the two strata and of the window, together — and the
+three that sit outside it non-negative; valid, not valid and not asked adding
+up to n, the escapes within the valid; each flip rate present exactly when
+its pairs are more than none, and the lag a finite number of hours beside
+uniform pairs, NaN and Infinity refused (PostgreSQL orders NaN above every
+number, so the first cut's `>= 0` admitted both); the threshold's group —
 threshold, statistic, target, development dataset and the test items measured
-at it — whole exactly when the outcome is `chosen`, and nothing measured at a
-threshold without one; no threshold on an upper bound; the model a pinned id;
+at it — whole exactly when the outcome is `chosen`, and nothing measured or
+counted at a threshold without one, the re-asks near it included, which the
+first cut admitted; no threshold on an upper bound; the model a pinned id;
 and the split and the outcome each in their vocabulary. PostgreSQL tests a
-table's CHECKs in the order of their names, so each case of
+table's CHECKs in the order of their names and names only the first a row
+fails, so each case of
 `tests/integration/test_jev_evaluations.py::TestEveryRuleBites` breaks one
-rule alone, and a CHECK added without a case fails
-`::test_every_rule_0014_adds_has_a_case`. What was not measured is NULL and
-stays NULL, a genuine zero stays zero, and 0014 applies over a database at
-0013 holding rows, or fails whole and leaves it there (`::TestTheMigration`).
-The rows stay append-only under 0012's trigger.
+conjunct alone — each side of a range, an interval or an equality, each
+count's floor and ceiling, each member of a group missing alone, each member
+of a threshold's group recorded where none was chosen, and an estimate
+without its interval — and
+`::test_each_case_breaks_its_rule_alone` admits it with that rule alone
+dropped, in a transaction rolled back after; a conjunct other rules imply (an
+interval's inner ends, an estimate's own range, a difference's point, and an
+accuracy's bounds at a threshold nobody chose, which the carry rule holds to
+the accuracy) has no case and says so. A CHECK added without a case
+fails `::test_every_rule_0014_adds_has_a_case`. What was not measured is NULL
+and stays NULL, a genuine zero stays zero, and 0014 applies over a database
+at 0013 holding rows, or fails whole and leaves it there
+(`::TestTheMigration`). The rows stay append-only under 0012's trigger. 0014
+was changed in C9's review, which it could be only because no database it
+was checked against holds it: the branch is unmerged, and `migrate.yml`, the
+one road to the deployed schema besides the API's authenticated route, which
+applies what the deployed code carries, is dispatch-only and has run four
+times, all on `main` and all in August 2026, before C9 began.
 
 **The repository.** `labels_for`, `answers_for_subjects`, `item_dates`,
 `subject_texts`, `subjects_to_label`, `ask_jobs_about`, `recorded_questions`,
@@ -3479,20 +3535,39 @@ four with the README), no answer set apart, the README's evaluation an upper
 bound, a title's dated by its hypothesis, and the flips each evaluation counts
 what the re-ask jobs found. Seeded ledgers, and two whose threshold is chosen,
 show that whatever `build_evaluation` computes 0014 admits and the repository
-reads back exactly. The export is blind and ordered by address; a refused
-import records nothing; a copy carries labels only across the words the lane
-recorded.
+reads back exactly. The export is blind and ordered by address, and keeps the
+excerpt the screen quarantined, for the screen and the catalogue alike; on a
+database of its own, one excerpt quarantined by each of the three causes, in
+the shipped code's words, shows the code screen's alone left out
+(`TestTheCommandsOnPostgres::test_the_export_leaves_out_what_the_code_screen_flags_alone`);
+a refused import records nothing; a copy carries labels only across the words
+the lane recorded.
 
 **Mutations.** Every new control was mutated and restored in turn, and each
-mutation failed a test: the migration's rules, the statistics, the
-calibration's reasons and verdicts, the repository's reads and its one write,
-the harness's rules and commands, and, on PostgreSQL, the read-only snapshot,
-the probe lane's exclusion, the export's quarantine filter, the copy's word
-comparison, the import's subject check, the jobs the plans are read from and
-the commit recorded, with the two boundaries. Two first survived — a replay
-that re-dated its answer, and a threshold searched on an upper bound, whose
-dry run nothing read since the schema refuses the row — and their tests now
-catch them; one calibration mutant was equivalent and was replaced.
+mutation failed a test: the statistics, the calibration's reasons and
+verdicts, the repository's reads and its one write, the harness's rules and
+commands, and, on PostgreSQL, the read-only snapshot, the probe lane's
+exclusion, the export's filter, the copy's word comparison, the import's
+subject check, the jobs the plans are read from and the commit recorded, with
+the two boundaries. Two first survived — a replay that re-dated its answer,
+and a threshold searched on an upper bound, whose dry run nothing read since
+the schema refuses the row — and their tests now catch them; one calibration
+mutant was equivalent and was replaced. The first cut said the same of the
+migration's rules, and it held only rule by rule: each named CHECK had a case,
+but conjuncts inside them — an interval's outer end, one side of an
+estimate's interval, a count's floor or ceiling, a member of the
+at-threshold group — could each be deleted with every PostgreSQL suite green
+(C9's review). Every conjunct no other rule implies now has a case breaking
+it alone, and the migration was then mutated against those cases on
+PostgreSQL, one mutant at a time: every conjunct removed, every range
+halved, every group rule kept for all but one member or for one pair of
+them, every equality kept on one side, each vocabulary widened and each
+anchor dropped. 168 of 195 mutants failed a case; the 27 that survived are
+the conjuncts other rules imply, named above, each equivalent to the rule as
+written. Eighteen of the finer mutants — an
+estimate alone, a difference with one of its counts, an equality's upper
+side, a threshold's member where none was chosen — survived until the last
+eighteen cases were written for them.
 
 **Where C9 departs from the design and its scope.** Migration 0014 adds
 `n_other_plans` and `n_plan_unknown`, so a row says how many items 10a set
@@ -3528,6 +3603,29 @@ address; `labels copy` reads an unregistered version's words from the ledger
 (open item 61). The harness reads `GIT_COMMIT` for `--record`, beside C4's
 `DATABASE_URL` (open item 66). And `jev_repo` has six reads beyond the
 design's five functions, each named above.
+
+C9's review moved four of the design's own choices, each toward refusing, and
+each a finding the first cut met with its tests green. `usable` reads what the
+held-out test split measured at the threshold (`held_out`), which design C9's
+list left out. Jev beats a baseline by the exact one-sided sign test of the
+items only one of the two got right, where design section 10.1 named the
+paired bootstrap's bound at the gate level; the bootstrap interval is still
+computed and reported, at the reporting level rather than the gate's, so
+`ci_level` is every reported interval's level, as 0014 documents it, and the
+gate's level is recorded beside it (`gate_ci_level`); the discordant items the
+test reads are columns of their own, held to the difference by a sixth CHECK
+the design did not name (`jev_evaluations_differences_from_their_items`). The
+blind export leaves out the code screen's flags alone, where the design's
+`--include-quarantined` implied every quarantine left out by default, since
+some are answers. And a
+row counts the re-asks it could not compare. Each is recorded under the plans
+already registered: none moves a number of the plan, and the gate's level,
+the target, the floors and the grid are the plan's as released; whether a
+threshold should be refused when many re-asks could not be compared would be
+one, and is left to a new plan version (open item 68). The planned
+set-and-question pairs are held to `GATE_FAMILY`, the family `GATE_CI` is
+Bonferroni over, by `tests/unit/test_jev_prereg.py::TestTheGateFamily`, since a
+pair a set plan adds moves no hash of the global plan.
 
 ### Open items Phase C found
 
@@ -3747,7 +3845,9 @@ Numbered on from Phase B's.
     harness measures it — covered precision of `true` beside the code screen
     v1 — and can arm nothing yet: every web excerpt is undated, so every
     evaluation of the screen is an upper bound and carries no threshold (open
-    item 65).
+    item 65). The blind export keeps the texts the screen quarantined, so a
+    labeller sees its `true` answers (C9's review); the first cut left them
+    out, and the screen could only have been measured on what it cleared.
 55. **A held text stays held for its version and pin.** A tie, or another
     screen answer that measured nothing, is canonical and replays, so the text
     is never screened again and never described until a new version of the
@@ -3829,6 +3929,28 @@ Numbered on from Phase B's.
     through `card_verdict`, the screen's line — is phase D's change, and must
     move the calibration across the boundary test that keeps it out of
     everything that acts.
+68. **`usable` does not read the re-asks that could not be compared.** A row
+    counts them, stratum by stratum and near the threshold (C9's review), and
+    the text prints them beside each rate, but a flip rate over the compared
+    pairs alone still decides the two flip conditions: thirty valid pairs and
+    thirty ties pass where sixty valid pairs would. A tie or an answer refused
+    whole on a re-ask is itself unstable, so a rule counting them against a
+    threshold may be wanted; it would be a new number of the plan, so it is a
+    new plan version's to register, not a choice made here after the answers.
+69. **A percentile bootstrap over few items understates its uncertainty.** The
+    Brier score's interval and each paired difference's are reported only, at
+    the reporting level, and gate nothing: "beats" is the exact sign test's
+    (C9's review). Over one item the interval has no width, and the n is
+    printed beside it; a method with better small-sample coverage — Newcombe's
+    paired interval for the differences, say — is a later change.
+70. **The README's labels cover what was in use when each page version was
+    read.** The ingest records the source's grouping only for content not
+    quarantined at that moment (C6, C7+C8), so a page version first read after
+    Jev's screen quarantined a title has no label for it: that labeller's
+    population leaves out what the screen answered `true` about, a choice made
+    by an answer. Its evaluations are upper bounds, every excerpt being
+    undated, and arm nothing; a labeller that must not be chosen by answers is
+    a person labelling from the blind export, which keeps such content.
 
 ## Inputs needed from the operator
 

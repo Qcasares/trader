@@ -284,7 +284,9 @@ ALTER TABLE jev_evaluations
         AND n_escape <= n_valid
     ),
     -- A flip rate is measured exactly when it has pairs, and its median lag
-    -- is the uniform stratum's.
+    -- is the uniform stratum's: a number of hours, which neither NaN nor
+    -- Infinity is. PostgreSQL orders NaN above every number, so `>= 0` alone
+    -- admits it; `< 'Infinity'` refuses both.
     ADD CONSTRAINT jev_evaluations_flip_rates_need_pairs CHECK (
         (flip_rate IS NOT NULL) = COALESCE(flip_rate_n > 0, FALSE)
         AND (flip_rate_low_margin IS NOT NULL)
@@ -292,7 +294,9 @@ ALTER TABLE jev_evaluations
         AND (flip_rate_near_threshold IS NOT NULL)
             = COALESCE(flip_rate_near_threshold_n > 0, FALSE)
         AND (flip_median_lag_hours IS NULL
-             OR (flip_median_lag_hours >= 0 AND COALESCE(flip_rate_n > 0, FALSE)))
+             OR (flip_median_lag_hours >= 0
+                 AND flip_median_lag_hours < 'Infinity'::float8
+                 AND COALESCE(flip_rate_n > 0, FALSE)))
     ),
     -- A threshold arrives with its whole group — the margin, what it was
     -- searched to reach, the dataset it was searched on and how many test
@@ -303,13 +307,18 @@ ALTER TABLE jev_evaluations
                   threshold_dataset_sha256, n_at_threshold)
         = CASE WHEN threshold_outcome IS NOT DISTINCT FROM 'chosen' THEN 0 ELSE 5 END
     ),
-    -- Nothing is measured at a threshold nobody chose. Within one chosen, a
-    -- coverage or an accuracy over no test item stays NULL.
+    -- Nothing is measured at a threshold nobody chose: no coverage, no
+    -- accuracy, and no re-ask counted near it — so no flip rate near it
+    -- either, a rate being measured exactly when its pairs are (above).
+    -- Within one chosen, a coverage or an accuracy over no test item stays
+    -- NULL.
     ADD CONSTRAINT jev_evaluations_at_threshold_needs_one CHECK (
         threshold_outcome IS NOT DISTINCT FROM 'chosen'
         OR num_nulls(coverage_at_threshold, accuracy_at_threshold,
                      accuracy_at_threshold_wilson_low,
-                     accuracy_at_threshold_wilson_high) = 4
+                     accuracy_at_threshold_wilson_high,
+                     flip_rate_near_threshold_n,
+                     flip_rate_near_threshold_not_compared) = 6
     ),
     ADD CONSTRAINT jev_evaluations_no_threshold_on_an_upper_bound CHECK (
         NOT possibly_in_training OR threshold IS NULL

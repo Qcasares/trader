@@ -49,6 +49,7 @@ import csv
 import dataclasses
 import io
 import json
+import math
 import os
 import random
 from collections.abc import AsyncIterator, Iterator, Sequence
@@ -334,6 +335,30 @@ DISCORDANT: dict[str, tuple[str, str]] = {
     for baseline in ("majority", "keyword")
 }
 
+#: A chosen threshold's own group: present exactly when one was chosen.
+THRESHOLD_GROUP = (
+    "threshold",
+    "threshold_statistic",
+    "threshold_target",
+    "threshold_dataset_sha256",
+    "n_at_threshold",
+)
+
+#: A row that chose no threshold: its group, and everything measured or
+#: counted at one, NULL.
+NO_THRESHOLD: dict[str, Any] = {
+    "threshold": None,
+    "threshold_statistic": None,
+    "threshold_target": None,
+    "threshold_dataset_sha256": None,
+    "n_at_threshold": None,
+    "coverage_at_threshold": None,
+    **_triple("accuracy_at_threshold", None, None, None),
+    "flip_rate_near_threshold": None,
+    "flip_rate_near_threshold_n": None,
+    "flip_rate_near_threshold_not_compared": None,
+}
+
 #: The single proportions, each outside [0, 1] on either side.
 SINGLE_PROPORTIONS = (
     "balanced_accuracy",
@@ -348,34 +373,60 @@ SINGLE_PROPORTIONS = (
     "labeller_agreement",
 )
 
-#: Every way a row can break one rule, and the rule that refuses it.
+#: The estimates whose interval's ends are proportions.
+PROPORTION_TRIPLES = ("accuracy", "accuracy_all_items", "accuracy_at_threshold")
+
+#: Every way a row can break one rule, and the rule that refuses it: one case
+#: for each conjunct of each CHECK that no other rule implies — each side of a
+#: range, of an interval and of an equality, each count's floor and ceiling,
+#: each member of a group missing alone, each member of a threshold's group
+#: recorded where none was chosen, an estimate without its interval — written
+#: so that it breaks that conjunct and nothing else
+#: (``TestEveryRuleBites::test_each_case_breaks_its_rule_alone`` admits
+#: each once its rule alone is gone). Where a conjunct is implied by others it
+#: has no case of its own, and a comment says what implies it: an interval's
+#: inner ends and its estimate's range lie between its outer ends, a
+#: difference's point is its discordant items over n, and at a threshold
+#: nobody chose an accuracy's bounds go with the accuracy.
 BROKEN: list[tuple[str, dict[str, Any], str]] = [
+    # Every proportion in [0, 1]: a single one on either side, and an
+    # interval's outer ends, which hold its estimate and its inner ends.
     *[
         (f"{column} {value}", {column: value}, "jev_evaluations_proportions")
         for column in SINGLE_PROPORTIONS
         for value in (1.01, -0.01)
     ],
     *[
-        (f"{name} above 1", _triple(name, 1.1, 1.2, 1.3), "jev_evaluations_proportions")
-        for name in ("accuracy", "accuracy_all_items", "accuracy_at_threshold")
-    ],
-    *[
         (
-            f"{name} below 0",
-            _triple(name, -0.3, -0.2, -0.1),
+            f"{name}'s {end} bound {where}",
+            {column: value},
             "jev_evaluations_proportions",
         )
-        for name in ("accuracy", "accuracy_all_items", "accuracy_at_threshold")
+        for name in PROPORTION_TRIPLES
+        for end, where, column, value in zip(
+            ("lower", "upper"),
+            ("below 0", "above 1"),
+            list(_triple(name, 0, 0, 0))[::2],
+            (-0.01, 1.01),
+            strict=True,
+        )
     ],
+    # Both levels strictly between 0 and 1, each side.
     *[
         (f"{column} {value}", {column: value}, "jev_evaluations_ci_level")
         for column in ("ci_level", "gate_ci_level")
         for value in (0.0, 1.0, 1.5, -0.5)
     ],
-    ("brier above 2", _triple("brier", 2.1, 2.2, 2.3), "jev_evaluations_brier_range"),
+    # The Brier score's interval within [0, 2] at its outer ends, which hold
+    # the score; its climatology on either side.
     (
-        "brier below 0",
-        _triple("brier", -0.3, -0.2, -0.1),
+        "the Brier score's lower bound below 0",
+        {"brier_ci_low": -0.01},
+        "jev_evaluations_brier_range",
+    ),
+    (
+        "the Brier score's upper bound above 2",
+        {"brier_ci_high": 2.01},
         "jev_evaluations_brier_range",
     ),
     ("climatology above 2", {"brier_reference": 2.5}, "jev_evaluations_brier_range"),
@@ -393,34 +444,45 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         for name in ("vs_majority_diff", "vs_keyword_diff")
         for side, where, value in (("high", "above 1", 1.2), ("low", "below -1", -1.2))
     ],
+    # An interval holds its estimate, on each side. A difference's point moves
+    # with its items, which are moved with it.
     *[
         (
-            f"{name} outside its interval",
+            f"{name} {where} its interval",
             {**_triple(name, *values), **counts},
             "jev_evaluations_intervals_hold_their_estimates",
         )
-        for name, values, counts in (
-            ("accuracy", (0.73, 0.90, 0.85), {}),
-            ("accuracy_all_items", (0.65, 0.60, 0.78), {}),
-            ("accuracy_at_threshold", (0.83, 0.95, 0.94), {}),
-            ("brier", (0.25, 0.20, 0.36), {}),
+        for name, where, values, counts in (
+            ("accuracy", "above", (0.73, 0.90, 0.85), {}),
+            ("accuracy", "below", (0.82, 0.80, 0.85), {}),
+            ("accuracy_all_items", "above", (0.65, 0.80, 0.78), {}),
+            ("accuracy_all_items", "below", (0.65, 0.60, 0.78), {}),
+            ("accuracy_at_threshold", "above", (0.83, 0.95, 0.94), {}),
+            ("accuracy_at_threshold", "below", (0.91, 0.90, 0.94), {}),
+            ("brier", "above", (0.25, 0.40, 0.36), {}),
+            ("brier", "below", (0.25, 0.20, 0.36), {}),
             (
                 "vs_majority_diff",
+                "above",
                 (0.02, 0.30, 0.22),
                 {"vs_majority_jev_right_only": 66},
             ),
+            ("vs_majority_diff", "below", (0.15, 0.12, 0.22), {}),
+            ("vs_keyword_diff", "above", (0.10, 0.22, 0.20), {}),
             (
                 "vs_keyword_diff",
+                "below",
                 (0.10, 0.05, 0.33),
                 {"vs_keyword_jev_right_only": 16},
             ),
         )
     ],
     # The discordant items: present with their difference and never without
-    # it, and the difference their arithmetic over n.
+    # it, each of the three missing alone, and the difference their
+    # arithmetic over n, on either side of it.
     *[
         case
-        for baseline, (better, worse) in (("majority", (30, 6)), ("keyword", (50, 6)))
+        for baseline, better in (("majority", 30), ("keyword", 50))
         for case in (
             (
                 f"a {baseline} difference without its items",
@@ -431,17 +493,33 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
                 "jev_evaluations_differences_from_their_items",
             ),
             (
+                f"a {baseline} difference without the items Jev alone got right",
+                {f"vs_{baseline}_jev_right_only": None},
+                "jev_evaluations_differences_from_their_items",
+            ),
+            (
+                f"a {baseline} difference without the items it alone got right",
+                {f"vs_{baseline}_baseline_right_only": None},
+                "jev_evaluations_differences_from_their_items",
+            ),
+            (
                 f"{baseline} items without their difference",
                 _triple(f"vs_{baseline}_diff", None, None, None),
                 "jev_evaluations_differences_from_their_items",
             ),
             (
-                f"a {baseline} difference its items do not make",
+                f"a {baseline} difference below what its items make",
                 {f"vs_{baseline}_jev_right_only": better + 1},
+                "jev_evaluations_differences_from_their_items",
+            ),
+            (
+                f"a {baseline} difference above what its items make",
+                {f"vs_{baseline}_jev_right_only": better - 1},
                 "jev_evaluations_differences_from_their_items",
             ),
         )
     ],
+    # A figure and its interval: never one without the other.
     *[
         (
             f"{name} without its {side} bound",
@@ -462,46 +540,89 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         )
         for name in TRIPLES
     ],
-    # Counts inside n: the three that partition n are moved together, so they
-    # still add up and only the bound is broken.
+    *[
+        (
+            f"{name} without its interval",
+            dict.fromkeys(list(_triple(name, 0, 0, 0))[::2]),
+            "jev_evaluations_estimates_carry_their_intervals",
+        )
+        for name in TRIPLES
+    ],
+    # Every count inside n: its floor and its ceiling, each alone. The three
+    # that partition n add up wherever all three are given, so a ceiling is
+    # broken with one of the others unrecorded, and a floor with them moved.
     (
-        "a negative count of answers",
+        "n_valid below 0",
+        {"n_valid": -1, "n_invalid": None, "n_escape": None},
+        "jev_evaluations_counts_within_n",
+    ),
+    (
+        "n_valid above n",
+        {"n_valid": 205, "n_invalid": None},
+        "jev_evaluations_counts_within_n",
+    ),
+    ("n_escape below 0", {"n_escape": -1}, "jev_evaluations_counts_within_n"),
+    (
+        "n_escape above n",
+        {"n_escape": 201, "n_valid": None},
+        "jev_evaluations_counts_within_n",
+    ),
+    (
+        "n_invalid below 0",
         {"n_valid": 190, "n_invalid": -5, "n_not_asked": 15},
         "jev_evaluations_counts_within_n",
     ),
     (
-        "more valid answers than items",
-        {"n_valid": 205, "n_invalid": 0, "n_not_asked": -5},
+        "n_invalid above n",
+        {"n_invalid": 201, "n_valid": None},
         "jev_evaluations_counts_within_n",
     ),
     (
-        "a negative count of escapes",
-        {"n_escape": -1},
+        "n_not_asked below 0",
+        {"n_valid": 181, "n_invalid": 20, "n_not_asked": -1},
+        "jev_evaluations_counts_within_n",
+    ),
+    (
+        "n_not_asked above n",
+        {"n_not_asked": 201, "n_valid": None},
         "jev_evaluations_counts_within_n",
     ),
     *[
-        (f"{column} above n", {column: 201}, "jev_evaluations_counts_within_n")
-        for column in (
-            "n_distinct_states",
-            "n_at_threshold",
-            "flip_rate_n",
-            "flip_rate_low_margin_n",
-            "flip_rate_near_threshold_n",
-            "labeller_agreement_n",
-        )
-    ],
-    *[
-        (f"{column} negative", {column: -1}, "jev_evaluations_counts_within_n")
+        (f"{column} {where}", {column: value}, "jev_evaluations_counts_within_n")
         for column in ("n_distinct_states", "n_at_threshold", "labeller_agreement_n")
+        for where, value in (("below 0", -1), ("above n", 201))
     ],
+    # A stratum's pairs: below 0 with no rate, as no pairs have none; above n
+    # with the re-asks not compared unrecorded, which would otherwise carry
+    # them past n in the sum below.
     *[
-        (f"{column} negative", {column: -1}, "jev_evaluations_counts_outside_n")
-        for column in ("n_contested", "n_other_plans", "n_plan_unknown")
+        case
+        for rate, pairs in (
+            ("flip_rate", "flip_rate_n"),
+            ("flip_rate_low_margin", "flip_rate_low_margin_n"),
+            ("flip_rate_near_threshold", "flip_rate_near_threshold_n"),
+        )
+        for case in (
+            (
+                f"{pairs} below 0",
+                {
+                    pairs: -1,
+                    rate: None,
+                    **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
+                },
+                "jev_evaluations_counts_within_n",
+            ),
+            (
+                f"{pairs} above n",
+                {pairs: 201, f"{rate}_not_compared": None},
+                "jev_evaluations_counts_within_n",
+            ),
+        )
     ],
     # The re-asks that could not be compared: each a count, and every re-ask
     # of the two strata, as of the window, within n.
     *[
-        (f"{column} negative", {column: -1}, "jev_evaluations_counts_within_n")
+        (f"{column} below 0", {column: -1}, "jev_evaluations_counts_within_n")
         for column in (
             "flip_rate_not_compared",
             "flip_rate_low_margin_not_compared",
@@ -537,9 +658,18 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
             ("more discordant items than items", 113, 89, (0.02, 0.12, 0.22)),
         )
     ],
+    *[
+        (f"{column} below 0", {column: -1}, "jev_evaluations_counts_outside_n")
+        for column in ("n_contested", "n_other_plans", "n_plan_unknown")
+    ],
     (
-        "answers that do not add up to n",
+        "answers that add up to less than n",
         {"n_valid": 170},
+        "jev_evaluations_answers_add_up",
+    ),
+    (
+        "answers that add up to more than n",
+        {"n_valid": 190},
         "jev_evaluations_answers_add_up",
     ),
     (
@@ -547,8 +677,17 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         {"n_escape": 181},
         "jev_evaluations_answers_add_up",
     ),
+    # A rate exactly when its pairs: present with none, and absent with some.
+    # The uniform stratum's lag goes with its rate, so it goes here too.
     *[
-        (f"{rate} with {n} pairs", {n: pairs}, "jev_evaluations_flip_rates_need_pairs")
+        (
+            f"{rate} with {pairs} pairs",
+            {
+                n: pairs,
+                **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
+            },
+            "jev_evaluations_flip_rates_need_pairs",
+        )
         for rate, n in (
             ("flip_rate", "flip_rate_n"),
             ("flip_rate_low_margin", "flip_rate_low_margin_n"),
@@ -573,11 +712,15 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         {"flip_rate": None, "flip_rate_n": 0},
         "jev_evaluations_flip_rates_need_pairs",
     ),
-    (
-        "a negative lag",
-        {"flip_median_lag_hours": -1.0},
-        "jev_evaluations_flip_rates_need_pairs",
-    ),
+    *[
+        (
+            f"a lag of {lag}",
+            {"flip_median_lag_hours": lag},
+            "jev_evaluations_flip_rates_need_pairs",
+        )
+        for lag in (-1.0, math.nan, math.inf)
+    ],
+    # A threshold's group, whole exactly when one was chosen.
     *[
         (
             f"a chosen threshold without its {column}",
@@ -596,9 +739,12 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         (
             f"a threshold's group under the outcome {outcome}",
             {
+                **{
+                    column: value
+                    for column, value in NO_THRESHOLD.items()
+                    if column not in THRESHOLD_GROUP
+                },
                 "threshold_outcome": outcome,
-                **_triple("accuracy_at_threshold", None, None, None),
-                "coverage_at_threshold": None,
             },
             "jev_evaluations_threshold_whole",
         )
@@ -606,21 +752,60 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
     ],
     *[
         (
-            f"a measurement at no threshold, outcome {outcome}",
+            f"a {column} with no threshold chosen",
             {
+                **NO_THRESHOLD,
+                "threshold_outcome": "none_found",
+                column: _measured()[column],
+            },
+            "jev_evaluations_threshold_whole",
+        )
+        for column in THRESHOLD_GROUP
+    ],
+    # Nothing measured or counted at a threshold nobody chose, each of it alone.
+    *[
+        (
+            f"a coverage at no threshold, outcome {outcome}",
+            {
+                **NO_THRESHOLD,
                 "threshold_outcome": outcome,
-                "threshold": None,
-                "threshold_statistic": None,
-                "threshold_target": None,
-                "threshold_dataset_sha256": None,
-                "n_at_threshold": None,
-                column: value,
+                "coverage_at_threshold": 0.6,
             },
             "jev_evaluations_at_threshold_needs_one",
         )
         for outcome in ("none_found", "not_attempted", None)
-        for column, value in (("coverage_at_threshold", 0.6),)
     ],
+    # An accuracy and its bounds are present together or not at all (the
+    # carry rule, above), so one of them alone breaks that rule too: the
+    # three are one case.
+    (
+        "an accuracy at no threshold",
+        {
+            **NO_THRESHOLD,
+            "threshold_outcome": "none_found",
+            **_triple("accuracy_at_threshold", 0.8, 0.9, 0.95),
+        },
+        "jev_evaluations_at_threshold_needs_one",
+    ),
+    (
+        "flips counted near no threshold",
+        {
+            **NO_THRESHOLD,
+            "threshold_outcome": "none_found",
+            "flip_rate_near_threshold": 0.07,
+            "flip_rate_near_threshold_n": 35,
+        },
+        "jev_evaluations_at_threshold_needs_one",
+    ),
+    (
+        "re-asks not compared near no threshold",
+        {
+            **NO_THRESHOLD,
+            "threshold_outcome": "none_found",
+            "flip_rate_near_threshold_not_compared": 2,
+        },
+        "jev_evaluations_at_threshold_needs_one",
+    ),
     (
         "a threshold on an upper bound",
         {"possibly_in_training": True},
@@ -647,16 +832,7 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
     ],
     (
         "an outcome outside the vocabulary",
-        {
-            "threshold_outcome": "found",
-            "threshold": None,
-            "threshold_statistic": None,
-            "threshold_target": None,
-            "threshold_dataset_sha256": None,
-            "n_at_threshold": None,
-            "coverage_at_threshold": None,
-            **_triple("accuracy_at_threshold", None, None, None),
-        },
+        {**NO_THRESHOLD, "threshold_outcome": "found"},
         "jev_evaluations_threshold_outcome_check",
     ),
 ]
@@ -690,6 +866,30 @@ class TestEveryRuleBites:
             await _insert(conn, _measured(**overrides))
         assert refused.value.constraint_name == constraint
         assert await conn.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
+
+    @pytest.mark.parametrize(
+        ("overrides", "constraint"),
+        [pytest.param(o, c, id=name) for name, o, c in BROKEN],
+    )
+    async def test_each_case_breaks_its_rule_alone(
+        self, conn: asyncpg.Connection, overrides: dict[str, Any], constraint: str
+    ) -> None:
+        """
+        PostgreSQL names only the first CHECK a row fails, in the order of
+        their names, so a case that broke two rules could pass the test above
+        while the rule it is for is gone. Each is shown to break its rule
+        alone: with that one CHECK dropped, in a transaction rolled back after,
+        the row is admitted.
+        """
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await conn.execute(
+                f'ALTER TABLE jev_evaluations DROP CONSTRAINT "{constraint}"'
+            )
+            await _insert(conn, _measured(**overrides))
+        finally:
+            await transaction.rollback()
 
     async def test_every_rule_0014_adds_has_a_case(
         self, conn: asyncpg.Connection
@@ -754,22 +954,10 @@ class TestNothingMeasuredIsNull:
         self, conn: asyncpg.Connection, outcome: str
     ) -> None:
         stored = await _insert(
-            conn,
-            _measured(
-                threshold_outcome=outcome,
-                threshold=None,
-                threshold_statistic=None,
-                threshold_target=None,
-                threshold_dataset_sha256=None,
-                n_at_threshold=None,
-                coverage_at_threshold=None,
-                flip_rate_near_threshold=None,
-                flip_rate_near_threshold_n=None,
-                **_triple("accuracy_at_threshold", None, None, None),
-            ),
+            conn, _measured(**NO_THRESHOLD, threshold_outcome=outcome)
         )
         assert stored["threshold_outcome"] == outcome
-        assert stored["threshold"] is None
+        assert {column: stored[column] for column in NO_THRESHOLD} == NO_THRESHOLD
 
     async def test_a_threshold_measured_over_no_test_item_stays_null(
         self, conn: asyncpg.Connection
@@ -807,17 +995,9 @@ class TestAThresholdNeverRestsOnAnUpperBound:
         stored = await _insert(
             conn,
             _measured(
+                **NO_THRESHOLD,
                 possibly_in_training=True,
                 threshold_outcome="not_attempted",
-                threshold=None,
-                threshold_statistic=None,
-                threshold_target=None,
-                threshold_dataset_sha256=None,
-                n_at_threshold=None,
-                coverage_at_threshold=None,
-                flip_rate_near_threshold=None,
-                flip_rate_near_threshold_n=None,
-                **_triple("accuracy_at_threshold", None, None, None),
             ),
         )
         assert stored["possibly_in_training"] is True
