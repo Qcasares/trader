@@ -2452,16 +2452,22 @@ state (`test_the_baseline_rule_is_total_and_never_abstains`,
 the sleeves is a choice the operator has reviewed: both are the defaults the
 agent that built C4 chose.** Before the first regime answer exists — the
 decisions area is seeded off, so none does — a change to either is a new
-`PLAN_VERSION` with its hash appended, and costs nothing; a changed sleeve also
-changes `src/data/reference.py` and starts a new signal series, since the
-signal's symbol names the instruments. After it, the same bump, recorded as a
-change of plan: the regime job writes the plan in force into its result as it
-asks and the planner writes it into each re-ask's payload, so `forward` scores
-agreement only over answers first recorded under the plan it runs and counts
-the rest apart by the plan they were recorded under, and a flip rate counts
-only the pairs sampled under it; the report names its plan, no answer is
+`REGIME_PLAN_VERSION` with its hash appended, which sets aside regime
+agreement alone and costs nothing; a changed sleeve also changes
+`src/data/reference.py` and starts a new signal series, since the signal's
+symbol names the instruments. After it, the same bump, recorded as a change of
+plan: the regime job writes the plans in force into its result as it asks,
+the regime plan beside the global one, and the planner writes the global plan
+into each re-ask's payload, so `forward` scores agreement only over answers
+first recorded under the regime plan it runs and counts the rest apart by the
+regime plan they were recorded under (a result naming none, as C4's jobs
+wrote them, as plan unknown), and a flip rate counts only the pairs sampled
+under the global plan in force; the report names both plans, no answer is
 scored by a rule registered after it, and the old rule is never rewritten to
-match. The first cut said all this and built none of it.
+match. The first cut said all this and built none of it. As C4 built it, the
+rule and the sleeves sat inside the global plan, so a change was a new
+`PLAN_VERSION`, which would have set aside every lane's answers as well; phase
+D1 moved them into a regime plan of their own (M4, under "Phase D, as built").
 
 **The harness reads, and holds no key.** `python -m src.programme.jev_eval`
 runs `status`, `forward` and `forward-audit`, each in one read-only,
@@ -3370,7 +3376,7 @@ writes labels and evaluations, through `jev_repo`, in three commands alone.
 
 | Command | What it does |
 |---|---|
-| `evaluate --set S --key K --labelled-by L [--split test\|all] [--model M] [--record [--commit SHA]] [--json]` | One question of one registered set against exactly one labeller's labels, for one pinned model — the pin by default — over the held-out test split by default. A dry run, printing every figure with its n and interval and "dry run: nothing recorded", unless `--record`, which writes the row and refuses without a commit: `--commit`, else `GIT_COMMIT`, else `git rev-parse HEAD` on a tree with nothing uncommitted, 40 lowercase hex digits in each case. Refuses `decision.regime` ("its numbers are forward's"), a question no set plan registered, a labeller that is no labeller, a model that is not pinned, and nothing labelled under the plans in force: "not measured: no labelled items", with how many items were set apart, on standard error, and nothing written |
+| `evaluate --set S --key K --labelled-by L --split dev\|test\|all [--model M] [--record [--commit SHA]] [--json]` | One question of one registered set against exactly one labeller's labels, for one pinned model — the pin by default — over the split named. As C9 built it, `--split` took `test` or `all`, defaulted to the held-out test split, and ran as a dry run, printing every figure with its n and interval and "dry run: nothing recorded", unless `--record`; from phase D1 (plan version 2, M3) `--split` has no default, `test` and `all` are looks at the held-out items, each taken only with `--record`, and `dev`, the development split's search, is never recorded, all refused in `jev_eval.execute` before any connection (see Phase D, as built). `--record` writes the row and refuses without a commit: `--commit`, else `GIT_COMMIT`, else `git rev-parse HEAD` on a tree with nothing uncommitted, 40 lowercase hex digits in each case. Refuses `decision.regime` ("its numbers are forward's"), a question no set plan registered, a labeller that is no labeller, a model that is not pinned, and nothing labelled under the plans in force: "not measured: no labelled items", with how many items were set apart, on standard error, and nothing written |
 | `labels export --set S --key K --blind [--sample N] [--include-quarantined]` | CSV of `subject_type, subject_id, text` and nothing else: every stored subject of the set's kind — web content, each once by its earliest document's excerpt, or each title the programme's model wrote within the cap — in the order of their addresses, the first N where a sample is asked for. Which subjects is decided by the stored texts and the code alone: web text the code screen, run on it now, flags is left out unless `--include-quarantined`, a quarantine made by code from the words, which no set is ever asked about, and nothing else is. Content Jev's own injection screen quarantined, or a vendor's content block, is exported like any other, since leaving it out chose the subjects by what was answered: the first cut left out every quarantined content, so a labeller of the screen never saw one of its `true` answers (C9's review). No answer, request or quarantine is read, so neither what a labeller sees nor which subjects can depend on what Jev or the vendor said. For the catalogue, content the screen quarantined is never described, and counts as not asked. `--blind` is required, so no export can be asked for that is not |
 | `labels import --file F (--as operator:NAME \| --source DATASET)` | A UTF-8 CSV of `question_set, question_set_version, question_key, subject_type, subject_id, label`, optionally `note` and `text`, and no other column, an answer column above all. Every row is checked first: the set registered and the version its own, a question its plan plans, the subject its kind of text by a content address that is stored, the label one of the question's options and never its escape, a `text`, where given, the text the address names, each item once; and no item this labeller has labelled otherwise, since a label revised after the answers are seen is not ground truth. One refused row and nothing is recorded. A person is `operator:NAME`, lower case; a dataset is `source:DATASET@` the first twelve hex digits of the file's sha256, and an allow-listed source's name is refused, its labeller being the ingest's |
 | `labels copy --set S --key K --from-version A --to-version B` | Each label of the key at A, by its own labeller, to B, the registered version, noted "copied from vA", where the key's type and options, with their descriptions and in order, are A's exactly. A version no longer registered has its words only in the requests it was asked with, so they are read from there, and a version never asked is refused |
@@ -3416,7 +3422,8 @@ the reporting level like every other interval, beside the items only one of
 the two got right, which the row records; Jev beats a baseline only by the
 exact one-sided sign test of those items at the gate level (McNemar's, exact:
 `jev_stats.sign_test`), and the text says "too few to say" where not even
-every one of them going Jev's way could reach it — fewer than eight at 0.995.
+every one of them going Jev's way could reach it — fewer than eight at plan
+version 1's 0.995, and from phase D1 fewer than eleven at version 2's 0.999375.
 The bootstrap gates nothing: over a few discordant items it understates their
 uncertainty, and the first cut, which gated on its bound, called one item of
 one, and five, six or seven of 200 all Jev's way, a win at exact chances of
@@ -3988,14 +3995,22 @@ Numbered on from Phase B's.
     through `card_verdict`, the screen's line — is phase D's change, and must
     move the calibration across the boundary test that keeps it out of
     everything that acts.
-68. **`usable` does not read the re-asks that could not be compared.** A row
-    counts them, stratum by stratum and near the threshold (C9's review), and
-    the text prints them beside each rate, but a flip rate over the compared
-    pairs alone still decides the two flip conditions: thirty valid pairs and
-    thirty ties pass where sixty valid pairs would. A tie or an answer refused
-    whole on a re-ask is itself unstable, so a rule counting them against a
-    threshold may be wanted; it would be a new number of the plan, so it is a
-    new plan version's to register, not a choice made here after the answers.
+68. ~~**`usable` does not read the re-asks that could not be compared.**~~
+    *Closed by phase D1 (plan version 2, M5):* `usable` reads each flip rate in
+    the worst case, every re-ask that could not be compared counted as a flip,
+    `(flipped + not compared) / (compared + not compared)` within its limit on
+    at least `MIN_FLIP_PAIRS` compared pairs (`jev_prereg.FLIPS_NOT_COMPARED`),
+    so thirty valid pairs and thirty ties are refused where sixty valid pairs
+    pass, and a row that does not say how many could not be compared is
+    refused too. The rule is a number of the plan, registered by version 2
+    while no answer existed, as this item asked
+    (`tests/unit/test_jev_calibration.py::TestTheFlipLimitsReadTheWorstCase`).
+    As first written: a row counts them, stratum by stratum and near the
+    threshold (C9's review), and the text prints them beside each rate, but a
+    flip rate over the compared pairs alone still decided the two flip
+    conditions; a tie or an answer refused whole on a re-ask is itself
+    unstable, and a rule counting them against a threshold would be a new
+    number of the plan, a new plan version's to register.
 69. **A percentile bootstrap over few items understates its uncertainty.** The
     Brier score's interval and each paired difference's are reported only, at
     the reporting level, and gate nothing: "beats" is the exact sign test's
@@ -4266,6 +4281,32 @@ worst-case flip rule also refuses a rate no count of its pairs could give. The
 integration split test's expectations were re-derived under five tenths rather
 than its fixture's titles re-chosen. 0015 carries a header saying why, above
 SQL identical to the design's.
+
+**D1's review.** Fifteen findings, each checked against the code and each
+real; every one is fixed with a test that failed before it, recorded beside
+what it changed above, or below as an open item:
+
+- the harness's command line fails closed: `execute` refuses a command or a
+  split no parser makes, where the first cut evaluated any command it did not
+  know (looks at the command line, above);
+- a `dev` run promises no look its threshold cannot have, and says that its
+  flip rates are the population's, as a look's are (looks at the command
+  line, above, and open item 83);
+- the four boundary scans read the spellings they missed: the write walk a
+  table in capitals or split across `+` or `str.join`, the detail walk every
+  statement reading a guarded table, whatever its first word, its comma joins
+  and whole-row reads, and its column lists it cannot read, the switch test
+  everything the programme reaches, the queue scan the queue held as a value
+  or looked up by name, the findings-update scan a `SET` list past a subquery
+  or a literal, and the caller scan `raise_finding` taken by name (what Jev's
+  code reaches, and a finding's writer, above);
+- two tests now bind what they claimed: the text-free check is tested without
+  the declaration and under a provenance the detail rule does not read, and
+  two flip cases ask rates their pairs can give, so the limit refuses them;
+- three passages that still stated what D1 changed now say what it is: C4's
+  rule and sleeves are a `REGIME_PLAN_VERSION`'s, C9's `evaluate` row says
+  `--split` has no default and a look needs `--record`, and open item 68 is
+  closed by M5.
 
 ### Open items Phase D found
 
