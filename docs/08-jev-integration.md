@@ -4156,7 +4156,7 @@ and, in D1, is read by nothing outside `flags`.
 10, signals 0, decision 20, probe 10; the minimum budget is still derived, and
 still 10; a refused budget's message names the lanes with the smallest share,
 read from the table (`jev_catalogue.smallest_shares`).
-`tests/unit/test_jev_catalogue.py`.
+`tests/unit/test_jev_catalogue.py::TestTheShares`.
 
 **The detail switch in the planner** (the scope's 2j). A set declaring
 `internal_detail` is planned only while `jev_send_internal_detail` is on, read
