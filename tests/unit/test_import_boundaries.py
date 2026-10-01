@@ -2558,14 +2558,24 @@ def test_the_jev_module_the_runners_may_load_loads_no_other() -> None:
 #: harness all read: each may load the standard library and itself, and
 #: nothing else, however it is imported. ``claims`` joined in phase C8, when
 #: the performance-claim check moved out of ``author``, which prompts a
-#: generative model, so that reading the rule no longer loads one.
+#: generative model, so that reading the rule no longer loads one; phase C9's
+#: ``jev_calibration`` and the statistics it adds to ``jev_stats`` joined in C9.
 PURE_PROGRAMME_MODULES = (
     "src.programme.claims",
+    "src.programme.jev_calibration",
     "src.programme.jev_hash",
     "src.programme.jev_prereg",
     "src.programme.jev_stats",
     "src.programme.job_errors",
 )
+
+#: The one pure module that loads another: ``jev_calibration`` reads the
+#: analysis plan its rules are written against, ``jev_prereg``, which is
+#: itself pure and loads nothing. Named, so a second such load is a
+#: reviewer's edit here rather than a loosened rule.
+PURE_MODULES_MAY_LOAD: Mapping[str, tuple[str, ...]] = {
+    "src.programme.jev_calibration": ("src.programme.jev_prereg",),
+}
 
 
 def _loaded_by(statement: str) -> set[str]:
@@ -2599,7 +2609,9 @@ def test_the_pure_modules_load_nothing(module: str) -> None:
     loaded = _loaded_by(f"import {module}") - baseline
     package = module.rsplit(".", 1)[0]
     ours = {m for m in loaded if _matches(m, ("src",))}
-    assert ours == {"src", package, module}, sorted(ours)
+    allowed = set(PURE_MODULES_MAY_LOAD.get(module, ()))
+    assert allowed <= set(PURE_PROGRAMME_MODULES), allowed
+    assert ours == {"src", package, module, *allowed}, sorted(ours)
     foreign = sorted(
         m
         for m in loaded - ours
@@ -2607,6 +2619,64 @@ def test_the_pure_modules_load_nothing(module: str) -> None:
         and m.split(".")[0] not in sys.stdlib_module_names
     )
     assert not foreign, f"{module} loads {foreign}"
+
+
+#: What may never load ``jev_calibration`` (phase C9): everything that acts —
+#: the planner, the jobs that ask and the forward clock's, the lane and its
+#: client, the runner that drains them, the web ingest and fetcher, and the
+#: tick with the model code it runs. Phase C arms no threshold, so the rules
+#: that would arm one are read by the harness, to report, and by nothing
+#: that could act on them; arming one is phase D's change, made here.
+CALIBRATION = "src.programme.jev_calibration"
+NOTHING_THAT_ACTS = (
+    "src.programme.jev_plan",
+    "src.programme.jev_jobs",
+    "src.programme.jev_forward",
+    "src.programme.jev_lane",
+    "src.programme.jev_client",
+    "src.programme.main",
+    "src.programme.web_ingest",
+    "src.programme.web_fetch",
+    "src.programme.tick",
+    "src.programme.author",
+    "src.programme.panel",
+    "src.programme.client",
+)
+
+
+@pytest.mark.parametrize("module", NOTHING_THAT_ACTS)
+def test_nothing_that_acts_loads_the_calibration(module: str) -> None:
+    graph = _real_graph()
+    assert module in graph.names, f"{module} is not in the tree"
+    offenders = _reachable_offences(graph, [module], (CALIBRATION,))
+    assert not offenders, (
+        f"{module} acts, and loads the rules that would arm a threshold, which "
+        "phase C arms nowhere:\n" + "\n".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("package", PROTECTED_PACKAGES)
+def test_nothing_that_can_move_money_loads_the_calibration(package: str) -> None:
+    graph = _real_graph()
+    offenders = _reachable_offences(
+        graph, _package_modules(graph, package), (CALIBRATION,)
+    )
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_calibration_scan_sees_an_import_of_it() -> None:
+    """The walk above, on a tree where the planner does load it, finds it."""
+    graph = _synthetic(
+        {
+            "src/programme/jev_plan.py": "from src.programme import jev_repo\n",
+            "src/programme/jev_repo.py": (
+                "from src.programme.jev_calibration import usable\n"
+            ),
+            "src/programme/jev_calibration.py": "def usable(): ...\n",
+        }
+    )
+    offenders = _reachable_offences(graph, ["src.programme.jev_plan"], (CALIBRATION,))
+    assert offenders, "the scan no longer sees the calibration loaded"
 
 
 @pytest.mark.parametrize("package", PROTECTED_PACKAGES)
