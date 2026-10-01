@@ -1996,8 +1996,8 @@ class TestTheCommandsOnPostgres:
     ) -> None:
         """
         From plan version 2 the one dry run is the development split's search
-        (M3): it runs, reads the five development items and no test item, and
-        records nothing.
+        (M3): it runs, scores the five development items and no test item,
+        and records nothing.
         """
         before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
         argv = ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]

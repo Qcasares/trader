@@ -4071,9 +4071,16 @@ answer recorded under another, or before D1 under none (plan unknown), apart;
 
 **Looks at the command line** (the scope's 2c). `evaluate --split` has no
 default and takes `dev`, `test` or `all`. `test` and `all` read the held-out
-items, so each is a look and is taken only with `--record`; `dev` reads the
-development split's items alone — no label, answer or date of a test item —
-and is never recorded. The rule is `jev_eval.look_problem`, applied in
+items, so each is a look and is taken only with `--record`; `dev` scores the
+development split's items alone — it reads no label or date of a test item and
+scores none of its answers — and is never recorded. Its flip rates are the
+population's (M2), as a look's are, since a flip uses no label: the re-asks of
+test items are counted among them, and the first cut's claim that `dev` read
+nothing of the test split was wrong (D1's review). Nor does its threshold line
+promise that a look will bear the threshold out, as the first cut's did: the
+look searches again only if every item it reads, the held-out ones included,
+is dated after the pin was first observed, which a `dev` run does not read
+(open item 83). The rule is `jev_eval.look_problem`, applied in
 `jev_eval.execute`, which `main` and every caller of the commands reach,
 before any connection is made, and it fails closed: it decides from the
 command `jev_eval._command` names, which refuses anything but one of
@@ -4268,6 +4275,17 @@ pull request it belongs to; D1 builds the ones it names.
     live from D3). Switched on for ops, it lets any later set declaring
     `internal_detail` send too, once that set's own area is on; the planner
     and the road both read it for every such set.
+83. **A `dev` run cannot say whether a look would be an upper bound** (D1,
+    found by D1's review). `evaluate --split dev` reads no date of a test
+    item, and a look searches for a threshold only if every item it reads is
+    dated after the pin was first observed, so a held-out item undated, or
+    dated on or before that day, makes the look an upper bound that attempts
+    no threshold while it still spends one of the four looks every pin
+    shares (item 78). The `dev` run's threshold line names that condition and
+    promises nothing; reading the held-out items' dates, which carry no label
+    and no answer, in a line of their own beside the `dev` figures, without
+    moving any of them, would let an operator know before spending the look.
+    Left for review: it is a new read of the test split, however harmless.
 
 ## Inputs needed from the operator
 

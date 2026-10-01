@@ -2173,7 +2173,8 @@ class TestLooks:
     has ``MAX_LOOKS`` looks at the held-out items, and ``usable`` counts the
     recorded ones, so the harness takes no look it does not record. ``--split
     test`` and ``--split all`` need ``--record``; ``--split dev``, the
-    search's own items, never records and reads no test item; and ``--split``
+    search's own items, never records and reads no label or date of a test
+    item, its flip rates the population's as a look's are; and ``--split``
     has no default. The rule is held in ``jev_eval.execute``, which ``main``
     and every caller of the harness's commands reach, the integration suite's
     included.
@@ -2362,10 +2363,11 @@ class TestLooks:
 
     def test_the_dev_split_never_records_and_reads_no_test_item(self) -> None:
         """
-        A dev evaluation reads the development split's items alone: change
+        A dev evaluation scores the development split's items alone: change
         every test item's label, answer and date and it does not move; it
         holds no test item; and nothing is measured at a threshold, which is
-        the test split's to bear out.
+        the test split's to bear out. Its flip rates are the population's,
+        which use no label (``test_the_dev_splits_flips_are_the_populations``).
         """
         book, dev, test = _threshold_book()
         before = book.evaluate("dev")
@@ -2393,9 +2395,63 @@ class TestLooks:
         # The same changes move the test split's evaluation, which reads them.
         assert book.evaluate("test") != _threshold_book()[0].evaluate("test")
         text = jev_eval.format_evaluation(before.row())
-        assert "the dev split reads no test item" in text
+        assert "this run reads no label or date of a test item" in text
         assert "never recorded" in text
         assert "dry run" not in text
+        assert "reads no test item" not in text
+
+    def test_a_dev_threshold_promises_no_look(self) -> None:
+        """
+        D1's review (D1RP-2): a dev run reads no date of a test item, so it
+        cannot know that an undated held-out item, or one dated on or before
+        the pin's first observation, makes the look an upper bound that
+        searches no threshold. It said only a recorded look would bear its
+        threshold out, which pointed the operator at spending one of the four
+        looks every pin shares on a look that can never arm. It now names the
+        condition the look's own search needs, and promises nothing.
+        """
+        book, _, test = _threshold_book()
+        book.dates[book.subject(test[0])] = None
+        dev, look = book.evaluate("dev"), book.evaluate("test")
+        assert (dev.possibly_in_training, dev.threshold_outcome) == (False, "chosen")
+        assert (look.possibly_in_training, look.threshold_outcome) == (
+            True,
+            "not_attempted",
+        )
+        (line,) = [
+            line
+            for line in jev_eval.format_evaluation(dev.row()).splitlines()
+            if line.startswith("threshold:")
+        ]
+        assert "bears it out" not in line
+        assert "only if every item the look reads" in line
+        assert "dated after the model was first observed" in line
+        assert "otherwise the look is an upper bound" in line
+
+    def test_the_dev_splits_flips_are_the_populations(self) -> None:
+        """
+        D1's review (D1RT-2): flips use no label, and plan version 2 counts
+        them over every canonical request of the question under the pin (M2),
+        so a dev evaluation's flip rates count the re-asks of test items as a
+        look's do, and are the look's own. Nothing else in it moves with
+        them, and its text says whose flips they are rather than that it
+        reads nothing of the test split.
+        """
+        book, _, test = _threshold_book()
+        before = book.evaluate("dev")
+        for text in test[:5]:
+            TestTheFlips()._paired(book, text, "uniform", flipped=True)
+            assert jev_prereg.split_of(*book.subject(text)) == "test"
+        dev, look = book.evaluate("dev"), book.evaluate("test")
+        flips = [f.name for f in dataclasses.fields(dev) if f.name.startswith("flip_")]
+        assert (dev.flip_rate, dev.flip_rate_n) == (1.0, 5)
+        assert {f: getattr(dev, f) for f in flips} == {
+            f: getattr(look, f) for f in flips
+        }
+        unmoved = dataclasses.replace(dev, **{f: getattr(before, f) for f in flips})
+        assert unmoved == before
+        text = jev_eval.format_evaluation(dev.row())
+        assert "the flip rates are the whole population's" in text
 
     def test_report_prints_the_looks_each_identity_has_spent(self) -> None:
         """
@@ -3232,7 +3288,7 @@ class TestTheCommandsThatWrite:
         labels.write_bytes(_labels_file(_row()))
         book = _Book()
         # One item of each split: the test split's for the recorded look, and
-        # the development split's for --split dev, which reads no test item.
+        # the development split's for --split dev, which scores no test item.
         assert jev_prereg.split_of(*book.subject("Invented Bond Timing")) == "test"
         for text in ("Invented Bond Timing", _texts_in("dev", 1)[0]):
             book.label(text, "bonds")
@@ -3302,7 +3358,7 @@ class TestTheCommandsThatWrite:
                 ["record_evaluation"],
             ),
             # The one evaluation that is not recorded: the development
-            # split's search, which reads no test item (plan version 2, M3).
+            # split's search, which scores no test item (plan version 2, M3).
             "evaluate": (
                 [
                     "evaluate",

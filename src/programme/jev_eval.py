@@ -49,10 +49,12 @@ the split ``--split`` names, which has no default. ``test`` and ``all`` read
 the held-out test items, a look the gate's level is spent on, so from plan
 version 2 each is taken only with ``--record``, which refuses without a clean
 40-hex commit, and ``jev_calibration.usable`` refuses a fifth look of a set,
-version and question under any model (M3). ``dev`` reads the development
-split's items alone — the threshold's search, and no label, answer or date of
-a test item — and is never recorded. The rule is held in :func:`execute`, which
-``main`` and every caller of the harness's commands reach (:func:`look_problem`).
+version and question under any model (M3). ``dev`` scores the development
+split's items alone — the threshold's search, reading no label or date of a
+test item and scoring none of its answers — and is never recorded; its flip
+rates, which use no label, are the whole population's, as a look's are. The
+rule is held in :func:`execute`, which ``main`` and every caller of the
+harness's commands reach (:func:`look_problem`).
 What it refuses outright: ``decision.regime``, which has no ground truth for
 the present regime, its numbers being ``forward``'s; a question with no plan
 registered before the answers; and nothing labelled, which writes nothing and
@@ -291,9 +293,13 @@ TEXT_SUBJECTS = ("web_excerpt", "hypothesis_title")
 SPLITS = ("test", "all")
 
 #: The development split: the threshold search's own items. ``evaluate
-#: --split dev`` reads them and nothing of the test split — no label, answer
-#: or date of a test item — and is never recorded (plan version 2, M3), so an
-#: operator can see how the search stands without spending a look.
+#: --split dev`` scores them alone — it reads no label or date of a test item,
+#: and scores none of its answers — and is never recorded (plan version 2,
+#: M3), so an operator can see how the search stands without spending a look.
+#: Its flip rates are the population's (M2), as a look's are: a flip uses no
+#: label, so counting a test item's re-ask among them is no look at it (D1's
+#: review, D1RT-2). Nor can it say whether a look would be an upper bound,
+#: which a held-out item's date decides (docs/08 open item 83).
 DEV_SPLIT = "dev"
 
 #: What ``evaluate --split`` takes. It has no default, so nobody looks at the
@@ -1258,9 +1264,10 @@ def build_evaluation(
     design section 10.1 is tested without a database. See :func:`evaluate`
     for what it is, and the module docstring for the rules it keeps.
 
-    Over :data:`DEV_SPLIT` it reads the development split's items alone —
+    Over :data:`DEV_SPLIT` it scores the development split's items alone —
     their labels, answers and dates — and so its search, and measures
-    nothing at the threshold, which is the test split's to bear out
+    nothing at the threshold, which a recorded look measures on the test
+    split; its flip rates are the population's, as every split's are
     (``tests/unit/test_jev_eval.py::TestLooks``).
     """
     problem = question_problem(question_set, question_key)
@@ -1310,8 +1317,9 @@ def build_evaluation(
             )
         )
     if split == DEV_SPLIT:
-        # The search's own items, and nothing of the test split: no label, no
-        # answer and no date of a test item is read below.
+        # The search's own items: no label and no date of a test item is read
+        # below, and none of its answers is scored. The flip rates below count
+        # the population, which uses no label, as every split's do.
         items = [i for i in items if i.split == DEV_SPLIT]
     in_split = [i for i in items if split == "all" or i.split == split]
     scored = [i for i in in_split if i.standing == "scored"]
@@ -2662,11 +2670,19 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             else ""
         )
         if e.get("split") == DEV_SPLIT:
+            # Never a promise that a look bears it out: the look's search runs
+            # only when every item the look reads is dated after the pin was
+            # first observed, and this run reads no date of a test item, so
+            # it cannot know (D1's review, D1RP-2; docs/08 open item 83).
             lines.append(
                 f"threshold: margin >= {said(e['threshold'])}, chosen on the dev "
-                f"split to reach {said(e['threshold_target'])}{by}; the dev split "
-                "reads no test item, so nothing is measured at it here, and only "
-                "a recorded look at the test split bears it out"
+                f"split to reach {said(e['threshold_target'])}{by}; nothing is "
+                "measured at it here, since this run reads no label or date of a "
+                "test item. A recorded look measures it on the test split, and "
+                "searches for it again only if every item the look reads, the "
+                "held-out ones included, is dated after the model was first "
+                "observed; otherwise the look is an upper bound and attempts no "
+                "threshold"
             )
         else:
             lines.append(
@@ -2743,8 +2759,10 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
         lines.append(f"commit {commit}")
     elif e.get("split") == DEV_SPLIT:
         lines.append(
-            "the development split's search: no look at the held-out items, and "
-            "never recorded"
+            "the development split's search: no look at the held-out items, no "
+            "label or date of a test item read, and never recorded; the flip "
+            "rates are the whole population's, as a look's are, since a flip "
+            "uses no label"
         )
     else:
         lines.append("dry run: nothing recorded; --record writes it")
@@ -3093,9 +3111,10 @@ def look_problem(arguments: argparse.Namespace) -> str | None:
     each is a look, and ``jev_calibration.usable`` counts recorded looks
     alone: one taken as a dry run would be a look the gate's level was never
     spent on, and labelling until a dry run passed, then recording that one,
-    is optional stopping. So each needs ``--record``. ``--split dev`` reads
-    the search's own items and no test item, so it is never recorded: it is
-    no look, and a row of it would be one ``usable`` could not read as one.
+    is optional stopping. So each needs ``--record``. ``--split dev`` scores
+    the search's own items and reads no label of a test item, so it is never
+    recorded: it is no look, and a row of it would be one ``usable`` could
+    not read as one.
 
     It decides from the command :func:`_command` names, which refuses
     anything but a command the harness runs, and refuses a split that is
@@ -3122,9 +3141,9 @@ def look_problem(arguments: argparse.Namespace) -> str | None:
         )
     if split == DEV_SPLIT and record:
         return (
-            "--split dev is the development split's search, which reads no test "
-            "item and is never recorded; record a look with --split test or "
-            "--split all; nothing was read"
+            "--split dev is the development split's search, which reads no label "
+            "of a test item and is never recorded; record a look with --split "
+            "test or --split all; nothing was read"
         )
     return None
 

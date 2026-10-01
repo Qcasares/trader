@@ -236,10 +236,12 @@ python -m src.programme.jev_eval forward-audit [--since 2026-10-01]
 # bound and carries no threshold. `report` lists the newest of each apart,
 # with why none could arm a threshold, which nothing in phases C or D1 does,
 # and the looks each set, version and question has spent. `--split` has no
-# default (plan version 2, phase D1): `dev` reads the development split alone
-# and is never recorded; `test` and `all` read the held-out items, a look, and
-# each is taken only with `--record`. Four looks per set, version and
-# question, counted across every model, and `usable` refuses a fifth.
+# default (plan version 2, phase D1): `dev` scores the development split alone,
+# reading no label or date of a test item, its flip rates the population's as
+# a look's are, and is never recorded; `test` and `all` read the held-out
+# items, a look, and each is taken only with `--record`. Four looks per set,
+# version and question, counted across every model, and `usable` refuses a
+# fifth. A command or split the harness does not run is refused unread.
 python -m src.programme.jev_eval labels export --set research.catalogue \
     --key asset_class --blind [--sample 60] > to_label.csv
 python -m src.programme.jev_eval labels import --file labelled.csv \
