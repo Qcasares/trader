@@ -1742,11 +1742,17 @@ ASKING_MODULE = "src.programme.jev_jobs"
 
 @dataclass(frozen=True)
 class _Namespace:
-    """One module's top-level names: what it defines, and what it imports."""
+    """
+    One module's top level: every statement binding each name, what each name
+    an import binds stands for, the packages it star-imports, the code it runs
+    when it is imported, and the modules its imports load then.
+    """
 
-    defs: Mapping[str, ast.stmt]
+    defs: Mapping[str, tuple[ast.AST, ...]]
     imported: Mapping[str, str]
     stars: tuple[str, ...]
+    effects: tuple[ast.AST, ...]
+    loads: tuple[str, ...]
 
 
 def _bound(target: ast.expr) -> list[str]:
@@ -1759,36 +1765,154 @@ def _bound(target: ast.expr) -> list[str]:
     return []
 
 
+def _names_only(target: ast.expr) -> bool:
+    """Whether an assignment's target binds plain names and stores into nothing."""
+    if isinstance(target, ast.Name):
+        return True
+    if isinstance(target, ast.Tuple | ast.List):
+        return all(_names_only(element) for element in target.elts)
+    if isinstance(target, ast.Starred):
+        return _names_only(target.value)
+    return False
+
+
+def _is_main_guard(test: ast.expr) -> bool:
+    """``__name__ == "__main__"``, either way round: what runs as a script only."""
+    if not (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+    ):
+        return False
+    sides = [test.left, *test.comparators]
+    return any(
+        isinstance(side, ast.Name) and side.id == "__name__" for side in sides
+    ) and any(
+        isinstance(side, ast.Constant) and side.value == "__main__" for side in sides
+    )
+
+
+def _package_of(graph: ImportGraph, module: str) -> str:
+    if graph.paths[module].endswith("__init__.py"):
+        return module
+    return module.rpartition(".")[0]
+
+
+def _imported_modules(node: ast.Import | ast.ImportFrom, package: str) -> list[str]:
+    """Every module an import statement loads, the packages it sits in included."""
+    if isinstance(node, ast.Import):
+        bases = [alias.name for alias in node.names]
+        named: list[str] = []
+    else:
+        base = _resolve_from(node, package)
+        if base is None:
+            return []
+        bases = [base]
+        named = [f"{base}.{alias.name}" for alias in node.names if alias.name != "*"]
+    loaded = [
+        ".".join(parts[:cut])
+        for parts in (name.split(".") for name in bases)
+        for cut in range(1, len(parts) + 1)
+    ]
+    return [*loaded, *named]
+
+
 def _namespace(graph: ImportGraph, module: str) -> _Namespace:
     """
-    What ``module`` binds at its top level, a definition inside a top-level
-    ``if`` or ``try`` included, and every name an import anywhere in it binds,
-    to the absolute dotted name it stands for.
+    What ``module`` binds at its top level, a binding inside a top-level
+    ``if``, ``try``, ``with`` or loop included and every binding of a name kept;
+    every name an import anywhere in it binds, to the absolute dotted name it
+    stands for; and its import-time code.
+
+    Import-time code is everything that runs when the module is imported but
+    a binding the walk reaches by its name: a store into a table or onto an
+    attribute, a call, a loop, a test, a decorator, a default argument, a
+    class's bases and its body's own import-time code, and an assignment whose
+    value calls anything. A ``__name__ == "__main__"`` block runs only as a
+    script, and is not. C7+C8's review found the walk read bindings alone, so
+    a writer stored into a table by a subscript, a method call, a loop or
+    ``setattr`` at module level was never reached.
     """
     tree = ast.parse(graph.sources[module])
-    is_package = graph.paths[module].endswith("__init__.py")
-    package = module if is_package else module.rpartition(".")[0]
-    defs: dict[str, ast.stmt] = {}
+    package = _package_of(graph, module)
+    defs: dict[str, list[ast.AST]] = {}
+    effects: list[ast.AST] = []
+    loads: list[str] = []
 
-    def collect(body: list[ast.stmt]) -> None:
+    def bind(name: str, node: ast.AST) -> None:
+        defs.setdefault(name, []).append(node)
+
+    def collect(body: list[ast.stmt], *, names: bool) -> None:
+        """``names``: whether ``body`` binds the module's names, not a class's."""
         for node in body:
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                defs[node.name] = node
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    for name in _bound(target):
-                        defs[name] = node
-            elif isinstance(node, ast.AnnAssign | ast.AugAssign):
-                for name in _bound(node.target):
-                    defs[name] = node
-            elif isinstance(node, ast.If | ast.Try | ast.TryStar | ast.With):
-                collect(node.body)
-                collect(getattr(node, "orelse", []))
-                collect(getattr(node, "finalbody", []))
-                for handler in getattr(node, "handlers", []):
-                    collect(handler.body)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                if names:
+                    bind(node.name, node)
+                effects.extend(node.decorator_list)
+                effects.extend(node.args.defaults)
+                effects.extend(d for d in node.args.kw_defaults if d is not None)
+            elif isinstance(node, ast.ClassDef):
+                if names:
+                    bind(node.name, node)
+                effects.extend(node.decorator_list)
+                effects.extend(node.bases)
+                effects.extend(keyword.value for keyword in node.keywords)
+                collect(node.body, names=False)
+            elif isinstance(node, ast.Import | ast.ImportFrom):
+                loads.extend(_imported_modules(node, package))
+            elif isinstance(node, ast.Assign | ast.AnnAssign | ast.AugAssign):
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if names:
+                    for target in targets:
+                        for name in _bound(target):
+                            bind(name, node)
+                calls = node.value is not None and any(
+                    isinstance(part, ast.Call) for part in ast.walk(node.value)
+                )
+                if calls or not all(_names_only(target) for target in targets):
+                    effects.append(node)
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+                continue
+            elif isinstance(node, ast.If) and _is_main_guard(node.test):
+                collect(node.orelse, names=names)
+            elif isinstance(node, ast.If | ast.While):
+                effects.append(node.test)
+                collect(node.body, names=names)
+                collect(node.orelse, names=names)
+            elif isinstance(node, ast.For | ast.AsyncFor):
+                if names:
+                    for name in _bound(node.target):
+                        bind(name, node)
+                effects.append(node.iter)
+                collect(node.body, names=names)
+                collect(node.orelse, names=names)
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                for item in node.items:
+                    effects.append(item.context_expr)
+                    if names and item.optional_vars is not None:
+                        for name in _bound(item.optional_vars):
+                            bind(name, node)
+                collect(node.body, names=names)
+            elif isinstance(node, ast.Try | ast.TryStar):
+                collect(node.body, names=names)
+                for handler in node.handlers:
+                    if handler.type is not None:
+                        effects.append(handler.type)
+                    collect(handler.body, names=names)
+                collect(node.orelse, names=names)
+                collect(node.finalbody, names=names)
+            elif isinstance(node, ast.Match):
+                effects.append(node.subject)
+                for case in node.cases:
+                    if case.guard is not None:
+                        effects.append(case.guard)
+                    collect(case.body, names=names)
+            else:
+                effects.append(node)
 
-    collect(tree.body)
+    collect(tree.body, names=True)
     imported: dict[str, str] = {}
     stars: list[str] = []
     for node in ast.walk(tree):
@@ -1808,7 +1932,13 @@ def _namespace(graph: ImportGraph, module: str) -> _Namespace:
                     stars.append(base)
                 else:
                     imported[alias.asname or alias.name] = f"{base}.{alias.name}"
-    return _Namespace(defs, imported, tuple(stars))
+    return _Namespace(
+        {name: tuple(nodes) for name, nodes in defs.items()},
+        imported,
+        tuple(stars),
+        tuple(effects),
+        tuple(loads),
+    )
 
 
 def _dotted(node: ast.expr) -> list[str] | None:
@@ -1823,36 +1953,71 @@ def _dotted(node: ast.expr) -> list[str] | None:
     return parts[::-1]
 
 
-def _span(node: ast.stmt) -> tuple[int, int]:
-    """The lines a definition is written on, its decorators included."""
-    first = min([node.lineno, *(d.lineno for d in getattr(node, "decorator_list", []))])
-    return first, node.end_lineno or node.lineno
+def _span(node: ast.AST) -> tuple[int, int]:
+    """The lines a definition or a piece of code is written on, decorators too."""
+    line: int = getattr(node, "lineno", 0)
+    first = min([line, *(d.lineno for d in getattr(node, "decorator_list", []))])
+    return first, getattr(node, "end_lineno", None) or line
+
+
+#: The calls that hand over a namespace, read by name: the module's own.
+_NAMESPACE_CALLS = frozenset({"globals", "vars", "locals"})
+
+
+def _namespace_call(node: ast.AST) -> bool:
+    """``globals()``, ``vars()`` or ``locals()``, with nothing passed."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _NAMESPACE_CALLS
+        and not node.args
+        and not node.keywords
+    )
+
+
+def _peel(node: ast.Attribute) -> tuple[ast.expr, list[str]]:
+    """``x.a.b`` as ``x`` and ``["a", "b"]``, whatever ``x`` is."""
+    attributes: list[str] = []
+    base: ast.expr = node
+    while isinstance(base, ast.Attribute):
+        attributes.append(base.attr)
+        base = base.value
+    return base, attributes[::-1]
 
 
 class _Reach:
     """
     Every top-level definition of the tree a module reaches by referring to
-    it, however the reference is spelled, and every load it cannot read.
+    it, however the reference is spelled, the code each module it enters runs
+    when it is imported, and every load it cannot read.
 
     A definition is reached when anything reached refers to it, called or not,
     since a function stored in a variable, a dict or a class body is called
     later by a name no scan follows: by the module's own name for it, an
     import under any alias, a chain of attributes, a re-export, a star import,
-    or ``getattr`` with a literal name. A module referred to as a value —
-    passed, stored, handed to ``getattr`` with a name the scan cannot read,
-    read through ``vars`` or ``__dict__``, or loaded by a literal name — is
-    reached whole. A load by a name the scan cannot read is recorded. A
-    definition is read whole, nested functions and classes included. It reads
-    spellings, and is not a sandbox.
+    ``getattr`` with a literal name, or a literal looked up in a namespace —
+    ``globals()``, ``vars()``, ``locals()`` or ``sys.modules``, subscripted or
+    through ``get``. Every binding of a reached name is read, not only its
+    last. A module is entered when anything of it is reached, or it is
+    imported by a module entered: its import-time code is read then
+    (``_namespace``), so a writer it stores into a table, by a subscript, a
+    method call, a loop or ``setattr``, is reached however the table is read
+    later. A module referred to as a value — passed, stored, handed to
+    ``getattr`` with a name the scan cannot read, read through ``vars`` or
+    ``__dict__``, or loaded by a literal name — is reached whole. A load, or a
+    namespace lookup, by a name the scan cannot read is recorded. A definition
+    is read whole, nested functions and classes included. It reads spellings,
+    and is not a sandbox.
     """
 
     def __init__(self, graph: ImportGraph) -> None:
         self.graph = graph
         self.spaces: dict[str, _Namespace] = {}
-        self.reached: dict[tuple[str, str], ast.stmt] = {}
+        self.reached: dict[tuple[str, str], tuple[ast.AST, ...]] = {}
         self.whole_modules: set[str] = set()
+        self.entered: set[str] = set()
         self.unreadable: list[str] = []
-        self.pending: list[tuple[str, str]] = []
+        self.pending: list[tuple[str, ast.AST]] = []
 
     def space(self, module: str) -> _Namespace:
         if module not in self.spaces:
@@ -1862,15 +2027,35 @@ class _Reach:
     def run(self, module: str) -> _Reach:
         self.whole(module)
         while self.pending:
-            where, name = self.pending.pop()
-            self.read(where, self.space(where).defs[name])
+            where, node = self.pending.pop()
+            self.read(where, node)
         return self
+
+    def enter(self, module: str) -> None:
+        """
+        ``module`` runs: the packages it sits in are entered, its import-time
+        code is read, and every module that code imports is entered in turn.
+        """
+        if module in self.entered or module not in self.graph.sources:
+            return
+        self.entered.add(module)
+        parts = module.split(".")
+        for cut in range(1, len(parts)):
+            self.enter(".".join(parts[:cut]))
+        space = self.space(module)
+        for index, node in enumerate(space.effects):
+            line = getattr(node, "lineno", 0)
+            self.reached[(module, f"<import-time code {index}, line {line}>")] = (node,)
+            self.pending.append((module, node))
+        for loaded in space.loads:
+            self.enter(loaded)
 
     def whole(self, module: str) -> None:
         """Everything ``module`` defines, and every definition it imports."""
         if module in self.whole_modules:
             return
         self.whole_modules.add(module)
+        self.enter(module)
         space = self.space(module)
         for name in space.defs:
             self.define(module, name)
@@ -1879,8 +2064,10 @@ class _Reach:
 
     def define(self, module: str, name: str) -> None:
         if (module, name) not in self.reached:
-            self.reached[(module, name)] = self.space(module).defs[name]
-            self.pending.append((module, name))
+            nodes = self.space(module).defs[name]
+            self.reached[(module, name)] = nodes
+            self.pending.extend((module, node) for node in nodes)
+            self.enter(module)
 
     def name(
         self,
@@ -1920,25 +2107,86 @@ class _Reach:
         for cut in range(len(parts), 0, -1):
             module = ".".join(parts[:cut])
             if module in self.graph.sources:
+                self.enter(module)
                 if cut < len(parts):
                     self.name(module, parts[cut:], as_value=as_value, seen=seen)
                 elif as_value:
                     self.whole(module)
                 return
 
+    def absolute(self, module: str, parts: list[str]) -> list[str] | None:
+        """``parts`` as an absolute name, when its head is a name an import binds."""
+        imported = self.space(module).imported.get(parts[0])
+        return None if imported is None else [*imported.split("."), *parts[1:]]
+
+    def is_sys_modules(self, module: str, node: ast.AST) -> bool:
+        parts = _dotted(node) if isinstance(node, ast.expr) else None
+        return parts is not None and self.absolute(module, parts) == [
+            "sys",
+            "modules",
+        ]
+
+    def looked_up(self, module: str, node: ast.AST, attributes: list[str]) -> bool:
+        """
+        Whether ``node`` is a lookup in a namespace — ``holder[key]`` or
+        ``holder.get(key)``, the holder ``globals()``, ``vars()``, ``locals()``
+        or ``sys.modules`` — followed, with ``attributes`` read off what it
+        finds, here. A literal key is the name it looks up: in the module's own
+        namespace, or as a module's dotted name. Any other key is recorded as a
+        load the scan cannot read.
+        """
+        if isinstance(node, ast.Subscript):
+            holder, key, rest = node.value, node.slice, []
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+        ):
+            holder, key = node.func.value, node.args[0]
+            rest = [*node.args[1:], *(k.value for k in node.keywords)]
+        else:
+            return False
+        if _namespace_call(holder):
+            in_sys_modules = False
+        elif self.is_sys_modules(module, holder):
+            in_sys_modules = True
+        else:
+            return False
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            self.unreadable.append(f"{module}: {ast.unparse(node)}")
+            self.read(module, key)
+        elif in_sys_modules:
+            self.dotted([*key.value.split("."), *attributes])
+        else:
+            self.name(module, [key.value, *attributes])
+        for other in rest:
+            self.read(module, other)
+        return True
+
     def read(self, module: str, node: ast.AST) -> None:
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            for loaded in _imported_modules(node, _package_of(self.graph, module)):
+                self.enter(loaded)
+            return
         if isinstance(node, ast.Attribute):
             parts = _dotted(node)
             if parts is None:
-                self.read(module, node.value)
+                base, attributes = _peel(node)
+                if not self.looked_up(module, base, attributes):
+                    self.read(module, node.value)
             elif "__dict__" in parts[1:]:
                 self.name(module, parts[: parts.index("__dict__")])
+            elif (self.absolute(module, parts) or [])[:2] == ["sys", "modules"]:
+                self.unreadable.append(f"{module}: {ast.unparse(node)}")
             else:
                 self.name(module, parts)
             return
         if isinstance(node, ast.Name):
             if isinstance(node.ctx, ast.Load):
                 self.name(module, [node.id])
+            return
+        if isinstance(node, ast.Subscript) and self.looked_up(module, node, []):
             return
         if isinstance(node, ast.Call) and self.call(module, node):
             return
@@ -1947,9 +2195,15 @@ class _Reach:
 
     def call(self, module: str, node: ast.Call) -> bool:
         """
-        ``getattr`` and ``vars`` on a name, and the name loaders, which a
-        reference alone does not read; true when the call is read whole here.
+        ``getattr`` and ``vars`` on a name, a namespace handed over or looked
+        up in, and the name loaders, which a reference alone does not read;
+        true when the call is read whole here.
         """
+        if self.looked_up(module, node, []):
+            return True
+        if _namespace_call(node):
+            self.unreadable.append(f"{module}: {ast.unparse(node)}")
+            return True
         func = _dotted(node.func)
         callee = func[-1] if func else None
         if callee == "getattr" and len(node.args) >= 2:
@@ -1980,19 +2234,21 @@ class _Reach:
         return False
 
     def writes(self) -> list[str]:
-        """Every reached definition that writes a table no answer may change."""
-        found: list[str] = []
+        """
+        Every reached definition, and every piece of import-time code read,
+        that writes a table no answer may change.
+        """
+        found: dict[str, None] = {}
         lines: dict[str, list[tuple[int, str, str]]] = {}
-        for (module, name), node in sorted(self.reached.items(), key=lambda i: i[0]):
+        for (module, name), nodes in sorted(self.reached.items(), key=lambda i: i[0]):
             if module not in lines:
                 lines[module] = _shadow_writes(self.graph, module)
-            first, last = _span(node)
-            found += [
-                f"{module}.{name} ({verb}, line {line}): {shown}"
-                for line, verb, shown in lines[module]
-                if first <= line <= last
-            ]
-        return found
+            for node in nodes:
+                first, last = _span(node)
+                for line, verb, shown in lines[module]:
+                    if first <= line <= last:
+                        found[f"{module}.{name} ({verb}, line {line}): {shown}"] = None
+        return list(found)
 
 
 def _shadow_writes(graph: ImportGraph, module: str) -> list[tuple[int, str, str]]:
@@ -2024,9 +2280,9 @@ def _writers(graph: ImportGraph) -> set[tuple[str, str]]:
         lines = [line for line, _, _ in _shadow_writes(graph, module)]
         if not lines:
             continue
-        for name, node in _namespace(graph, module).defs.items():
-            first, last = _span(node)
-            if any(first <= line <= last for line in lines):
+        for name, nodes in _namespace(graph, module).defs.items():
+            spans = [_span(node) for node in nodes]
+            if any(first <= line <= last for first, last in spans for line in lines):
                 found.add((module, name))
     return found
 
@@ -2277,6 +2533,168 @@ _TRIPS = [
         },
         id="a-write-whose-table-cannot-be-read",
     ),
+    # C7+C8's review: code a module runs when it is imported, binding no name
+    # the walk follows — a store into a table, a call, a loop — and lookups in
+    # a module's namespace by a literal name.
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "FOLLOW = {}\n"
+                "FOLLOW['guardrail.card'] = repo.decide_hypothesis\n"
+                "async def follow(conn):\n"
+                "    await FOLLOW['guardrail.card'](conn, 'H-1', 'rejected')\n"
+            )
+        },
+        id="stored-by-a-subscript-at-module-level",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "FOLLOW = {}\n"
+                "FOLLOW.update(card=repo.raise_finding)\n"
+                "async def follow(conn):\n"
+                "    await FOLLOW['card'](conn, 1)\n"
+            )
+        },
+        id="stored-by-a-method-call-at-module-level",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "ACTS = []\n"
+                "for act in (repo.create_candidate,):\n"
+                "    ACTS.append(act)\n"
+                "async def follow(conn):\n"
+                "    await ACTS[0](conn, 1)\n"
+            )
+        },
+        id="stored-by-a-loop-at-module-level",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "class Table:\n"
+                "    pass\n"
+                "setattr(Table, 'act', staticmethod(repo.decide_hypothesis))\n"
+                "async def follow(conn):\n"
+                "    await Table.act(conn, 'H', 'x')\n"
+            )
+        },
+        id="stored-by-setattr-at-module-level",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "async def follow(conn):\n"
+                "    await globals()['repo'].decide_hypothesis(conn, 'H', 'x')\n"
+            )
+        },
+        id="looked-up-in-globals-by-a-literal",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "import sys\n"
+                "import src.programme.repo\n"
+                "async def follow(conn):\n"
+                "    holder = sys.modules['src.programme.repo']\n"
+                "    await holder.create_candidate(conn, 1)\n"
+            )
+        },
+        id="looked-up-in-sys-modules-by-a-literal",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "ACTS = [repo.create_candidate]\n"
+                "ACTS = list(ACTS)\n"
+                "async def follow(conn):\n"
+                "    await ACTS[0](conn, 1)\n"
+            )
+        },
+        id="a-name-bound-twice-the-writer-in-the-first",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "def register(fn):\n"
+                "    return lambda f: f\n"
+                "@register(repo.raise_finding)\n"
+                "async def follow(conn):\n"
+                "    return None\n"
+            )
+        },
+        id="a-decorator-argument",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "async def follow(conn, act=repo.decide_hypothesis):\n"
+                "    await act(conn, 'H', 'x')\n"
+            )
+        },
+        id="a-default-argument",
+    ),
+    pytest.param(
+        {
+            "src/programme/helper.py": (
+                "from src.programme import repo, registry\n"
+                "registry.FOLLOW['card'] = repo.raise_finding\n"
+            ),
+            "src/programme/registry.py": "FOLLOW = {}\n",
+            "src/programme/jev_jobs.py": (
+                "from src.programme import helper, registry\n"
+                "async def follow(conn):\n"
+                "    await registry.FOLLOW['card'](conn, 1)\n"
+            ),
+        },
+        id="stored-by-another-module-when-it-is-imported",
+    ),
+    pytest.param(
+        {
+            "src/programme/helper.py": (
+                "from src.programme import repo, registry\n"
+                "registry.FOLLOW['card'] = repo.raise_finding\n"
+            ),
+            "src/programme/registry.py": (
+                "FOLLOW = {}\nfrom src.programme import helper  # noqa: E402\n"
+            ),
+            "src/programme/jev_jobs.py": (
+                "from src.programme import registry\n"
+                "async def follow(conn):\n"
+                "    await registry.FOLLOW['card'](conn, 1)\n"
+            ),
+        },
+        id="stored-by-a-module-another-imports",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "async def follow(conn, name):\n"
+                "    await globals()[name].decide_hypothesis(conn, 'H', 'x')\n"
+            )
+        },
+        id="looked-up-in-globals-by-a-computed-name",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "import sys\n"
+                "async def follow(conn, name):\n"
+                "    await sys.modules[name].create_candidate(conn, 1)\n"
+            )
+        },
+        id="looked-up-in-sys-modules-by-a-computed-name",
+    ),
 ]
 
 #: Spellings that reach a reader and no writer.
@@ -2311,6 +2729,40 @@ _INNOCENT = [
         },
         id="its-own-read",
     ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "from src.programme import repo\n"
+                "LOADERS = {}\n"
+                "LOADERS['hypothesis_title'] = repo.get_hypothesis\n"
+            )
+        },
+        id="the-reader-stored-by-a-subscript-at-module-level",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "import sys\n"
+                "from src.programme import repo\n"
+                "async def load(conn):\n"
+                "    await globals()['repo'].get_hypothesis(conn, 'H')\n"
+                "    loaded = sys.modules['src.programme.repo'].get_hypothesis\n"
+                "    await loaded(conn, 'H')\n"
+            )
+        },
+        id="the-reader-looked-up-by-a-literal",
+    ),
+    pytest.param(
+        {
+            "src/programme/jev_jobs.py": (
+                "import asyncio\n"
+                "from src.programme import repo\n"
+                "if __name__ == '__main__':\n"
+                "    asyncio.run(repo.decide_hypothesis(None, 'H', 'x'))\n"
+            )
+        },
+        id="code-run-as-a-script-only",
+    ),
 ]
 
 
@@ -2322,7 +2774,12 @@ class TestTheCardCheckChangesNothing:
     an answer from the card check, or from any set, is recorded and acts on
     nothing. Built on ``test_import_boundaries``' import graph and SQL write
     scanner, it follows a reference however it is spelled, aliases included,
-    and each spelling is proved on a synthetic tree that must trip it.
+    and each spelling is proved on a synthetic tree that must trip it. From
+    C7+C8's review it also reads every binding of a name, the code each module
+    it enters runs when imported — so a writer stored into a table at module
+    level by a subscript, a method call, a loop or ``setattr`` is reached — and
+    a literal looked up in ``globals()``, ``vars()``, ``locals()`` or
+    ``sys.modules``, refusing any other key.
     ``test_import_boundaries.py::test_no_model_runner_loads_a_jev_or_web_module``
     holds the other half of design C8's guarantee: the tick loads no ``jev_*``
     or ``web_*`` module.

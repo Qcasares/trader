@@ -2995,9 +2995,27 @@ name, or loaded by a literal name) is reached whole; a load by a name the scan
 cannot read is refused. Every reached definition is checked by the shared
 write scanner, `_table_writes`, for a write of `hypotheses`, `candidates` or
 `findings`. It reaches the lane's `ask`, the quarantine, `repo.get_hypothesis`
-and the code screen, and none of the writers the scan finds in `repo`; each of
-21 spellings must trip it on a synthetic tree, and 3 that only read must not.
-The tick's half of design C8 — it loads no `jev_*` or `web_*` module — is
+and the code screen, and none of the writers the scan finds in `repo`.
+
+This part's review found it read a module's bindings alone, so a writer stored
+into a table by code the module runs when imported — a subscript, a method
+call such as `update`, a loop, `setattr` — was never reached, nor one looked up
+in `globals()` or `sys.modules` by a literal. Now every module the walk enters
+— anything of it reached, or imported by a module entered — has its
+import-time code read: everything it runs on import but a binding reached by
+its name, so stores, calls, loops, tests, decorators, default arguments, a
+class's bases and its body's own such code, and an assignment whose value
+calls anything, a `__name__ == "__main__"` block excepted, which runs as a
+script only. Every binding of a name is read, not its last alone. A literal
+looked up in `globals()`, `vars()`, `locals()` or `sys.modules`, subscripted or
+through `get`, is the name or the module it names, and any other key, or any
+other use of a namespace, is refused as a load the scan cannot read. In the
+real tree it now enters 33 modules, the closure of `jev_jobs`' imports, reads
+400 pieces of their import-time code, and finds no writer. Each of 34
+spellings must trip it on a synthetic tree, and 6 that only read, or run as a
+script only, must not; six mutations of the walk, each removing one of these
+readings, fail them. The tick's half of design C8 — it loads no `jev_*` or
+`web_*` module — is
 `test_import_boundaries.py::test_no_model_runner_loads_a_jev_or_web_module`,
 as before.
 
