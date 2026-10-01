@@ -2572,6 +2572,7 @@ PURE_PROGRAMME_MODULES = (
     "src.programme.jev_chips",
     "src.programme.jev_hash",
     "src.programme.jev_prereg",
+    "src.programme.jev_redact",
     "src.programme.jev_stats",
     "src.programme.job_errors",
 )
