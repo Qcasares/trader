@@ -1011,7 +1011,12 @@ class TestTheCommandLine:
         assert tuple(sorted(printed)) == tuple(sorted(PINNED_FIELDS))
 
     def test_the_one_variable_it_reads_is_database_url(self) -> None:
-        """No key, no model setting: the harness asks nothing, so it needs none."""
+        """
+        No key, no model setting: the harness asks nothing, so it needs none.
+        Phase C9's ``GIT_COMMIT``, read by ``evaluate --record`` alone, names a
+        commit and holds no secret
+        (``TestTheCommandsThatWrite::test_the_variables_it_reads``).
+        """
         tree = ast.parse(EVAL.read_text(encoding="utf-8"))
         read = set()
         for node in ast.walk(tree):

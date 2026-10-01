@@ -2401,8 +2401,10 @@ def test_the_programme_modules_the_api_imports_hold_no_client() -> None:
 
 #: What the evaluation harness may never load: every road to a model, the web
 #: fetcher and ingest phase C adds (named before they exist, as ``jev_client``
-#: was), the runner, and the two handlers that ask; and the vault that holds
-#: the keys, with the one function that decrypts a stored secret.
+#: was), the runner, and the two handlers that ask; the planner, the one
+#: producer of a job that can make a call, since the harness queues nothing
+#: (phase C9); and the vault that holds the keys, with the one function that
+#: decrypts a stored secret.
 HARNESS_MUST_NOT_REACH = (
     "src.programme.jev_lane",
     "src.programme.jev_client",
@@ -2415,6 +2417,7 @@ HARNESS_MUST_NOT_REACH = (
     "src.programme.main",
     "src.programme.jev_forward",
     "src.programme.jev_jobs",
+    "src.programme.jev_plan",
     "src.db.repos.secrets",
     "src.crypto",
 )
@@ -2677,6 +2680,44 @@ def test_the_calibration_scan_sees_an_import_of_it() -> None:
     )
     offenders = _reachable_offences(graph, ["src.programme.jev_plan"], (CALIBRATION,))
     assert offenders, "the scan no longer sees the calibration loaded"
+
+
+#: The research command line, ``python -m src.cli``: backtests and
+#: walk-forwards, run beside the engine.
+RESEARCH_CLI = "src.cli"
+
+
+def test_the_research_cli_loads_no_programme() -> None:
+    """
+    Phase C9: the evaluation harness is ``python -m src.programme.jev_eval``,
+    never a ``src/cli.py`` command. The research command line runs the
+    engine — strategies, the driver, the simulated broker — and an import of
+    the programme there, however indirect, would put the package that is
+    permitted a model client, and the Jev ledger's readers, into the process
+    that runs backtests. "Never ``src/cli.py``" is a machine rule here: the
+    whole closure is walked, so a helper that grew the import is found too.
+    """
+    graph = _real_graph()
+    assert RESEARCH_CLI in graph.names, "the research command line is not in the tree"
+    offenders = _reachable_offences(graph, [RESEARCH_CLI], ("src.programme",))
+    assert not offenders, "the research command line loads the programme:\n" + (
+        "\n".join(offenders)
+    )
+
+
+def test_the_research_cli_scan_sees_the_programme_loaded() -> None:
+    """The walk above, on a tree where a helper of the CLI loads the harness."""
+    graph = _synthetic(
+        {
+            "src/cli.py": "from src.engine import report\n",
+            "src/engine/__init__.py": "",
+            "src/engine/report.py": "from src.programme import jev_eval\n",
+            "src/programme/__init__.py": "",
+            "src/programme/jev_eval.py": "def main(): ...\n",
+        }
+    )
+    offenders = _reachable_offences(graph, [RESEARCH_CLI], ("src.programme",))
+    assert offenders, "the scan no longer sees the programme loaded"
 
 
 @pytest.mark.parametrize("package", PROTECTED_PACKAGES)
