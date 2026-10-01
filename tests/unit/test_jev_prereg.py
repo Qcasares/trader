@@ -782,8 +782,7 @@ _MOVED_SET: dict[str, Any] = {
 
 def _set_plan_hashes() -> dict[tuple[str, int], str | None]:
     return {
-        key: jev_prereg.set_plan_hash(*key)
-        for key in jev_prereg.GOLDEN_SET_PLAN_HASHES
+        key: jev_prereg.set_plan_hash(*key) for key in jev_prereg.GOLDEN_SET_PLAN_HASHES
     }
 
 
@@ -1289,6 +1288,6 @@ class TestTheKeywordRules:
                 rng.choice(words).title() for _ in range(rng.randint(1, 5))
             )
             for rules in (ASSET_CLASS_RULES_AS_WRITTEN, MECHANISM_RULES_AS_WRITTEN):
-                assert jev_prereg.keyword_label(rules, title) == _label(
-                    rules, title
-                ), title
+                assert jev_prereg.keyword_label(rules, title) == _label(rules, title), (
+                    title
+                )

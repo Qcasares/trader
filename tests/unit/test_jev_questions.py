@@ -215,9 +215,7 @@ class TestTheRegistry:
         assert list(catalogue) == list(hypothesis) == ["asset_class", "mechanism"]
         for key in catalogue:
             assert catalogue[key]["criteria"] == hypothesis[key]["criteria"]
-            assert list(catalogue[key]["criteria"]) == list(
-                hypothesis[key]["criteria"]
-            )
+            assert list(catalogue[key]["criteria"]) == list(hypothesis[key]["criteria"])
             assert catalogue[key]["instructions"] != hypothesis[key]["instructions"]
         assert dict(catalogue["asset_class"]["criteria"]) == dict(
             jq.ASSET_CLASS_CRITERIA
@@ -1523,13 +1521,13 @@ class TestTheDetailRuleFailsClosed:
             if question_set.provenance == "web":
                 assert model in jq.WEB_STATE_MODELS, question_set.name
                 continue
-            assert not jq._model_carries_text(
-                model, set(), exempt=("title",)
-            ), question_set.name
+            assert not jq._model_carries_text(model, set(), exempt=("title",)), (
+                question_set.name
+            )
             if model not in jq.TEXT_SUBJECT_FIELD:
-                assert not jq._model_carries_text(
-                    model, set(), exempt=()
-                ), question_set.name
+                assert not jq._model_carries_text(model, set(), exempt=()), (
+                    question_set.name
+                )
         assert jq._model_carries_text(jq.HypothesisTitleState, set(), exempt=())
 
     def test_a_web_set_is_not_held_to_it(self) -> None:

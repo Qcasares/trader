@@ -169,9 +169,7 @@ class TestTheTitleIsScreenedToo:
         F11: the card's fields were checked and its title was not. Refused
         before anything is returned, so nothing reaches the ledger.
         """
-        _replying(
-            monkeypatch, _card(title="Invented Carry With a Sharpe Ratio of 1.4")
-        )
+        _replying(monkeypatch, _card(title="Invented Carry With a Sharpe Ratio of 1.4"))
         with pytest.raises(claims.PerformanceClaimError, match="title asserts"):
             await _propose()
 
