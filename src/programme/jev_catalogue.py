@@ -40,7 +40,7 @@ itself is one an operator cannot reason about.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from types import MappingProxyType
 
@@ -173,12 +173,18 @@ SUBJECT_TYPES: tuple[str, ...] = ("probe", "session", "web_excerpt", "hypothesis
 #: spent its own. A lane with no set gets nothing until it has one. Integer
 #: percents, rounded down, so a budget below :data:`MIN_DAILY_REQUEST_BUDGET`
 #: would leave a lane with a share no call at all, and is refused.
+#:
+#: Phase D (docs/09, section 5.4) takes ten points each from research and the
+#: guardrails, which at the seeded 500 still cover the README's first day, for
+#: the findings and ops lanes, whose sets arrive in D2 and D3; the decision
+#: lane's twenty is untouched, so no findings or ops backlog can take the
+#: forward clock's calls.
 LANE_BUDGET_PERCENT: Mapping[str, int] = MappingProxyType(
     {
-        "research": 35,
-        "guardrail": 35,
-        "findings": 0,
-        "ops": 0,
+        "research": 25,
+        "guardrail": 25,
+        "findings": 10,
+        "ops": 10,
         "signals": 0,
         "decision": 20,
         "probe": 10,
@@ -187,13 +193,32 @@ LANE_BUDGET_PERCENT: Mapping[str, int] = MappingProxyType(
 
 #: The smallest daily request budget other than zero: the least at which every
 #: lane with a share gets at least one call once its share is rounded down —
-#: ten, for the probe lane's 10%. A budget from one to nine would leave the
-#: probe lane none and, below five, the decision lane none, while reading as a
-#: budget that permits calls; ``settings_problem`` refuses it, so it reads as
-#: zero, which says what it does. Derived from the shares, so it moves with them.
+#: ten, for the 10% of the findings, ops and probe lanes. A budget from one to
+#: nine would leave those lanes none and, below five, the decision lane none,
+#: while reading as a budget that permits calls; ``settings_problem`` refuses
+#: it, so it reads as zero, which says what it does. Derived from the shares,
+#: so it moves with them.
 MIN_DAILY_REQUEST_BUDGET = max(
     -(-100 // share) for share in LANE_BUDGET_PERCENT.values() if share
 )
+
+
+def smallest_shares() -> tuple[str, ...]:
+    """
+    The lanes with the smallest share above none, in :data:`LANES`' order:
+    the ones a budget below :data:`MIN_DAILY_REQUEST_BUDGET` leaves with no
+    call first, which ``settings_problem``'s refusal names. Read from the
+    table, so the refusal names whichever lanes the shares make smallest.
+    """
+    least = min(share for share in LANE_BUDGET_PERCENT.values() if share)
+    return tuple(lane for lane in LANES if LANE_BUDGET_PERCENT[lane] == least)
+
+
+def _listed(names: Sequence[str]) -> str:
+    """``names`` as prose: "a", "a and b", "a, b and c"."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
 
 #: The operator's area switches, one ``jev_area_<area>`` flag each.
 AREAS: tuple[str, ...] = (
@@ -377,11 +402,17 @@ def settings_problem(
         return problem
     # An integer by now: _count_problem refused anything else.
     if isinstance(daily_budget, int) and 0 < daily_budget < MIN_DAILY_REQUEST_BUDGET:
+        smallest = smallest_shares()
+        named = (
+            f"the {_listed(smallest)} lane's share"
+            if len(smallest) == 1
+            else f"the {_listed(smallest)} lanes' shares"
+        )
         return (
             f"jev_daily_request_budget must be 0, for no calls, or at least "
             f"{MIN_DAILY_REQUEST_BUDGET}, got {daily_budget}: each lane spends at "
             "most its share of the budget, rounded down, and below "
-            f"{MIN_DAILY_REQUEST_BUDGET} the probe lane's would be none"
+            f"{MIN_DAILY_REQUEST_BUDGET} {named} would be none"
         )
     # A state larger than the sub-limit could never be sent with any question
     # at all, so the sub-limit is a fact about the vendor, not a policy here.
@@ -396,11 +427,11 @@ def lane_budget(daily_budget: int, lane: str) -> int:
     :data:`LANE_BUDGET_PERCENT` of the budget, rounded down.
 
     Rounded down, never up, so the slices together never exceed the budget and
-    a small budget floors them: at a budget of 9 the probe lane's 10% is none,
-    which is why :func:`settings_problem` refuses any budget from one to
-    :data:`MIN_DAILY_REQUEST_BUDGET` less one. A lane outside the vocabulary is
-    a :class:`ValueError`, not a slice of nothing: the schema refuses to record
-    one, so asking is a caller's defect.
+    a small budget floors them: at a budget of 9 a 10% share — the findings,
+    ops and probe lanes' — is none, which is why :func:`settings_problem`
+    refuses any budget from one to :data:`MIN_DAILY_REQUEST_BUDGET` less one.
+    A lane outside the vocabulary is a :class:`ValueError`, not a slice of
+    nothing: the schema refuses to record one, so asking is a caller's defect.
     """
     if lane not in LANE_BUDGET_PERCENT:
         raise ValueError(f"{lane!r} is not a lane; the lanes are {list(LANES)}")
@@ -442,4 +473,5 @@ __all__ = [
     "model_problem",
     "request_size_problem",
     "settings_problem",
+    "smallest_shares",
 ]

@@ -997,21 +997,22 @@ class TestTheAsks:
 
     async def test_never_beyond_the_lanes_share(self, queue: Queue) -> None:
         """
-        A budget of 10 gives the guardrail and research lanes 3 calls each;
-        the screen, planned first, takes the guardrail lane's three, and the
-        card check none.
+        A budget of 10 gives the guardrail and research lanes 2 calls each, at
+        phase D's 25%; the screen, planned first, takes the guardrail lane's
+        two, and the card check none.
         """
-        assert jev_catalogue.lane_budget(10, "guardrail") == 3
+        assert jev_catalogue.lane_budget(10, "guardrail") == 2
+        assert jev_catalogue.lane_budget(10, "research") == 2
         queue.screens = _screens(10)
         queue.titles = [TITLE_SUBJECT]
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
-        assert len(_asks(queue, "guardrail.injection")) == 3
+        assert len(_asks(queue, "guardrail.injection")) == 2
         assert _asks(queue, "guardrail.card") == []
         assert len(_asks(queue, "research.hypothesis")) == 1
 
     async def test_one_call_left_plans_one_ask(self, queue: Queue) -> None:
         queue.screens = _screens(10)
-        queue.calls_today["guardrail"] = 2
+        queue.calls_today["guardrail"] = 1
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
         assert len(_asks(queue, "guardrail.injection")) == 1
 
@@ -1019,10 +1020,11 @@ class TestTheAsks:
         self, queue: Queue
     ) -> None:
         """
-        Three card checks queued from an earlier pass fill the guardrail lane's
-        three calls, so no screen is planned; the research lane's are its own.
+        Two card checks waiting from an earlier pass, one running and one
+        queued, fill the guardrail lane's two calls, so no screen is planned;
+        the research lane's are its own.
         """
-        for n in range(3):
+        for n in range(2):
             queue.jobs[f"elsewhere:{n}"] = {
                 "kind": "jev_ask",
                 "status": "queued" if n else "running",
@@ -1045,7 +1047,7 @@ class TestTheAsks:
             }
         queue.screens = _screens(5)
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
-        assert len(_asks(queue, "guardrail.injection")) == 3
+        assert len(_asks(queue, "guardrail.injection")) == 2
 
     async def test_content_a_block_is_on_record_for_is_planned_with_no_call_left(
         self, queue: Queue
