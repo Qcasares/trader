@@ -1333,8 +1333,7 @@ class TestTheNewSubjects:
         measured = {
             jev_questions.STATE_SUBJECT[question_set.state_model]
             for name, question_set in jev_questions.REGISTRY.items()
-            if name not in jev_eval.NO_GROUND_TRUTH
-            and name != jev_eval.PROBE_SET_NAME
+            if name not in jev_eval.NO_GROUND_TRUTH and name != jev_eval.PROBE_SET_NAME
         }
         assert set(jev_eval.LABELLED_SUBJECTS) == measured
         problem = jev_eval.question_problem(
@@ -4252,9 +4251,7 @@ class TestTheCommandsThatWrite:
 
         monkeypatch.setattr(jev_eval, "preview_report", previewed)
         monkeypatch.setattr(jev_eval, "suggestions_report", suggested)
-        assert set(jev_eval.WRITING_COMMANDS) | {"preview", "suggestions"} <= set(
-            cases
-        )
+        assert set(jev_eval.WRITING_COMMANDS) | {"preview", "suggestions"} <= set(cases)
         for command, (argv, writes) in cases.items():
             record = self._run(monkeypatch)
             monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)

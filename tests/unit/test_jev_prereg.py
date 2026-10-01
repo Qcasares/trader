@@ -1485,9 +1485,8 @@ class TestTheFindingsBaseline:
             "subject": "finding_title",
             "address": "sha256 of the title as UTF-8",
         }
-        assert jev_questions.STATE_SUBJECT[jev_questions.FindingTitleState] == (
-            plan["population"]["subject"]
-        )
+        subject = jev_questions.STATE_SUBJECT[jev_questions.FindingTitleState]
+        assert subject == plan["population"]["subject"]
 
     def test_no_phase_c_plan_names_a_population(self) -> None:
         """So adding the findings plans moved no phase C plan's hash."""
@@ -1512,9 +1511,8 @@ class TestTheKeywordFallback:
             "research.hypothesis",
             "guardrail.card",
         ):
-            assert jev_prereg.set_plan_hash(name, 1) == (
-                RELEASED_SET_PLAN_HASHES[(name, 1, 1)]
-            ), name
+            released = RELEASED_SET_PLAN_HASHES[(name, 1, 1)]
+            assert jev_prereg.set_plan_hash(name, 1) == released, name
         for name in ("research.catalogue", "research.hypothesis"):
             plan = jev_prereg.set_plan(name, 1)
             assert plan is not None

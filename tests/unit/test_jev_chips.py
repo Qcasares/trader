@@ -166,9 +166,7 @@ class TestTheCopies:
         escape = jev_questions.FINDINGS_OWNER.escape_options["owning_role"]
         assert jev_chips.ROLE_KEYS == tuple(o for o in OWNER_OPTIONS if o != escape)
         escape = jev_questions.FINDINGS_SEVERITY.escape_options["severity"]
-        assert jev_chips.SEVERITIES == tuple(
-            o for o in SEVERITY_OPTIONS if o != escape
-        )
+        assert jev_chips.SEVERITIES == tuple(o for o in SEVERITY_OPTIONS if o != escape)
 
     @pytest.mark.parametrize("raised_by", RAISERS)
     @pytest.mark.parametrize("severity", (*roles.SEVERITIES, "unheard_of"))
@@ -221,9 +219,10 @@ def test_the_severity_chip_only_escalates() -> None:
             assert roles.SEVERITIES.index(chip.value) > roles.SEVERITIES.index(
                 finding.severity
             )
-    assert jev_chips.severity_chip(
-        _finding(severity="unheard_of"), _answer("critical")
-    ) is None
+    assert (
+        jev_chips.severity_chip(_finding(severity="unheard_of"), _answer("critical"))
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +354,8 @@ def test_a_duplicate_points_to_the_earliest_older_finding_that_holds_as_much() -
     weaker = _finding("F-0002", severity="medium", opened_at=RAISED + timedelta(1))
     newest = _finding("F-0003", severity="high", opened_at=RAISED + timedelta(2))
     (chip,) = [
-        c for c in jev_chips.duplicate_chips([newest, weaker, first])
+        c
+        for c in jev_chips.duplicate_chips([newest, weaker, first])
         if c.finding_ref == "F-0003"
     ]
     assert chip.value == "F-0001", "the weaker older finding holds less"

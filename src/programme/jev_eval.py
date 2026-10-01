@@ -3016,9 +3016,8 @@ async def preview_report(
         ),
     }
     if question_set.internal_detail:
-        switches[flags.JEV_SEND_INTERNAL_DETAIL] = (
-            await flags.jev_send_internal_detail(conn)
-        )
+        detail = await flags.jev_send_internal_detail(conn)
+        switches[flags.JEV_SEND_INTERNAL_DETAIL] = detail
     model = await flags.jev_model(conn)
     plans = jev_prereg.plans_in_force(name, version)
     holds = {
@@ -3032,9 +3031,7 @@ async def preview_report(
     }
     budget = await flags.jev_daily_request_budget(conn)
     lane_sets = sorted(
-        other.name
-        for other in jev_questions.REGISTRY.values()
-        if other.lane == lane
+        other.name for other in jev_questions.REGISTRY.values() if other.lane == lane
     )
     calls_left = (
         jev_catalogue.lane_budget(budget, lane)
@@ -3046,9 +3043,7 @@ async def preview_report(
         reasons.append("no usable pin is set")
     if plans is None:
         reasons.append(f"{name} v{version} has no analysis plan in force")
-    reasons += [
-        f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on
-    ]
+    reasons += [f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on]
     if calls_left <= 0:
         reasons.append(f"the {lane} lane has no call left today")
     subjects = []
@@ -3122,9 +3117,7 @@ WRITERS = {
 }
 
 
-def ask_status(
-    origin: str, title: object, outcome: Mapping[str, Any] | None
-) -> str:
+def ask_status(origin: str, title: object, outcome: Mapping[str, Any] | None) -> str:
     """
     How one findings set's ask about one finding came out, in a fixed
     phrase: ``answered`` or ``invalid`` for a canonical answer on record
@@ -3137,8 +3130,7 @@ def ask_status(
         return "not asked: no title"
     if len(title) > jev_questions.FINDING_TITLE_MAX_CHARS:
         return (
-            f"not asked: over the {jev_questions.FINDING_TITLE_MAX_CHARS}-"
-            "character cap"
+            f"not asked: over the {jev_questions.FINDING_TITLE_MAX_CHARS}-character cap"
         )
     if outcome is None:
         return "not asked: no usable pin"

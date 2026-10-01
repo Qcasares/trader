@@ -1520,9 +1520,7 @@ class TestTheFindingsRules:
     @pytest.mark.parametrize(
         "stored", ['"true"', "1", "false", None], ids=["string", "one", "off", "none"]
     )
-    async def test_only_json_true_is_on(
-        self, queue: Queue, stored: str | None
-    ) -> None:
+    async def test_only_json_true_is_on(self, queue: Queue, stored: str | None) -> None:
         queue.findings = [FINDING_SUBJECT]
         await _plan(_switches(**{**FINDINGS_ON, AREA_FINDINGS: stored}))
         assert _asks(queue) == []
