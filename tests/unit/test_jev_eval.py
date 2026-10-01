@@ -2126,7 +2126,12 @@ class TestSuggestions:
                 "not answered yet: 2 failed calls",
             ),
             ("model", "T", _outcome(), "not asked yet"),
-            ("model", "T", None, "not asked: no usable pin"),
+            (
+                "model",
+                "T",
+                None,
+                "unknown: no usable pin, so how the ask came out is not read",
+            ),
             ("model", "", _outcome(), "not asked: no title"),
             ("model", "x" * 201, _outcome(), "not asked: over the 200-character cap"),
             ("operator", "T", _outcome(), "not asked: written by an operator"),
@@ -2154,9 +2159,25 @@ class TestSuggestions:
     ) -> None:
         assert jev_eval.ask_status(origin, title, outcome) == status
 
-    async def test_with_no_pin_nothing_is_read_of_the_ledger(
-        self, outcomes_rig: _Outcomes, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        "pin",
+        [None, json.dumps("jev-latest"), "not json"],
+        ids=["no-row", "an-alias", "unreadable"],
+    )
+    async def test_with_no_pin_nothing_is_read_and_nothing_is_said_of_it(
+        self,
+        outcomes_rig: _Outcomes,
+        monkeypatch: pytest.MonkeyPatch,
+        pin: str | None,
     ) -> None:
+        """
+        D2's review (D2RW-2): with no pin the ledger is not read, so how a
+        model-written finding's asks came out is unknown, and it is said to
+        be. The first cut printed "not asked", which the ledger may contradict:
+        here both sets answered F-0001 under the pin before it went. What the
+        rows alone decide — an operator's finding, or one raised before 0015
+        named its writer, is never asked — is still said.
+        """
         self._register(outcomes_rig)
 
         async def no_outcomes(*args: Any, **kwargs: Any) -> Any:
@@ -2164,12 +2185,23 @@ class TestSuggestions:
 
         monkeypatch.setattr(jev_repo, "ask_outcomes", no_outcomes)
         report = await jev_eval.suggestions_report(
-            _FlagConn(_flags(**{flags.JEV_MODEL: None}))  # type: ignore[arg-type]
+            _FlagConn(_flags(**{flags.JEV_MODEL: pin}))  # type: ignore[arg-type]
         )
         assert report["pin"] is None
-        assert report["findings"][0]["asks"] == dict.fromkeys(
-            ("findings.owner", "findings.severity"), "not asked: no usable pin"
-        )
+        statuses = {row["ref"]: row["asks"] for row in report["findings"]}
+        sets = ("findings.owner", "findings.severity")
+        assert statuses == {
+            "F-0001": dict.fromkeys(
+                sets, "unknown: no usable pin, so how the ask came out is not read"
+            ),
+            "F-0002": dict.fromkeys(sets, "not asked: written by an operator"),
+            "F-0003": dict.fromkeys(
+                sets, "not asked: written before migration 0015 named its writer"
+            ),
+        }
+        text = jev_eval.format_suggestions(report)
+        assert "pin: none usable, so how each ask came out is not read" in text
+        assert "not asked: no usable pin" not in text
 
 
 class TestTheEvaluationIsTheTable:

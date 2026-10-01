@@ -4469,8 +4469,14 @@ harness's read-only snapshot, loading no planner, lane or client:
   how each findings set's ask came out — answered, invalid, held by a content
   block, retired, waiting, or not asked and why — with the switches, the pin
   and the holds; never a title, an option, a probability or a chip, since
-  anyone who reads it may later label a set (D-HMB-04). Jev's findings are
-  counted, never named. Its reads, `open_findings`, `jev_findings_raised` and
+  anyone who reads it may later label a set (D-HMB-04). With no usable pin
+  the asks, which are read under the pin, are not read at all, and a finding
+  a set does ask about reads "unknown", the header saying why; the first cut
+  printed "not asked" there, a negative fact where nothing was read, which an
+  answer on record from before the pin went contradicts (D2's review;
+  `tests/unit/test_jev_eval.py::TestSuggestions::test_with_no_pin_nothing_is_read_and_nothing_is_said_of_it`).
+  What a finding's own row decides — its writer, its title's length — is
+  said whatever the pin. Jev's findings are counted, never named. Its reads, `open_findings`, `jev_findings_raised` and
   `ask_outcomes`, read no option, probability or margin, and each filter is
   held on PostgreSQL by a case only it refuses
   (`tests/integration/test_jev_repo.py::TestWhatSuggestionsReads`).

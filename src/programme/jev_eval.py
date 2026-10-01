@@ -3173,12 +3173,23 @@ WRITERS = {
 }
 
 
+#: What ``suggestions`` says of an ask it cannot read: the asks are read under
+#: the pin, and with none usable how one came out is unknown, which is not
+#: "not asked" — the ledger may hold an answer from before the pin went.
+UNKNOWN_WITHOUT_A_PIN = "unknown: no usable pin, so how the ask came out is not read"
+
+
 def ask_status(origin: str, title: object, outcome: Mapping[str, Any] | None) -> str:
     """
     How one findings set's ask about one finding came out, in a fixed
     phrase: ``answered`` or ``invalid`` for a canonical answer on record
     — never which option, never a probability — then a hold, a retirement,
-    a job waiting, or why it was not asked.
+    a job waiting, or why it was not asked; and, for a finding a set does ask
+    about, with no usable pin (``outcome`` ``None``), unknown
+    (:data:`UNKNOWN_WITHOUT_A_PIN`). The first cut said "not asked" there,
+    a value where nothing was read, which the ledger may contradict (D2's
+    review, D2RW-2); what the finding's own row decides — its writer, its
+    title, its cap — is said whatever the pin.
     """
     if origin != "model":
         return f"not asked: {WRITERS.get(origin, 'not written by the programme')}"
@@ -3189,7 +3200,7 @@ def ask_status(origin: str, title: object, outcome: Mapping[str, Any] | None) ->
             f"not asked: over the {jev_questions.FINDING_TITLE_MAX_CHARS}-character cap"
         )
     if outcome is None:
-        return "not asked: no usable pin"
+        return UNKNOWN_WITHOUT_A_PIN
     if outcome["answered"]:
         return "answered" if outcome["valid"] else "invalid"
     if outcome["blocked"]:
@@ -3295,11 +3306,18 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
 
 
 def format_suggestions(report: Mapping[str, Any]) -> str:
-    """``suggestions`` as text: refs, statuses and counts, and nothing else."""
+    """
+    ``suggestions`` as text: refs, statuses and counts, and nothing else. With
+    no usable pin the header says so, and that how each ask came out is not
+    read, so no status of a finding a set asks about reads as a fact.
+    """
+    pin = report["pin"]
     lines = [
         "suggestions: how each ask came out, never what it answered; no answer, "
         "probability or chip is shown before phase E",
-        f"pin: {said(report['pin'])}",
+        f"pin: {pin}"
+        if pin is not None
+        else "pin: none usable, so how each ask came out is not read",
         "switches: "
         + "; ".join(
             f"{switch} {'on' if on else 'off'}"
