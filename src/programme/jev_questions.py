@@ -2033,13 +2033,123 @@ FINDINGS_SEVERITY = _register(
     )
 )
 
+
+def _placeholder_legend() -> str:
+    """
+    The placeholders, each with what it stands for, as ``ops.job_error``
+    tells Jev: rendered from ``jev_redact.PLACEHOLDERS``, so a placeholder
+    added, reworded or reordered moves the set's pack hash
+    (``tests/unit/test_jev_questions.py::
+    test_the_skeleton_bound_and_legend_are_rendered_from_jev_redact``).
+    """
+    items = [f"{token} {meaning}" for token, meaning in jev_redact.PLACEHOLDERS.items()]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+#: Phase D3's one set: the likely cause of a failed research or ingest job
+#: whose error code's table of known failures could not place
+#: (``jev_chips.code_cause``), asked about its skeleton alone. Causes, never
+#: actions: no option says to wait, retry or ignore, since an option that
+#: recommends dismissing an error removes friction by persuasion, and what
+#: code knows exactly is code's chip and never asked (docs/09, section 2.5).
+#: The options are ``jev_chips.CAUSES`` and the escape, in that order
+#: (``test_the_cause_options_are_jev_chips_causes``). Sent only while
+#: ``jev_send_internal_detail`` is on: :data:`TEXT_FREE_LANES` requires the
+#: declaration, and ``dump_state`` checks what is sent all the same.
+OPS_JOB_ERROR = _register(
+    QuestionSet(
+        name="ops.job_error",
+        version=1,
+        lane="ops",
+        provenance="system",
+        internal_detail=True,
+        questions=(
+            (
+                "cause",
+                {
+                    "type": "choice",
+                    "instructions": (
+                        "What most likely caused the failure recorded in `error`? "
+                        "`error` is the error message of a failed background job "
+                        "of the kind named in `job_kind`, reduced to at most "
+                        f"{jev_redact.SKELETON_MAX_TOKENS} words from a fixed "
+                        "technical vocabulary and kept in their order, and each "
+                        "word outside that vocabulary is replaced by a "
+                        f"placeholder: {_placeholder_legend()}. It is all the "
+                        "text given."
+                    ),
+                    "criteria": {
+                        "network": (
+                            "A connection to another service failed, was refused, "
+                            "was reset or timed out."
+                        ),
+                        "rate_limit": (
+                            "Another service refused the request because too many "
+                            "requests were made in a short time."
+                        ),
+                        "vendor_service": (
+                            "A data vendor or another outside service reported an "
+                            "error or an outage, or sent a reply that was empty or "
+                            "unreadable."
+                        ),
+                        "credentials": (
+                            "A key, password or permission was missing, wrong, "
+                            "expired or refused."
+                        ),
+                        "data_missing": (
+                            "Data the job needed was missing: prices, sessions, "
+                            "rows or records it expected to find."
+                        ),
+                        "data_invalid": (
+                            "Data the job read was malformed, inconsistent or "
+                            "outside the range it accepts."
+                        ),
+                        "configuration": (
+                            "A setting, parameter or other input given to the job "
+                            "was invalid or contradictory."
+                        ),
+                        "database": (
+                            "The database refused or failed an operation: a "
+                            "constraint, a lock, a deadlock or its own connection "
+                            "dropping."
+                        ),
+                        "resource_limit": (
+                            "The job ran out of time, memory, disk space or "
+                            "another resource."
+                        ),
+                        "code_defect": (
+                            "A defect in this system's own code: an unexpected "
+                            "exception such as a missing attribute, a wrong type "
+                            "or an index out of range."
+                        ),
+                        "unclear": (
+                            "The error fits two or more of the causes above about "
+                            "equally well, or fits each of them only weakly."
+                        ),
+                    },
+                },
+            ),
+        ),
+        state_model=JobErrorState,
+        purpose=(
+            "Suggests the most likely cause of a failed research or ingest job "
+            "that code's table of known failures cannot place, from a skeleton "
+            "of its error message. A cause, never an action: nothing it answers "
+            "retries, resumes, cancels or fails a job, or reads or writes a "
+            "switch. This system's own text, so it is sent only while "
+            "jev_send_internal_detail is on."
+        ),
+    )
+)
+
 #: The pack hash of every registered set, pinned. A test requires each
 #: registered set to hash to its entry and every entry to be registered, so
 #: editing a set's words without bumping its version fails the build, and so
 #: does bumping the version without recording the new hash here. The four
 #: phase C sets hash to the values design section 5 computed from the same
-#: words, and the two findings sets of phase D2 to the values docs/09 section
-#: 2.6 computed from theirs.
+#: words, and the two findings sets of phase D2 and phase D3's ops set to the
+#: values docs/09 section 2.6 computed from theirs, the ops set's under
+#: provenance ``system``.
 GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ("probe.connectivity", 1): (
         "5d5d091e936ae7b0a2006d2d2a92f90c7a08b0bbe55453550ef2c08c2370560e"
@@ -2064,6 +2174,9 @@ GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ),
     ("findings.severity", 1): (
         "a9cae8cdafff291715982ea74dc3fe05f3e0da1ba8ffdd03cc428df585e830e0"
+    ),
+    ("ops.job_error", 1): (
+        "1e625e8f0965342d12907dbc27fb78e66db44086bb0b6428359c8ab9c512b512"
     ),
 }
 
@@ -2104,6 +2217,7 @@ __all__ = [
     "MIN_SCORE_LEVELS",
     "MOMENTUM_FLAT_BAND",
     "MOMENTUM_SESSIONS",
+    "OPS_JOB_ERROR",
     "OWNING_ROLE_CRITERIA",
     "PROBE_CONNECTIVITY",
     "PROBE_TEXT",

@@ -39,6 +39,7 @@ import random
 import sys
 import types
 import typing
+from collections.abc import Callable
 from datetime import timedelta
 from fractions import Fraction
 from pathlib import Path
@@ -342,6 +343,9 @@ _SET_PLAN_CHOICES = frozenset(
         "KEYWORD_FALLBACK",
         "KEYWORD_MATCHER",
         "MECHANISM_KEYWORDS",
+        "OPS_KEYWORDS",
+        "OPS_KEYWORD_FALLBACK",
+        "OPS_POPULATION",
         "PERFORMANCE_CLAIM_BASELINE",
         "SET_PLAN_VERSIONS",
         "SET_TARGETS",
@@ -514,9 +518,9 @@ class TestTheGateFamily:
 
     def test_the_family_holds_phase_ds_pairs(self) -> None:
         """
-        Pinned pair by pair: phase C's six, and phase D2's two findings
-        questions — eight of the twenty; D3's ops question makes nine
-        (docs/09, section 13).
+        Pinned pair by pair: phase C's six, phase D2's two findings questions
+        and phase D3's ops question — nine of the twenty (docs/09, section
+        13).
         """
         assert _gated_family() == {
             ("guardrail.injection", 1, "addressed_to_ai"),
@@ -527,6 +531,7 @@ class TestTheGateFamily:
             ("guardrail.card", 1, "performance_claim"),
             ("findings.owner", 1, "owning_role"),
             ("findings.severity", 1, "severity"),
+            ("ops.job_error", 1, "cause"),
         }
 
     def test_the_level_is_bonferroni_over_the_family_and_the_looks(self) -> None:
@@ -1043,6 +1048,11 @@ RELEASED_SET_PLAN_HASHES: dict[tuple[str, int, int], str] = {
     ("findings.severity", 1, 1): (
         "256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2"
     ),
+    # Phase D3: the ops set, its baseline the keyword rule on the skeleton's
+    # text, released while the ledger held no answer of it.
+    ("ops.job_error", 1, 1): (
+        "eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883"
+    ),
 }
 
 #: The sets with no plan of their own: the probe measures the vendor, not a
@@ -1181,6 +1191,9 @@ _MOVED_SET: dict[str, Any] = {
     "KEYWORD_FALLBACK": "unclear",
     "KEYWORD_MATCHER": "keywords/v2",
     "MECHANISM_KEYWORDS": jev_prereg.MECHANISM_KEYWORDS[::-1],
+    "OPS_KEYWORDS": jev_prereg.OPS_KEYWORDS[1:],
+    "OPS_KEYWORD_FALLBACK": "insufficient_evidence",
+    "OPS_POPULATION": {**jev_prereg.OPS_POPULATION, "min_content_tokens": 2},
     "PERFORMANCE_CLAIM_BASELINE": {
         **jev_prereg.PERFORMANCE_CLAIM_BASELINE,
         "proximity": 41,
@@ -1344,7 +1357,8 @@ class TestTheTargets:
     def test_the_design_targets(self) -> None:
         """Covered precision of at least 0.90 for the guardrails, covered
         accuracy of at least 0.80 for the research sets and, from phase D2,
-        for the findings sets (docs/09, section 3.4)."""
+        for the findings sets, and from phase D3 for the ops set (docs/09,
+        section 3.4)."""
         expected = {
             "guardrail.injection": ("covered_precision_of_the_acting_class", 0.90),
             "guardrail.card": ("covered_precision_of_the_acting_class", 0.90),
@@ -1352,6 +1366,7 @@ class TestTheTargets:
             "research.hypothesis": ("covered_accuracy", 0.80),
             "findings.owner": ("covered_accuracy", 0.80),
             "findings.severity": ("covered_accuracy", 0.80),
+            "ops.job_error": ("covered_accuracy", 0.80),
         }
         assert {name for name, _ in jev_prereg.SET_PLAN_VERSIONS} == set(expected)
         for name, (statistic, at_least) in expected.items():
@@ -1489,11 +1504,15 @@ class TestTheFindingsBaseline:
         assert subject == plan["population"]["subject"]
 
     def test_no_phase_c_plan_names_a_population(self) -> None:
-        """So adding the findings plans moved no phase C plan's hash."""
+        """
+        So adding the findings plans, and from phase D3 the ops plan, each
+        naming its population, moved no phase C plan's hash.
+        """
         for name, version in jev_prereg.SET_PLAN_VERSIONS:
             plan = jev_prereg.set_plan(name, version)
             assert plan is not None
-            assert ("population" in plan) is name.startswith("findings."), name
+            names_one = name.startswith(("findings.", "ops."))
+            assert ("population" in plan) is names_one, name
 
 
 class TestTheKeywordFallback:
@@ -2057,3 +2076,455 @@ class TestTheKeywordRules:
                 assert jev_prereg.keyword_label(rules, title) == _label(rules, title), (
                     title
                 )
+
+
+# ---------------------------------------------------------------------------
+# Phase D3: the ops set's plan
+# ---------------------------------------------------------------------------
+
+#: The ops rule, written out here as literals and read by hand, apart from
+#: the module: the plan hashes the module's constant, and this copy holds the
+#: words a reviewer read (docs/09, section 3.4).
+OPS_RULES_AS_WRITTEN = (
+    ("credentials", ("permission", "authentication")),
+    (
+        "database",
+        ("deadlock", "constraint", "violates", "duplicate key", "could not serialize"),
+    ),
+    ("resource_limit", ("memory", "disk", "no space")),
+    (
+        "network",
+        (
+            "connection",
+            "refused",
+            "reset",
+            "timeout",
+            "timed out",
+            "unreachable",
+            "socket",
+        ),
+    ),
+    ("vendor_service", ("unavailable",)),
+    (
+        "code_defect",
+        (
+            "has no attribute",
+            "unsupported operand",
+            "out of range",
+            "division by zero",
+            "not iterable",
+            "unexpected keyword argument",
+            "required positional argument",
+        ),
+    ),
+    ("data_missing", ("missing", "no rows", "empty")),
+    ("data_invalid", ("malformed", "invalid", "nan")),
+    ("configuration", ("parameter", "setting", "configuration", "unknown")),
+)
+
+#: design section 3.4's draft of the ops rule, as literals: what the rule
+#: above was cut from, by the evidence below.
+OPS_KEYWORDS_DRAFTED = (
+    ("rate_limit", ("http_429", "rate limit", "throttled", "too many requests")),
+    (
+        "credentials",
+        (
+            "http_401",
+            "http_403",
+            "unauthorized",
+            "unauthorised",
+            "forbidden",
+            "credential",
+            "password",
+            "permission",
+            "authentication",
+        ),
+    ),
+    (
+        "database",
+        ("deadlock", "constraint", "violates", "duplicate key", "could not serialize"),
+    ),
+    ("resource_limit", ("memory", "disk", "exhausted", "no space")),
+    (
+        "network",
+        (
+            "connection",
+            "refused",
+            "reset",
+            "timeout",
+            "timed out",
+            "unreachable",
+            "dns",
+            "socket",
+            "cannot connect",
+        ),
+    ),
+    (
+        "vendor_service",
+        (
+            "http_500",
+            "http_502",
+            "http_503",
+            "http_504",
+            "http_529",
+            "unavailable",
+            "outage",
+            "empty response",
+        ),
+    ),
+    (
+        "code_defect",
+        (
+            "has no attribute",
+            "not subscriptable",
+            "unsupported operand",
+            "out of range",
+            "division by zero",
+            "is not defined",
+            "not callable",
+            "not iterable",
+            "unexpected keyword argument",
+            "required positional argument",
+        ),
+    ),
+    (
+        "data_missing",
+        ("missing", "no data", "no rows", "delisted", "empty", "not found"),
+    ),
+    ("data_invalid", ("malformed", "invalid", "nan", "inconsistent")),
+    ("configuration", ("parameter", "setting", "configuration", "unknown")),
+)
+
+#: What the ops rule says of invented subject texts, recorded under the set
+#: plan version that registered it: a change to what the rule decides fails
+#: here until the plan's version is bumped and a row appended.
+OPS_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, str], ...]] = {
+    1: (
+        ("ingest_bars: errno [number] connection refused", "network"),
+        ("backtest: errno [number] connection reset by peer", "network"),
+        (
+            "backtest: [address] missing [number] required positional argument "
+            "[quoted]",
+            "code_defect",
+        ),
+        ("walkforward: [address] got an unexpected keyword argument missing",
+         "code_defect"),
+        (
+            "walkforward: duplicate key value violates unique constraint [quoted]",
+            "database",
+        ),
+        ("backtest: permission denied for table [word]", "credentials"),
+        ("backtest: permission denied connection refused", "credentials"),
+        ("ingest_reference_bars: errno [number] no space left on device",
+         "resource_limit"),
+        ("backtest: errno [number] resource temporarily unavailable",
+         "vendor_service"),
+        ("backtest: query returned no rows", "data_missing"),
+        ("backtest: cannot [word] from an empty sequence", "data_missing"),
+        ("backtest: invalid input syntax for type integer [quoted]", "data_invalid"),
+        ("backtest: cannot convert float nan to integer", "data_invalid"),
+        ("backtest: unrecognized configuration parameter [quoted]", "configuration"),
+        ("ingest_bars: connection [word] missing", "network"),
+        ("backtest: [word] [word] [word]", "unclear"),
+        ("ingest_reference_bars: ", "unclear"),
+    ),
+}
+
+
+def _raised(fn: Callable[[], object]) -> str:
+    """The message ``fn`` raises."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 - the message is the evidence
+        return str(exc)
+    raise AssertionError("raised nothing")
+
+
+def _missing_positional(a: object) -> object:
+    return a
+
+
+def _os_error(name: str) -> str:
+    """An operating system error as Python raises it: errno and strerror."""
+    import errno
+    import os
+
+    code = getattr(errno, name)
+    return str(OSError(code, os.strerror(code)))
+
+
+def _postgres(class_name: str, message: str) -> str:
+    """PostgreSQL's message as asyncpg's own class for it raises it."""
+    import asyncpg
+
+    cls = getattr(asyncpg.exceptions, class_name)
+    return str(cls(message))
+
+
+def _evidence() -> tuple[tuple[str, str], ...]:
+    """
+    The evidence corpus (docs/09, D-HMB-10): real messages a triaged job can
+    record as they stand — none is wrapped by a data source, which places
+    every vendor failure under a shape of its own — each named by where it
+    comes from. A builtin's and numpy's and pandas' are triggered here; an
+    operating system's is its errno with the platform's strerror;
+    PostgreSQL's is the server's text as asyncpg's class for its SQLSTATE
+    raises it, the asyncpg the job uses.
+    """
+    import asyncpg
+    import numpy
+    import pandas
+
+    pg = f"PostgreSQL, through asyncpg {asyncpg.__version__}"
+    return (
+        ("builtins: AttributeError", _raised(lambda: int.no_such_attribute)),
+        ("builtins: TypeError", _raised(lambda: 1 + "a")),
+        ("builtins: IndexError", _raised(lambda: [][0])),
+        ("builtins: ZeroDivisionError", _raised(lambda: 1.0 / 0)),
+        ("builtins: TypeError", _raised(lambda: 1 in 3)),
+        ("builtins: TypeError", _raised(lambda: _missing_positional(1, b=2))),
+        ("builtins: TypeError", _raised(lambda: _missing_positional())),
+        ("builtins: ValueError", _raised(lambda: int("abc"))),
+        ("builtins: ValueError", _raised(lambda: int(float("nan")))),
+        ("random: IndexError", _raised(lambda: random.choice([]))),
+        (f"numpy {numpy.__version__}", _raised(
+            lambda: numpy.array([1.0, [1, 2]], dtype=float)
+        )),
+        (f"pandas {pandas.__version__}", _raised(lambda: pandas.Timestamp("xyzzy"))),
+        ("os: ECONNREFUSED", _os_error("ECONNREFUSED")),
+        ("os: ECONNRESET", _os_error("ECONNRESET")),
+        ("os: ETIMEDOUT", _os_error("ETIMEDOUT")),
+        ("os: ENETUNREACH", _os_error("ENETUNREACH")),
+        ("os: ENOSPC", _os_error("ENOSPC")),
+        ("os: ENOMEM", _os_error("ENOMEM")),
+        ("os: EDQUOT", _os_error("EDQUOT")),
+        ("os: ENOTSOCK", _os_error("ENOTSOCK")),
+        ("os: EDEADLK", _os_error("EDEADLK")),
+        ("os: EACCES", _os_error("EACCES")),
+        ("os: EAGAIN", _os_error("EAGAIN")),
+        (pg, _postgres(
+            "UniqueViolationError",
+            'duplicate key value violates unique constraint "jobs_dedupe_key"',
+        )),
+        (pg, _postgres(
+            "SerializationError", "could not serialize access due to concurrent update"
+        )),
+        (pg, _postgres(
+            "QueryCanceledError", "canceling statement due to statement timeout"
+        )),
+        (
+            pg,
+            _postgres("InsufficientPrivilegeError", "permission denied for table jobs"),
+        ),
+        (pg, _postgres(
+            "InvalidAuthorizationSpecificationError",
+            'Peer authentication failed for user "trader"',
+        )),
+        (pg, _postgres(
+            "InvalidTextRepresentationError",
+            'invalid input syntax for type integer: "abc"',
+        )),
+        (
+            pg,
+            _postgres("InvalidTextRepresentationError", 'malformed array literal: "x"'),
+        ),
+        (pg, _postgres("NoDataFoundError", "query returned no rows")),
+        (pg, _postgres(
+            "UndefinedObjectError", 'unrecognized configuration parameter "x"'
+        )),
+        (pg, _postgres(
+            "DiskFullError", 'could not extend file "base/1/2": No space left on device'
+        )),
+        (pg, _postgres(
+            "ConnectionDoesNotExistError",
+            "connection was closed in the middle of operation",
+        )),
+    )
+
+
+def _subject_text(kind: str, message: str) -> str | None:
+    """
+    The subject text the planner would send for a job of ``kind`` failing
+    with ``message``, or ``None`` where code places it or its skeleton is too
+    short to ask about (``jev_chips.residue_skeleton``).
+    """
+    from src.programme import jev_chips, jev_questions
+
+    tokens = jev_chips.residue_skeleton(kind, message)
+    if tokens is None:
+        return None
+    state = jev_questions.JobErrorState(job_kind=kind, error=tokens)
+    return jev_questions.job_error_text(state)
+
+
+class TestTheOpsKeywords:
+    """
+    The ops baseline (docs/09, section 3.4): pinned by what it says, and every
+    keyword one a message this system can send produces.
+    """
+
+    def test_held_to_literals_and_to_verdicts(self) -> None:
+        assert jev_prereg.OPS_KEYWORDS == OPS_RULES_AS_WRITTEN
+        assert jev_prereg.OPS_KEYWORD_FALLBACK == "unclear"
+        version = jev_prereg.SET_PLAN_VERSIONS[("ops.job_error", 1)]
+        for text, label in OPS_VERDICTS_AS_REGISTERED[version]:
+            assert jev_prereg.keyword_label(
+                jev_prereg.OPS_KEYWORDS, text, fallback="unclear"
+            ) == label, text
+
+    def test_the_labels_are_code_causes_and_the_fallback_the_escape(self) -> None:
+        from src.programme import jev_chips, jev_questions
+
+        labels = [label for label, _ in jev_prereg.OPS_KEYWORDS]
+        assert len(labels) == len(set(labels))
+        assert set(labels) <= set(jev_chips.CAUSES)
+        assert labels.index("code_defect") < labels.index("data_missing")
+        ops = jev_questions.REGISTRY["ops.job_error"]
+        assert ops.escape_options == {"cause": jev_prereg.OPS_KEYWORD_FALLBACK}
+
+    def test_every_evidence_message_is_one_jev_would_be_asked_about(self) -> None:
+        """
+        Each message of the corpus is residue under every triaged kind, and
+        its skeleton admissible: evidence the redactor would send.
+        """
+        from src.programme import jev_redact
+
+        for source, message in _evidence():
+            for kind in jev_redact.TRIAGED_KINDS:
+                assert _subject_text(kind, message) is not None, (source, message)
+
+    def test_every_keyword_is_produced(self) -> None:
+        """
+        Each keyword is found, by ``keyword_label``'s own matcher, in the
+        subject text of a corpus message code leaves to Jev (docs/09,
+        D-HMB-10): a keyword nothing produces could never fire, and would
+        read as a rule it is not.
+        """
+        texts = [
+            text
+            for _, message in _evidence()
+            if (text := _subject_text("backtest", message)) is not None
+        ]
+        for _, keywords in jev_prereg.OPS_KEYWORDS:
+            for keyword in keywords:
+                pattern = jev_prereg._keyword_pattern(keyword)
+                assert any(pattern.search(t.casefold()) for t in texts), keyword
+
+    def test_the_check_bites(self) -> None:
+        """A keyword only an HTTP status could produce is found in no text."""
+        texts = [
+            text
+            for _, message in _evidence()
+            if (text := _subject_text("backtest", message)) is not None
+        ]
+        for keyword in ("http_429", "rate limit", "throttled", "forbidden"):
+            pattern = jev_prereg._keyword_pattern(keyword)
+            assert not any(pattern.search(t.casefold()) for t in texts), keyword
+
+    def test_the_rule_is_the_drafts_less_what_no_message_produces(self) -> None:
+        """
+        The rule is design section 3.4's draft cut, and only cut: its labels
+        in the draft's order, each label's keywords the draft's in the draft's
+        order, and every keyword the draft held that the rule dropped found in
+        no subject text of the evidence — so nothing was dropped that a
+        message this system records could have fired, and nothing added that
+        the draft did not hold.
+        """
+        kept = {keyword for _, keywords in OPS_RULES_AS_WRITTEN for keyword in keywords}
+        drafted = dict(OPS_KEYWORDS_DRAFTED)
+        order = [label for label, _ in OPS_KEYWORDS_DRAFTED]
+        labels = [label for label, _ in jev_prereg.OPS_KEYWORDS]
+        assert labels == [label for label in order if label in labels]
+        for label, keywords in jev_prereg.OPS_KEYWORDS:
+            assert list(keywords) == [k for k in drafted[label] if k in keywords]
+        texts = [
+            text
+            for _, message in _evidence()
+            for kind in ("backtest", "ingest_bars")
+            if (text := _subject_text(kind, message)) is not None
+        ]
+        dropped = [
+            keyword
+            for _, keywords in OPS_KEYWORDS_DRAFTED
+            for keyword in keywords
+            if keyword not in kept
+        ]
+        assert "rate limit" in dropped and "sqlstate" not in kept
+        for keyword in dropped:
+            pattern = jev_prereg._keyword_pattern(keyword)
+            assert not any(pattern.search(t.casefold()) for t in texts), keyword
+
+    def test_no_keyword_matches_a_job_kind(self) -> None:
+        """
+        The subject text opens with the job's kind, and ``keyword_label``
+        reads across an underscore, so no keyword may match a kind alone:
+        ``ingest_bars`` would otherwise answer for ``bars``.
+        """
+        from src.programme import jev_redact
+
+        for kind in jev_redact.TRIAGED_KINDS:
+            for _, keywords in jev_prereg.OPS_KEYWORDS:
+                for keyword in keywords:
+                    assert not jev_prereg._keyword_pattern(keyword).search(kind), (
+                        keyword,
+                        kind,
+                    )
+            assert (
+                jev_prereg.keyword_label(
+                    jev_prereg.OPS_KEYWORDS, f"{kind}: ", fallback="unclear"
+                )
+                == "unclear"
+            )
+
+
+class TestTheOpsPlan:
+    """
+    The plan names the rule it reads, the population it is asked about and
+    the versions of the code that decide it (docs/09, section 3.4).
+    """
+
+    def test_the_baseline_is_the_keyword_rule_on_the_subject_text(self) -> None:
+        plan = jev_prereg.set_plan("ops.job_error", 1)
+        assert plan is not None
+        assert list(plan["questions"]) == ["cause"]
+        question = plan["questions"]["cause"]
+        assert question["acting_class"] is None
+        assert question["statistic"] == "covered_accuracy"
+        assert question["at_least"] == 0.80
+        assert question["keyword_baseline"] == {
+            "rule": "jev_prereg.keyword_label",
+            "matcher": jev_prereg.KEYWORD_MATCHER,
+            "reads": "job_error_text",
+            "rules": [[label, list(words)] for label, words in OPS_RULES_AS_WRITTEN],
+            "fallback": "unclear",
+        }
+
+    def test_the_population_copies_are_the_codes_own(self) -> None:
+        """
+        This module loads the standard library alone, so the population holds
+        copies — the triaged kinds, the redactor's and the shapes' versions
+        and hashes, the minimum content — each held here to its original, so
+        a moved redactor or table is a moved plan.
+        """
+        from src.programme import jev_chips, jev_questions, jev_redact
+
+        population = jev_prereg.OPS_POPULATION
+        assert population["kinds"] == jev_redact.TRIAGED_KINDS
+        assert dict(population["redactor"]) == {
+            "rule": "jev_redact.skeleton",
+            "version": jev_redact.REDACTOR_VERSION,
+            "sha256": jev_redact.redactor_sha256(),
+        }
+        assert dict(population["left_to_jev_by"]) == {
+            "rule": "jev_chips.code_cause",
+            "version": jev_chips.SHAPES_VERSION,
+            "sha256": jev_chips.shapes_sha256(),
+        }
+        assert population["min_content_tokens"] == jev_redact.MIN_CONTENT_TOKENS
+        assert population["subject"] == (
+            jev_questions.STATE_SUBJECT[jev_questions.JobErrorState]
+        )
+        assert population["status"] == "failed"
+        plan = jev_prereg.set_plan("ops.job_error", 1)
+        assert plan is not None
+        assert plan["population"]["kinds"] == list(jev_redact.TRIAGED_KINDS)

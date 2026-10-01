@@ -534,6 +534,9 @@ def test_the_module_reads_nothing_and_holds_no_text_of_a_finding() -> None:
 #: names by its hash.
 RELEASED_SHAPES_SHA256: dict[int, str] = {
     1: "f4760e9218a63855942d567b8ad23c550cc3862119cd46f3c1c3445300adc53a",
+    # Version 2: the ops ask's own refusals, which version 1 placed nowhere.
+    # Version 1 was published on the branch before them, and no plan named it.
+    2: "0ce6cdc62fbbbfe20ba80fa5f268157f6a21f838687fc8657bf8f4a84aa474d8",
 }
 
 TRIAGED = jev_redact.TRIAGED_KINDS
@@ -1334,7 +1337,7 @@ class TestTheShapesTable:
     @pytest.mark.parametrize(
         ("target", "attribute", "moved"),
         [
-            (jev_chips, "SHAPES_VERSION", 2),
+            (jev_chips, "SHAPES_VERSION", jev_chips.SHAPES_VERSION + 1),
             (jev_chips, "CAUSES", ("network",)),
             (jev_chips, "CODE_ONLY_CAUSES", ("expired",)),
             (jev_chips, "JOB_ERROR_SHAPES", "reversed"),

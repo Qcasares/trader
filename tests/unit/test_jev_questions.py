@@ -80,7 +80,7 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypedDict
 
-from src.programme import jev_catalogue, jev_redact
+from src.programme import jev_catalogue, jev_chips, jev_redact
 from src.programme import jev_questions as jq
 from src.programme.jev_hash import state_hash
 from src.programme.jev_questions import QuestionSet
@@ -171,16 +171,19 @@ REGISTERED: dict[str, tuple[int, str, str, type[BaseModel]]] = {
     "guardrail.card": (1, "guardrail", "model", jq.HypothesisTitleState),
     "findings.owner": (1, "findings", "model", jq.FindingTitleState),
     "findings.severity": (1, "findings", "model", jq.FindingTitleState),
+    "ops.job_error": (1, "ops", "system", jq.JobErrorState),
 }
 
 
 class TestTheRegistry:
-    def test_the_registry_is_exactly_the_eight_sets(self) -> None:
+    def test_the_registry_is_exactly_the_nine_sets(self) -> None:
         """
         An exact pin, both ways: a set added, removed, moved to another lane
         or provenance, or given another state is a reviewer's edit here, with
         its words, its golden and its released rows beside it. Six sets at
-        phase C's end; phase D2 adds the two findings sets.
+        phase C's end; phase D2 adds the two findings sets, and phase D3 the
+        ops set, the one set that declares ``internal_detail`` (docs/09,
+        section 2.6).
         """
         assert {
             name: (qs.version, qs.lane, qs.provenance, qs.state_model)
@@ -194,7 +197,10 @@ class TestTheRegistry:
         assert jq.GUARDRAIL_CARD is jq.get("guardrail.card")
         assert jq.FINDINGS_OWNER is jq.get("findings.owner")
         assert jq.FINDINGS_SEVERITY is jq.get("findings.severity")
-        assert not any(qs.internal_detail for qs in jq.REGISTRY.values())
+        assert jq.OPS_JOB_ERROR is jq.get("ops.job_error")
+        assert {
+            name for name, qs in jq.REGISTRY.items() if qs.internal_detail
+        } == {"ops.job_error"}
 
     def test_the_registered_screen_is_the_screen(self) -> None:
         """
@@ -555,6 +561,11 @@ RELEASED_PACK_HASHES: dict[tuple[str, int], str] = {
     ("findings.severity", 1): (
         "a9cae8cdafff291715982ea74dc3fe05f3e0da1ba8ffdd03cc428df585e830e0"
     ),
+    # Phase D3: docs/09 section 2.6's hash, computed under provenance
+    # ``system``.
+    ("ops.job_error", 1): (
+        "1e625e8f0965342d12907dbc27fb78e66db44086bb0b6428359c8ab9c512b512"
+    ),
 }
 
 
@@ -590,6 +601,9 @@ RELEASED_QUESTION_HASHES: dict[tuple[str, int], str] = {
     ),
     ("findings.severity", 1): (
         "0504d4817b84e44db3fc268f4d64bfd0d4d0e4ec62856f84595ccd9bab08db9e"
+    ),
+    ("ops.job_error", 1): (
+        "e24fe30799ea8252dd3eac4dba6df02cb7fd9a0aaf4d4d11007fedc7df6a617a"
     ),
 }
 
@@ -1472,8 +1486,17 @@ class TestRegistrationRules:
         assert jq.registration_problem(_one_noul(state_model=model), {}) is None
 
     def test_the_registered_states_carry_no_detail(self) -> None:
+        """
+        No registered state carries this system's detail beyond a title. From
+        phase D3 the ops set declares ``internal_detail`` all the same: its
+        skeleton carries no text at all, and the text-free lane requires the
+        declaration, so it is sent only while the detail switch is on (docs/09,
+        D-SAFE-1). Every other set declares none.
+        """
         for question_set in jq.REGISTRY.values():
-            assert question_set.internal_detail is False
+            assert question_set.internal_detail is (
+                question_set.lane in jq.TEXT_FREE_LANES
+            ), question_set.name
             assert jq.registration_problem(question_set, {}) is None
 
     def test_detail_is_a_boolean(self, subjects: None) -> None:
@@ -3749,6 +3772,20 @@ class TestTheJobError:
             _job_error("timeout", kind="backtest")
         ) != jq.job_error_subject(_job_error("timeout", kind="walkforward"))
 
+    def test_what_the_ops_set_sends_is_the_state_and_nothing_else(self) -> None:
+        """
+        ``ops.job_error`` dumps exactly the kind and the tokens, its output
+        read on every dump with no field exempted (``TEXT_FREE_LANES``), and
+        the subject is the hash of what it sends.
+        """
+        state = _job_error("UniqueViolationError", "duplicate", "key", "[quoted]")
+        sent = jq.OPS_JOB_ERROR.dump_state(state)
+        assert sent == {
+            "job_kind": "ingest_bars",
+            "error": ["UniqueViolationError", "duplicate", "key", "[quoted]"],
+        }
+        assert jq.job_error_subject(state) == state_hash(sent)
+
     def test_no_set_asked_about_another_state_takes_it(self) -> None:
         for question_set in jq.REGISTRY.values():
             if question_set.state_model is not jq.JobErrorState:
@@ -3805,3 +3842,125 @@ def test_job_error_text_round_trips() -> None:
         ("ingest_bars", ("connection",)),
     ):
         assert jq.job_error_from_text(text) is None, text
+
+
+# ---------------------------------------------------------------------------
+# Phase D3: the ops set
+# ---------------------------------------------------------------------------
+
+
+def test_the_cause_options_are_jev_chips_causes() -> None:
+    """
+    One vocabulary for code and Jev: the options are code's causes in their
+    order, then the escape, so a code chip and an answer name a cause the
+    same way (docs/09, section 4.5).
+    """
+    ((key, question),) = jq.OPS_JOB_ERROR.questions
+    assert (key, question["type"]) == ("cause", "choice")
+    assert list(question["criteria"]) == [*jev_chips.CAUSES, "unclear"]
+    assert not set(question["criteria"]) & set(jev_chips.CODE_ONLY_CAUSES)
+
+
+@pytest.mark.parametrize("moved", ["bound", "a-meaning", "the-order", "a-placeholder"])
+def test_the_skeleton_bound_and_legend_are_rendered_from_jev_redact(
+    moved: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The words tell Jev how long a skeleton can be and what each placeholder
+    stands for, rendered from ``jev_redact``'s constants: executed with each
+    moved, the ops set's words and pack hash move, the state's bound with the
+    first, and no other set's hash moves.
+    """
+    placeholders = dict(jev_redact.PLACEHOLDERS)
+    if moved == "bound":
+        bound = jev_redact.SKELETON_MAX_TOKENS - 1
+        monkeypatch.setattr(jev_redact, "SKELETON_MAX_TOKENS", bound)
+    elif moved == "a-meaning":
+        placeholders["[secret]"] = "a credential or key"
+    elif moved == "the-order":
+        items = list(placeholders.items())
+        items[0], items[1] = items[1], items[0]
+        placeholders = dict(items)
+    else:
+        placeholders = {**placeholders, "[thing]": "anything else"}
+    monkeypatch.setattr(
+        jev_redact, "PLACEHOLDERS", types.MappingProxyType(placeholders)
+    )
+    variant = _execute_variant(monkeypatch, MODULE.read_text(encoding="utf-8"))
+    ops = variant.REGISTRY["ops.job_error"]
+    assert ops.pack_hash != jq.OPS_JOB_ERROR.pack_hash
+    assert ops.questions_hash != jq.OPS_JOB_ERROR.questions_hash
+    ((_, question),) = ops.questions
+    legend = ", ".join(f"{token} {meaning}" for token, meaning in placeholders.items())
+    assert legend.rsplit(", ", 1)[0] in question["instructions"]
+    for other, registered in variant.REGISTRY.items():
+        if other != "ops.job_error":
+            assert registered.pack_hash == jq.get(other).pack_hash, other
+    if moved == "bound":
+        assert f"at most {bound} words" in question["instructions"]
+        with pytest.raises(ValidationError):
+            variant.JobErrorState(job_kind="backtest", error=("timeout",) * (bound + 1))
+
+
+def test_the_ops_set_is_the_designs() -> None:
+    """
+    Lane ``ops``, provenance ``system``, declaring ``internal_detail``, about
+    a ``JobErrorState``, its one question rendered word for word (docs/09,
+    section 2.4).
+    """
+    ops = jq.OPS_JOB_ERROR
+    assert (ops.name, ops.version, ops.lane, ops.provenance) == (
+        "ops.job_error",
+        1,
+        "ops",
+        "system",
+    )
+    assert ops.internal_detail is True
+    assert ops.state_model is jq.JobErrorState
+    ((_, question),) = ops.questions
+    assert question["instructions"] == (
+        "What most likely caused the failure recorded in `error`? `error` is the "
+        "error message of a failed background job of the kind named in "
+        "`job_kind`, reduced to at most 48 words from a fixed technical "
+        "vocabulary and kept in their order, and each word outside that "
+        "vocabulary is replaced by a placeholder: [number] a number, [id] an "
+        "identifier mixing letters and digits, [name] a name written with "
+        "capital letters, [word] another word, [date] a date, [time] a time of "
+        "day, [address] a web, network or code address, [path] a file path, "
+        "[quoted] quoted text, [value] the value given to a setting, [secret] a "
+        "credential, and [more] words left out at the end. It is all the text "
+        "given."
+    )
+    assert ops.pack_hash == (
+        "1e625e8f0965342d12907dbc27fb78e66db44086bb0b6428359c8ab9c512b512"
+    )
+    assert ops.questions_hash == (
+        "e24fe30799ea8252dd3eac4dba6df02cb7fd9a0aaf4d4d11007fedc7df6a617a"
+    )
+
+
+def test_the_largest_skeleton_fits_the_seeded_limits() -> None:
+    """
+    A skeleton at its bound, of the longest token the vocabulary holds, is
+    far inside the seeded ``jev_max_state_tokens`` and the vendor's limits
+    (docs/09, section 2.6), so no skeleton is refused for its size.
+    """
+    longest = max(jev_redact.TOKENS, key=len)
+    state = jq.OPS_JOB_ERROR.dump_state(
+        jq.JobErrorState(
+            job_kind="ingest_reference_bars",
+            error=(longest,) * jev_redact.SKELETON_MAX_TOKENS,
+        )
+    )
+    questions = {
+        key: json.dumps(q, ensure_ascii=False)
+        for key, q in jq.OPS_JOB_ERROR.as_request_questions().items()
+    }
+    problem = jev_catalogue.request_size_problem(
+        json.dumps(state, ensure_ascii=False),
+        questions,
+        jev_catalogue.DEFAULT_MAX_STATE_TOKENS,
+    )
+    assert problem is None, problem
+    tokens = jev_catalogue.estimate_tokens(json.dumps(state, ensure_ascii=False))
+    assert tokens < jev_catalogue.DEFAULT_MAX_STATE_TOKENS / 8

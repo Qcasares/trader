@@ -1107,7 +1107,31 @@ _TEXTS = {
     "web_excerpt": (_EXCERPT, 7),
     "hypothesis_title": ("Invented Carry in Fictional Bond Futures", "H-0007"),
     "finding_title": ("Invented Fills Assumed at Prices No Venue Gave", "F-0042"),
+    # Phase D3: a failed job's error, which the ops set is asked about as its
+    # skeleton; its subject is the skeleton's state, never this text's hash.
+    "job_error": (
+        "[Errno 111] Connection refused",
+        "6d0c5b1e-0d3a-4d37-9c43-7b0b9b0b0b01",
+    ),
 }
+
+#: The triaged kind the counted ops run's job is of.
+_JOB_KIND = "ingest_bars"
+
+
+def _subject_id(subject_type: str, text: str) -> str:
+    """
+    What a counted run's payload names: a text's sha256, or, for a job's
+    error, the address of the state its skeleton makes.
+    """
+    if subject_type != "job_error":
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    from src.programme import jev_questions, jev_redact
+
+    state = jev_questions.JobErrorState(
+        job_kind=_JOB_KIND, error=jev_redact.skeleton(text)
+    )
+    return jev_questions.job_error_subject(state)
 
 
 def _askable() -> tuple[str, ...]:
@@ -1131,7 +1155,7 @@ def _ask_payload(name: str) -> dict[str, Any]:
         "set": name,
         "version": version,
         "subject_type": subject_type,
-        "subject_id": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "subject_id": _subject_id(subject_type, text),
         "source_id": source_id,
         **(jev_prereg.plans_in_force(name, version) or {}),
     }
@@ -1242,7 +1266,8 @@ class TestEveryJevHandlerMakesAtMostOneCall:
         every set it asks, not only the screen the run above asks — each
         reading its own row, admitting it and building its own state before
         the road — through every outcome the road can return. From phase D2
-        that includes the two findings sets, whose follow-up is none.
+        that includes the two findings sets, and from phase D3 the ops set,
+        whose follow-up is none.
         """
         _prepare_handler(monkeypatch, "jev_ask")
         await _count_calls(monkeypatch, "jev_ask", _ask_payload(name))
@@ -1494,8 +1519,20 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
                 "opened_at": datetime(2026, 9, 28, 9, tzinfo=UTC),
             }
 
+        # And a failed job of a triaged kind whose error code leaves to Jev,
+        # for the ops set (phase D3).
+        async def failed_job(conn: Any, job_id: Any) -> dict[str, Any]:
+            return {
+                "id": job_id,
+                "kind": _JOB_KIND,
+                "status": "failed",
+                "error": _TEXTS["job_error"][0],
+                "finished_at": datetime(2026, 9, 28, 10, tzinfo=UTC),
+            }
+
         monkeypatch.setattr(jev_repo, "get_hypothesis_title", hypothesis)
         monkeypatch.setattr(jev_repo, "get_finding_title", finding)
+        monkeypatch.setattr(jev_repo, "get_failed_job", failed_job)
         monkeypatch.setattr(jev_repo, "get_document", document)
         monkeypatch.setattr(jev_repo, "content_quarantined", not_quarantined)
         monkeypatch.setattr(jev_repo, "screen_flag", not_flagged)

@@ -77,7 +77,11 @@ prints "not measured: no labelled items".
   web document is stored undated, so an evaluation of a web set — against
   the README's grouping or a person's labels alike — is an upper bound, and
   says so everywhere it is printed; it is never given a threshold (docs/08
-  open item 65).
+  open item 65). From phase D3 a job error's skeleton is dated over exactly
+  the rows its population reads, failed jobs finished after the day the pin
+  was first observed, so an ops evaluation is never an upper bound by its
+  dates, which carry nothing about training there, and it says so beside its
+  figures (:data:`OPS_DATING_NOTE`; docs/08 open item 81).
 * **The threshold is the development split's**, searched on its items alone
   and measured on the test split's; the figure a gate reads is a one-sided
   Wilson lower bound, never a point estimate, and a threshold is usable only
@@ -115,7 +119,9 @@ text the code screen flags, content Jev's own screen quarantined among them,
 since leaving that out would choose the subjects by what Jev said
 (:func:`export_labels`). ``labels import`` records a file of
 labels only if every row names the registered set, version and question, an
-option that is not the escape, and a subject that is stored; ``labels copy``
+option that is not the escape, and a subject that is stored — from phase D3 a
+job error's skeleton, whose address is its state's hash, held to the one
+state its exported text names (:data:`STATE_FROM_TEXT`); ``labels copy``
 carries one version's labels to the registered version only where the
 question's options are the same. ``report`` prints the newest evaluation of
 each set, version, question, model, labeller and split, with whether it could
@@ -305,9 +311,37 @@ NO_GROUND_TRUTH: Mapping[str, str] = {
 }
 
 #: The subjects a label may be of: text, which a person can read and judge —
-#: a web excerpt, a hypothesis title and, from phase D2, a finding's title
-#: (docs/09, section 3.7).
-LABELLED_SUBJECTS = ("web_excerpt", "hypothesis_title", "finding_title")
+#: a web excerpt, a hypothesis title, from phase D2 a finding's title, and
+#: from phase D3 a failed job's error as its skeleton, written as
+#: ``jev_questions.job_error_text`` writes it (docs/09, section 3.7).
+LABELLED_SUBJECTS = ("web_excerpt", "hypothesis_title", "finding_title", "job_error")
+
+#: For each state model whose subject is the state itself
+#: (``jev_questions.STATE_ADDRESSED``), how a label's text is read back: the
+#: state the text names, or ``None``, and that state's address. A label of
+#: such a subject is held to the state its text names, since its address is
+#: the state's hash and never its text's (docs/09, D-HMB-07); a model
+#: addressed by its state with no entry here is refused, never read as text.
+STATE_FROM_TEXT: Mapping[type, tuple[Callable[[object], Any], Callable[[Any], str]]] = {
+    jev_questions.JobErrorState: (
+        jev_questions.job_error_from_text,
+        jev_questions.job_error_subject,
+    ),
+}
+
+#: What an evaluation of a job error's skeleton says beside its figures: its
+#: items are dated over the population's own rows, every one finished after
+#: the day the pin was first observed, so "possibly in training" reads false
+#: for every item and carries no information there — and a skeleton that is
+#: also a library's public message was in the training data whatever its date
+#: (docs/09, section 3.7, D-HMB-08; docs/08 open item 81).
+OPS_DATING_NOTE = (
+    "dates: each skeleton is dated over the failed jobs its population reads, "
+    "every one finished after the day the pin was first observed, so "
+    "'possibly in training' reads false for every item and says nothing about "
+    "training here; a skeleton that is also a library's public message is in "
+    "the training data whatever its date (docs/08 open item 81)"
+)
 
 #: The splits an evaluation may be recorded over: the held-out test split,
 #: which a gate reads, or every labelled item, which holds it. Each is a look
@@ -1047,7 +1081,8 @@ def question_problem(
     if subject_type not in LABELLED_SUBJECTS:
         return (
             f"{question_set.name} is asked about a {subject_type!r}, and a label "
-            "is of text: a web excerpt, a hypothesis title or a finding title"
+            "is of text: a web excerpt, a hypothesis title, a finding title or a "
+            "job error's skeleton"
         )
     plan = jev_prereg.set_plan(question_set.name, question_set.version)
     if plan is None or question_key not in plan["questions"]:
@@ -2043,7 +2078,13 @@ def label_problems(
     question one it asks with a plan, the subject its kind of text named by
     a content address, the label one of the question's options and never its
     escape, a ``text`` given the text the address names, and each item
-    labelled once in the file.
+    labelled once in the file. A subject addressed by its state — from phase
+    D3 a job error, whose address is its state's hash and never its text's —
+    is held to the state its ``text`` names (:data:`STATE_FROM_TEXT`): the
+    text is required, must name exactly one state, and that state's address
+    must be the subject, so an exported row imports as the item it was
+    exported as, and a row whose text was blanked or edited is refused
+    (docs/09, D-HMB-07).
     """
     problems = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -2093,7 +2134,12 @@ def label_problems(
             problems.append(f"line {line}: {label!r} is not one of {options}")
             continue
         text = row.get("text")
-        if text and text_sha256(text) != subject_id:
+        if question_set.state_model in jev_questions.STATE_ADDRESSED:
+            problem = _state_text_problem(question_set.state_model, text, subject_id)
+            if problem is not None:
+                problems.append(f"line {line}: {problem}")
+                continue
+        elif text and text_sha256(text) != subject_id:
             problems.append(
                 f"line {line}: its text is not the text its subject names; the "
                 "label would be of words nobody is asked about"
@@ -2105,6 +2151,33 @@ def label_problems(
             continue
         seen.add(item)
     return problems
+
+
+def _state_text_problem(model: type, text: object, subject_id: str) -> str | None:
+    """
+    Why a label's ``text`` does not name the state-addressed subject it labels,
+    or ``None``: no way to read the model's text back, no text, a text naming
+    no state, or one naming another state than the subject.
+    """
+    readers = STATE_FROM_TEXT.get(model)
+    if readers is None:
+        return (
+            f"a {model.__name__} subject is addressed by its state, and no reader "
+            "of its text is registered; nothing is labelled"
+        )
+    from_text, address = readers
+    state = from_text(text)
+    if state is None:
+        return (
+            "its text names no state its subject could be; a label of this "
+            "subject keeps the text it was exported with"
+        )
+    if address(state) != subject_id:
+        return (
+            "its text names another state than its subject; the label would be "
+            "of a skeleton nobody is asked about"
+        )
+    return None
 
 
 async def import_labels(
@@ -2637,6 +2710,12 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             "first observed, so it may be in the model's training data; every "
             "figure below is an upper bound, and no threshold rests on it"
         )
+    question_set = jev_questions.REGISTRY.get(e["question_set"])
+    if (
+        question_set is not None
+        and jev_questions.STATE_SUBJECT.get(question_set.state_model) == "job_error"
+    ):
+        lines.append(OPS_DATING_NOTE)
     lines.append(
         f"items: {e['n']} scored; {said(e.get('n_other_plans'))} answered under "
         f"other plans and {said(e.get('n_plan_unknown'))} under plans unknown, set "

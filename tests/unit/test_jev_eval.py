@@ -59,6 +59,7 @@ from src.programme import (
     flags,
     jev_calibration,
     jev_catalogue,
+    jev_chips,
     jev_clock,
     jev_eval,
     jev_prereg,
@@ -1322,14 +1323,16 @@ class TestTheNewSubjects:
 
     def test_question_problem_admits_finding_title_and_job_error(self) -> None:
         """
-        Both findings sets' questions may be evaluated, and the subjects a
-        label may be of are exactly those of the registered sets with ground
-        truth: phase D3's job error joins them when ``ops.job_error`` is
-        registered, and this fails until it does.
+        Both findings sets' questions and, from phase D3, the ops set's may be
+        evaluated, and the subjects a label may be of are exactly those of the
+        registered sets with ground truth: the job error joined them when
+        ``ops.job_error`` was registered.
         """
         assert jev_eval.question_problem(OWNER, "owning_role") is None
         assert jev_eval.question_problem(SEVERITY, "severity") is None
+        assert jev_eval.question_problem(jev_questions.OPS_JOB_ERROR, "cause") is None
         assert "finding_title" in jev_eval.LABELLED_SUBJECTS
+        assert "job_error" in jev_eval.LABELLED_SUBJECTS
         measured = {
             jev_questions.STATE_SUBJECT[question_set.state_model]
             for name, question_set in jev_questions.REGISTRY.items()
@@ -2549,7 +2552,7 @@ class TestTheOpsDates:
             return sorted(kept, key=lambda r: r["finished_at"], reverse=True)
 
         monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
-        tokens = jev_redact_skeleton(OPS_ERROR)
+        tokens = _skeleton_of(OPS_ERROR)
         state = jev_questions.JobErrorState(job_kind="ingest_bars", error=tokens)
         subject = ("job_error", jev_questions.job_error_subject(state))
         other = ("job_error", "0" * 64)
@@ -2583,7 +2586,7 @@ class TestTheOpsDates:
 
         monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
         state = jev_questions.JobErrorState(
-            job_kind="ingest_bars", error=jev_redact_skeleton(OPS_ERROR)
+            job_kind="ingest_bars", error=_skeleton_of(OPS_ERROR)
         )
         subject = ("job_error", jev_questions.job_error_subject(state))
         assert await jev_repo.item_dates(object(), [subject], model=MODEL) == {
@@ -2591,13 +2594,237 @@ class TestTheOpsDates:
         }
 
 
-def jev_redact_skeleton(error: str) -> tuple[str, ...]:
+def _skeleton_of(error: str) -> tuple[str, ...]:
     """The redactor's skeleton of ``error``, through the harness's own rule."""
-    from src.programme import jev_chips
-
     tokens = jev_chips.residue_skeleton("ingest_bars", error)
     assert tokens is not None, error
     return tokens
+
+
+OPS = jev_questions.OPS_JOB_ERROR
+
+
+def _ops_state(
+    *tokens: str, kind: str = "ingest_bars"
+) -> jev_questions.JobErrorState:
+    return jev_questions.JobErrorState(job_kind=kind, error=tokens)
+
+
+class _OpsBook(_Book):
+    """
+    A synthetic ledger for ``ops.job_error``'s ``cause``: an item is named by
+    its text, ``jev_questions.job_error_text`` of a skeleton, and its subject
+    is the address of the state that text names, as the harness reads it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(OPS, "cause")
+
+    def subject(self, text: str) -> tuple[str, str]:
+        state = jev_questions.job_error_from_text(text)
+        assert state is not None, text
+        return (self.subject_type, jev_questions.job_error_subject(state))
+
+
+#: Invented skeletons of the ops population, as their texts, each with the
+#: cause the keyword rule gives it.
+OPS_TEXTS = {
+    "ingest_bars: errno [number] connection refused while [word] [id]": "network",
+    "backtest: duplicate key value violates unique constraint [quoted]": "database",
+    "walkforward: type object [quoted] has no attribute [quoted]": "code_defect",
+    "backtest: cannot convert float nan to integer": "data_invalid",
+}
+
+
+class TestTheOpsSubject:
+    """
+    docs/09, sections 3.4 and 3.7 (D3): a job error's skeleton is a subject a
+    label may be of, read as its text and addressed by its state; the keyword
+    baseline reads the text, ``"{kind}: {tokens}"``; and an ops evaluation
+    says beside its figures that its dates carry no information about
+    training (open item 81).
+    """
+
+    def test_the_ops_question_may_be_evaluated(self) -> None:
+        assert jev_eval.question_problem(OPS, "cause") is None
+        assert "job_error" in jev_eval.LABELLED_SUBJECTS
+        assert jev_eval.options_of(OPS, "cause") == list(jev_chips.CAUSES)
+
+    def test_the_baseline_reads_the_skeletons_text(self) -> None:
+        book = _OpsBook()
+        for text in OPS_TEXTS:
+            book.label(text, "network")
+            book.answer(text, "network")
+        guess, named = jev_eval.keyword_baseline(OPS, "cause")
+        assert "reading job_error_text" in named
+        for text, cause in OPS_TEXTS.items():
+            assert guess(book.subject(text), text) == cause, text
+        assert guess(book.subject("backtest: [word] [word] [word]"), "x") == "unclear"
+
+    def test_an_evaluation_is_built_over_skeletons(self) -> None:
+        book = _OpsBook()
+        for text, cause in OPS_TEXTS.items():
+            book.label(text, cause)
+            book.answer(text, cause)
+        evaluation = book.evaluate()
+        assert evaluation.n == len(OPS_TEXTS)
+        assert evaluation.possibly_in_training is False
+        lines = jev_eval.format_evaluation(evaluation.row())
+        assert jev_eval.OPS_DATING_NOTE in lines
+
+    def test_only_an_ops_evaluation_carries_the_dating_note(self) -> None:
+        book = _Book()
+        for n in range(4):
+            book.label(f"Invented Bond Timing {n}", "bonds")
+            book.answer(f"Invented Bond Timing {n}", "bonds")
+        lines = jev_eval.format_evaluation(book.evaluate().row())
+        assert jev_eval.OPS_DATING_NOTE not in lines
+
+
+def _ops_row(
+    state: jev_questions.JobErrorState, label: str = "network", **overrides: str
+) -> dict[str, str]:
+    """A labels file's row for ``state``, as an export of it is filled in."""
+    row = {
+        "question_set": OPS.name,
+        "question_set_version": str(OPS.version),
+        "question_key": "cause",
+        "subject_type": "job_error",
+        "subject_id": jev_questions.job_error_subject(state),
+        "label": label,
+        "text": jev_questions.job_error_text(state),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestTheJobErrorLabels:
+    """
+    docs/09, section 3.5 (D3; revised: D-HMB-07): a job error's subject is
+    its state's hash, never its text's, so a label of one is checked through
+    the state its text names — the text required, naming exactly one state,
+    and that state's address the subject.
+    """
+
+    STATE = _ops_state("errno", "[number]", "connection", "refused")
+
+    def test_a_label_is_checked_through_the_state_its_text_names(self) -> None:
+        assert jev_eval.label_problems([_ops_row(self.STATE)]) == []
+        for cause in jev_chips.CAUSES:
+            assert jev_eval.label_problems([_ops_row(self.STATE, cause)]) == []
+        (problem,) = jev_eval.label_problems([_ops_row(self.STATE, "unclear")])
+        assert "escape" in problem
+
+    @pytest.mark.parametrize(
+        ("overrides", "says"),
+        [
+            ({"text": "ingest_bars: errno [number] connection reset"}, "another"),
+            ({"text": "backtest: errno [number] connection refused"}, "another"),
+            ({"text": ""}, "names no state"),
+            ({"text": "ingest_bars: errno [number] Connection refused"}, "no state"),
+            ({"text": "ingest_bars:  errno [number] connection refused"}, "no state"),
+            ({"text": "[Errno 111] Connection refused"}, "names no state"),
+            ({"text": "live_decision: errno [number] connection refused"}, "no state"),
+        ],
+        ids=[
+            "another-skeleton",
+            "another-kind",
+            "blanked",
+            "a-token-edited",
+            "a-space-too-many",
+            "the-raw-error",
+            "a-kind-never-triaged",
+        ],
+    )
+    def test_a_text_naming_another_state_or_none_is_refused(
+        self, overrides: dict[str, str], says: str
+    ) -> None:
+        (problem,) = jev_eval.label_problems([_ops_row(self.STATE, **overrides)])
+        assert problem.startswith("line 2: ") and says in problem, problem
+
+    def test_a_row_with_no_text_is_refused(self) -> None:
+        row = _ops_row(self.STATE)
+        del row["text"]
+        (problem,) = jev_eval.label_problems([row])
+        assert "names no state" in problem
+
+    def test_a_texts_own_sha256_is_not_its_address(self) -> None:
+        """A text subject's address is no job error's: the state is."""
+        row = _ops_row(self.STATE)
+        row["subject_id"] = text_sha256(row["text"])
+        (problem,) = jev_eval.label_problems([row])
+        assert "another state" in problem
+
+    async def test_an_exported_file_imports_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The export's rows, each given a label, import as the items they were
+        exported as: through ``parse_labels``, ``label_problems`` and
+        ``import_labels`` with nothing refused.
+        """
+        states = [
+            self.STATE,
+            _ops_state("duplicate", "key", "value", "violates", kind="backtest"),
+        ]
+        population = [
+            {
+                "subject_type": "job_error",
+                "subject_id": jev_questions.job_error_subject(state),
+                "text": jev_questions.job_error_text(state),
+            }
+            for state in states
+        ]
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            assert kwargs == {"subject_type": "job_error"}
+            return population
+
+        async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
+            return {(r["subject_type"], r["subject_id"]): r["text"] for r in population}
+
+        async def labels_for(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        written: list[dict[str, Any]] = []
+
+        async def record_label(conn: Any, **kwargs: Any) -> int:
+            written.append(kwargs)
+            return len(written)
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)
+        monkeypatch.setattr(jev_repo, "labels_for", labels_for)
+        monkeypatch.setattr(jev_repo, "record_label", record_label)
+        exported = await jev_eval.export_labels(
+            object(),  # type: ignore[arg-type]
+            question_set=OPS,
+            question_key="cause",
+            sample=None,
+            include_quarantined=False,
+        )
+        reader = csv.DictReader(io.StringIO(exported))
+        filled = [
+            {
+                "question_set": OPS.name,
+                "question_set_version": str(OPS.version),
+                "question_key": "cause",
+                "label": "network",
+                **row,
+            }
+            for row in reader
+        ]
+        rows = jev_eval.parse_labels(_labels_file(*filled, extra=("text",)))
+        assert jev_eval.label_problems(rows) == []
+        done = await jev_eval.import_labels(
+            object(),  # type: ignore[arg-type]
+            rows=rows,
+            labelled_by="operator:q",
+        )
+        assert done["recorded"] == 2
+        assert sorted(w["subject_id"] for w in written) == sorted(
+            r["subject_id"] for r in population
+        )
 
 
 class TestPossiblyInTraining:

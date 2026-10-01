@@ -1847,6 +1847,18 @@ class TestPinned:
         for redactor in REDACTOR_OF_OPS_VERSION.values():
             assert redactor in RELEASED_REDACTOR_SHA256
 
+    def test_the_registered_ops_set_is_asked_under_this_redactor(self) -> None:
+        """
+        The same words over another skeleton are another question (open item
+        77): the registered ``ops.job_error``'s version maps to the redactor in
+        force, so a redactor bumped under an unchanged set fails here until the
+        set gains a version of its own.
+        """
+        from src.programme import jev_questions
+
+        ops = jev_questions.OPS_JOB_ERROR
+        assert REDACTOR_OF_OPS_VERSION[ops.version] == jev_redact.REDACTOR_VERSION
+
     @pytest.mark.parametrize(
         ("attribute", "moved"),
         [

@@ -29,9 +29,10 @@ The ``jev_ask`` job
 :func:`run_ask` asks one of the sets in :data:`ASKABLE` about one subject, once:
 a stored web excerpt (``guardrail.injection``, ``research.catalogue``), a
 hypothesis title the programme's own model wrote (``research.hypothesis``,
-``guardrail.card``), or, from phase D2, the title of a finding the
-programme's model raised (``findings.owner``, ``findings.severity``). Its
-payload names the subject, the row it was read from
+``guardrail.card``), from phase D2 the title of a finding the programme's
+model raised (``findings.owner``, ``findings.severity``), or, from phase D3,
+the skeleton of a failed research or ingest job's error (``ops.job_error``).
+Its payload names the subject, the row it was read from
 and the analysis plans it was planned under (:data:`PLAN_KEYS`), never its
 text, and the handler reads the text again from that row. In order; the first
 that applies decides:
@@ -49,8 +50,8 @@ that applies decides:
                                                                ``superseded``
 4   The row is not stored, or its text is not the subject      fail, no retry
 5   The row may not be asked about (below)                     fail, no retry
-6   The state cannot be built                                  fail, no retry,
-                                                               no text quoted
+6   The state cannot be built, or, for a subject addressed by  fail, no retry,
+    its state, the state built is not the subject              no text quoted
 7   The ask, once; then its follow-up; then its verdict        as
                                                                :func:`ask_verdict`
 ==  =========================================================  ================
@@ -76,6 +77,20 @@ its writer — and only a title within ``jev_questions.FINDING_TITLE_MAX_CHARS``
 read by column list (``jev_repo.get_finding_title``: its ref, title, origin
 and when it was opened), never its detail, remediation, close note, raiser or
 recorded severity.
+
+For a failed job (phase D3), read by its id (``jev_repo.get_failed_job``: its
+id, kind, status, error and finish time, and nothing else), each refused alone
+and asked nothing: a job that did not fail; one of a kind code alone places
+(anything but ``jev_redact.TRIAGED_KINDS``: a venue's, the shadow replay's,
+the programme's own); one with no finish time, which an expired lease leaves;
+one whose error code's table places (``jev_chips.code_cause``); and one whose
+skeleton holds too few words of the vocabulary to ask about
+(``jev_redact.admissible``). The error is read by those two lines and by the
+one that builds the state, ``jev_redact.skeleton``, and by nothing else: the
+state is the skeleton and the job's kind, and the subject is that state's
+address (``jev_questions.job_error_subject``), so it is held to the subject
+once the state is built (step 6) rather than before admission, as a text's
+address is. Nothing quotes the error; an error is named by its job's id.
 
 Step 6: pydantic's ``ValidationError`` quotes the input it refused, so it is
 replaced by an error naming the document's id or the hypothesis's ref and
@@ -126,7 +141,8 @@ any web set                 a content block, this call's or     the content is
 ``research.hypothesis``,                                        and acted on by
 ``guardrail.card``,                                             nothing
 ``findings.owner``,
-``findings.severity``
+``findings.severity``,
+``ops.job_error``
 ==========================  ==================================  =================
 
 The injection screen's quarantine says what it was, and that it is not
@@ -153,8 +169,9 @@ is held by the road alone. Nothing that writes ``hypotheses``, ``candidates`` or
 ``findings`` is reachable from here: a card check's answer is recorded and
 acts on nothing, and so is a findings set's — a suggested owner or severity
 is in the ledger alone, never written to a finding, and the chips phase E
-shows are computed from the ledger at read time (``jev_chips``)
-(``tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing``).
+shows are computed from the ledger at read time (``jev_chips``) — and the ops
+set's: a suggested cause retries, resumes, cancels and fails no job, and
+changes no switch (``tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing``).
 
 Re-asks measure the noise
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -176,6 +193,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -188,9 +206,11 @@ from pydantic import BaseModel, ValidationError
 from src.programme import (
     flags,
     jev_catalogue,
+    jev_chips,
     jev_lane,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     web_sources,
 )
@@ -241,17 +261,21 @@ class Askable:
 
     ``subject_type`` is what the set's state describes. ``load`` reads the row
     the payload's ``source_id`` names — a stored document by its id, a
-    hypothesis by its ref — or returns ``None``; ``text`` is the text in that
-    row whose sha256 is the subject. ``admit`` refuses, by raising, what may
-    not be asked about, before any state is built; ``build`` makes the state,
-    ``as_of`` the instant it describes, ``what`` names the row in an error by
-    its id alone, and ``follow_up``, where there is one, is what the answer
-    changes.
+    hypothesis or a finding by its ref, a job by its id — or returns ``None``;
+    ``address`` is the subject the row holds, from the row and the state built
+    from it (docs/09, section 5.1): for text, the sha256 of the text, the
+    state unread and ``None`` before one is built, held to the subject before
+    ``admit``; for a subject addressed by its state
+    (``jev_questions.STATE_ADDRESSED``), the state's own hash, held to it once
+    the state is built. ``admit`` refuses, by raising, what may not be asked
+    about, before any state is built; ``build`` makes the state, ``as_of``
+    the instant it describes, ``what`` names the row in an error by its id
+    alone, and ``follow_up``, where there is one, is what the answer changes.
     """
 
     subject_type: str
     load: Callable[[asyncpg.Connection, object], Awaitable[Mapping[str, Any] | None]]
-    text: Callable[[Mapping[str, Any]], object]
+    address: Callable[[Mapping[str, Any], BaseModel | None], object]
     admit: Callable[[asyncpg.Connection, Mapping[str, Any]], Awaitable[None]]
     build: Callable[[Mapping[str, Any]], BaseModel]
     as_of: Callable[[Mapping[str, Any]], datetime]
@@ -597,10 +621,111 @@ def _opened_at(row: Mapping[str, Any]) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(value)
 
 
+# ---------------------------------------------------------------------------
+# A failed job's error, as a skeleton (phase D3)
+# ---------------------------------------------------------------------------
+
+
+async def _load_failed_job(
+    conn: asyncpg.Connection, source_id: object
+) -> Mapping[str, Any] | None:
+    """
+    The job the ops set asks about, by its id: its id, kind, status, error
+    and when it finished, and nothing else (``jev_repo.get_failed_job``).
+    """
+    try:
+        job_id = uuid.UUID(source_id) if isinstance(source_id, str) else None
+    except ValueError:
+        job_id = None
+    if job_id is None:
+        raise JobFailedError(
+            f"a job error's row is a job, named by its id; got "
+            f"{type(source_id).__name__}",
+            retry=False,
+        )
+    return await jev_repo.get_failed_job(conn, job_id)
+
+
+async def _admit_failed_job(conn: asyncpg.Connection, row: Mapping[str, Any]) -> None:
+    """
+    Only a failed job of a triaged kind, with a finish time, whose error code
+    leaves to Jev and whose skeleton holds enough words to ask about — the
+    population the planner plans from (``jev_chips.residue_skeleton``) — each
+    refused alone, before any state is built (docs/09, section 5.1). The
+    planner plans no other; a job refused here was named by hand, or left the
+    population between the plan and the claim because code's table or the
+    redactor moved. The error is read by ``code_cause`` and the redactor
+    alone, and never quoted: each refusal names the job by its id and says
+    which rule refused it, in words ``jev_chips``' shapes place.
+    """
+    job_id = row["id"]
+    if row["status"] != "failed":
+        raise JobFailedError(
+            f"job {job_id} is {row['status']!r}, not failed; only a failed job's "
+            "error is asked about; nothing was asked",
+            retry=False,
+        )
+    if row["kind"] not in jev_redact.TRIAGED_KINDS:
+        raise JobFailedError(
+            f"job {job_id} is of the kind {row['kind']!r}, whose errors code "
+            "alone places; nothing was asked",
+            retry=False,
+        )
+    if row["finished_at"] is None:
+        raise JobFailedError(
+            f"job {job_id} has no finish time; only a job that finished failing "
+            "is asked about; nothing was asked",
+            retry=False,
+        )
+    cause = jev_chips.code_cause(row["kind"], row["error"])
+    if cause is not None:
+        raise JobFailedError(
+            f"job {job_id}'s error is placed by code ({cause}), and only what "
+            "code cannot place is asked about; nothing was asked",
+            retry=False,
+        )
+    if not jev_redact.admissible(jev_redact.skeleton(row["error"])):
+        raise JobFailedError(
+            f"job {job_id}'s error reduces to fewer than "
+            f"{jev_redact.MIN_CONTENT_TOKENS} words of the vocabulary, too few to "
+            "ask about; nothing was asked",
+            retry=False,
+        )
+
+
+def _job(row: Mapping[str, Any]) -> str:
+    return f"job {row['id']}"
+
+
+def _job_error_state(row: Mapping[str, Any]) -> BaseModel:
+    """The job's kind and its error's skeleton, and nothing else of the job."""
+    return jev_questions.JobErrorState(
+        job_kind=row["kind"], error=jev_redact.skeleton(row["error"])
+    )
+
+
+def _job_error_address(row: Mapping[str, Any], state: BaseModel | None) -> object:
+    """The subject a job holds: its state's address, once the state is built."""
+    if not isinstance(state, jev_questions.JobErrorState):
+        return None
+    return jev_questions.job_error_subject(state)
+
+
+def _finished_at(row: Mapping[str, Any]) -> datetime:
+    """When the job finished failing: the instant its error describes."""
+    value = row["finished_at"]
+    return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+
+def _text_address(text: object) -> str | None:
+    """A text subject's address: the sha256 of the text, or ``None``."""
+    return text_sha256(text) if isinstance(text, str) else None
+
+
 _EXCERPT = {
     "subject_type": "web_excerpt",
     "load": _load_document,
-    "text": lambda row: row["excerpt"],
+    "address": lambda row, state: _text_address(row["excerpt"]),
     "admit": _admit_excerpt,
     "build": _excerpt_state,
     "as_of": lambda row: row["fetched_at"],
@@ -610,7 +735,7 @@ _EXCERPT = {
 _TITLE = {
     "subject_type": "hypothesis_title",
     "load": _load_hypothesis,
-    "text": lambda row: row["title"],
+    "address": lambda row, state: _text_address(row["title"]),
     "admit": _admit_title,
     "build": _title_state,
     "as_of": _created_at,
@@ -620,19 +745,30 @@ _TITLE = {
 _FINDING = {
     "subject_type": "finding_title",
     "load": _load_finding,
-    "text": lambda row: row["title"],
+    "address": lambda row, state: _text_address(row["title"]),
     "admit": _admit_finding,
     "build": _finding_state,
     "as_of": _opened_at,
     "what": _finding,
 }
 
+_JOB_ERROR = {
+    "subject_type": "job_error",
+    "load": _load_failed_job,
+    "address": _job_error_address,
+    "admit": _admit_failed_job,
+    "build": _job_error_state,
+    "as_of": _finished_at,
+    "what": _job,
+}
+
 #: Every set a ``jev_ask`` job asks, by name, and how. Exactly the registered
-#: sets asked about text: the web sets, the two title sets and, from phase D2,
-#: the two findings sets (``tests/unit/test_jev_jobs.py``). Neither the title
-#: sets nor the findings sets have a follow-up: a hypothesis, a candidate or a
-#: finding is changed by nothing Jev answers, and a suggested owner or
-#: severity is recorded in the ledger alone (docs/09, section 6.1).
+#: sets asked about text, and the one about a skeleton: the web sets, the two
+#: title sets, from phase D2 the two findings sets, and from phase D3 the ops
+#: set (``tests/unit/test_jev_jobs.py``). None but the web sets has a
+#: follow-up: a hypothesis, a candidate, a finding or a job is changed by
+#: nothing Jev answers, and a suggested owner, severity or cause is recorded
+#: in the ledger alone (docs/09, section 6.1).
 ASKABLE: Mapping[str, Askable] = MappingProxyType(
     {
         jev_questions.SCREEN_SET_NAME: Askable(**_EXCERPT, follow_up=_screen_follow_up),
@@ -641,6 +777,7 @@ ASKABLE: Mapping[str, Askable] = MappingProxyType(
         "guardrail.card": Askable(**_TITLE, follow_up=None),
         "findings.owner": Askable(**_FINDING, follow_up=None),
         "findings.severity": Askable(**_FINDING, follow_up=None),
+        "ops.job_error": Askable(**_JOB_ERROR, follow_up=None),
     }
 )
 
@@ -761,15 +898,13 @@ async def _ask_once(
             retry=False,
         )
     what = askable.what(row)
-    text = askable.text(row)
-    if not isinstance(text, str) or text_sha256(text) != subject_id:
-        raise JobFailedError(
-            f"{what} does not hold the text whose address this job names; "
-            "nothing was asked",
-            retry=False,
-        )
+    by_state = question_set.state_model in jev_questions.STATE_ADDRESSED
+    if not by_state:
+        _hold_to_subject(askable.address(row, None), subject_id, what)
     await askable.admit(conn, row)
     state = _built(askable, row, what)
+    if by_state:
+        _hold_to_subject(askable.address(row, state), subject_id, what)
     asked = await jev_lane.ask(
         conn,
         question_set=question_set,
@@ -781,6 +916,20 @@ async def _ask_once(
         probe=False,
     )
     return row, asked
+
+
+def _hold_to_subject(address: object, subject_id: str, what: str) -> None:
+    """
+    The row holds the subject the job names: a text's address before
+    admission, a state's once it is built (``Askable.address``). Neither the
+    text nor the state is quoted.
+    """
+    if address != subject_id:
+        raise JobFailedError(
+            f"{what} does not hold the text whose address this job names; "
+            "nothing was asked",
+            retry=False,
+        )
 
 
 def _record(

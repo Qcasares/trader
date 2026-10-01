@@ -1691,9 +1691,10 @@ async def findings_to_ask(
 # handed only to ``jev_chips.code_cause`` and ``jev_redact.skeleton`` — the
 # planner and the harness through ``jev_chips.residue_skeleton``, the handler
 # through its admission — so that what becomes state is the skeleton alone
-# (docs/09, sections 4 and 5). The error is never returned beside anything a
-# caller logs or stores, and no read here writes, changes, retries or resumes
-# a job.
+# (docs/09, sections 4 and 5; ``tests/unit/test_jev_table_boundaries.py::
+# test_a_job_error_is_used_only_by_the_redactor_and_code_cause``). The error is
+# never returned beside anything a caller logs or stores, and no read here
+# writes, changes, retries or resumes a job.
 
 #: What the ops reads take of a job: never its payload or its result.
 _FAILED_JOB_COLUMNS = "id, kind, status, error, finished_at"

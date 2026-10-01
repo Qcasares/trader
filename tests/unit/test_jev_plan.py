@@ -21,7 +21,9 @@ import dataclasses
 import inspect
 import itertools
 import json
+import logging
 import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -37,10 +39,12 @@ from src.db.repos import jobs as job_repo
 from src.programme import (
     flags,
     jev_catalogue,
+    jev_chips,
     jev_clock,
     jev_plan,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     web_sources,
 )
@@ -106,6 +110,11 @@ class Queue:
     #: What the findings sets' read returns (phase D2).
     findings: list[dict[str, Any]] = field(default_factory=list)
     subject_reads: list[dict[str, Any]] = field(default_factory=list)
+    #: The failed jobs the ops set's read returns (phase D3), every read of
+    #: them made, and the addresses ``unasked_subjects`` leaves out.
+    failed: list[dict[str, Any]] = field(default_factory=list)
+    job_reads: list[dict[str, Any]] = field(default_factory=list)
+    asked_addresses: set[str] = field(default_factory=set)
     auth_held: bool = False
     refused_sets: set[str] = field(default_factory=set)
 
@@ -232,6 +241,46 @@ class Queue:
         )
         return self.findings[:limit]
 
+    async def failed_jobs_for_triage(
+        self,
+        conn: Any,
+        *,
+        kinds: Any,
+        since: datetime,
+        limit: int | None = 200,
+    ) -> list[dict[str, Any]]:
+        """As the read: of ``kinds``, finished after ``since``, newest first."""
+        self.job_reads.append({"kinds": tuple(kinds), "since": since, "limit": limit})
+        rows = [
+            row
+            for row in self.failed
+            if row["kind"] in kinds and row["finished_at"] > since
+        ]
+        rows.sort(key=lambda row: (row["finished_at"], row["id"]), reverse=True)
+        return rows if limit is None else rows[:limit]
+
+    async def unasked_subjects(
+        self,
+        conn: Any,
+        *,
+        question_set: Any,
+        model: str,
+        subject_type: str,
+        subjects: Any,
+        day: date,
+    ) -> list[str]:
+        self.subject_reads.append(
+            {
+                "read": "unasked",
+                "set": question_set,
+                "model": model,
+                "subject_type": subject_type,
+                "subjects": list(subjects),
+                "day": day,
+            }
+        )
+        return [subject for subject in subjects if subject not in self.asked_addresses]
+
 
 @pytest.fixture
 def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
@@ -250,6 +299,8 @@ def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
         "documents_to_describe",
         "hypotheses_to_ask",
         "findings_to_ask",
+        "failed_jobs_for_triage",
+        "unasked_subjects",
     ):
         monkeypatch.setattr(jev_repo, name, getattr(fake, name))
     monkeypatch.setattr(jev_repo, "screen_flag", fake.screen_flag)
@@ -291,6 +342,53 @@ TITLE_SUBJECT = {"subject_id": "b2" * 32, "ref": "H-0007"}
 #: And one for the findings sets' read (phase D2).
 FINDING_SUBJECT = {"subject_id": "f6" * 32, "ref": "F-0042"}
 
+#: And, from phase D3, failed jobs for the ops set, invented: each of a triaged
+#: kind, its error one code leaves to Jev, with a word of the canary riding in
+#: it, which the redactor reduces to a placeholder and nothing may log or
+#: queue.
+CANARY = "CANARY-d3e1"
+
+
+def _residue_words(n: int) -> tuple[str, ...]:
+    """
+    ``n`` vocabulary words, each giving :func:`_failed`'s error a skeleton of
+    its own that code leaves to Jev.
+    """
+    words: list[str] = []
+    seen: set[tuple[str, ...]] = set()
+    for word in sorted(jev_redact.VOCABULARY - jev_redact.FUNCTION_WORDS):
+        error = f"[Errno 111] Connection refused while {word} {CANARY}"
+        tokens = jev_chips.residue_skeleton("ingest_bars", error)
+        if tokens is not None and word in tokens and tokens not in seen:
+            seen.add(tokens)
+            words.append(word)
+        if len(words) == n:
+            return tuple(words)
+    raise AssertionError(f"the vocabulary gives fewer than {n} such errors")
+
+
+_WORDS = _residue_words(40)
+
+
+def _job_id(i: int) -> uuid.UUID:
+    return uuid.UUID(f"6d0c5b1e-0d3a-4d37-9c43-{i:012d}")
+
+
+def _failed(i: int, **overrides: Any) -> dict[str, Any]:
+    """
+    Failed job ``i`` as ``jev_repo.failed_jobs_for_triage`` returns one — its
+    id, kind, error and finish time — the smaller ``i`` the newer, each with
+    a skeleton of its own.
+    """
+    row = {
+        "id": _job_id(i),
+        "kind": "ingest_bars",
+        "error": f"[Errno 111] Connection refused while {_WORDS[i - 1]} {CANARY}",
+        "finished_at": MORNING - timedelta(minutes=i),
+    }
+    row.update(overrides)
+    return row
+
 
 class TestItIsDark:
     @pytest.mark.parametrize(
@@ -316,12 +414,15 @@ class TestItIsDark:
         not planned with it, shows here. From phase D2 a finding's title waits
         too, with the findings area never switched on, so a findings set
         planned behind another area's switch shows here as well
-        (:class:`TestTheSwitchMatrix` switches the findings area itself).
+        (:class:`TestTheSwitchMatrix` switches the findings area itself); and
+        from phase D3 a failed job, with the ops area never switched on, so
+        the ops set read or planned behind another switch shows here too.
         """
         queue.screens = [SCREEN_SUBJECT]
         queue.descriptions = [DESCRIBE_SUBJECT]
         queue.titles = [TITLE_SUBJECT]
         queue.findings = [FINDING_SUBJECT]
+        queue.failed = [_failed(1)]
         rows = _switches(
             **{
                 flags.PROGRAMME_ENABLED: programme,
@@ -333,6 +434,7 @@ class TestItIsDark:
             }
         )
         planned = await _plan(rows, key=key)
+        assert queue.job_reads == [], "a failed job was read with ops off"
         open_ = programme == "true" and jev == "true" and pin == json.dumps(MODEL)
         if not (open_ and key):
             assert planned == [] and queue.jobs == {}
@@ -928,6 +1030,7 @@ class TestTheAsks:
             "research.hypothesis": 10,
             "findings.owner": 10,
             "findings.severity": 10,
+            "ops.job_error": 10,
         }
         assert set(jev_plan.ASKS_PER_PASS) == set(jev_jobs.ASKABLE)
         assert (jev_plan.ASK_PRIORITY, jev_plan.ASK_ATTEMPTS) == (0, 3)
@@ -1281,12 +1384,12 @@ def detailed(monkeypatch: pytest.MonkeyPatch, queue: Queue) -> list[str]:
     subjects_of = jev_plan._ask_subjects
 
     async def subjects(
-        conn: Any, question_set: Any, model: str, day: date
+        conn: Any, question_set: Any, model: str, now: datetime
     ) -> list[tuple[str, object, bool]]:
         if question_set is DETAILED:
             reads.append(question_set.name)
             return [DETAIL_SUBJECT]
-        return await subjects_of(conn, question_set, model, day)
+        return await subjects_of(conn, question_set, model, now)
 
     monkeypatch.setattr(jev_plan, "_ask_subjects", subjects)
     return reads
@@ -1308,7 +1411,8 @@ class TestTheDetailSwitchGatesPlanning:
     ``internal_detail`` is planned only while ``jev_send_internal_detail`` is
     on, read through its own reader, as the road reads it, neither derived
     from the other — so no job is queued only to end ``disabled``. A test-only
-    set stands in for phase D3's ``ops.job_error``.
+    set stands for any set declaring it; from phase D3 the one registered set
+    that does, ``ops.job_error``, is held to it as well.
     """
 
     async def test_off_it_is_not_planned_and_nothing_of_it_is_read(
@@ -1343,7 +1447,7 @@ class TestTheDetailSwitchGatesPlanning:
         await _plan_reading(rows)
         assert _asks(queue, DETAILED.name) == []
 
-    async def test_the_registered_sets_are_planned_either_way(
+    async def test_a_set_declaring_none_is_planned_either_way(
         self, queue: Queue, detailed: list[str]
     ) -> None:
         queue.screens = [SCREEN_SUBJECT]
@@ -1361,6 +1465,28 @@ class TestTheDetailSwitchGatesPlanning:
         conn = await _plan_reading(_switches(**{**ASKS_ON, AREA_DECISIONS: "true"}))
         assert _asks(queue)
         assert flags.JEV_SEND_INTERNAL_DETAIL not in conn.asked
+
+    def test_the_ops_set_is_the_one_registered_set_declaring_it(self) -> None:
+        declaring = {
+            name
+            for name, question_set in jev_questions.REGISTRY.items()
+            if question_set.internal_detail
+        }
+        assert declaring == {"ops.job_error"}
+
+    async def test_the_ops_set_waits_for_it(self, queue: Queue) -> None:
+        """
+        docs/09, section 5.2 (revised: D-SAFE-1): the ops area on and the
+        detail switch off plans no ops ask and reads no failed job; switched
+        on, the same pass plans it.
+        """
+        queue.failed = [_failed(1)]
+        off = _switches(**{**OPS_ON, flags.JEV_SEND_INTERNAL_DETAIL: "false"})
+        conn = await _plan_reading(off)
+        assert _ops_asks(queue) == [] and queue.job_reads == []
+        assert flags.JEV_SEND_INTERNAL_DETAIL in conn.asked
+        await _plan_reading(_switches(**OPS_ON))
+        assert len(_ops_asks(queue)) == 1
 
     async def test_the_forward_clock_waits_for_it_too(
         self, queue: Queue, monkeypatch: pytest.MonkeyPatch
@@ -1678,6 +1804,398 @@ class TestTheFindingsRules:
         assert [job["payload"]["request_id"] for job in _reasks(queue)] == [1]
 
 
+# ---------------------------------------------------------------------------
+# Phase D3: the ops set
+# ---------------------------------------------------------------------------
+
+#: The ops area and the detail switch on, and every other area the asks read
+#: off.
+OPS_ON = {
+    AREA_DECISIONS: "false",
+    AREA_RESEARCH: "false",
+    AREA_GUARDRAILS: "false",
+    AREA_FINDINGS: "false",
+    AREA_OPS: "true",
+    flags.JEV_SEND_INTERNAL_DETAIL: "true",
+}
+
+#: Where the window starts at :data:`MORNING`: the midnight after the pin was
+#: first observed, later than a week before.
+OPS_SINCE = datetime(2026, 9, 27, 0, 0, tzinfo=UTC)
+
+
+def _ops_asks(queue: Queue) -> list[dict[str, Any]]:
+    return _planned_asks(queue, "ops.job_error")
+
+
+def _state_of(job: Mapping[str, Any]) -> jev_questions.JobErrorState:
+    tokens = jev_redact.skeleton(job["error"])
+    return jev_questions.JobErrorState(job_kind=job["kind"], error=tokens)
+
+
+def _address_of(job: Mapping[str, Any]) -> str:
+    return jev_questions.job_error_subject(_state_of(job))
+
+
+class TestTheOpsRule:
+    """
+    Phase D3 (docs/09, section 5.2): ``ops.job_error`` is planned behind the
+    ops area and the detail switch together, each read through its own
+    reader, at most ten a pass, each ask one call from the ops lane's share,
+    under ``jev_repo.ask_job_key``; about each skeleton of a failed job of a
+    triaged kind within the window whose error code leaves to Jev, newest
+    first, once each, naming its newest job by id; never a job's error, in a
+    payload, a key or a log.
+    """
+
+    def test_the_set_is_the_ops_lanes_and_its_area_the_ops(self) -> None:
+        question_set = jev_questions.REGISTRY["ops.job_error"]
+        assert question_set.lane == "ops"
+        assert jev_catalogue.LANE_AREA["ops"] == "ops"
+        assert question_set.internal_detail is True
+        assert jev_plan.ASKS_PER_PASS["ops.job_error"] == 10
+        assert jev_plan.OPS_SET_NAME == "ops.job_error"
+        assert jev_plan.OPS_WINDOW == timedelta(days=7)
+        assert jev_catalogue.lane_budget(500, "ops") == 50
+
+    async def test_each_skeleton_is_one_job_naming_its_job_and_never_its_error(
+        self, queue: Queue
+    ) -> None:
+        job = _failed(1)
+        queue.failed = [job]
+        planned = await _plan(_switches(**OPS_ON))
+        address = _address_of(job)
+        key = f"jev_ask:ops.job_error@1:job_error:{address}:2026-09-28"
+        assert [k for k in planned if k.startswith("jev_ask:")] == [key]
+        plans = jev_prereg.plans_in_force("ops.job_error", 1)
+        assert plans is not None
+        (ask,) = _ops_asks(queue)
+        assert ask["payload"] == {
+            "set": "ops.job_error",
+            "version": 1,
+            "subject_type": "job_error",
+            "subject_id": address,
+            "source_id": str(job["id"]),
+            **plans,
+        }, "the plans in force are named, and nothing else is"
+        assert (ask["priority"], ask["max_attempts"]) == (0, 3)
+        assert ask["scheduled_for"] == MORNING
+        assert key == jev_repo.ask_job_key(
+            "ops.job_error", 1, "job_error", address, date(2026, 9, 28)
+        )
+        stored = json.dumps([queue.jobs, planned], default=str)
+        assert CANARY not in stored and "Connection" not in stored
+
+    @pytest.mark.parametrize(
+        ("ops", "detail"),
+        [("true", "false"), ("false", "true"), ("false", "false"), (None, None)],
+        ids=["ops-alone", "detail-alone", "neither", "unset"],
+    )
+    async def test_it_needs_the_ops_area_and_the_detail_switch(
+        self, queue: Queue, ops: str | None, detail: str | None
+    ) -> None:
+        """
+        The detail switch is not the area, nor the area the switch: with
+        either off, nothing of the ops set is planned and no failed job is
+        read at all.
+        """
+        queue.failed = [_failed(1)]
+        rows = _switches(
+            **{**OPS_ON, AREA_OPS: ops, flags.JEV_SEND_INTERNAL_DETAIL: detail}
+        )
+        conn = await _plan_reading(rows)
+        assert _ops_asks(queue) == []
+        assert queue.job_reads == [] and queue.subject_reads == []
+        assert AREA_OPS in conn.asked
+
+    @pytest.mark.parametrize(
+        "stored", ['"true"', "1", "false", None], ids=["string", "one", "off", "none"]
+    )
+    @pytest.mark.parametrize("switch", [AREA_OPS, flags.JEV_SEND_INTERNAL_DETAIL])
+    async def test_only_json_true_is_on(
+        self, queue: Queue, switch: str, stored: str | None
+    ) -> None:
+        queue.failed = [_failed(1)]
+        await _plan(_switches(**{**OPS_ON, switch: stored}))
+        assert _ops_asks(queue) == []
+        assert queue.job_reads == []
+
+    async def test_each_switch_is_read_by_its_own_reader(self, queue: Queue) -> None:
+        queue.failed = [_failed(1)]
+        conn = await _plan_reading(_switches(**OPS_ON))
+        assert len(_ops_asks(queue)) == 1
+        assert AREA_OPS in conn.asked
+        assert flags.JEV_SEND_INTERNAL_DETAIL in conn.asked
+        assert conn.asked.index(AREA_OPS) < conn.asked.index(
+            flags.JEV_SEND_INTERNAL_DETAIL
+        ), "the detail switch is read for the ops set, after its area"
+
+    async def test_the_read_is_the_triaged_kinds_since_the_later_bound(
+        self, queue: Queue
+    ) -> None:
+        """
+        A week before ``now``, or the midnight after the pin was first
+        observed, whichever is later: at :data:`MORNING` the pin's, three
+        weeks on the week's.
+        """
+        await _plan(_switches(**OPS_ON))
+        (read,) = queue.job_reads
+        assert read["kinds"] == jev_redact.TRIAGED_KINDS
+        assert read["since"] == OPS_SINCE == jev_repo.job_error_since(MODEL)
+        queue.job_reads.clear()
+        later = datetime(2026, 10, 19, 14, 0, tzinfo=UTC)
+        await _plan(_switches(**OPS_ON), now=later)
+        (read,) = queue.job_reads
+        assert read["since"] == later - timedelta(days=7)
+
+    async def test_a_job_before_the_window_is_never_asked_about(
+        self, queue: Queue
+    ) -> None:
+        queue.failed = [
+            _failed(1, finished_at=OPS_SINCE),
+            _failed(2, finished_at=OPS_SINCE + timedelta(seconds=1)),
+        ]
+        await _plan(_switches(**OPS_ON))
+        assert [ask["payload"]["source_id"] for ask in _ops_asks(queue)] == [
+            str(_job_id(2))
+        ]
+
+    @pytest.mark.parametrize(
+        ("kind", "error"),
+        [
+            ("backtest", f"unknown data source '{CANARY}'"),
+            ("ingest_bars", f"division by zero {CANARY}"),
+            ("ingest_bars", None),
+            ("ingest_bars", ""),
+            ("backtest", "lease expired; worker presumed dead"),
+        ],
+        ids=["placed-by-code", "too-few-words", "no-error", "empty", "lease"],
+    )
+    async def test_only_the_residue_is_asked_about(
+        self, queue: Queue, kind: str, error: str | None
+    ) -> None:
+        """
+        What code places, and what reduces to too few words, is never planned:
+        the planner reads a job's error by the handler's own rule
+        (``jev_chips.residue_skeleton``), so no job is queued only to be
+        refused.
+        """
+        assert jev_chips.residue_skeleton(kind, error) is None
+        queue.failed = [_failed(1, kind=kind, error=error), _failed(2)]
+        await _plan(_switches(**OPS_ON))
+        assert [ask["payload"]["source_id"] for ask in _ops_asks(queue)] == [
+            str(_job_id(2))
+        ]
+
+    async def test_one_job_per_address_naming_the_newest(self, queue: Queue) -> None:
+        """
+        Two jobs whose errors differ only in what the redactor takes out make
+        one skeleton, asked about once, by its address, naming the newer job.
+        """
+        older = _failed(1, error=f"[Errno 104] Connection refused {CANARY}a")
+        newer = _failed(2, error=f"[Errno 111] Connection refused {CANARY}b")
+        newer["finished_at"] = older["finished_at"] + timedelta(minutes=5)
+        assert _address_of(older) == _address_of(newer)
+        queue.failed = [older, newer]
+        await _plan(_switches(**OPS_ON))
+        (ask,) = _ops_asks(queue)
+        assert ask["payload"]["source_id"] == str(newer["id"])
+        assert ask["payload"]["subject_id"] == _address_of(newer)
+
+    async def test_newest_first_and_no_more_than_ten_a_pass(self, queue: Queue) -> None:
+        queue.failed = [_failed(i) for i in range(1, 31)]
+        await _plan(_switches(**OPS_ON))
+        assert [ask["payload"]["source_id"] for ask in _ops_asks(queue)] == [
+            str(_job_id(i)) for i in range(1, 11)
+        ], "newest first"
+        (read,) = [r for r in queue.subject_reads if r["read"] == "unasked"]
+        assert read["subjects"] == [_address_of(_failed(i)) for i in range(1, 31)]
+
+    async def test_what_the_unasked_read_leaves_out_is_not_planned(
+        self, queue: Queue
+    ) -> None:
+        """
+        ``jev_repo.unasked_subjects`` is asked about every address, for the
+        registered set under the pin today, and only what it keeps is
+        planned, in its order: an answer on record, a retired subject and one
+        already waiting or planned today are its to leave out.
+        """
+        queue.failed = [_failed(i) for i in range(1, 4)]
+        queue.asked_addresses = {_address_of(_failed(2))}
+        await _plan(_switches(**OPS_ON))
+        assert [ask["payload"]["source_id"] for ask in _ops_asks(queue)] == [
+            str(_job_id(1)),
+            str(_job_id(3)),
+        ]
+        (read,) = queue.subject_reads
+        assert read["set"] is jev_questions.REGISTRY["ops.job_error"]
+        assert read["model"] == MODEL
+        assert read["subject_type"] == "job_error"
+        assert read["day"] == date(2026, 9, 28)
+
+    async def test_with_no_residue_no_unasked_read_is_made(self, queue: Queue) -> None:
+        queue.failed = [_failed(1, error="division by zero")]
+        await _plan(_switches(**OPS_ON))
+        assert len(queue.job_reads) == 1
+        assert queue.subject_reads == []
+        assert _ops_asks(queue) == []
+
+    async def test_never_beyond_the_ops_share(self, queue: Queue) -> None:
+        """A budget of 50 gives the ops lane five calls."""
+        assert jev_catalogue.lane_budget(50, "ops") == 5
+        queue.failed = [_failed(i) for i in range(1, 31)]
+        await _plan(_switches(**OPS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "50"}))
+        assert len(_ops_asks(queue)) == 5
+
+    async def test_the_share_is_the_ops_lanes_and_no_others(self, queue: Queue) -> None:
+        queue.failed = [_failed(i) for i in range(1, 31)]
+        queue.calls_today.update({"findings": 5, "research": 12, "ops": 3})
+        await _plan(_switches(**OPS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "50"}))
+        assert len(_ops_asks(queue)) == 2
+
+    async def test_asks_already_waiting_count_against_the_ops_share(
+        self, queue: Queue
+    ) -> None:
+        waiting = [
+            ("running", "ops.job_error"),
+            ("queued", "ops.job_error"),
+            ("succeeded", "ops.job_error"),
+            ("failed", "ops.job_error"),
+            ("queued", "findings.owner"),
+        ]
+        for n, (status, name) in enumerate(waiting):
+            queue.jobs[f"elsewhere:{n}"] = {
+                "kind": "jev_ask",
+                "status": status,
+                "payload": {"set": name},
+            }
+        queue.failed = [_failed(i) for i in range(1, 31)]
+        await _plan(_switches(**OPS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "50"}))
+        assert len(_ops_asks(queue)) == 3
+
+    async def test_planning_again_the_same_day_adds_nothing(self, queue: Queue) -> None:
+        queue.failed = [_failed(1)]
+        rows = _switches(**OPS_ON)
+        await _plan(rows)
+        before = dict(queue.jobs)
+        assert [k for k in await _plan(rows) if k.startswith("jev_ask:")] == []
+        assert queue.jobs == before
+
+    async def test_nothing_is_planned_while_an_authentication_failure_holds(
+        self, queue: Queue
+    ) -> None:
+        """Every ops ask would call, so none is planned, nor a failed job read."""
+        queue.auth_held = True
+        queue.failed = [_failed(1)]
+        planned = await _plan(_switches(**OPS_ON))
+        assert _ops_asks(queue) == []
+        assert queue.job_reads == []
+        assert "jev_probe:2026-09-28" in planned
+
+    async def test_a_set_the_vendor_refused_is_not_asked(self, queue: Queue) -> None:
+        queue.refused_sets = {"ops.job_error"}
+        queue.failed = [_failed(1)]
+        await _plan(_switches(**OPS_ON))
+        assert _ops_asks(queue) == []
+        assert queue.job_reads == []
+
+    async def test_a_set_with_no_plan_is_planned_nothing(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = jev_prereg.plans_in_force
+
+        def no_ops_plan(name: str, version: int) -> dict[str, Any] | None:
+            return None if name == "ops.job_error" else real(name, version)
+
+        monkeypatch.setattr(jev_prereg, "plans_in_force", no_ops_plan)
+        queue.failed = [_failed(1)]
+        await _plan(_switches(**OPS_ON))
+        assert _ops_asks(queue) == []
+        assert queue.job_reads == []
+
+    async def test_a_row_that_cannot_be_read_is_passed_over_by_class_and_id(
+        self,
+        queue: Queue,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """
+        A defect on one row holds no other, and is logged by the exception's
+        class and the job's id alone: never the error, nor the exception's
+        message, which may quote it.
+        """
+        real = jev_chips.residue_skeleton
+        broken = _failed(2)
+
+        def residue(kind: object, error: object) -> Any:
+            if error == broken["error"]:
+                raise ValueError(f"cannot read {error!r}")
+            return real(kind, error)
+
+        monkeypatch.setattr(jev_chips, "residue_skeleton", residue)
+        queue.failed = [_failed(1), broken, _failed(3)]
+        caplog.set_level(logging.DEBUG)
+        await _plan(_switches(**OPS_ON))
+        assert [ask["payload"]["source_id"] for ask in _ops_asks(queue)] == [
+            str(_job_id(1)),
+            str(_job_id(3)),
+        ]
+        (record,) = [r for r in caplog.records if "passed over" in r.getMessage()]
+        assert str(broken["id"]) in record.getMessage()
+        assert "ValueError" in record.getMessage()
+        assert CANARY not in record.getMessage() and "cannot read" not in (
+            record.getMessage()
+        )
+
+    async def test_the_planner_logs_no_text(
+        self, queue: Queue, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """
+        docs/09, section 13 (D3): planning ops at DEBUG, every logger
+        captured, quotes no job's error and none of its words: only keys,
+        whose subjects are addresses.
+        """
+        queue.failed = [_failed(i) for i in range(1, 13)]
+        queue.failed.append(_failed(13, kind="backtest", error=f"no {CANARY} data"))
+        caplog.set_level(logging.DEBUG)
+        planned = await _plan(_switches(**OPS_ON))
+        assert len(_ops_asks(queue)) == 10
+        logged = "\n".join(
+            [record.getMessage() for record in caplog.records]
+            + [repr(record.args) for record in caplog.records]
+        )
+        assert planned and any(key in logged for key in planned)
+        assert CANARY not in logged
+        for word in ("Errno", "Connection", "refused", "while"):
+            assert word not in logged, word
+
+    async def test_an_ops_answer_is_reasked_behind_the_ops_area_and_the_detail(
+        self, queue: Queue
+    ) -> None:
+        """
+        A re-ask resends the skeleton on record, so it waits for both
+        switches as the ask did.
+        """
+        ops = jev_questions.REGISTRY["ops.job_error"]
+        queue.canonical = [
+            _canonical(
+                1,
+                _hash("00000000"),
+                question_set=ops.name,
+                question_set_version=ops.version,
+                pack_hash=ops.pack_hash,
+                lane="ops",
+                subject_type="job_error",
+                subject_id=_address_of(_failed(1)),
+            )
+        ]
+        for off in (AREA_OPS, flags.JEV_SEND_INTERNAL_DETAIL):
+            await _plan(_switches(**{**OPS_ON, off: "false"}))
+            assert _reasks(queue) == [], off
+        await _plan(_switches(**OPS_ON))
+        assert [job["payload"]["request_id"] for job in _reasks(queue)] == [1]
+
+
 #: Every switch the matrix sets, as phase D reads them, and the key: the
 #: master switch, Jev's, the findings, ops and guardrails areas, the arming
 #: switch and the detail switch (docs/09, section 13; D4 builds the rest of
@@ -1700,11 +2218,13 @@ class TestTheSwitchMatrix:
     256 cases — and a subject waiting for every set. Each rule is planned
     exactly when its conjunction holds: the probe on programme, Jev and a key;
     the guardrail sets on those and the guardrails area; the findings sets on
-    those and the findings area. Until phase D3 registers ``ops.job_error`` the
-    ops area plans nothing, and until D4 the arming switch has no consumer; so
-    each, and the detail switch, alone or with anything else, plans nothing of
-    its own. The research and decisions areas stay off, which
-    :class:`TestItIsDark` covers.
+    those and the findings area; and from phase D3 the ops set on those, the
+    ops area and the detail switch together, so the ops area on with the
+    detail switch off plans nothing and reads no failed job (revised:
+    D-SAFE-1). Until D4 the arming switch has no consumer, so it plans nothing
+    of its own, alone or with anything else, and neither does the detail
+    switch without the ops area. The research and decisions areas stay off,
+    which :class:`TestItIsDark` covers.
     """
 
     @pytest.mark.parametrize(
@@ -1720,6 +2240,7 @@ class TestTheSwitchMatrix:
         queue.screens = [SCREEN_SUBJECT]
         queue.titles = [TITLE_SUBJECT]
         queue.findings = [FINDING_SUBJECT]
+        queue.failed = [_failed(1)]
         rows = _switches(
             **{AREA_DECISIONS: "false", AREA_RESEARCH: "false"},
             **{name: "true" if on else "false" for name, on in switches.items()},
@@ -1738,6 +2259,10 @@ class TestTheSwitchMatrix:
             sets |= {"guardrail.injection", "guardrail.card"}
         if switches[AREA_FINDINGS]:
             sets |= set(FINDING_SETS)
+        ops = switches[AREA_OPS] and switches[flags.JEV_SEND_INTERNAL_DETAIL]
+        if ops:
+            sets.add("ops.job_error")
         assert {k for k in planned if not k.startswith("jev_ask:")} == expected
         assert {job["payload"]["set"] for job in _asks(queue)} == sets
         assert {read["set"].name for read in queue.subject_reads} == sets
+        assert bool(queue.job_reads) is ops, "a failed job read without both"

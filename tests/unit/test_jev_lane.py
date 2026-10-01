@@ -54,6 +54,7 @@ from src.programme import (
     jev_client,
     jev_lane,
     jev_questions,
+    jev_redact,
     jev_repo,
     jev_validate,
 )
@@ -634,6 +635,57 @@ _OPS = jev_questions.QuestionSet(
 AREA_RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
 AREA_GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
 AREA_DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
+AREA_OPS = f"{flags.JEV_AREA_PREFIX}ops"
+
+#: Phase D3's registered ops set, and a skeleton of an invented failed job.
+_OPS_JOB_ERROR = jev_questions.OPS_JOB_ERROR
+
+
+def _skeleton_state(
+    error: str = "[Errno 111] Connection refused", kind: str = "ingest_bars"
+) -> jev_questions.JobErrorState:
+    return jev_questions.JobErrorState(
+        job_kind=kind,  # type: ignore[arg-type]
+        error=jev_redact.skeleton(error),  # type: ignore[arg-type]
+    )
+
+
+def _answering_ops(**overrides: Any) -> Callable[..., Any]:
+    """
+    A responder answering the ops set's one Choice soundly: half on the first
+    cause, the rest shared equally, summing to 1.
+    """
+
+    def respond(**kwargs: Any) -> Any:
+        answers: dict[str, Any] = {}
+        for key, question in kwargs["questions"].items():
+            options = list(question["criteria"])
+            share = 0.5 / (len(options) - 1)
+            answers[key] = {
+                "type": "choice",
+                "choice": options[0],
+                "confidence": 0.5,
+                "probabilities": {
+                    option: 0.5 if n == 0 else share for n, option in enumerate(options)
+                },
+            }
+        return _call(200, _body(answers), **overrides)
+
+    return respond
+
+
+async def _ask_skeleton(
+    rig: Rig, state: jev_questions.JobErrorState, **kwargs: Any
+) -> AskResult:
+    """Ask the ops set about ``state``, its subject the state's own address."""
+    return await _ask(
+        rig,
+        _OPS_JOB_ERROR,
+        state,
+        subject_type="job_error",
+        subject_id=jev_questions.job_error_subject(state),
+        **kwargs,
+    )
 
 
 @pytest.fixture
@@ -1871,6 +1923,48 @@ class TestTheDetailSwitch:
         assert result.status == "ok"
         assert flags.JEV_SEND_INTERNAL_DETAIL not in rig.conn.asked
 
+    async def test_ops_asks_nothing_with_the_detail_switch_off(self, rig: Rig) -> None:
+        """
+        docs/09, section 13 (D3; revised: D-SAFE-1): the programme, Jev and
+        the ops area on and the detail switch off, an ask about a skeleton —
+        this system's own detail — is ``disabled``, writes no row and makes no
+        call. Switched on, the same ask is sent, the skeleton and the kind and
+        nothing else, and recorded in the ops lane under provenance
+        ``system``.
+        """
+        rig.conn.rows[AREA_OPS] = "true"
+        rig.client.respond = _answering_ops()
+        state = _skeleton_state()
+
+        result = await _ask_skeleton(rig, state)
+
+        assert result.status == "disabled"
+        _nothing_happened(rig)
+        assert AREA_OPS in rig.conn.asked
+        assert flags.JEV_SEND_INTERNAL_DETAIL in rig.conn.asked
+
+        rig.conn.rows[flags.JEV_SEND_INTERNAL_DETAIL] = "true"
+        result = await _ask_skeleton(rig, state)
+
+        assert result.status == "ok"
+        (call,) = rig.client.calls
+        assert call["state"] == {
+            "job_kind": "ingest_bars",
+            "error": ["errno", "[number]", "connection", "refused"],
+        }
+        (row,) = rig.ledger.requests
+        assert (row["lane"], row["provenance"]) == ("ops", "system")
+        assert row["subject_type"] == "job_error"
+        assert row["subject_id"] == jev_questions.job_error_subject(state)
+
+    async def test_the_ops_area_does_not_stand_for_the_switch_nor_it_for_the_area(
+        self, rig: Rig
+    ) -> None:
+        rig.client.respond = _answering_ops()
+        rig.conn.rows[flags.JEV_SEND_INTERNAL_DETAIL] = "true"
+        assert (await _ask_skeleton(rig, _skeleton_state())).status == "disabled"
+        _nothing_happened(rig)
+
     async def test_a_copy_with_the_detail_flag_cleared_is_refused(
         self, rig: Rig
     ) -> None:
@@ -2740,6 +2834,30 @@ class TestStandingRefusals:
 
         again = await _ask(rig, state=state)
         probed = await _ask(rig, state=state, probe=True)
+
+        assert (again.status, probed.status) == ("ok", "ok")
+        assert not again.replayed
+        assert len(rig.client.calls) == 3
+        assert "content_blocked" not in rig.ledger.log, "a block was looked up"
+
+    async def test_a_skeleton_is_held_by_no_content_block(self, rig: Rig) -> None:
+        """
+        docs/09, section 13 (D3; open item 36): a job error's skeleton is
+        enumerated — a kind and tokens, each a Literal, computed in code — so a
+        403 page about it holds it no more than it holds a regime state. Its
+        failure is recorded, and it is asked again, by the next ask and by a
+        probe, and no block is looked up for it.
+        """
+        rig.conn.rows[AREA_OPS] = "true"
+        rig.conn.rows[flags.JEV_SEND_INTERNAL_DETAIL] = "true"
+        state = _skeleton_state()
+        rig.client.respond = _blocking
+        blocked = await _ask_skeleton(rig, state)
+        assert (blocked.status, blocked.error_kind) == ("error", "content_block")
+        rig.client.respond = _answering_ops()
+
+        again = await _ask_skeleton(rig, state)
+        probed = await _ask_skeleton(rig, state, probe=True)
 
         assert (again.status, probed.status) == ("ok", "ok")
         assert not again.replayed

@@ -881,6 +881,27 @@ JOB_ERROR_SHAPES: tuple[JobErrorShape, ...] = (
         r", not a canonical answer; only a canonical answer is re-asked",
         "code_defect",
     ),
+    # Phase D3's ops ask, refusing a job outside its set's population: one the
+    # planner never plans — not failed, of a kind never triaged, with no finish
+    # time, or named by something other than its id — and one that has left
+    # the population since it was planned, because code's table or the
+    # redactor moved between the plan and the claim.
+    JobErrorShape(
+        "ops_ask_outside_the_population",
+        _ASKS,
+        r"\Ajob \S+ is \S+, not failed; |"
+        r"\Ajob \S+ is of the kind \S+, whose errors code alone places; |"
+        r"\Ajob \S+ has no finish time; |"
+        r"\Aa job error's row is a job, named by its id",
+        "code_defect",
+    ),
+    JobErrorShape(
+        "ops_ask_left_to_code",
+        _ASKS,
+        r"\Ajob \S+'s error is placed by code \(|"
+        r"\Ajob \S+'s error reduces to fewer than \S+ words of the vocabulary",
+        "held_by_design",
+    ),
     JobErrorShape(
         "ask_failed_in_the_database",
         _ASKS,
@@ -893,15 +914,16 @@ JOB_ERROR_SHAPES: tuple[JobErrorShape, ...] = (
 )
 
 #: The shapes' version: a pattern, a cause, a kind or an order changed is a
-#: new version, named with its hash by the ops set's plan.
-SHAPES_VERSION = 1
+#: new version, named with its hash by the ops set's plan. Version 2 added
+#: the ops ask's own refusals, before any plan named version 1.
+SHAPES_VERSION = 2
 
 #: :func:`shapes_sha256` of this version, pinned beside the table and held
 #: to an append-only released history kept in
 #: ``tests/unit/test_jev_chips.py``, so re-pinning this after an edit still
 #: fails there.
 GOLDEN_SHAPES_SHA256 = (
-    "f4760e9218a63855942d567b8ad23c550cc3862119cd46f3c1c3445300adc53a"
+    "0ce6cdc62fbbbfe20ba80fa5f268157f6a21f838687fc8657bf8f4a84aa474d8"
 )
 
 _COMPILED_SHAPES: tuple[tuple[JobErrorShape, re.Pattern[str]], ...] = tuple(
