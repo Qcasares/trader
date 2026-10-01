@@ -67,6 +67,7 @@ from src.db.repos import flags as flag_repo  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
 from src.programme import (  # noqa: E402
     flags,
+    jev_catalogue,
     jev_client,
     jev_plan,
     jev_prereg,
@@ -249,8 +250,9 @@ class _Vendor:
     ``jev_client.ask``, answering each question about each text as scripted,
     and counting calls. A Noul about a text answers ``noul[text]``, or 0.03,
     the probe's 0.99; a Choice puts 0.7 on its first option. ``failing[text]``
-    makes every call about that text a timeout, a content block, or a response
-    refused whole (``invalid``: another model answered), and
+    makes every call about that text a timeout, a content block, a response
+    refused whole (``invalid``: another model answered), a 422
+    (``invalid_request``) or a refused key (``auth``), and
     ``failing_for[(text, key)]`` only the calls that ask question ``key``.
     """
 
@@ -280,6 +282,25 @@ class _Vendor:
                 error_kind="timeout",
                 input_tokens=None,
                 output_tokens=None,
+            )
+        if failing in ("invalid_request", "auth"):
+            # A 422, which holds the set's version under the pin, or a 401,
+            # which holds every lane until midnight: each a standing refusal.
+            body = json.dumps({"error": {"type": failing, "message": "refused"}})
+            return jev_client.JevCall(
+                http_status=422 if failing == "invalid_request" else 401,
+                raw_body=body,
+                request_id="req_refused",
+                latency_ms=30,
+                error_class=(
+                    "TypeSafeUnprocessableEntityError"
+                    if failing == "invalid_request"
+                    else "TypeSafeAuthenticationError"
+                ),
+                error_kind=failing,
+                input_tokens=None,
+                output_tokens=None,
+                wire_body=body.encode("utf-8"),
             )
         if failing == "content_block":
             body = "<html>blocked</html>"
@@ -728,6 +749,164 @@ class TestABlocksQuarantineSurvivesAFailedWrite:
             in (document["quarantine_reason"])
         )
         assert len(vendor.about(CLEAN)) == 2, "the repair made a call"
+
+    @pytest.mark.parametrize("hold", ["invalid_request", "auth"])
+    async def test_the_repair_is_planned_whatever_the_vendor_holds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db: tuple[str, asyncpg.Connection],
+        vendor: _Vendor,
+        hold: str,
+    ) -> None:
+        """
+        C7+C8's review: the planner held back every ask of a set the vendor
+        refused with a 422, and every ask while an authentication failure held
+        the day, because the road would refuse each before any call. Not the
+        repair: the road refuses it for the block, with no call, before it
+        reads a standing refusal, and its follow-up quarantines. A 422 holds
+        the screen until a new version, so the content stayed in use for as
+        long; now the repair is planned under either hold, and makes no call.
+        """
+        dsn, conn = db
+        vendor.failing_for = {(CLEAN, "asset_class"): "content_block"}
+        left = _flaky_quarantine(monkeypatch, failures=3)
+        _page(monkeypatch, {"Equities": [CLEAN]})
+        await _loop(monkeypatch, dsn)
+        assert left["failures"] == 0
+        assert [d["quarantined"] for d in await _documents(conn, CLEAN)] == [False]
+
+        # The same day, the screen's ask about another excerpt draws the hold.
+        await jev_repo.insert_documents(
+            conn,
+            [
+                jev_repo.DocumentRow(
+                    source="another_feed",
+                    url="https://example.invalid/feed",
+                    excerpt=TIED,
+                )
+            ],
+        )
+        vendor.failing = {TIED: hold}
+        await _plan_and_drain(conn, dsn, datetime.now(UTC))
+        (refused,) = await _requests(conn, SCREEN, TIED)
+        assert refused["error_kind"] == hold
+        model = await flags.jev_model(conn)
+        assert model is not None
+        held = (
+            await jev_repo.auth_failed_today(conn)
+            if hold == "auth"
+            else await jev_repo.set_refused(
+                conn, question_set=SCREEN.name, version=SCREEN.version, model=model
+            )
+        )
+        assert held, f"the {hold} hold is not in force"
+
+        calls = len(vendor.about(CLEAN)) + len(vendor.about(TIED))
+        tomorrow = _tomorrow()
+        planned = await _plan_and_drain(conn, dsn, tomorrow)
+        assert [k for k in planned if k.startswith("jev_ask:")] == [
+            jev_repo.ask_job_key(
+                SCREEN.name, 1, "web_excerpt", text_sha256(CLEAN), tomorrow.date()
+            )
+        ], "the repair was held back, or an ask that calls was planned"
+        (document,) = await _documents(conn, CLEAN)
+        assert document["quarantined"] is True
+        assert len(vendor.about(CLEAN)) + len(vendor.about(TIED)) == calls, (
+            "the repair made a call"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The screen's own quarantine survives a failed write (C7+C8's review)
+# ---------------------------------------------------------------------------
+
+
+class TestTheScreensQuarantineSurvivesAFailedWrite:
+    async def test_a_later_pass_quarantines_it_with_no_call_and_none_resends_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db: tuple[str, asyncpg.Connection],
+        vendor: _Vendor,
+    ) -> None:
+        """
+        A valid ``true`` from the screen quarantines its text, and the answer
+        is canonical and committed before the quarantine is written. With the
+        write failing on every attempt, the first cut left the text in use for
+        good — answered ``ok``, so never planned again — and the next day's
+        re-ask, sampled in the low-margin stratum, sent it to the vendor
+        again as a probe. Now a later day's pass plans the screen for it with
+        no call, whose job quarantines it on the answer on record, in the
+        screen's words; no re-ask is planned for flagged text; and the vendor
+        sees it once.
+        """
+        dsn, conn = db
+        vendor.noul = {ADDRESSED: 0.55}
+        left = _flaky_quarantine(monkeypatch, failures=3)
+        _page(monkeypatch, {"Commodities": [ADDRESSED]})
+        await _loop(monkeypatch, dsn)
+        (screened,) = await _requests(conn, SCREEN, ADDRESSED)
+        assert screened["status"] == "ok"
+        (job,) = await _asks(conn, SCREEN, ADDRESSED)
+        assert (job["status"], job["attempts"]) == ("failed", 3), job["error"]
+        assert left["failures"] == 0
+        assert [d["quarantined"] for d in await _documents(conn, ADDRESSED)] == [False]
+        assert len(vendor.about(ADDRESSED)) == 1
+
+        tomorrow = _tomorrow()
+        planned = await _plan_and_drain(conn, dsn, tomorrow)
+        assert not [k for k in planned if k.startswith("jev_reask")], planned
+        assert [k for k in planned if text_sha256(ADDRESSED) in k] == [
+            jev_repo.ask_job_key(
+                SCREEN.name, 1, "web_excerpt", text_sha256(ADDRESSED), tomorrow.date()
+            )
+        ], "the screen's flag was never acted on"
+        (document,) = await _documents(conn, ADDRESSED)
+        assert document["quarantined"] is True
+        assert document["quarantine_reason"] == (
+            f"jev guardrail.injection v1: addressed_to_ai p=0.55 (request "
+            f"{screened['id']}, {PIN}); not calibrated"
+        )
+        for days in (2, 3):
+            planned = await _plan_and_drain(conn, dsn, _tomorrow(days))
+            assert not [k for k in planned if text_sha256(ADDRESSED) in k], planned
+        assert len(vendor.about(ADDRESSED)) == 1, "flagged text was sent again"
+        assert [r["lane"] for r in await _requests(conn, SCREEN, ADDRESSED)] == [
+            "guardrail"
+        ]
+
+    async def test_a_flag_made_under_another_pin_is_acted_on_with_no_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db: tuple[str, asyncpg.Connection],
+        vendor: _Vendor,
+    ) -> None:
+        """
+        The answer on record is read before any ask, not replayed by one: with
+        the pin moved since, a replay would find no canonical answer and ask
+        the new model about the flagged text. Quarantine is one-way and by
+        content, so the flag stands whoever is pinned now, and the repair
+        quarantines in its words with no call.
+        """
+        dsn, conn = db
+        vendor.noul = {ADDRESSED: 0.55}
+        _flaky_quarantine(monkeypatch, failures=3)
+        _page(monkeypatch, {"Commodities": [ADDRESSED]})
+        await _loop(monkeypatch, dsn)
+        (screened,) = await _requests(conn, SCREEN, ADDRESSED)
+        assert [d["quarantined"] for d in await _documents(conn, ADDRESSED)] == [False]
+
+        newer = "jev-1.14.0"
+        monkeypatch.setattr(jev_catalogue, "KNOWN_MODELS", (PIN, newer))
+        await flag_repo.set_flag(conn, flags.JEV_MODEL, newer, "test")
+        assert await flags.jev_model(conn) == newer
+        await _plan_and_drain(conn, dsn, _tomorrow())
+        (document,) = await _documents(conn, ADDRESSED)
+        assert document["quarantined"] is True
+        assert document["quarantine_reason"] == (
+            f"jev guardrail.injection v1: addressed_to_ai p=0.55 (request "
+            f"{screened['id']}, {PIN}); not calibrated"
+        )
+        assert len(vendor.about(ADDRESSED)) == 1, "the new pin was asked about it"
 
 
 # ---------------------------------------------------------------------------

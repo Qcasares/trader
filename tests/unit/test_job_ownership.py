@@ -1370,6 +1370,9 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
         async def not_quarantined(conn: Any, content: str) -> None:
             return None
 
+        async def not_flagged(conn: Any, content: str) -> None:
+            return None
+
         async def quarantine(conn: Any, content: str, reason: str) -> int:
             return 1
 
@@ -1381,6 +1384,7 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
 
         monkeypatch.setattr(jev_repo, "get_document", document)
         monkeypatch.setattr(jev_repo, "content_quarantined", not_quarantined)
+        monkeypatch.setattr(jev_repo, "screen_flag", not_flagged)
         monkeypatch.setattr(jev_repo, "quarantine_content", quarantine)
         monkeypatch.setattr(jev_repo, "content_block_request", earliest_block)
         monkeypatch.setattr(jev_repo, "get_request", answered)

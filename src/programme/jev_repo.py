@@ -51,7 +51,9 @@ from src.programme import jev_questions
 from src.programme.jev_hash import text_sha256
 from src.programme.jev_questions import (
     SCREEN_CLEAR_ARGMAX,
+    SCREEN_FLAG_ARGMAX,
     SCREEN_QUESTION,
+    SCREEN_SET_NAME,
     QuestionSet,
 )
 
@@ -738,6 +740,54 @@ async def content_quarantined(
     return int(document_id) if document_id is not None else None
 
 
+def _flags(subject: str) -> str:
+    """
+    The canonical answers in which the injection screen found the web content
+    whose address is ``subject`` addressed to an AI system, as SQL: a request
+    of the screen's set about it, ``ok`` and outside the probe lane, whose
+    screen question has a valid answer of the acting argmax. Any version and
+    any model; the alias ``f`` is the request and ``fa`` the answer.
+    """
+    return f"""
+        jev_requests f
+        JOIN jev_answers fa ON fa.request_id = f.id
+        WHERE f.question_set = '{SCREEN_SET_NAME}'
+          AND f.subject_type = 'web_excerpt' AND f.subject_id = {subject}
+          AND f.status = 'ok' AND f.lane <> 'probe'
+          AND fa.question_key = '{SCREEN_QUESTION}' AND fa.valid
+          AND fa.argmax = '{SCREEN_FLAG_ARGMAX}'
+    """
+
+
+async def screen_flag(
+    conn: asyncpg.Connection, content_sha256: str
+) -> dict[str, Any] | None:
+    """
+    The earliest canonical answer in which the injection screen found this web
+    content addressed to an AI system, or ``None``: the request
+    (``request_id``), the screen's version that asked (``question_set_version``),
+    the model that answered (``model_answered``) and its probability
+    (``noul``).
+
+    Such an answer quarantines its content when it is recorded (``jev_jobs``),
+    but it is canonical and committed before the quarantine is written, so a
+    write that fails leaves it here and the content in use. ``jev_jobs`` reads
+    it before any ask about stored web text and makes the quarantine there,
+    and ``jev_plan`` re-asks no text it names. Any version and any model, where
+    a clearance (:func:`screened_clean`) is read under the registered screen
+    and the pin alone: quarantine is one-way and by content, so an answer
+    whose quarantine failed to write is one that should have quarantined,
+    whatever has been registered or pinned since. A probe's answer is not
+    one: a probe measures, and acts on nothing.
+    """
+    row = await conn.fetchrow(
+        f"SELECT f.id AS request_id, f.question_set_version, f.model_answered, "
+        f"fa.noul FROM {_flags('$1')} ORDER BY f.id LIMIT 1",
+        content_sha256,
+    )
+    return dict(row) if row is not None else None
+
+
 async def screened_clean(
     conn: asyncpg.Connection, *, state_hash: str, pack_hash: str, model: str
 ) -> bool:
@@ -1156,14 +1206,20 @@ async def pending_asks(conn: asyncpg.Connection, sets: Sequence[str]) -> int:
 #
 # Each returns at most ``limit`` subjects, never one whose ``jev_ask`` job for
 # the set is already waiting — queued or running, whatever day it was planned
-# — or was planned today, finished or not, under :func:`ask_job_key`; and
-# never one with ``max_failed`` failed calls for the set, its version and the
-# pin, which retires it. A failed call is a response refused whole
-# (``invalid``) or a call that failed (``error``): neither is an answer, an
-# ``invalid`` row is never canonical (:func:`find_canonical`), and so neither
-# replays, and the subject is asked again on a later day until the third. A
-# subject with an ``ok`` answer is never returned again, whatever the answer
-# said: that row is canonical, and asking again would only replay it.
+# — or was planned today, finished or not, under :func:`ask_job_key`; and,
+# with one exception, never one with ``max_failed`` failed calls for the set,
+# its version and the pin, which retires it. A failed call is a response
+# refused whole (``invalid``) or a call that failed (``error``): neither is an
+# answer, an ``invalid`` row is never canonical (:func:`find_canonical`), and
+# so neither replays, and the subject is asked again on a later day until the
+# third. A subject with an ``ok`` answer is not returned again, whatever the
+# answer said: that row is canonical, and asking again would only replay it.
+#
+# The exception is the injection screen's repairs: content still in use that
+# a vendor content block, or the screen's own ``true``, is on record for is
+# returned by :func:`documents_to_screen`, first, whatever its answers and
+# failed calls, until it is quarantined — its job makes no call, and makes the
+# quarantine the record says should have been made.
 
 #: How many failed calls retire a subject for a set, its version and the pin:
 #: three, the attempts one ``jev_ask`` job has (design C7).
@@ -1272,21 +1328,27 @@ async def documents_to_screen(
     The stored web content the injection screen is to be asked about on
     ``day``: at most ``limit``, each content once, by its address
     (``content_sha256``), with the earliest document holding it
-    (``document_id``) and whether a content block is on record for it
-    (``blocked``). Content quarantined under any source is never returned.
+    (``document_id``), whether a content block is on record for it
+    (``blocked``) and whether the screen's own ``true`` is (``flagged``).
+    Content quarantined under any source is never returned.
 
-    First, content a vendor content block was recorded for, by any set: the
-    road refuses the screen's ask about it before any call, for the block, and
-    the job's follow-up quarantines the content (``jev_jobs``). So a
-    quarantine that failed to write after a block is made by a later job,
-    planned here on a later pass, whatever the content's screen rows say.
+    First, the repairs, whatever the content's screen rows and failed calls
+    say: content still in use that a vendor content block was recorded for, by
+    any set, or that the screen found addressed to an AI system
+    (:func:`screen_flag`) — either should have quarantined it, and a write that
+    failed after the row committed left it in use. The job makes no call: the
+    handler quarantines flagged content on the answer on record before any
+    ask, and the road refuses blocked content for its block before any call,
+    the job's follow-up quarantining it (``jev_jobs``). So such a quarantine is
+    made by a later job, planned here on a later pass.
 
     Then content the screen, at its registered version and under ``model``,
     has not answered ``ok``, with fewer than ``max_failed`` failed calls (see
     the section's comment): an answer that cleared the text lets the catalogue
-    be asked, one that flagged it has quarantined it, and one that was not
-    measured — a tie, say — is canonical and would only replay, which holds the
-    text unscreened under this version and pin. Earliest document first.
+    be asked, one that flagged it has quarantined it or is repaired above, and
+    one that was not measured — a tie, say — is canonical and would only
+    replay, which holds the text unscreened under this version and pin.
+    Earliest document first.
     """
     prefix, suffix = _key_around(screen.name, screen.version, "web_excerpt", day)
     rows = await conn.fetch(
@@ -1294,14 +1356,18 @@ async def documents_to_screen(
         WITH {_CONTENT_IN_USE},
         subjects AS (
             SELECT c.content_sha256, c.document_id,
-                   {_blocked("web_excerpt", "c.content_sha256")} AS blocked
+                   {_blocked("web_excerpt", "c.content_sha256")} AS blocked,
+                   EXISTS (
+                       SELECT 1 FROM {_flags("c.content_sha256")}
+                   ) AS flagged
             FROM content c
         )
-        SELECT s.content_sha256, s.document_id, s.blocked
+        SELECT s.content_sha256, s.document_id, s.blocked, s.flagged
         FROM subjects s
         WHERE {_not_waiting("s.content_sha256")}
-          AND (s.blocked OR ({_unanswered("web_excerpt", "s.content_sha256")}))
-        ORDER BY s.blocked DESC, s.document_id
+          AND (s.blocked OR s.flagged
+               OR ({_unanswered("web_excerpt", "s.content_sha256")}))
+        ORDER BY (s.blocked OR s.flagged) DESC, s.document_id
         LIMIT $7
         """,
         screen.name,
@@ -1336,10 +1402,12 @@ async def documents_to_describe(
     has a *valid* answer of the clear argmax — joined here by the content's
     address rather than the state's hash, which for a web excerpt name the
     same text. An answer that is not valid is not a clearance, whatever argmax
-    it carries. Never content quarantined under any source or with a content
-    block on record; and, for the catalogue at its registered version under
-    ``model``, never content answered ``ok`` or retired by ``max_failed``
-    failed calls (see the section's comment).
+    it carries. Never content quarantined under any source, with a content
+    block on record, or that the screen found addressed to an AI system under
+    any version or model (:func:`screen_flag`), which is the screen's to
+    repair; and, for the catalogue at its registered version under ``model``,
+    never content answered ``ok`` or retired by ``max_failed`` failed calls
+    (see the section's comment).
     """
     prefix, suffix = _key_around(catalogue.name, catalogue.version, "web_excerpt", day)
     rows = await conn.fetch(
@@ -1358,6 +1426,7 @@ async def documents_to_describe(
                   AND a.question_key = $9 AND a.valid AND a.argmax = $10
               )
           AND NOT {_blocked("web_excerpt", "c.content_sha256")}
+          AND NOT EXISTS (SELECT 1 FROM {_flags("c.content_sha256")})
           AND {_unanswered("web_excerpt", "c.content_sha256")}
           AND {_not_waiting("c.content_sha256")}
         ORDER BY c.document_id

@@ -2082,11 +2082,13 @@ class TestDocumentsToScreen:
                 "content_sha256": text_sha256(text),
                 "document_id": first,
                 "blocked": False,
+                "flagged": False,
             },
             {
                 "content_sha256": text_sha256(other),
                 "document_id": second,
                 "blocked": False,
+                "flagged": False,
             },
         ]
 
@@ -2098,20 +2100,115 @@ class TestDocumentsToScreen:
         await _quarantine(conn, await _document(conn, text, source="another_feed"))
         assert await _to_screen(conn) == []
 
-    @pytest.mark.parametrize(
-        "answer", [CLEAR, FLAGGED, TIED], ids=["cleared", "flagged", "a-tie"]
-    )
+    @pytest.mark.parametrize("answer", [CLEAR, TIED], ids=["cleared", "a-tie"])
     async def test_content_the_screen_answered_ok_is_not_asked_again(
         self, conn: asyncpg.Connection, answer: Answer
     ) -> None:
         """
-        Whatever the answer said: an ``ok`` row is canonical, so a tie, which
-        measured nothing, would only replay, and holds the text where it is.
+        An ``ok`` row is canonical, so a tie, which measured nothing, would
+        only replay, and holds the text where it is. A ``true`` is the other
+        answer that leaves the text in use only when its quarantine failed to
+        write, which is a repair (below).
         """
         text = _text()
         await _document(conn, text)
         await _asked(conn, SCREEN, text, answers=(answer,))
         assert await _to_screen(conn) == []
+
+    async def test_content_the_screen_flagged_comes_first_until_quarantined(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        C7+C8's review: the screen's ``true`` is canonical and committed
+        before its quarantine is written, so content whose quarantine failed
+        to write was answered and never planned again. It is the screen's
+        repair now, first, whatever its failed calls, under any version or
+        pin, until its content is quarantined.
+        """
+        plain, flagged = _text(), _text()
+        await _document(conn, plain)
+        document = await _document(conn, flagged)
+        await _asked(
+            conn,
+            SCREEN,
+            flagged,
+            answers=(FLAGGED,),
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
+        for _ in range(3):
+            await _asked(conn, SCREEN, flagged, "error", **_failed("timeout"))
+        rows = await _to_screen(conn)
+        assert [(row["content_sha256"], row["flagged"]) for row in rows] == [
+            (text_sha256(flagged), True),
+            (text_sha256(plain), False),
+        ]
+        assert rows[0]["blocked"] is False
+        await _quarantine(conn, document)
+        assert _subjects(await _to_screen(conn)) == [text_sha256(plain)]
+
+    @pytest.mark.parametrize(
+        "not_a_flag",
+        [
+            {"answers": (CLEAR,)},
+            {"answers": (_invalid(FLAGGED, "noul_invalid"),)},
+            {"status": "invalid", "answers": (FLAGGED,)},
+            {"lane": "probe", "answers": (FLAGGED,)},
+            {"question_set": CATALOGUE.name, "answers": (FLAGGED,)},
+            {"subject_type": "hypothesis_title", "answers": (FLAGGED,)},
+            {"answers": (dataclasses.replace(FLAGGED, question_key="about_trading"),)},
+        ],
+        ids=[
+            "a-clearance",
+            "an-invalid-answer-naming-true",
+            "a-response-refused-whole",
+            "a-probe",
+            "another-set",
+            "another-subject-type",
+            "another-question",
+        ],
+    )
+    async def test_nothing_but_the_screens_canonical_true_is_a_flag(
+        self, conn: asyncpg.Connection, not_a_flag: dict[str, Any]
+    ) -> None:
+        """
+        Each filter of the flag by a case only it refuses: the content was
+        answered ``ok`` and cleared under the pin, and a row that is not the
+        screen's canonical, valid ``true`` about it does not bring it back.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text)
+        await _asked(conn, SCREEN, text, **not_a_flag)
+        assert await _to_screen(conn) == []
+        assert await jev_repo.screen_flag(conn, text_sha256(text)) is None
+
+    async def test_a_flag_names_its_request_its_version_its_model_and_its_p(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        ``screen_flag`` reads the earliest canonical ``true`` about the content,
+        and only about that content, for the quarantine's words.
+        """
+        text, other = _text(), _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, other, answers=(FLAGGED,))
+        first = await _asked(
+            conn,
+            SCREEN,
+            text,
+            answers=(FLAGGED,),
+            question_set_version=2,
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
+        await _asked(conn, SCREEN, text, answers=(FLAGGED,))
+        assert await jev_repo.screen_flag(conn, text_sha256(text)) == {
+            "request_id": first,
+            "question_set_version": 2,
+            "model_answered": "jev-1.14.0",
+            "noul": FLAGGED.noul,
+        }
 
     async def test_a_failed_call_is_asked_again_until_the_third(
         self, conn: asyncpg.Connection
@@ -2276,6 +2373,28 @@ class TestDocumentsToDescribe:
         text = _text()
         await _document(conn, text)
         await _asked(conn, SCREEN, text, **screened)
+        assert await _to_describe(conn) == []
+
+    async def test_content_the_screen_flagged_is_never_described(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        A clearance under the pin, and a ``true`` from another pin whose
+        quarantine failed to write: the flag wins, and is the screen's to
+        repair, so the catalogue is not asked about the text.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text)
+        assert _subjects(await _to_describe(conn)) == [text_sha256(text)]
+        await _asked(
+            conn,
+            SCREEN,
+            text,
+            answers=(FLAGGED,),
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
         assert await _to_describe(conn) == []
 
     async def test_content_quarantined_or_blocked_is_not_described(

@@ -51,15 +51,19 @@ Each with the area it needs, what it enqueues, when, and under which key:
   research. The payload names the set, its version, the subject, the row its
   text is read from and the analysis plans in force, which the handler asks
   under and no others, never the text; a set with no plan is planned nothing.
-  The subjects are ``jev_repo``'s
-  reads: stored content the screen has not answered, content a block is on
-  record for first; content the screen cleared, for the catalogue, and never
-  any other; model-written hypothesis titles within their cap, newest first.
-  Each read leaves out a subject whose job is waiting or was planned today,
-  and retires one after three failed calls; the day in the key lets a later
-  day's plan ask again about a subject whose job failed. No ask is planned
-  while an authentication failure recorded today holds every lane, nor of a
-  set the vendor refused with a 422 at its version under the pin.
+  The subjects are ``jev_repo``'s reads: stored content the screen has not
+  answered, and first its repairs, content still in use that a vendor
+  content block or the screen's own ``true`` is on record for; content the
+  screen cleared, for the catalogue, and never any other; model-written
+  hypothesis titles within their cap, newest first. Each read leaves out a
+  subject whose job is waiting or was planned today, and retires one after
+  three failed calls — but for the screen's repairs, returned until their
+  content is quarantined whatever its answers and failed calls; the day in
+  the key lets a later day's plan ask again about a subject whose job failed.
+  Nothing that would call is planned while an authentication failure
+  recorded today holds every lane, nor of a set the vendor refused with a
+  422 at its version under the pin; the screen's repairs, which make no
+  call, are planned under either.
 
 The daily probe proves each day, on a fixed state whose answer is known, that
 the key, the pin and the validator still work, and gives a daily series of the
@@ -77,8 +81,9 @@ A job that makes a call is enqueued only while its lane's share of the day's
 budget (``jev_catalogue.LANE_BUDGET_PERCENT``) has a call left once the calls
 already made today and the jobs already waiting are counted: the ``jev_ask``
 jobs of a lane's sets among them, from phase C7. The reference job, the web
-ingest and the screen's ask about content a block is on record for make no
-call. Every enqueue names its kind as a literal, so
+ingest and the screen's repairs — its asks about content a block, or its own
+``true``, is on record for — make no call. Every enqueue names its kind as a
+literal, so
 ``tests/unit/test_job_ownership.py`` can hold each to exactly one owner, and the
 reference job's priority by name (``REFERENCE_PRIORITY``), which a test holds
 below every kind on the live path, so the worker claims the live ingest first.
@@ -388,13 +393,17 @@ async def _plan_asks(
     :func:`jev_repo.documents_to_describe` — content the screen cleared, and
     nothing else — and :func:`jev_repo.hypotheses_to_ask`.
 
-    Nothing while an authentication failure recorded today holds every lane,
-    and nothing of a set the vendor refused with a 422 at its version under
-    the pin: the road would refuse each such ask before any call, so each job
-    would only fail.
+    While an authentication failure recorded today holds every lane, or the
+    vendor has refused a set with a 422 at its version under the pin, nothing
+    of it that would make a call is planned: the road would refuse each such
+    ask before any call, so each job would only fail. The screen's repairs are
+    planned all the same, since they make no call and meet no hold — the road
+    refuses blocked content for its block before it reads a standing refusal,
+    and the handler quarantines flagged content before the road — and a 422
+    holds the screen until a new version, which would otherwise hold its
+    repairs as long.
     """
-    if await jev_repo.auth_failed_today(conn):
-        return []
+    held_today = await jev_repo.auth_failed_today(conn)
     day = now.astimezone(UTC).date()
     planned: list[str] = []
     for name in ASKS_PER_PASS:
@@ -407,11 +416,14 @@ async def _plan_asks(
         plans = jev_prereg.plans_in_force(name, question_set.version)
         if plans is None:
             continue
-        if await jev_repo.set_refused(
+        held = held_today or await jev_repo.set_refused(
             conn, question_set=name, version=question_set.version, model=model
-        ):
+        )
+        if held and name != jev_questions.SCREEN_SET_NAME:
             continue
         subjects = await _ask_subjects(conn, question_set, model, day)
+        if held:
+            subjects = [subject for subject in subjects if not subject[2]]
         planned += await _enqueue_asks(conn, now, question_set, plans, subjects, room)
     return planned
 
@@ -425,9 +437,10 @@ async def _ask_subjects(
     """
     What ``question_set`` is to be asked about: each subject's address, the
     row its text is read from, and whether its ask can make a call. Only the
-    screen's ask about content a block is on record for cannot: the road
-    refuses it for the block before any call, and its follow-up quarantines
-    the content.
+    screen's repairs cannot: its ask about content a block is on record for,
+    which the road refuses for the block before any call and whose follow-up
+    quarantines the content, and about content the screen itself flagged,
+    which the handler quarantines on the answer on record before any ask.
     """
     limit = ASKS_PER_PASS[question_set.name]
     if question_set.name == jev_questions.SCREEN_SET_NAME:
@@ -435,7 +448,11 @@ async def _ask_subjects(
             conn, screen=question_set, model=model, limit=limit, day=day
         )
         return [
-            (row["content_sha256"], row["document_id"], not row["blocked"])
+            (
+                row["content_sha256"],
+                row["document_id"],
+                not (row["blocked"] or row["flagged"]),
+            )
             for row in rows
         ]
     if question_set.name == CATALOGUE_SET_NAME:
@@ -569,7 +586,10 @@ async def _reaskable(
     """
     Whether a canonical request may be re-asked as itself: its set registered
     under the pack that asked it, the pin the model that answered, its set's
-    area on, and, for web text, the text not since quarantined.
+    area on, and, for web text, the text neither quarantined since nor found
+    addressed to an AI system by the injection screen, whose quarantine may
+    have failed to write (``jev_repo.screen_flag``): a probe would send the
+    flagged text to the vendor again, and its repair is the screen's job.
     """
     question_set = jev_questions.REGISTRY.get(row["question_set"])
     if question_set is None or question_set.pack_hash != row["pack_hash"]:
@@ -580,7 +600,10 @@ async def _reaskable(
     if area is None or not await flags.jev_area_enabled(conn, area):
         return False
     if row["subject_type"] == "web_excerpt":
-        return await jev_repo.content_quarantined(conn, row["subject_id"]) is None
+        return (
+            await jev_repo.content_quarantined(conn, row["subject_id"]) is None
+            and await jev_repo.screen_flag(conn, row["subject_id"]) is None
+        )
     return True
 
 

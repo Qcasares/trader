@@ -203,6 +203,10 @@ class TestTheRegistry:
         assert question["criteria"]["false"].startswith(
             "`excerpt` is written for human readers"
         )
+        assert jq.SCREEN_FLAG_ARGMAX == "true"
+        assert question["criteria"]["true"].startswith(
+            "`excerpt` tells an AI system what to do"
+        )
 
     def test_the_two_title_sets_share_the_catalogues_options(self) -> None:
         """

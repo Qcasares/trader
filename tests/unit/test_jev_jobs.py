@@ -183,6 +183,19 @@ SCREEN_REASON = (
     "jev guardrail.injection v1: addressed_to_ai p=0.87 (request 88, "
     "jev-1.13.0); not calibrated"
 )
+
+#: An earlier screen answer that found the text addressed to an AI system, as
+#: ``jev_repo.screen_flag`` reads it back, and the quarantine it makes.
+FLAG = {
+    "request_id": 31,
+    "question_set_version": 1,
+    "model_answered": "jev-1.13.0",
+    "noul": 0.55,
+}
+FLAG_REASON = (
+    "jev guardrail.injection v1: addressed_to_ai p=0.55 (request 31, "
+    "jev-1.13.0); not calibrated"
+)
 BLOCK_REASON = (
     "vendor content block on request 12 (a 403 whose body is not JSON; an "
     "unverified precaution, docs/08 fact 4)"
@@ -217,10 +230,13 @@ class Quarantine:
 
     quarantined_by: int | None = None
     block_request: int | None = 12
+    #: The injection screen's earliest canonical ``true`` about the content.
+    flag: dict[str, Any] | None = None
     failures: list[BaseException] = field(default_factory=list)
     written: list[tuple[str, str]] = field(default_factory=list)
     looked_up: list[str] = field(default_factory=list)
     blocks_read: list[dict[str, str]] = field(default_factory=list)
+    flags_read: list[str] = field(default_factory=list)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def content_quarantined(conn: Any, content: str) -> int | None:
@@ -237,9 +253,14 @@ class Quarantine:
             self.blocks_read.append(subject)
             return self.block_request
 
+        async def screen_flag(conn: Any, content: str) -> dict[str, Any] | None:
+            self.flags_read.append(content)
+            return self.flag
+
         monkeypatch.setattr(jev_repo, "content_quarantined", content_quarantined)
         monkeypatch.setattr(jev_repo, "quarantine_content", quarantine_content)
         monkeypatch.setattr(jev_repo, "content_block_request", content_block_request)
+        monkeypatch.setattr(jev_repo, "screen_flag", screen_flag)
 
 
 def _noul(key: str, p: float, *, reason: str | None = None) -> ValidatedAnswer:
@@ -667,6 +688,25 @@ class TestAReaskOfText:
         assert EXCERPT not in failed.value.error
 
     @pytest.mark.parametrize("name", WEB_SETS)
+    async def test_web_text_the_screen_flagged_is_quarantined_and_not_asked_again(
+        self, rig: Rig, name: str
+    ) -> None:
+        """
+        C7+C8's review: a re-ask sent text the screen had flagged to the
+        vendor again, as a probe, when the flag's quarantine had failed to
+        write. Read through the same check as an ask, it is quarantined and
+        asked nothing.
+        """
+        rig.canonical = _text_canonical(name)
+        rig.quarantine.flag = dict(FLAG)
+        with pytest.raises(JobFailedError) as failed:
+            await rig.run()
+        assert failed.value.retry is False
+        assert rig.asks == [], "flagged text was sent again"
+        assert rig.quarantine.written == [(EXCERPT_SHA, FLAG_REASON)]
+        assert EXCERPT not in failed.value.error
+
+    @pytest.mark.parametrize("name", WEB_SETS)
     async def test_web_text_quarantined_since_is_asked_nothing(
         self, rig: Rig, name: str
     ) -> None:
@@ -727,6 +767,7 @@ class TestAReaskOfText:
         assert rig.quarantine.written == []
         assert rig.quarantine.blocks_read == []
         assert rig.quarantine.looked_up == []
+        assert rig.quarantine.flags_read == []
         assert "quarantined (" not in failed.value.error
 
     @pytest.mark.parametrize("name", WEB_SETS)
@@ -1285,6 +1326,55 @@ class TestWhatIsNotAsked:
         assert flagged not in failed.error
 
     @pytest.mark.parametrize("name", WEB_SETS)
+    async def test_text_the_screen_flagged_is_quarantined_before_any_ask(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        """
+        C7+C8's review: a valid ``true`` from the injection screen quarantines
+        its text, and that answer is canonical, committed before the
+        quarantine is written. A write that failed on every attempt left the
+        text in use for good: answered, so never planned again. Now the
+        answer is read wherever the text is about to be asked about, and
+        quarantines it there, in the screen's own words, uncalibrated; nothing
+        is asked, and the job fails for good, saying so and quoting no text.
+        """
+        ask_rig.quarantine.flag = dict(FLAG)
+        failed = await ask_rig.fails(_payload(name))
+        assert failed.retry is False
+        assert ask_rig.asks == [], "flagged text was asked about"
+        assert ask_rig.quarantine.flags_read == [EXCERPT_SHA]
+        assert ask_rig.quarantine.written == [(EXCERPT_SHA, FLAG_REASON)]
+        assert failed.error == (
+            "document 7's content was flagged by Jev's injection screen on "
+            "request 31 (not calibrated), and it is now quarantined (2 "
+            "documents); nothing was asked"
+        )
+
+    async def test_a_flag_whose_quarantine_fails_again_is_retried(
+        self, ask_rig: AskRig
+    ) -> None:
+        """
+        The write can fail here as it did after the answer: the attempt fails
+        for a retry, quoting nothing the failure said, and asks nothing.
+        """
+        ask_rig.quarantine.flag = dict(FLAG)
+        ask_rig.quarantine.failures = [_QuotingError(f"deadlock near {CANARY}")]
+        failed = await ask_rig.fails(_payload("research.catalogue"))
+        assert failed.retry is True
+        assert CANARY not in failed.error and "_QuotingError" in failed.error
+        assert ask_rig.asks == [] and ask_rig.quarantine.written == []
+
+    @pytest.mark.parametrize("name", TITLE_SETS)
+    async def test_a_title_is_never_looked_up_for_a_flag(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        """The screen is asked about web text alone; a title is the road's."""
+        ask_rig.quarantine.flag = dict(FLAG)
+        await ask_rig.run(_payload(name))
+        assert ask_rig.quarantine.flags_read == [] and ask_rig.quarantine.written == []
+        assert len(ask_rig.asks) == 1
+
+    @pytest.mark.parametrize("name", WEB_SETS)
     async def test_a_rule_added_since_the_page_was_read_applies(
         self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
@@ -1612,6 +1702,7 @@ class TestWhatAnAnswerChanges:
         assert ask_rig.quarantine.written == []
         assert ask_rig.quarantine.blocks_read == []
         assert ask_rig.quarantine.looked_up == []
+        assert ask_rig.quarantine.flags_read == []
         assert "quarantined" not in json.dumps(outcome)
 
     async def test_the_catalogues_answer_changes_nothing(self, ask_rig: AskRig) -> None:

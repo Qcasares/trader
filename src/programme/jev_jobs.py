@@ -57,7 +57,10 @@ Step 5 for a web excerpt: content quarantined under any source is asked
 nothing; then the code screen reads the stored excerpt again, as it stands
 now, and a hit quarantines the content (``web_sources.quarantine_reason``) and
 fails the job — a rule added to the screen since the page was read applies
-before any model is asked. For a hypothesis: only one the programme's model
+before any model is asked; then an earlier answer of the injection screen
+that found the content addressed to an AI system, whose quarantine failed to
+write, quarantines it in the screen's words and fails the job (below). For a
+hypothesis: only one the programme's model
 wrote is sent (``origin = 'model'``; an operator's text would be a subject of
 its own, docs/08 open item 28), and only a title within
 ``jev_questions.TITLE_MAX_CHARS``, refused by that number before any state is
@@ -125,9 +128,15 @@ for the content (``jev_repo.content_block_request``). The error row commits on
 its own before the follow-up runs, so a write that fails between them leaves
 the block on record and the content in use; the job then fails for a retry,
 and the retry, or tomorrow's screen, which ``jev_repo.documents_to_screen``
-plans for blocked content still in use, quarantines it. No title is ever
-quarantined: quarantine is a web document's, and a blocked title is held by
-the road alone. Nothing that writes ``hypotheses``, ``candidates`` or
+plans for blocked content still in use, quarantines it. The screen's own
+``true`` is canonical and committed before its quarantine is written too, so
+it is read back the same way: before any ask about stored web text, a re-ask's
+included, the answer on record (``jev_repo.screen_flag``) quarantines content
+still in use, in the screen's words, and the job fails asking nothing
+(:func:`screen_stored_excerpt`); ``documents_to_screen`` plans that repair for
+flagged content still in use, and ``jev_plan`` re-asks no flagged text. No
+title is ever quarantined: quarantine is a web document's, and a blocked title
+is held by the road alone. Nothing that writes ``hypotheses``, ``candidates`` or
 ``findings`` is reachable from here: a card check's answer is recorded and
 acts on nothing (``tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing``).
 
@@ -193,6 +202,14 @@ ASK_PAYLOAD_KEYS = frozenset(
     {"set", "version", "subject_type", "subject_id", "source_id", *PLAN_KEYS}
 )
 
+#: The reason the injection screen's ``true`` quarantines its text: the set and
+#: version that asked, its question, the probability it gave, the request and
+#: the model that answered, and that none of it is calibrated.
+SCREEN_REASON = (
+    "jev {set} v{version}: {question} p={p} (request {request}, {model}); not "
+    "calibrated"
+)
+
 #: The reason a content block quarantines its text, ``{request}`` the block's
 #: request row.
 CONTENT_BLOCK_REASON = (
@@ -255,9 +272,19 @@ async def screen_stored_excerpt(
 ) -> None:
     """
     Refuse, by raising, to ask about a stored excerpt that may not be asked
-    about: content quarantined under any source, or text the code screen, as
-    it stands now, flags — which is quarantined here, by content, before the
-    job fails. Both without a retry. ``what`` names the row, never its text.
+    about: content quarantined under any source; text the code screen, as it
+    stands now, flags; or content the injection screen found addressed to an
+    AI system on an earlier request (``jev_repo.screen_flag``). Either of the
+    last two is quarantined here, by content, before the job fails. All
+    without a retry. ``what`` names the row, never its text.
+
+    The screen's flag is read because its answer is canonical, and committed
+    before its quarantine is written: a write that failed on every attempt
+    left the text in use, and the answer on record says it should not be.
+    Read here, before any ask, the quarantine is made by the next job about
+    the text — the screen's repair, which ``jev_repo.documents_to_screen``
+    plans, or any other — and no ask, a re-ask's probe included, sends the
+    flagged text to the vendor again.
     """
     if await jev_repo.content_quarantined(conn, content_sha256) is not None:
         raise JobFailedError(
@@ -272,6 +299,23 @@ async def screen_stored_excerpt(
         raise JobFailedError(
             f"the code screen flags {what} ({reason}), and its content is now "
             f"quarantined ({count} documents); nothing was asked",
+            retry=False,
+        )
+    flag = await jev_repo.screen_flag(conn, content_sha256)
+    if flag is not None:
+        count = await _quarantine_as_screened(
+            conn,
+            content_sha256,
+            what,
+            version=flag["question_set_version"],
+            p=flag["noul"],
+            request=flag["request_id"],
+            model=flag["model_answered"],
+        )
+        raise JobFailedError(
+            f"{what}'s content was flagged by Jev's injection screen on request "
+            f"{flag['request_id']} (not calibrated), and it is now quarantined "
+            f"({count} documents); nothing was asked",
             retry=False,
         )
 
@@ -340,13 +384,12 @@ async def _screen_follow_up(
     blocked = await quarantine_if_blocked(conn, row["content_sha256"], result)
     if blocked:
         return blocked
-    screen = jev_questions.GUARDRAIL_INJECTION
     answer = result.answers.get(jev_questions.SCREEN_QUESTION)
     if (
         result.status != "ok"
         or answer is None
         or not answer.valid
-        or answer.argmax != "true"
+        or answer.argmax != jev_questions.SCREEN_FLAG_ARGMAX
     ):
         return {}
     request = (
@@ -354,26 +397,60 @@ async def _screen_follow_up(
         if result.request_row_id is None
         else await jev_repo.get_request(conn, result.request_row_id)
     )
-    model = None if request is None else request["model_answered"]
-    reason = (
-        f"jev {screen.name} v{screen.version}: {jev_questions.SCREEN_QUESTION} "
-        f"p={answer.noul:.2f} (request {result.request_row_id}, {model}); not "
-        "calibrated"
-    )
-    count = await jev_repo.quarantine_content(conn, row["content_sha256"], reason)
-    # Worded as the reason is: an uncalibrated argmax, never "an injection
-    # found" (design section 10.3), in the run logs as in the row.
-    logger.info(
-        "%s quarantined by Jev's injection screen (%s p=%.2f, request %s, %s; "
-        "not calibrated); %d documents",
+    count = await _quarantine_as_screened(
+        conn,
+        row["content_sha256"],
         _document(row),
+        version=jev_questions.GUARDRAIL_INJECTION.version,
+        p=answer.noul,
+        request=result.request_row_id,
+        model=None if request is None else request["model_answered"],
+    )
+    return {"quarantined": count, "quarantined_by": "jev_screen"}
+
+
+async def _quarantine_as_screened(
+    conn: asyncpg.Connection,
+    content_sha256: str,
+    what: str,
+    *,
+    version: int,
+    p: float | None,
+    request: int | None,
+    model: str | None,
+) -> int:
+    """
+    Quarantine content the injection screen found addressed to an AI system,
+    by content, in the screen's own words, and log it as they are worded: an
+    uncalibrated argmax, never "an injection found" (design section 10.3), in
+    the run logs as in the row. Returns how many documents it quarantined.
+    """
+    shown = _probability(p)
+    reason = SCREEN_REASON.format(
+        set=jev_questions.SCREEN_SET_NAME,
+        version=version,
+        question=jev_questions.SCREEN_QUESTION,
+        p=shown,
+        request=request,
+        model=model,
+    )
+    count = await jev_repo.quarantine_content(conn, content_sha256, reason)
+    logger.info(
+        "%s quarantined by Jev's injection screen (%s p=%s, request %s, %s; "
+        "not calibrated); %d documents",
+        what,
         jev_questions.SCREEN_QUESTION,
-        answer.noul,
-        result.request_row_id,
+        shown,
+        request,
         model,
         count,
     )
-    return {"quarantined": count, "quarantined_by": "jev_screen"}
+    return count
+
+
+def _probability(p: float | None) -> str:
+    """A screen's probability as its reason writes it; absent, said so."""
+    return "not recorded" if p is None else f"{p:.2f}"
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +980,7 @@ __all__ = [
     "CONTENT_BLOCK_REASON",
     "NOT_ASKED",
     "PLAN_KEYS",
+    "SCREEN_REASON",
     "Askable",
     "ask_verdict",
     "quarantine_if_blocked",

@@ -353,6 +353,10 @@ SCREEN_SET_NAME = "guardrail.injection"
 SCREEN_QUESTION = "addressed_to_ai"
 SCREEN_CLEAR_ARGMAX = "false"
 
+#: The screen's other answer: the text is addressed to an AI system, which
+#: quarantines it (``jev_jobs``), uncalibrated (docs/08 open item 54).
+SCREEN_FLAG_ARGMAX = "true"
+
 
 # ---------------------------------------------------------------------------
 # The question set
@@ -1650,6 +1654,7 @@ __all__ = [
     "RESEARCH_CATALOGUE",
     "RESEARCH_HYPOTHESIS",
     "SCREEN_CLEAR_ARGMAX",
+    "SCREEN_FLAG_ARGMAX",
     "SCREEN_QUESTION",
     "SCREEN_SET_NAME",
     "SLEEVES",

@@ -2922,12 +2922,50 @@ say — the catalogue's block of text the screen had cleared among them — and
 that job, too, makes no call and quarantines
 (`tests/unit/test_jev_jobs.py::TestWhatAnAnswerChanges::test_a_quarantine_that_failed_to_write_is_made_by_the_next_attempt`;
 `tests/integration/test_jev_research.py::TestABlocksQuarantineSurvivesAFailedWrite`,
-both ways, on PostgreSQL).
+both ways, on PostgreSQL). The repair is planned whatever the vendor holds:
+the first cut planned nothing of a set refused with a 422, nor anything while
+an authentication failure held the day, since the road would refuse each such
+ask before any call — true of every ask but the repair, which the road refuses
+for its block, with no call, before it reads a standing refusal. A 422 holds
+the screen's version until a new one, so a block whose quarantine failed
+stayed in use for as long. Now, under either hold, the screen's repairs, and
+nothing of a held set that would make a call, are planned
+(`tests/unit/test_jev_plan.py::TestTheAsks::test_a_refused_screen_still_plans_its_repairs`
+and `::test_nothing_that_calls_is_asked_while_an_authentication_failure_holds`;
+`tests/integration/test_jev_research.py::TestABlocksQuarantineSurvivesAFailedWrite::test_the_repair_is_planned_whatever_the_vendor_holds`,
+for a 422 and for a refused key).
+
+**The screen's own quarantine survives a failed write** (from this part's
+review). A valid `true` from the screen is canonical, and committed before its
+quarantine is written, so a write that failed on every attempt left the text
+in use for good: answered `ok`, the first cut never planned it again, and the
+next day's re-ask, sampled in the low-margin stratum, sent the flagged text to
+the vendor once more as a probe. Now the answer on record is read back as a
+block is: `jev_repo.screen_flag` is the earliest canonical, valid `true` from
+the screen about the content, under any version and any pin, since quarantine
+is one-way and by content — where a clearance is read under the registered
+screen and the pin alone. Before any ask about stored web text, a re-ask's
+included, the handler reads it and, finding one, quarantines the content in
+the screen's own words, uncalibrated, and fails the job asking nothing, after
+the quarantined check and the code screen (`jev_jobs.screen_stored_excerpt`);
+read before the ask rather than replayed by it, so a pin moved since asks the
+new model nothing about the flagged text. `documents_to_screen` plans that
+repair for flagged content still in use, first, with no call, beside the
+block's; `documents_to_describe` never describes flagged content; and the
+planner re-asks no flagged text
+(`tests/unit/test_jev_jobs.py::TestWhatIsNotAsked::test_text_the_screen_flagged_is_quarantined_before_any_ask`,
+`::TestAReaskOfText::test_web_text_the_screen_flagged_is_quarantined_and_not_asked_again`,
+`tests/unit/test_jev_plan.py::TestTheReasks::test_text_the_screen_flagged_is_not_asked_again`,
+`tests/integration/test_jev_repo.py::TestDocumentsToScreen::test_nothing_but_the_screens_canonical_true_is_a_flag`,
+every filter of the flag by a case only it refuses, and
+`tests/integration/test_jev_research.py::TestTheScreensQuarantineSurvivesAFailedWrite`,
+the write failing on every attempt and, once, the pin moved after it).
 
 **Re-asks of text.** `run_reask` reads a re-asked web excerpt through the code
 screen first, as `run_ask` does, quarantining it on a hit and asking nothing,
-and asks nothing about content quarantined since (the scope's 10c; C4's
-planner checked quarantine alone). A content block met by a re-ask of web
+and asks nothing about content quarantined since or flagged by the screen,
+quarantining the flagged (the scope's 10c; C4's planner checked quarantine
+alone, and now checks the flag too). A content block met by a re-ask of web
 text quarantines it; a block met by a re-ask of a title or of an enumerated
 state touches nothing, tested against a regime state and a hypothesis title
 both, so widening the condition to every text state fails a test (10g). A
@@ -3041,12 +3079,12 @@ counted against it (`jev_repo.pending_asks`); the kind is spelled as a literal
 at its one enqueue, and the key is spelled once, `jev_repo.ask_job_key`, for
 the planner and for the reads that exclude by it. The subjects are
 `jev_repo`'s: `documents_to_screen` — content in use, quarantined under no
-source, the screen has not answered `ok` under the pin, and first, content a
-block is on record for (above), whose ask makes no call and is planned with
-no call left; `documents_to_describe` — content the screen cleared, as
+source, the screen has not answered `ok` under the pin, and first, its
+repairs: content a block or the screen's own `true` is on record for (above),
+whose ask makes no call and is planned with no call left; `documents_to_describe` — content the screen cleared, as
 `screened_clean` reads a clearance, a *valid* answer of the clear argmax, and
 nothing else, so the catalogue is never planned for text that is not screened
-clean; and `hypotheses_to_ask` — model-written titles of 1 to
+clean, nor for text the screen flagged under any pin; and `hypotheses_to_ask` — model-written titles of 1 to
 `TITLE_MAX_CHARS` characters, by the content address computed in SQL
 (`encode(sha256(convert_to(title, 'UTF8')), 'hex')`, which the tests hold to
 `jev_hash.text_sha256` beyond ASCII), one subject per title, newest first.
@@ -3055,11 +3093,16 @@ planned today, finished or not, and retires one after three failed calls for
 the set, its version and the pin; a failed call is a response refused whole
 (`invalid`) or a call that failed (`error`). An `invalid` row is never
 canonical, so it replays nothing and the subject is asked again on a later day
-until the third; an `ok` answer is never asked again, whatever it said (the
+until the third; an `ok` answer is not asked again, whatever it said (the
 first build's docstring said a response refused whole was not asked again
-because its canonical row replays, which was false: 10h). No ask is planned
-while an authentication failure recorded today holds every lane, nor of a set
-the vendor refused with a 422 at its version under the pin.
+because its canonical row replays, which was false: 10h). The screen's repairs
+are the exception to both: content a block or the screen's `true` is on record
+for is returned until it is quarantined, whatever its answers and failed calls
+(the reads' section comment said "never", which the blocked branch already
+contradicted; corrected in this part's review). Nothing that would call is
+planned while an authentication failure recorded today holds every lane, nor
+of a set the vendor refused with a 422 at its version under the pin; the
+screen's repairs, which make no call, are planned under either.
 `tests/unit/test_jev_plan.py::TestTheAsks`, the planner's dark matrix now with
 the guardrails area and a subject waiting for every set, and every filter of
 each read on PostgreSQL by a case only it refuses
@@ -3145,14 +3188,18 @@ failed job's result holds what its attempt recorded, where the queue stored
 an error alone. `ask_verdict`, `NOT_ASKED` and
 `described` moved to `job_errors`. The re-ask's state rebuild is guarded and
 its failures reported by class, where C4's propagated. `documents_to_screen`
-plans content a block is on record for, where the design's row left such
-content out: that is the scope's 10d repair, and the ask makes no call.
-`documents_to_describe` and `hypotheses_to_ask` leave out blocked subjects,
-which the road refuses for good; the reads match a clearance by the content's
-address rather than the state's hash, which name the same text; only `invalid`
-and `error` rows are failed calls, a refusal recording no call. The planner
-reads the authentication hold and the 422 hold, which the design left to the
-road, so that it plans no job, a subject a day, that could only fail. The
+plans content a block, or the screen's own `true`, is on record for, where
+the design's row left such content out: that is the scope's 10d repair,
+extended in this part's review to the screen's flag, and the ask makes no
+call; the handler reads the flag before any ask about stored web text, which
+the design's step 4 did not. `documents_to_describe` and `hypotheses_to_ask`
+leave out blocked subjects, which the road refuses for good, and
+`documents_to_describe` flagged ones; the reads match a clearance by the
+content's address rather than the state's hash, which name the same text;
+only `invalid` and `error` rows are failed calls, a refusal recording no call.
+The planner reads the authentication hold and the 422 hold, which the design
+left to the road, so that it plans no job, a subject a day, that could only
+fail — the screen's repairs excepted, which make no call. The
 labeller is computed over every kept row, a quarantined one included, as C6's
 `kept` reads; the injection reason names the model that answered, read back
 from its request. The scope's `test_the_card_check_changes_nothing` is a class
@@ -3393,9 +3440,13 @@ Numbered on from Phase B's.
     The harness (C9) must choose which labeller an answer is measured against
     — the one in force when the answer was recorded, say — rather than pool
     them.
-58. **Blocked content whose quarantine keeps failing is planned once a day.**
-    The screen's ask about it makes no call, and the job stops once the write
-    succeeds; it repeats only while the database refuses the quarantine.
+58. **Content whose quarantine keeps failing is planned once a day.** Content
+    a block or the screen's own `true` is on record for: the screen's ask
+    about it makes no call, is planned whatever the vendor holds (a 422 on the
+    screen, an authentication failure), and the job stops once the write
+    succeeds; it repeats only while the database refuses the quarantine. Such
+    a repair ends its job `failed`, saying the content is now quarantined, as
+    the code screen's quarantine before an ask does: the job asked nothing.
 59. **The canary cannot see what a real vendor echoes.** It runs against a
     fake of `jev_client.ask`, and the SDK test against a fake server modelling
     the documented contract, whose response holds answers and no state. A

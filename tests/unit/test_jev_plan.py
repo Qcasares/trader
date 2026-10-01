@@ -90,6 +90,8 @@ class Queue:
     calls_today: dict[str, int] = field(default_factory=dict)
     canonical: list[dict[str, Any]] = field(default_factory=list)
     quarantined: set[str] = field(default_factory=set)
+    #: Content the injection screen found addressed to an AI system.
+    flagged: set[str] = field(default_factory=set)
     canonical_asked: list[tuple[datetime, datetime]] = field(default_factory=list)
     #: What each subject read returns (phases C7 and C8), and every read made.
     screens: list[dict[str, Any]] = field(default_factory=list)
@@ -133,6 +135,13 @@ class Queue:
 
     async def content_quarantined(self, conn: Any, content_sha256: str) -> int | None:
         return 1 if content_sha256 in self.quarantined else None
+
+    async def screen_flag(
+        self, conn: Any, content_sha256: str
+    ) -> dict[str, Any] | None:
+        if content_sha256 not in self.flagged:
+            return None
+        return {"request_id": 1, "question_set_version": 1, "noul": 0.9}
 
     async def pending_asks(self, conn: Any, sets: Any) -> int:
         return sum(
@@ -220,6 +229,7 @@ def queue(monkeypatch: pytest.MonkeyPatch) -> Queue:
         "hypotheses_to_ask",
     ):
         monkeypatch.setattr(jev_repo, name, getattr(fake, name))
+    monkeypatch.setattr(jev_repo, "screen_flag", fake.screen_flag)
     return fake
 
 
@@ -247,7 +257,12 @@ PIN = [json.dumps(MODEL), json.dumps("jev-latest"), None]
 KEY = [True, False]
 
 #: One subject for each of the subject reads (phases C7 and C8), invented.
-SCREEN_SUBJECT = {"content_sha256": "a1" * 32, "document_id": 7, "blocked": False}
+SCREEN_SUBJECT = {
+    "content_sha256": "a1" * 32,
+    "document_id": 7,
+    "blocked": False,
+    "flagged": False,
+}
 DESCRIBE_SUBJECT = {"content_sha256": "c3" * 32, "document_id": 9}
 TITLE_SUBJECT = {"subject_id": "b2" * 32, "ref": "H-0007"}
 
@@ -727,6 +742,39 @@ class TestTheReasks:
         await _plan(_switches(**{f"{flags.JEV_AREA_PREFIX}research": "true"}))
         assert len(_reasks(queue)) == 1
 
+    async def test_text_the_screen_flagged_is_not_asked_again(
+        self, queue: Queue
+    ) -> None:
+        """
+        C7+C8's review: the screen's own ``true``, sampled for a re-ask while
+        the quarantine it should have made had failed to write, sent the text
+        to the vendor again as a probe. Flagged text is never re-asked; its
+        repair is the screen's job (``jev_repo.documents_to_screen``).
+        """
+        from src.programme import jev_questions
+
+        screen = jev_questions.GUARDRAIL_INJECTION
+        sha = "cd" * 32
+        queue.canonical = [
+            _canonical(
+                1,
+                _hash("00000002"),
+                margins=(0.1,),
+                question_set=screen.name,
+                pack_hash=screen.pack_hash,
+                lane="guardrail",
+                subject_type="web_excerpt",
+                subject_id=sha,
+            )
+        ]
+        rows = _switches(**{AREA_GUARDRAILS: "true"})
+        queue.flagged.add(sha)
+        await _plan(rows)
+        assert _reasks(queue) == [], "flagged text was planned for a re-ask"
+        queue.flagged.clear()
+        await _plan(rows)
+        assert len(_reasks(queue)) == 1
+
     async def test_the_cap_is_the_days_whatever_becomes_eligible(
         self, queue: Queue, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -818,10 +866,18 @@ def _asks(queue: Queue, name: str | None = None) -> list[dict[str, Any]]:
     ]
 
 
-def _screens(n: int, *, blocked: int = 0) -> list[dict[str, Any]]:
-    """``n`` contents for the screen, the first ``blocked`` with a block on record."""
+def _screens(n: int, *, blocked: int = 0, flagged: int = 0) -> list[dict[str, Any]]:
+    """
+    ``n`` contents for the screen, the first ``blocked`` with a block on record
+    and the first ``flagged`` with the screen's own ``true`` on record.
+    """
     return [
-        {"content_sha256": f"{i:064x}", "document_id": i, "blocked": i <= blocked}
+        {
+            "content_sha256": f"{i:064x}",
+            "document_id": i,
+            "blocked": i <= blocked,
+            "flagged": i <= flagged,
+        }
         for i in range(1, n + 1)
     ]
 
@@ -1004,15 +1060,40 @@ class TestTheAsks:
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
         assert [job["payload"]["source_id"] for job in _asks(queue)] == [1, 2]
 
-    async def test_nothing_is_asked_while_an_authentication_failure_holds(
+    async def test_content_the_screen_flagged_is_planned_with_no_call_left(
         self, queue: Queue
     ) -> None:
+        """
+        C7+C8's review: content whose own screen answer was ``true`` and whose
+        quarantine failed to write is planned again, before anything else, by
+        an ask that makes no call — the handler quarantines it on the answer
+        on record before any ask — so with no call left it is still planned,
+        and takes none.
+        """
+        queue.calls_today["guardrail"] = 3
+        queue.screens = _screens(4, flagged=2)
+        await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
+        assert [job["payload"]["source_id"] for job in _asks(queue)] == [1, 2]
+
+    async def test_nothing_that_calls_is_asked_while_an_authentication_failure_holds(
+        self, queue: Queue
+    ) -> None:
+        """
+        The road holds every lane for the day, so every ask that would call
+        could only fail. The screen's repairs make no call and meet no hold —
+        the road refuses blocked content for its block before it reads a
+        standing refusal, and flagged content is quarantined before the road
+        — so they alone are planned, and only the screen's subjects are read.
+        """
         queue.auth_held = True
-        queue.screens = _screens(2)
+        queue.screens = _screens(4, blocked=1, flagged=2)
         queue.descriptions = [DESCRIBE_SUBJECT]
         queue.titles = [TITLE_SUBJECT]
         planned = await _plan(_switches(**ASKS_ON))
-        assert _asks(queue) == [] and queue.subject_reads == []
+        assert [job["payload"]["source_id"] for job in _asks(queue)] == [1, 2]
+        assert [read["set"].name for read in queue.subject_reads] == [
+            "guardrail.injection"
+        ]
         assert "jev_probe:2026-09-28" in planned
 
     async def test_a_set_the_vendor_refused_is_not_asked(self, queue: Queue) -> None:
@@ -1022,6 +1103,24 @@ class TestTheAsks:
         await _plan(_switches(**ASKS_ON))
         assert _asks(queue, "guardrail.injection") == []
         assert len(_asks(queue, "guardrail.card")) == 1
+
+    async def test_a_refused_screen_still_plans_its_repairs(self, queue: Queue) -> None:
+        """
+        C7+C8's review: a 422 holds the screen's version and pin until a new
+        version, and the repair of a block whose quarantine failed — which
+        the road refuses for the block, with no call, before it reads the
+        hold — was held with it, for as long. Only what makes no call is
+        planned of a refused set; of any other refused set, nothing.
+        """
+        queue.refused_sets = {"guardrail.injection", "research.hypothesis"}
+        queue.screens = _screens(4, blocked=1, flagged=2)
+        queue.titles = [TITLE_SUBJECT]
+        await _plan(_switches(**ASKS_ON))
+        assert [job["payload"]["source_id"] for job in _asks(queue)][:2] == [1, 2]
+        assert len(_asks(queue, "guardrail.injection")) == 2
+        assert _asks(queue, "research.hypothesis") == []
+        assert len(_asks(queue, "guardrail.card")) == 1
+        assert "research.hypothesis" not in [r["set"].name for r in queue.subject_reads]
 
     async def test_a_set_not_registered_is_not_asked(
         self, queue: Queue, monkeypatch: pytest.MonkeyPatch
