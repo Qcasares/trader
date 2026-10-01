@@ -20,10 +20,16 @@ the switches as the migrations seed them:
   what they are for (docs/08, the switch order); with the decisions area as
   well, the forward clock starts; with the research area, the day's web
   ingest is planned and fetches its page, and asks nothing.
-* **A stored text needs two areas** (phases C7 and C8): the guardrails area
-  joins the matrix, and only with it and the research area both on is a text
-  the ingest stored screened and, once cleared, described; either alone sends
-  nothing about it.
+* **Each area asks its own sets** (phases C7 and C8): the guardrails area
+  joins the matrix. From an empty ledger only the research area's ingest
+  stores text, so a text the ingest stored is screened and, once cleared,
+  described only with both areas on. A text already stored is another
+  matter, and the design's section 8 is the rule: the guardrails area alone
+  screens a stored text the screen has not answered, sending it, and the
+  research area alone describes one the screen cleared earlier
+  (:class:`TestATextAlreadyStoredIsAskedAboutByEachAreasOwnSets`). The first
+  record of C7+C8 said either area alone sends nothing about a stored text,
+  which held only from an empty ledger.
 * **The research area on its own fetches nothing** (phase C6): with it on and
   the programme or Jev off, or with no key, no page is fetched and no job
   planned.
@@ -346,9 +352,11 @@ class TestTheSwitchMatrix:
         the forward clock's jobs are planned for the sessions ahead, each due
         at its own minute after a close; with the research area, the day's
         web ingest, which fetches its page once and asks nothing. From phases
-        C7 and C8, a stored text is asked about only with both the guardrails
-        and the research areas on — screened, then, once cleared, described —
-        and either alone sends nothing about it.
+        C7 and C8, from this empty ledger, a text the ingest stored is asked
+        about only with both the guardrails and the research areas on —
+        screened, then, once cleared, described — since only the research
+        area stores one and only the guardrails area screens it. Text already
+        stored is asked about by each area's own sets alone: the next class.
         """
         dsn, conn = seeded
         await _set(conn, {switch: switch in on for switch in SWITCHES})
@@ -403,6 +411,85 @@ class TestTheSwitchMatrix:
                 clock.add(jev_clock.reference_job_key(session))
                 clock.add(jev_clock.regime_job_key(DECISION_REGIME, session))
         assert keys == probe | clock | ingest | asks
+
+
+#: Two invented excerpts stored before the areas are set: one the screen
+#: cleared earlier, and one it has not answered. Neither is on the page the
+#: fake fetcher hands over.
+CLEARED_EARLIER = "Invented Breadth Signals in Imaginary Sector Funds"
+NOT_SCREENED = "Made-Up Auction Cycles in Fictional Sovereign Notes"
+
+
+async def _store(conn: asyncpg.Connection, excerpt: str) -> None:
+    await jev_repo.insert_documents(
+        conn,
+        [
+            jev_repo.DocumentRow(
+                source="another_feed",
+                url="https://example.invalid/feed",
+                excerpt=excerpt,
+            )
+        ],
+    )
+
+
+def _asked_about(calls: list[dict[str, Any]], excerpt: str) -> list[list[str]]:
+    """The questions of each call about ``excerpt``, in the order sent."""
+    return [
+        sorted(call["questions"])
+        for call in calls
+        if call["state"] == {"excerpt": excerpt}
+    ]
+
+
+class TestATextAlreadyStoredIsAskedAboutByEachAreasOwnSets:
+    """
+    The matrix above starts from an empty ledger, where text is stored only
+    when the research area ingests it in the same run, so it could not see
+    what each area does on its own with text already stored. The road reads a
+    set's own lane's area and no other (design section 8; ``jev_lane``), and
+    the planner plans each set behind it: the guardrails area alone screens a
+    stored text the screen has not answered, and so sends it; the research
+    area alone describes a text the screen cleared earlier. Turning research
+    off stops the catalogue and the ingest, not the screen. C7+C8's review
+    found the first record saying either area alone sends nothing about a
+    stored text.
+    """
+
+    @pytest.mark.parametrize(
+        ("guardrails", "research"),
+        list(itertools.product((False, True), repeat=2)),
+        ids=["neither", "research", "guardrails", "both"],
+    )
+    async def test_each_area_asks_its_own_sets_about_what_is_stored(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+        guardrails: bool,
+        research: bool,
+    ) -> None:
+        dsn, conn = seeded
+        await _set(conn, {PROGRAMME: True, JEV: True, GUARDRAILS: True})
+        await _store(conn, CLEARED_EARLIER)
+        await _run_the_loop(monkeypatch, dsn)
+        assert _asked_about(client.calls, CLEARED_EARLIER) == [["addressed_to_ai"]]
+
+        await _store(conn, NOT_SCREENED)
+        await _set(conn, {GUARDRAILS: guardrails, RESEARCH: research})
+        client.calls.clear()
+        await _run_the_loop(monkeypatch, dsn)
+
+        described = [["asset_class", "mechanism"]]
+        screened = [["addressed_to_ai"]]
+        assert _asked_about(client.calls, CLEARED_EARLIER) == (
+            described if research else []
+        ), "the catalogue follows the research area alone"
+        assert _asked_about(client.calls, NOT_SCREENED) == (
+            screened + (described if research else []) if guardrails else []
+        ), "the screen follows the guardrails area alone, and sends the text"
+        assert (len(fetcher.fetched) == 1) is research
 
 
 class TestTheResearchAreaAloneFetchesNothing:

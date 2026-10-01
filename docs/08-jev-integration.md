@@ -666,8 +666,8 @@ golden hash, so the sets below are named without one.
 
 | Lane | Question sets | State | What Jev may do | What it may never do |
 |---|---|---|---|---|
-| Research | `research.catalogue` (asset class, mechanism), built in C7; `research.hypothesis` (the same two questions about a hypothesis's title), built in C8; `research.news` (relevance, event type, tone), not planned. `guardrail.injection` ("addressed to an AI system"), built in C7, runs first | Allow-listed web excerpts; the programme's model-written hypothesis titles | Today: be recorded and planned on, the catalogue only for text the screen cleared; quarantine what the injection screen flags. Later: label the catalogue page; rank a shortlist `author.py` may use to prioritise | Satisfy any gate criterion |
-| Guardrails | `guardrail.card` (a performance claim), built in C8 beside `find_performance_claim`, in shadow; an untestable falsification test, planned | Hypothesis titles; cards as titles unless the detail switch is on | Today: be recorded and change nothing. Later, once calibrated (phase D): a "yes" rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
+| Research | `research.catalogue` (asset class, mechanism), built in C7; `research.hypothesis` (the same two questions about a hypothesis's title), built in C8; `research.news` (relevance, event type, tone), not planned | Allow-listed web excerpts; the programme's model-written hypothesis titles | Today: be recorded and planned on, the catalogue only for text the injection screen cleared, which it asks under the research area alone. Later: label the catalogue page; rank a shortlist `author.py` may use to prioritise | Satisfy any gate criterion |
+| Guardrails | `guardrail.injection` ("addressed to an AI system"), built in C7, asked before any other set about a stored web excerpt, under the guardrails area alone; `guardrail.card` (a performance claim), built in C8 beside `find_performance_claim`, in shadow; an untestable falsification test, planned | Allow-listed web excerpts; hypothesis titles; cards as titles unless the detail switch is on | Today: the injection screen quarantines what it flags, uncalibrated, and its clearance is what lets the catalogue ask; the card check is recorded and changes nothing. Later, once calibrated (phase D): a "yes" from the card check rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
 | Findings routing | Owning role (the twelve plus "unclear"), likely duplicate, suggested severity | Findings, as titles unless the detail switch is on | Suggest | Write `severity` or `status`. Findings it raises carry `raised_by='jev:<set>'`, never in `VETO_ROLES` |
 | Ops triage | Job errors, reconciliation discrepancies, data-quality alerts, through a redactor | Free text only; code handles structured cases first | Show chips on System > Jobs | Resume anything, or touch the kill switch |
 | Recorded signals | `signal.news_tone` | Web content | Be recorded and scored going forward | Be loaded by the decision path. The loader's filter excludes web provenance by construction |
@@ -3141,9 +3141,22 @@ refused whole, a timeout, a content block. `tests/sdk/test_jev_research_over_htt
 screens and describes one stored excerpt through the planner, the handler,
 the lane, the real client and SDK and the fake TypeSafe server, each request
 exactly `{"excerpt": …}`, and replays the screen with no request leaving. The
-integration dark matrix turns five switches in all 32 combinations: a stored
-text is asked about only with both the guardrails and the research areas on,
-and either alone sends nothing about it. Every new control was mutated and
+integration dark matrix turns five switches in all 32 combinations from an
+empty ledger, where only the research area's ingest stores text: a text the
+ingest stored is asked about only with both the guardrails and the research
+areas on. With text already stored, each area asks its own lane's sets alone,
+as the road reads them (design section 8): the guardrails area alone screens
+a stored text the screen has not answered, sending it, and the research area
+alone describes one the screen cleared earlier; turning research off stops
+the catalogue and the ingest, not the screen
+(`tests/integration/test_jev_dark.py::TestATextAlreadyStoredIsAskedAboutByEachAreasOwnSets`,
+the four combinations of the two areas over a cleared text and an unscreened
+one). The first record said a stored text was asked about only with both
+areas on and either alone sent nothing about it, which held only from an
+empty ledger — this part's review found it, and the design's own C7 line,
+"two areas must be on for a document to be described; either off and nothing
+is sent", is true of a document the ingest has just stored and of nothing
+else. Every new control was mutated and
 restored in turn, and each mutation failed a test; one, the planner's repair
 of a blocked text, first survived, because the test's blocked text had one
 failed screen call and was planned again by the ordinary rule anyway, and the
@@ -3206,8 +3219,14 @@ from its request. The scope's `test_the_card_check_changes_nothing` is a class
 of tests, the walk and its proofs. The set plans landed before the job, since
 the job records them. The SDK test calls the handler itself rather than the
 loop's drain, so the probe the planner also plans takes none of the scripted
-replies. And the Lanes table above now names the questions the catalogue asks
-(open item 29).
+replies. The Lanes table above now names the questions the catalogue asks
+(open item 29), and, from this part's review, lists the injection screen
+under Guardrails, its lane and area, where the first record put it under
+Research. And design C7's Dark line — "two areas must be on for a document to
+be described; either off and nothing is sent" — holds for a document the
+ingest has just stored, not for one already stored: the binding rule is the
+design's section 8, each set's own lane's area read by the road, which the
+code follows and the dark tests now hold both ways (above).
 
 ### Open items Phase C found
 
