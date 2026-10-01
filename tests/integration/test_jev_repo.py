@@ -3493,6 +3493,160 @@ class TestTheFindingTitlesAHarnessReads:
         assert await jev_repo.finding_records(conn, []) == {}
 
 
+def _owner(valid: bool = True) -> Answer:
+    """A ``findings.owner`` answer: a valid choice, or a tie, measuring nothing."""
+    if valid:
+        return Answer(
+            "owning_role",
+            "choice",
+            choice="execution",
+            probabilities={"execution": 0.6, "platform": 0.3, "unclear": 0.1},
+            confidence=0.4,
+            argmax="execution",
+            margin=0.3,
+        )
+    return Answer(
+        "owning_role",
+        "choice",
+        choice="execution",
+        probabilities={"execution": 0.45, "platform": 0.45, "unclear": 0.1},
+        confidence=0.4,
+        margin=0.0,
+        valid=False,
+        invalid_reason="tie",
+    )
+
+
+async def _outcomes(
+    conn: asyncpg.Connection, *titles: str, **kwargs: Any
+) -> dict[str, dict[str, Any]]:
+    arguments = {
+        "question_set": OWNER,
+        "model": MODEL,
+        "subject_type": "finding_title",
+        "subject_ids": [text_sha256(title) for title in titles],
+    }
+    found = await jev_repo.ask_outcomes(conn, **{**arguments, **kwargs})
+    return {title: found[text_sha256(title)] for title in titles}
+
+
+def _nothing(**overrides: Any) -> dict[str, Any]:
+    outcome = {
+        "answered": False,
+        "valid": False,
+        "failed_calls": 0,
+        "retired": False,
+        "blocked": False,
+        "waiting": False,
+    }
+    outcome.update(overrides)
+    return outcome
+
+
+class TestWhatSuggestionsReads:
+    """
+    Phase D2's ``suggestions`` reads (docs/09, section 9.3): the open
+    findings, Jev's counted, and how each findings set's asks came out — each
+    filter held by a case only it refuses, and no option, probability or
+    margin read.
+    """
+
+    async def test_the_open_findings_oldest_first_with_three_columns(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        tag = uuid.uuid4().hex[:6]
+        later = await _finding(
+            conn,
+            "Invented Open Finding",
+            ref=f"F-{tag}-2",
+            at=RAISED + timedelta(days=1),
+        )
+        earlier = await _finding(
+            conn, "Invented Operator Finding", ref=f"F-{tag}-1", origin="operator"
+        )
+        tie = await _finding(conn, "Invented Tie", ref=f"F-{tag}-0")
+        await _finding(conn, "Invented Closed Finding", status="remediated")
+        found = await jev_repo.open_findings(conn)
+        assert [row["ref"] for row in found] == [tie, earlier, later]
+        assert found[1] == {
+            "ref": earlier,
+            "title": "Invented Operator Finding",
+            "origin": "operator",
+        }
+
+    async def test_jevs_findings_are_counted(self, conn: asyncpg.Connection) -> None:
+        before = await jev_repo.jev_findings_raised(conn)
+        await _jev_finding(conn, "An Invented Finding Jev Raised")
+        await _finding(conn, "An Invented Finding the Model Raised")
+        assert await jev_repo.jev_findings_raised(conn) == before + 1
+
+    async def test_an_answer_on_record_and_whether_it_was_valid(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        valid, tied, unasked = (f"Invented Finding Asked {n}" for n in range(3))
+        await _asked(conn, OWNER, valid, answers=(_owner(),))
+        await _asked(conn, OWNER, tied, answers=(_owner(valid=False),))
+        assert await _outcomes(conn, valid, tied, unasked) == {
+            valid: _nothing(answered=True, valid=True),
+            tied: _nothing(answered=True),
+            unasked: _nothing(),
+        }
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"lane": "probe"},
+            {"question_set": "findings.severity"},
+            {"question_set_version": 2},
+            {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+            {"subject_type": "hypothesis_title"},
+        ],
+        ids=["a-probe", "another-set", "another-version", "another-pin", "a-title"],
+    )
+    async def test_an_answer_of_another_ask_is_not_this_ones(
+        self, conn: asyncpg.Connection, overrides: dict[str, Any]
+    ) -> None:
+        title = "Invented Finding Answered Elsewhere"
+        await _asked(conn, OWNER, title, answers=(_owner(),), **overrides)
+        assert await _outcomes(conn, title) == {title: _nothing()}
+
+    async def test_failed_calls_retire_at_three_and_a_probes_count_for_nothing(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        twice = "Invented Finding Failed Twice"
+        thrice = "Invented Finding Failed Thrice"
+        for _ in range(2):
+            await _asked(conn, OWNER, twice, "error", **_failed("server"))
+        await _asked(conn, OWNER, twice, "error", lane="probe", **_failed("server"))
+        for _ in range(2):
+            await _asked(conn, OWNER, thrice, "error", **_failed("server"))
+        await _asked(conn, OWNER, thrice, "invalid", answers=())
+        assert await _outcomes(conn, twice, thrice) == {
+            twice: _nothing(failed_calls=2),
+            thrice: _nothing(failed_calls=3, retired=True),
+        }
+
+    async def test_a_block_from_any_set_and_a_job_waiting(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        blocked, waiting, finished = (f"Invented Finding Held {n}" for n in range(3))
+        await _asked(conn, SEVERITY, blocked, "error", **_failed("content_block"))
+        await _ask_job(conn, OWNER, text_sha256(waiting), status="running")
+        await _ask_job(conn, OWNER, text_sha256(finished), status="succeeded")
+        await _ask_job(conn, OWNER, text_sha256(finished), version=OWNER.version + 1)
+        found = await _outcomes(conn, blocked, waiting, finished)
+        assert found[blocked] == _nothing(blocked=True, failed_calls=0)
+        assert found[waiting] == _nothing(waiting=True)
+        assert found[finished] == _nothing()
+        assert await jev_repo.ask_outcomes(
+            conn,
+            question_set=OWNER,
+            model=MODEL,
+            subject_type="finding_title",
+            subject_ids=[],
+        ) == {}
+
+
 class TestTheJobsAboutASubject:
     async def test_the_ask_jobs_of_one_set_version_and_subject(
         self, conn: asyncpg.Connection

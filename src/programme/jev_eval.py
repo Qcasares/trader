@@ -15,6 +15,9 @@ The Jev evaluation harness, from the command line.
     DATABASE_URL=… python -m src.programme.jev_eval labels copy --set S --key K \\
         --from-version A --to-version B
     DATABASE_URL=… python -m src.programme.jev_eval report [--json]
+    DATABASE_URL=… python -m src.programme.jev_eval preview --set S \\
+        [--limit N] [--json]
+    DATABASE_URL=… python -m src.programme.jev_eval suggestions [--json]
 
 Exit 0 when a command ran, 1 when the harness refused it, 2 on a usage error.
 Never ``src/cli.py``: the research CLI loads the engine, and this loads the
@@ -118,6 +121,21 @@ question's options are the same. ``report`` prints the newest evaluation of
 each set, version, question, model, labeller and split, with whether it could
 arm a threshold (``jev_calibration.usable``, which nothing that acts reads) and
 the quarantines, counted by what made them.
+
+From phase D2 two more commands read (docs/09, section 9.3). ``preview``
+prints what a title set — the findings sets, the hypothesis categories and
+the card check — would be asked about on the day, from the planner's own
+read, with the exact state the ``jev_ask`` handler would send or why it would
+send nothing, and every switch, the pin, the plans, the holds and the lane's
+calls left that decide whether it is planned at all; a web set is refused,
+since its subjects are chosen by the injection screen's own answers. It
+loads neither the planner nor the handler: their rules are copied, and held
+equal on the same rows (``tests/integration/test_jev_findings.py::
+TestPreviewIsThePlanners``). ``suggestions`` prints, for each open finding
+but Jev's, by its ref, how each findings set's ask came out — answered,
+invalid, held, retired, waiting, or not asked and why — and never a title,
+an option, a probability or a chip, since anyone who reads it may later
+label a set; Jev's own findings are counted, never named.
 
 What the forward report may say
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2859,6 +2877,401 @@ def format_report(report: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# What would leave, and how each ask came out (phase D2)
+# ---------------------------------------------------------------------------
+#
+# docs/09, section 9.3. ``preview`` is what an operator reads before switching
+# an area on; ``suggestions`` says how the asks about the findings register
+# came out, and shows no answer. Both read, in the caller's read-only
+# snapshot, and neither loads the planner or the handler: the reads and rules
+# below are copies of theirs, held equal on the same rows by
+# ``tests/integration/test_jev_findings.py::TestPreviewIsThePlanners``.
+
+#: The subjects ``preview`` shows: a title the programme's model wrote. A web
+#: set's subjects are chosen by the injection screen's own answers — content
+#: it cleared, for the catalogue, and content its ``true`` is on record for,
+#: for the screen's repairs — so listing them would show those answers, and
+#: ``preview`` does not; phase D3's job-error skeleton joins it.
+PREVIEWED_SUBJECTS = ("hypothesis_title", "finding_title")
+
+#: How many subjects ``preview`` lists unless told: the planner's cap a pass
+#: for every set it reads (``jev_plan.ASKS_PER_PASS``, held equal by
+#: ``tests/unit/test_jev_eval.py::TestPreview``, since the harness may not
+#: load the planner).
+PREVIEW_LIMIT = 10
+
+
+async def _titles_to_ask(
+    conn: asyncpg.Connection,
+    subject_type: str,
+    question_set: jev_questions.QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+) -> list[dict[str, Any]]:
+    """The planner's read of ``question_set``'s subjects, as it reads them."""
+    read = (
+        jev_repo.findings_to_ask
+        if subject_type == "finding_title"
+        else jev_repo.hypotheses_to_ask
+    )
+    return await read(
+        conn, question_set=question_set, model=model, limit=limit, day=day
+    )
+
+
+async def _previewed(
+    conn: asyncpg.Connection,
+    question_set: jev_questions.QuestionSet,
+    subject_type: str,
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    One subject as the ``jev_ask`` handler would take it: the row read again
+    by its ref, by column list (``jev_repo.get_finding_title``,
+    ``get_hypothesis_title``), held to the address planned, to the
+    programme's model as its writer and to its cap, and built into the state
+    that would be sent — or why nothing would be, in code's words, quoting
+    no text.
+    """
+    finding = subject_type == "finding_title"
+    loaded = await (
+        jev_repo.get_finding_title(conn, row["ref"])
+        if finding
+        else jev_repo.get_hypothesis_title(conn, row["ref"])
+    )
+    cap = (
+        jev_questions.FINDING_TITLE_MAX_CHARS
+        if finding
+        else jev_questions.TITLE_MAX_CHARS
+    )
+    entry: dict[str, Any] = {
+        "subject_type": subject_type,
+        "subject_id": row["subject_id"],
+        "source_id": row["ref"],
+        "state": None,
+        "not_sent_because": None,
+    }
+    title = None if loaded is None else loaded["title"]
+    if loaded is None:
+        entry["not_sent_because"] = "the row is no longer stored"
+    elif not isinstance(title, str) or text_sha256(title) != row["subject_id"]:
+        entry["not_sent_because"] = "the row no longer holds the text planned"
+    elif loaded["origin"] != "model":
+        entry["not_sent_because"] = (
+            f"written by {loaded['origin']!r}, not by the programme's model"
+        )
+    elif len(title) > cap:
+        entry["not_sent_because"] = (
+            f"{len(title)} characters, over the {cap} its state carries"
+        )
+    else:
+        state_model = (
+            jev_questions.FindingTitleState
+            if finding
+            else jev_questions.HypothesisTitleState
+        )
+        try:
+            entry["state"] = question_set.dump_state(state_model(title=title))
+        except ValueError:
+            entry["not_sent_because"] = "the title does not make the state"
+    return entry
+
+
+async def preview_report(
+    conn: asyncpg.Connection,
+    *,
+    question_set: jev_questions.QuestionSet,
+    limit: int,
+    day: date,
+) -> dict[str, Any]:
+    """
+    What ``question_set`` would be asked about on ``day``, and what would be
+    sent: the subjects the planner's read returns, at most ``limit``, each
+    with the row it comes from and the exact state the handler would build
+    from it, or why nothing would be sent; and every switch the planner reads
+    for it, through the shipped readers, whether each is on, the pin, the
+    plans in force, the standing holds and the lane's calls left today.
+    Whether a key is set is not the harness's to know: it holds none. Reads
+    only, and enqueues nothing.
+    """
+    subject_type = jev_questions.STATE_SUBJECT.get(question_set.state_model)
+    if question_set is not jev_questions.REGISTRY.get(question_set.name):
+        raise Refused(f"{question_set.name} v{question_set.version} is not registered")
+    if subject_type not in PREVIEWED_SUBJECTS:
+        raise Refused(
+            f"{question_set.name} is asked about a {subject_type!r}; preview shows "
+            "what a title set would send, and a web set's subjects are chosen by "
+            "the injection screen's own answers, which it does not show"
+        )
+    if limit < 1:
+        raise Refused(f"a preview lists at least one subject, not {limit}")
+    name, version, lane = question_set.name, question_set.version, question_set.lane
+    area = jev_catalogue.LANE_AREA.get(lane)
+    switches = {
+        flags.PROGRAMME_ENABLED: await flags.programme_enabled(conn),
+        flags.JEV_ENABLED: await flags.jev_enabled(conn),
+        f"{flags.JEV_AREA_PREFIX}{area}": (
+            area is not None and await flags.jev_area_enabled(conn, area)
+        ),
+    }
+    if question_set.internal_detail:
+        switches[flags.JEV_SEND_INTERNAL_DETAIL] = (
+            await flags.jev_send_internal_detail(conn)
+        )
+    model = await flags.jev_model(conn)
+    plans = jev_prereg.plans_in_force(name, version)
+    holds = {
+        "authentication_failure_today": await jev_repo.auth_failed_today(conn),
+        "refused_at_this_version_under_the_pin": (
+            model is not None
+            and await jev_repo.set_refused(
+                conn, question_set=name, version=version, model=model
+            )
+        ),
+    }
+    budget = await flags.jev_daily_request_budget(conn)
+    lane_sets = sorted(
+        other.name
+        for other in jev_questions.REGISTRY.values()
+        if other.lane == lane
+    )
+    calls_left = (
+        jev_catalogue.lane_budget(budget, lane)
+        - await jev_repo.requests_today(conn, lane)
+        - await jev_repo.pending_asks(conn, lane_sets)
+    )
+    reasons = [f"{switch} is off" for switch, on in switches.items() if not on]
+    if model is None:
+        reasons.append("no usable pin is set")
+    if plans is None:
+        reasons.append(f"{name} v{version} has no analysis plan in force")
+    reasons += [
+        f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on
+    ]
+    if calls_left <= 0:
+        reasons.append(f"the {lane} lane has no call left today")
+    subjects = []
+    if model is not None and plans is not None:
+        for row in await _titles_to_ask(
+            conn, subject_type, question_set, model, limit, day
+        ):
+            subjects.append(await _previewed(conn, question_set, subject_type, row))
+    return {
+        "set": name,
+        "version": version,
+        "lane": lane,
+        "provenance": question_set.provenance,
+        "subject_type": subject_type,
+        "day": day.isoformat(),
+        "pin": model,
+        "switches": switches,
+        "plans_in_force": plans is not None,
+        "holds": holds,
+        "calls_left_today": max(calls_left, 0),
+        "key": "not read: the harness holds none, and nothing is planned without one",
+        "would_plan": not reasons,
+        "not_planned_because": reasons,
+        "subjects": subjects,
+    }
+
+
+def format_preview(report: Mapping[str, Any]) -> str:
+    """``preview`` as text: the switches, then each subject and its state."""
+    lines = [
+        f"preview of {report['set']} v{report['version']} ({report['lane']} lane, "
+        f"provenance {report['provenance']}, about a {report['subject_type']}) "
+        f"for {report['day']}",
+        f"pin: {said(report['pin'])}",
+        "switches: "
+        + "; ".join(
+            f"{switch} {'on' if on else 'off'}"
+            for switch, on in report["switches"].items()
+        ),
+        f"plans in force: {'yes' if report['plans_in_force'] else 'no'}",
+        "holds: "
+        + "; ".join(
+            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            for hold, on in report["holds"].items()
+        ),
+        f"calls left today in the lane: {report['calls_left_today']}",
+        f"key: {report['key']}",
+    ]
+    if report["would_plan"]:
+        lines.append("would plan: yes, given a key")
+    else:
+        lines.append("would plan: no — " + "; ".join(report["not_planned_because"]))
+    lines.append(f"subjects: {len(report['subjects'])}")
+    for subject in report["subjects"]:
+        lines.append(
+            f"{subject['subject_type']} {subject['subject_id']} from "
+            f"{subject['source_id']}"
+        )
+        if subject["state"] is not None:
+            state = json.dumps(subject["state"], ensure_ascii=False, sort_keys=True)
+            lines.append(f"  would send: {state}")
+        else:
+            lines.append(f"  would send nothing: {subject['not_sent_because']}")
+    return "\n".join(lines)
+
+
+#: How ``suggestions`` says who wrote a finding no set asks about.
+WRITERS = {
+    "operator": "written by an operator",
+    "unknown": "written before migration 0015 named its writer",
+}
+
+
+def ask_status(
+    origin: str, title: object, outcome: Mapping[str, Any] | None
+) -> str:
+    """
+    How one findings set's ask about one finding came out, in a fixed
+    phrase: ``answered`` or ``invalid`` for a canonical answer on record
+    — never which option, never a probability — then a hold, a retirement,
+    a job waiting, or why it was not asked.
+    """
+    if origin != "model":
+        return f"not asked: {WRITERS.get(origin, 'not written by the programme')}"
+    if not isinstance(title, str) or not title:
+        return "not asked: no title"
+    if len(title) > jev_questions.FINDING_TITLE_MAX_CHARS:
+        return (
+            f"not asked: over the {jev_questions.FINDING_TITLE_MAX_CHARS}-"
+            "character cap"
+        )
+    if outcome is None:
+        return "not asked: no usable pin"
+    if outcome["answered"]:
+        return "answered" if outcome["valid"] else "invalid"
+    if outcome["blocked"]:
+        return "held: a vendor content block, so never sent again"
+    if outcome["retired"]:
+        return f"retired: {outcome['failed_calls']} failed calls"
+    if outcome["waiting"]:
+        return "waiting: a job is queued or running"
+    if outcome["failed_calls"]:
+        return f"not answered yet: {outcome['failed_calls']} failed calls"
+    return "not asked yet"
+
+
+async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
+    """
+    For each open finding but Jev's, by its ref, whether each findings set
+    asked about its title and how the ask came out (:func:`ask_status`); and
+    the switches, the pin and the holds that decide whether any is asked.
+    Statuses, refs and counts alone: no title, no answer, no probability and
+    no chip, since anyone who reads this may later label a set, and a label
+    made after seeing the answer is not blind (docs/09, sections 3.5 and
+    9.3). Jev's own findings are counted, never named: a ref beside a
+    hypothesis would say what Jev answered about its title.
+    """
+    model = await flags.jev_model(conn)
+    sets = [
+        question_set
+        for question_set in jev_questions.REGISTRY.values()
+        if jev_questions.STATE_SUBJECT.get(question_set.state_model) == "finding_title"
+    ]
+    areas = sorted(
+        {
+            area
+            for question_set in sets
+            if (area := jev_catalogue.LANE_AREA.get(question_set.lane)) is not None
+        }
+    )
+    switches = {
+        flags.PROGRAMME_ENABLED: await flags.programme_enabled(conn),
+        flags.JEV_ENABLED: await flags.jev_enabled(conn),
+        **{
+            f"{flags.JEV_AREA_PREFIX}{area}": await flags.jev_area_enabled(conn, area)
+            for area in areas
+        },
+    }
+    holds = {"authentication_failure_today": await jev_repo.auth_failed_today(conn)}
+    for question_set in sets:
+        holds[f"{question_set.name} refused under the pin"] = (
+            model is not None
+            and await jev_repo.set_refused(
+                conn,
+                question_set=question_set.name,
+                version=question_set.version,
+                model=model,
+            )
+        )
+    findings = [
+        finding
+        for finding in await jev_repo.open_findings(conn)
+        if finding["origin"] != "jev"
+    ]
+    addresses = {
+        finding["ref"]: text_sha256(finding["title"])
+        for finding in findings
+        if isinstance(finding["title"], str)
+    }
+    outcomes: dict[str, dict[str, dict[str, Any]]] = {}
+    if model is not None:
+        for question_set in sets:
+            outcomes[question_set.name] = await jev_repo.ask_outcomes(
+                conn,
+                question_set=question_set,
+                model=model,
+                subject_type="finding_title",
+                subject_ids=sorted(set(addresses.values())),
+            )
+    rows = []
+    for finding in findings:
+        address = addresses.get(finding["ref"])
+        rows.append(
+            {
+                "ref": finding["ref"],
+                "asks": {
+                    question_set.name: ask_status(
+                        finding["origin"],
+                        finding["title"],
+                        None
+                        if model is None
+                        else outcomes[question_set.name].get(address or ""),
+                    )
+                    for question_set in sets
+                },
+            }
+        )
+    return {
+        "pin": model,
+        "switches": switches,
+        "holds": holds,
+        "jev_findings_raised": await jev_repo.jev_findings_raised(conn),
+        "open_findings": len(rows),
+        "findings": rows,
+    }
+
+
+def format_suggestions(report: Mapping[str, Any]) -> str:
+    """``suggestions`` as text: refs, statuses and counts, and nothing else."""
+    lines = [
+        "suggestions: how each ask came out, never what it answered; no answer, "
+        "probability or chip is shown before phase E",
+        f"pin: {said(report['pin'])}",
+        "switches: "
+        + "; ".join(
+            f"{switch} {'on' if on else 'off'}"
+            for switch, on in report["switches"].items()
+        ),
+        "holds: "
+        + "; ".join(
+            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            for hold, on in report["holds"].items()
+        ),
+        f"findings Jev raised: {report['jev_findings_raised']} (counted, never named)",
+        f"open findings, oldest first: {report['open_findings']}",
+    ]
+    for row in report["findings"]:
+        asks = "; ".join(f"{name} {status}" for name, status in row["asks"].items())
+        lines.append(f"{row['ref']}: {asks}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # The command line
 # ---------------------------------------------------------------------------
 
@@ -2878,6 +3291,8 @@ COMMANDS = (
     "report",
     "labels export",
     "evaluate",
+    "preview",
+    "suggestions",
     *WRITING_COMMANDS,
 )
 
@@ -2993,6 +3408,18 @@ def _parser() -> argparse.ArgumentParser:
         "report", help="the newest evaluation of each question, model and labeller"
     )
     report.add_argument("--json", action="store_true")
+
+    preview = commands.add_parser(
+        "preview", help="what a title set would be asked about, and send"
+    )
+    preview.add_argument("--set", dest="question_set", required=True)
+    preview.add_argument("--limit", type=_positive, default=PREVIEW_LIMIT)
+    preview.add_argument("--json", action="store_true")
+    suggestions = commands.add_parser(
+        "suggestions",
+        help="how each findings set's ask came out: statuses, never an answer",
+    )
+    suggestions.add_argument("--json", action="store_true")
     return parser
 
 
@@ -3058,6 +3485,17 @@ async def _read(
         evaluation = await _evaluate(conn, arguments)
         report = evaluation.row()
         text = format_evaluation(report)
+    elif command == "preview":
+        report = await preview_report(
+            conn,
+            question_set=_registered(arguments.question_set),
+            limit=arguments.limit,
+            day=now.astimezone(UTC).date(),
+        )
+        text = format_preview(report)
+    elif command == "suggestions":
+        report = await suggestions_report(conn)
+        text = format_suggestions(report)
     else:
         raise Refused(f"no reading command {command!r}; nothing was read")
     return _dumped(report) if getattr(arguments, "json", False) else text

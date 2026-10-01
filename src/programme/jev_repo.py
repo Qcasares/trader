@@ -2052,6 +2052,109 @@ async def finding_records(
     }
 
 
+async def open_findings(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """
+    Every open finding's ref, title and writer, oldest first by ``opened_at``
+    then ``ref``: what the harness's ``suggestions`` reports each findings
+    set's asks against (docs/09, section 9.3). The title is read to compute
+    its content address and is never printed; who raised the finding, its
+    severity and its detail are not read at all.
+    """
+    rows = await conn.fetch(
+        "SELECT ref, title, origin FROM findings WHERE status = 'open' "
+        "ORDER BY opened_at, ref"
+    )
+    return [dict(row) for row in rows]
+
+
+async def jev_findings_raised(conn: asyncpg.Connection) -> int:
+    """How many findings Jev's answers raised, of any status: a count, never a ref."""
+    count = await conn.fetchval("SELECT COUNT(*) FROM findings WHERE origin = 'jev'")
+    return int(count or 0)
+
+
+async def ask_outcomes(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    model: str,
+    subject_type: str,
+    subject_ids: Sequence[str],
+    max_failed: int = MAX_FAILED_CALLS,
+) -> dict[str, dict[str, Any]]:
+    """
+    How the asks of ``question_set``, at its registered version under
+    ``model``, about each of ``subject_ids`` came out, by the rules the
+    planner's reads apply (see the section's comment): ``answered`` — an
+    ``ok`` row outside the probe lane is on record — with ``valid`` whether
+    every answer it holds was valid; ``failed_calls``, the responses refused
+    whole and the calls that failed, and ``retired``, whether they have reached
+    ``max_failed``; ``blocked``, a vendor content block on record for the
+    subject from any set; and ``waiting``, a ``jev_ask`` job of the set about it
+    queued or running. Statuses alone: no option, probability or margin is
+    read, so nothing built from this can show an answer.
+    """
+    if not subject_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT s.subject_id,
+               EXISTS (
+                   SELECT 1 FROM jev_requests r
+                   WHERE r.question_set = $1 AND r.question_set_version = $2
+                     AND r.model_requested = $3 AND r.subject_type = $4
+                     AND r.subject_id = s.subject_id
+                     AND r.status = 'ok' AND r.lane <> 'probe'
+               ) AS answered,
+               COALESCE((
+                   SELECT bool_and(a.valid)
+                   FROM jev_requests r JOIN jev_answers a ON a.request_id = r.id
+                   WHERE r.question_set = $1 AND r.question_set_version = $2
+                     AND r.model_requested = $3 AND r.subject_type = $4
+                     AND r.subject_id = s.subject_id
+                     AND r.status = 'ok' AND r.lane <> 'probe'
+               ), FALSE) AS valid,
+               (
+                   SELECT COUNT(*) FROM jev_requests f
+                   WHERE f.question_set = $1 AND f.question_set_version = $2
+                     AND f.model_requested = $3 AND f.subject_type = $4
+                     AND f.subject_id = s.subject_id
+                     AND f.status IN ('invalid', 'error') AND f.lane <> 'probe'
+               ) AS failed_calls,
+               EXISTS (
+                   SELECT 1 FROM jev_requests b
+                   WHERE b.error_kind = 'content_block'
+                     AND b.subject_type = $4 AND b.subject_id = s.subject_id
+               ) AS blocked,
+               EXISTS (
+                   SELECT 1 FROM jobs j
+                   WHERE j.kind = 'jev_ask'
+                     AND j.payload->>'set' = $1
+                     AND j.payload->>'version' = $2::int::text
+                     AND j.payload->>'subject_id' = s.subject_id
+                     AND j.status IN ('queued', 'running')
+               ) AS waiting
+        FROM unnest($5::text[]) AS s(subject_id)
+        """,
+        question_set.name,
+        question_set.version,
+        model,
+        subject_type,
+        list(subject_ids),
+    )
+    return {
+        row["subject_id"]: {
+            "answered": row["answered"],
+            "valid": row["valid"],
+            "failed_calls": int(row["failed_calls"]),
+            "retired": int(row["failed_calls"]) >= max_failed,
+            "blocked": row["blocked"],
+            "waiting": row["waiting"],
+        }
+        for row in rows
+    }
+
+
 async def subjects_to_label(
     conn: asyncpg.Connection, *, subject_type: str
 ) -> list[dict[str, Any]]:
