@@ -3138,11 +3138,20 @@ planned while an authentication failure recorded today holds every lane, nor
 of a set the vendor refused with a 422 at its version under the pin; the
 screen's repairs, which make no call, are planned under either.
 `tests/unit/test_jev_plan.py::TestTheAsks`, the planner's dark matrix now with
-the guardrails area and a subject waiting for every set, and every filter of
-each read on PostgreSQL by a case only it refuses
+the guardrails area and a subject waiting for every set, and every filter and
+order of each read on PostgreSQL by a case only it refuses
 (`tests/integration/test_jev_repo.py::TestDocumentsToScreen`,
 `::TestDocumentsToDescribe`, `::TestHypothesesToAsk`) — a screen answer that
-is not valid but names `false` among them (10i).
+is not valid but names `false` among them (10i). As first written that was not
+so: this part's review found a waiting job's version and a block's subject
+type held by nothing, and loosening each of the three reads' 54 filters and
+orders in turn, the flag's among them, found seven more — a waiting job's
+kind; the subject type of an answer, of a failed call and of a clearance; the
+statuses a failed call is counted from, a refusal being no call; a
+clearance's argmax, which the flag read had left the second of two refusals
+of a `true`, now held by a valid argmax the schema admits and the validator
+never writes for a Noul; and the catalogue's earliest first. Each is now held
+by a case only it refuses.
 
 **The README's own headings, as labels.** The ingest now records, in the
 snapshot's one transaction and in content order, the source's heading for

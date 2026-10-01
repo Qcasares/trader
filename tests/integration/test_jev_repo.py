@@ -2017,20 +2017,25 @@ async def _ask_job(
     *,
     status: str = "queued",
     day: date = TODAY,
+    version: int | None = None,
 ) -> uuid.UUID:
-    """A ``jev_ask`` job as the planner enqueues one, under its key."""
+    """
+    A ``jev_ask`` job as the planner enqueues one, under its key: of the set's
+    registered version, or of ``version``.
+    """
     web = question_set.state_model is jev_questions.WebExcerptState
     subject_type = "web_excerpt" if web else "hypothesis_title"
+    version = question_set.version if version is None else version
     return await _job(
         conn,
         "jev_ask",
         status=status,
         key=jev_repo.ask_job_key(
-            question_set.name, question_set.version, subject_type, subject_id, day
+            question_set.name, version, subject_type, subject_id, day
         ),
         payload={
             "set": question_set.name,
-            "version": question_set.version,
+            "version": version,
             "subject_type": subject_type,
             "subject_id": subject_id,
             "source_id": 1,
@@ -2317,6 +2322,96 @@ class TestDocumentsToScreen:
         await _ask_job(conn, CATALOGUE, text_sha256(text))
         assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
 
+    async def test_a_job_of_another_version_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        C7+C8's review: the waiting job's version was a filter nothing held. A
+        job of another version of the set, waiting, is no job of this one.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _ask_job(conn, SCREEN, text_sha256(text), version=SCREEN.version + 1)
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    async def test_a_job_of_another_kind_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """A waiting job is a ``jev_ask``, whatever another kind's payload says."""
+        text = _text()
+        await _document(conn, text)
+        await _job(
+            conn,
+            "jev_reask",
+            payload={
+                "set": SCREEN.name,
+                "version": SCREEN.version,
+                "subject_id": text_sha256(text),
+            },
+        )
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    @pytest.mark.parametrize(
+        "elsewhere",
+        [
+            {"status": "ok"},
+            {"status": "error", "times": 3, **_failed("timeout")},
+        ],
+        ids=["an-answer", "three-failed-calls"],
+    )
+    async def test_rows_about_a_title_holding_the_same_text_are_not_this_ones(
+        self, conn: asyncpg.Connection, elsewhere: dict[str, Any]
+    ) -> None:
+        """
+        An answer, or failed calls, about a hypothesis title whose text is the
+        excerpt's — so whose address is too — are the title's: they neither
+        answer the excerpt nor retire it. Each held by the subject type alone.
+        """
+        text = _text()
+        await _document(conn, text)
+        fields = dict(elsewhere)
+        times = fields.pop("times", 1)
+        status = fields.pop("status")
+        for _ in range(times):
+            await _asked(
+                conn, SCREEN, text, status, subject_type="hypothesis_title", **fields
+            )
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    async def test_a_refusal_is_no_failed_call(self, conn: asyncpg.Connection) -> None:
+        """
+        Only a response refused whole or a call that failed retires a
+        subject: a refusal recorded no call, and three of them retire nothing.
+        """
+        text = _text()
+        await _document(conn, text)
+        for _ in range(3):
+            await _asked(conn, SCREEN, text, "refused_budget")
+        assert _subjects(await _to_screen(conn)) == [text_sha256(text)]
+
+    async def test_a_block_on_a_title_holding_the_same_text_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        C7+C8's review: a block's subject type was a filter nothing held. A
+        block on a hypothesis title whose text is the excerpt's, so whose
+        address is too, is the title's: the excerpt is no repair, and its ask,
+        which the road matches by the state it sends, would make a call.
+        """
+        text = _text()
+        await _document(conn, text)
+        await _asked(
+            conn,
+            jev_questions.GUARDRAIL_CARD,
+            text,
+            "error",
+            **_failed("content_block"),
+        )
+        rows = await _to_screen(conn)
+        assert [(row["content_sha256"], row["blocked"]) for row in rows] == [
+            (text_sha256(text), False)
+        ]
+
     async def test_at_most_the_limit_earliest_first(
         self, conn: asyncpg.Connection
     ) -> None:
@@ -2350,6 +2445,8 @@ class TestDocumentsToDescribe:
             {"pack_hash": "6" * 64},
             {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
             {"answers": (dataclasses.replace(CLEAR, question_key="about_trading"),)},
+            {"answers": (dataclasses.replace(CLEAR, argmax="neither"),)},
+            {"subject_type": "hypothesis_title"},
         ],
         ids=[
             "flagged",
@@ -2360,6 +2457,8 @@ class TestDocumentsToDescribe:
             "another-version-of-the-screen",
             "another-model",
             "another-question",
+            "a-valid-answer-of-another-argmax",
+            "about-a-title-holding-the-same-text",
         ],
     )
     async def test_nothing_but_a_clearance_lets_the_catalogue_ask(
@@ -2369,6 +2468,13 @@ class TestDocumentsToDescribe:
         Section 10i of the scope: among these, an answer that is not valid but
         still names ``false``, which only the validity filter refuses. The
         catalogue is never asked about content the screen has not cleared.
+
+        Two more each hold one filter alone (C7+C8's review). A valid answer
+        whose argmax is neither ``false`` nor ``true``: the validator writes
+        neither for a Noul and the schema admits it, and a ``true`` is now
+        refused by the flag read too, so without it the argmax filter would
+        be held by nothing. And a clearance of a hypothesis title whose text,
+        so whose address, is the excerpt's.
         """
         text = _text()
         await _document(conn, text)
@@ -2436,6 +2542,43 @@ class TestDocumentsToDescribe:
             conn, CATALOGUE, text_sha256(earlier), status="failed", day=yesterday
         )
         assert _subjects(await _to_describe(conn)) == [text_sha256(earlier)]
+
+    async def test_a_job_of_another_version_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text)
+        await _ask_job(
+            conn, CATALOGUE, text_sha256(text), version=CATALOGUE.version + 1
+        )
+        assert _subjects(await _to_describe(conn)) == [text_sha256(text)]
+
+    async def test_a_block_on_a_title_holding_the_same_text_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _document(conn, text)
+        await _asked(conn, SCREEN, text)
+        await _asked(
+            conn,
+            jev_questions.GUARDRAIL_CARD,
+            text,
+            "error",
+            **_failed("content_block"),
+        )
+        assert _subjects(await _to_describe(conn)) == [text_sha256(text)]
+
+    async def test_at_most_the_limit_earliest_first(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """C7+C8's review: the order the docstring promises was held by nothing."""
+        texts = [_text() for _ in range(5)]
+        for text in texts:
+            await _document(conn, text)
+            await _asked(conn, SCREEN, text)
+        rows = await _to_describe(conn, limit=3)
+        assert _subjects(rows) == [text_sha256(text) for text in texts[:3]]
 
 
 async def _hypothesis(
@@ -2522,6 +2665,25 @@ class TestHypothesesToAsk:
         )
         await _ask_job(conn, HYPOTHESIS, text_sha256(waiting))
         assert _subjects(await _titles(conn), "subject_id") == [text_sha256(plain)]
+
+    async def test_a_job_of_another_version_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Breadth in Fictional Sector Funds"
+        await _hypothesis(conn, title)
+        await _ask_job(
+            conn, HYPOTHESIS, text_sha256(title), version=HYPOTHESIS.version + 1
+        )
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_a_block_on_an_excerpt_holding_the_same_text_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """The other way round: a stored excerpt's block is not the title's."""
+        title = "Invented Auction Cycles in Made-Up Notes"
+        await _hypothesis(conn, title)
+        await _asked(conn, SCREEN, title, "error", **_failed("content_block"))
+        assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
 
     async def test_another_sets_answer_leaves_the_title_for_this_one(
         self, conn: asyncpg.Connection
