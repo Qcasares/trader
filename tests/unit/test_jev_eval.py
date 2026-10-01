@@ -2677,6 +2677,59 @@ class TestTheBaselines:
             "claims.find_performance_claim"
         )
 
+    @staticmethod
+    def _catalogue_falling_back(
+        monkeypatch: pytest.MonkeyPatch, fallback: str | None
+    ) -> None:
+        """The catalogue's plans, each keyword rule's fallback moved, or gone."""
+        real = jev_prereg.set_plan
+
+        def moved(name: str, version: int) -> dict[str, Any] | None:
+            plan = real(name, version)
+            if plan is None or name != CATALOGUE.name:
+                return plan
+            questions = {}
+            for key, question in plan["questions"].items():
+                baseline = dict(question["keyword_baseline"])
+                if fallback is None:
+                    del baseline["fallback"]
+                else:
+                    baseline["fallback"] = fallback
+                questions[key] = {**question, "keyword_baseline": baseline}
+            return {**plan, "questions": questions}
+
+        monkeypatch.setattr(jev_prereg, "set_plan", moved)
+
+    @pytest.mark.parametrize(
+        "fallback", ["other_mechanism", jev_prereg.KEYWORD_FALLBACK, "neither"]
+    )
+    def test_a_keyword_rule_falls_back_as_its_plan_registered(
+        self, monkeypatch: pytest.MonkeyPatch, fallback: str
+    ) -> None:
+        """
+        D2's review (D2RW-3): from phase D a plan records the label its keyword
+        rule gives text no keyword names (``"fallback"``), and the baseline is
+        the rule the plan names, as the plan holds it. The first cut fell back
+        to ``KEYWORD_FALLBACK`` whatever the plan said, so a plan registering
+        another would have been scored by a rule it never registered.
+        """
+        self._catalogue_falling_back(monkeypatch, fallback)
+        guess, _ = jev_eval.keyword_baseline(CATALOGUE, "mechanism")
+        nothing = "Invented Words No Keyword Names"
+        assert guess(("web_excerpt", text_sha256(nothing)), nothing) == fallback
+        named = "Invented Momentum in Pretend Shares"
+        assert guess(("web_excerpt", text_sha256(named)), named) == (
+            "trend_or_momentum"
+        )
+
+    def test_a_keyword_plan_naming_no_fallback_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rule the plan does not complete is measured against nothing."""
+        self._catalogue_falling_back(monkeypatch, None)
+        with pytest.raises(jev_eval.Refused, match="no fallback"):
+            jev_eval.keyword_baseline(CATALOGUE, "mechanism")
+
 
 class TestTheBrierScore:
     def test_a_choices_score_beside_its_climatology(self) -> None:

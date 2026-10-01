@@ -1088,7 +1088,8 @@ def keyword_baseline(
     it. Only the rule the plan names, as the plan holds it: the injection
     screen's is the code screen at the version and rule data the plan hashed,
     and is refused if the screen running now is another; the catalogue's and
-    the hypotheses' are the plan's own ordered keyword rules; the card's the
+    the hypotheses' are the plan's own ordered keyword rules, falling back to
+    the label the plan records (refused if it records none); the card's the
     claims check with the plan's terms. From phase D2 the findings sets' is
     ``findings.recorded``: the value the plan names — who raised the
     finding, or its severity — of the earliest finding of the population
@@ -1159,8 +1160,21 @@ def keyword_baseline(
         return claim, f"claims.find_performance_claim, reading {baseline['reads']}"
     if rule == "jev_prereg.keyword_label":
         rules = tuple((label, tuple(keywords)) for label, keywords in baseline["rules"])
+        # The label text no keyword names gets is the plan's own, as it
+        # recorded it (from phase D each keyword plan names one): the first
+        # cut applied jev_prereg.KEYWORD_FALLBACK whatever the plan said, so a
+        # plan registering another would have been scored by a rule it never
+        # registered (D2's review, D2RW-3).
+        fallback = baseline.get("fallback")
+        if not isinstance(fallback, str) or not fallback:
+            raise Refused(
+                f"{question_set.name}'s plan registers no fallback for its keyword "
+                "rule; nothing is measured against it"
+            )
         return (
-            lambda subject, text: jev_prereg.keyword_label(rules, text),
+            lambda subject, text: jev_prereg.keyword_label(
+                rules, text, fallback=fallback
+            ),
             f"jev_prereg.keyword_label {baseline['matcher']}, reading "
             f"{baseline['reads']}",
         )

@@ -4369,8 +4369,14 @@ They hash to `e6cb5e05456468a9447b5748a3f09900a4893a5096cea6b0e98c445de05e09e9`
 and `256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2`, in
 `GOLDEN_SET_PLAN_HASHES` and the released history. `keyword_label` gains its
 `fallback`, read at call time and recorded in each plan that uses one; every
-phase C plan keeps `insufficient_evidence` and its hash. The gated family is
-eight pairs of twenty. `tests/unit/test_jev_prereg.py::TestTheFindingsBaseline`,
+phase C plan keeps `insufficient_evidence` and its hash. The harness measures
+a keyword baseline with the fallback its plan recorded, and refuses a plan
+that records none; the first cut applied `KEYWORD_FALLBACK` whatever the plan
+said, which moved no figure only because every plan's fallback is that
+constant (D2's review;
+`tests/unit/test_jev_eval.py::TestTheBaselines::test_a_keyword_rule_falls_back_as_its_plan_registered`).
+The gated family is eight pairs of twenty.
+`tests/unit/test_jev_prereg.py::TestTheFindingsBaseline`,
 `::TestTheKeywordFallback` and `::TestTheGateFamily::test_the_family_holds_phase_ds_pairs`.
 
 **The ask** (the scope's 3, fourth point; design section 5.1). `ASKABLE`
