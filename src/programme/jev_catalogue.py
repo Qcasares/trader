@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from datetime import date
 from types import MappingProxyType
 
 #: Where Jev answers. Passed explicitly to the SDK on every construction, so
@@ -62,6 +63,23 @@ PINNED_MODEL = re.compile(r"^jev-\d+\.\d+\.\d+\Z", re.ASCII)
 #: here after it has been evaluated on this repository's own labels — not typed
 #: into a form — because every threshold is measured per model.
 KNOWN_MODELS: tuple[str, ...] = ("jev-1.13.0",)
+
+#: When each known model was first observed answering: the earliest day this
+#: repository has evidence the model existed. TypeSafe discloses no training
+#: cutoff (docs/08, fact 6), so the harness (phase C9) treats this as the
+#: latest day the model could have been trained on: an item dated on or
+#: before it, or not dated at all, may be in its training data, and an
+#: evaluation holding one is an upper bound that carries no threshold
+#: (``jev_eval``, and migration 0014's
+#: ``jev_evaluations_no_threshold_on_an_upper_bound``). ``jev-1.13.0``'s is
+#: the dispatch-only key check's run, which found it answering the
+#: connectivity probe on 26 September 2026: a conservative bound, since the
+#: model was released before it. A model added to :data:`KNOWN_MODELS`
+#: without a day here fails ``tests/unit/test_jev_catalogue.py::
+#: TestTheModelIsPinned::test_every_known_model_has_a_first_observation``.
+MODEL_FIRST_OBSERVED: Mapping[str, date] = MappingProxyType(
+    {"jev-1.13.0": date(2026, 9, 26)}
+)
 
 #: Names the docs use that do not pin a release. ``jev-latest`` tracks the
 #: newest stable release and ``jev-preview`` moves ahead of it; the docs also
@@ -406,6 +424,7 @@ __all__ = [
     "MAX_STATE_PLUS_LONGEST_QUESTION",
     "MAX_TOTAL_TOKENS",
     "MIN_DAILY_REQUEST_BUDGET",
+    "MODEL_FIRST_OBSERVED",
     "PINNED_MODEL",
     "PROVENANCES",
     "REFUSED_ALIASES",

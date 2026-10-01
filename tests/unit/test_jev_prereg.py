@@ -319,6 +319,57 @@ class TestTheLaneTargets:
         assert low < target
 
 
+def _gated_family() -> set[tuple[str, int, str]]:
+    """
+    Every set, version and question a set plan gates — each version's
+    questions counted, since an earlier version's gate was applied too —
+    from the plans themselves rather than from ``SET_TARGETS``, whose
+    entries gate nothing without a plan naming them.
+    """
+    return {
+        (name, version, key)
+        for name, version in jev_prereg.SET_PLAN_VERSIONS
+        for key in (jev_prereg.set_plan(name, version) or {}).get("questions", {})
+    }
+
+
+class TestTheGateFamily:
+    """
+    ``GATE_CI`` is a Bonferroni level: one-sided 99.5%, so that at most
+    ``GATE_FAMILY`` gated set-and-question pairs together err no more often
+    than one reported interval leaves out. A pair added through a set plan
+    moves no hash of the global plan, so without this nothing would notice
+    the family outgrow the level: a larger family is a new global plan, with
+    ``GATE_FAMILY`` raised and ``GATE_CI`` with it (docs/08, C9).
+    """
+
+    def test_the_gated_pairs_fit_the_family(self) -> None:
+        family = _gated_family()
+        assert len(family) <= jev_prereg.GATE_FAMILY, sorted(family)
+
+    def test_the_gate_level_is_bonferroni_over_the_family(self) -> None:
+        family_error = (1 - jev_prereg.GATE_CI) * jev_prereg.GATE_FAMILY
+        assert family_error <= (1 - jev_prereg.REPORT_CI) + 1e-12
+
+    def test_the_count_sees_a_question_a_set_plan_adds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not vacuous: five more planned questions and the family is eleven."""
+        before = len(_gated_family())
+        real = jev_prereg._set_plans
+
+        def more() -> dict[tuple[str, int], dict[str, Any]]:
+            plans = real()
+            questions = plans[("research.catalogue", 1)]["questions"]
+            for i in range(jev_prereg.GATE_FAMILY - before + 1):
+                questions[f"invented_{i}"] = dict(questions["asset_class"])
+            return plans
+
+        monkeypatch.setattr(jev_prereg, "_set_plans", more)
+        assert len(_gated_family()) == jev_prereg.GATE_FAMILY + 1
+        assert jev_prereg.plan_hash() == jev_prereg.GOLDEN_PLAN_HASH
+
+
 class TestThePureModuleLoadsNothing:
     def test_it_imports_the_standard_library_alone(self) -> None:
         """

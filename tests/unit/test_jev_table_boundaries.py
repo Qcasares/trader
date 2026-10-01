@@ -179,6 +179,23 @@ LABELS_WRITES = frozenset(
 )
 
 
+#: The one module that writes ``jev_evaluations`` (phase C9), and its one
+#: write: ``record_evaluation``, for ``jev_eval evaluate --record``.
+EVALUATIONS_WRITER = PROGRAMME / "jev_repo.py"
+EVALUATIONS_WRITES = frozenset({("record_evaluation", "insert into")})
+
+
+def _evaluation_writes(source: str) -> list[tuple[int, str, str | None]]:
+    """
+    Every write of ``jev_evaluations`` in ``source``, and every write whose
+    table the scan cannot read, which could be one (``_table_writes``).
+    """
+    return [
+        (write.line, write.verb, write.function)
+        for write in _table_writes(source, "jev_evaluations", bare_name=True)
+    ]
+
+
 def _label_writes(source: str) -> list[tuple[int, str, str | None]]:
     """
     Every write of ``jev_labels`` in ``source``, and every write whose table
@@ -405,6 +422,60 @@ def test_the_label_write_scan_finds_each_spelling(source: str) -> None:
 )
 def test_the_label_write_scan_ignores_what_does_not_write_labels(source: str) -> None:
     assert _label_writes(source) == [], source
+
+
+def test_only_the_repo_writes_jev_evaluations() -> None:
+    """
+    An evaluation is what a threshold may one day rest on, so the row that
+    says how well Jev did is written by one function, ``record_evaluation``,
+    which names every column, and the schema holds what it may say (migration
+    0014). Nothing else in the scanned trees writes the table (phase C9).
+    """
+    offenders = [
+        f"{_label(path)} line {line}: {verb} jev_evaluations"
+        for path in _scanned()
+        if path != EVALUATIONS_WRITER
+        for line, verb, _ in _evaluation_writes(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        "a module other than src/programme/jev_repo.py writes jev_evaluations, "
+        "or writes a table this scan cannot read; name the table in the SQL:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_repo_writes_jev_evaluations_by_record_evaluation_alone() -> None:
+    """Appended, never rewritten: one insert, and no update or upsert."""
+    writes = _evaluation_writes(EVALUATIONS_WRITER.read_text(encoding="utf-8"))
+    assert {(function, verb) for _, verb, function in writes} == EVALUATIONS_WRITES
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.execute("INSERT INTO jev_evaluations (n) VALUES ($1)")',
+        'q = "INSERT INTO " + "jev_evaluations (n) VALUES ($1)"',
+        'q = " ".join(["INSERT INTO", "jev_evaluations", "(n) VALUES ($1)"])',
+        'await conn.execute(f"INSERT INTO jev_evaluations ({cols}) VALUES (1)")',
+        'await conn.copy_records_to_table("jev_evaluations", records=rows)',
+        'await conn.execute("UPDATE jev_evaluations SET accuracy = 0.99")',
+    ],
+)
+def test_the_evaluation_write_scan_finds_each_spelling(source: str) -> None:
+    assert _evaluation_writes(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'await conn.fetch("SELECT * FROM jev_evaluations")',
+        '"""Evaluations are written to jev_evaluations by jev_repo alone."""',
+    ],
+)
+def test_the_evaluation_write_scan_ignores_what_does_not_write_one(
+    source: str,
+) -> None:
+    assert _evaluation_writes(source) == [], source
 
 
 def test_the_one_update_of_web_documents_is_quarantine_content() -> None:

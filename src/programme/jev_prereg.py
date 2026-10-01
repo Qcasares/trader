@@ -156,6 +156,9 @@ REPORT_CI = 0.95
 
 #: A gate's bound: one-sided, 99.5%, Bonferroni over a family of up to
 #: :data:`GATE_FAMILY` set-and-question pairs; a larger family is a new plan.
+#: A pair a set plan adds moves no hash of this plan, so the count of the
+#: pairs the set plans gate is held to the family by a test instead
+#: (``tests/unit/test_jev_prereg.py::TestTheGateFamily``).
 GATE_CI = 0.995
 GATE_FAMILY = 10
 

@@ -1544,7 +1544,9 @@ class TestEvaluations:
         self, conn: asyncpg.Connection
     ) -> None:
         bins = [{"low": 0.9, "high": 1.0, "n": 12, "accuracy": 0.75}]
-        await _evaluation(conn, flip_rate=0.0, calibration_bins=json.dumps(bins))
+        await _evaluation(
+            conn, flip_rate=0.0, flip_rate_n=12, calibration_bins=json.dumps(bins)
+        )
         (evaluation,) = await jev_repo.list_evaluations(conn)
         assert evaluation["flip_rate"] == 0.0
         assert evaluation["accuracy"] is None
@@ -2693,3 +2695,485 @@ class TestHypothesesToAsk:
         await _asked(conn, jev_questions.GUARDRAIL_CARD, title)
         assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
         assert await _titles(conn, question_set=jev_questions.GUARDRAIL_CARD) == []
+
+
+# ---------------------------------------------------------------------------
+# The evaluation harness's reads and its write (phase C9)
+# ---------------------------------------------------------------------------
+#
+# Every read is held to what it returns by a case only its filter refuses:
+# the C7+C8 reads once passed every suite with a filter missing, and a
+# harness that scored the wrong answer would fail no test of its own.
+
+
+def _choice(argmax: str = "equities", *, valid: bool = True) -> Answer:
+    """A catalogue asset-class answer, valid or a tie."""
+    others = [o for o in ("equities", "bonds", "insufficient_evidence") if o != argmax]
+    probabilities = {argmax: 0.6, others[0]: 0.3, others[1]: 0.1}
+    answer = Answer(
+        "asset_class",
+        "choice",
+        choice=argmax,
+        probabilities=probabilities,
+        confidence=0.4,
+        argmax=argmax,
+        margin=0.3,
+    )
+    if valid:
+        return answer
+    return dataclasses.replace(
+        answer, argmax=None, margin=0.0, valid=False, invalid_reason="tie"
+    )
+
+
+async def _answers(
+    conn: asyncpg.Connection, *texts: str, **kwargs: Any
+) -> dict[tuple[str, str], dict[str, Any]]:
+    arguments = {
+        "question_set": CATALOGUE.name,
+        "version": CATALOGUE.version,
+        "question_key": "asset_class",
+        "model": MODEL,
+        "subjects": [("web_excerpt", text_sha256(text)) for text in texts],
+    }
+    return await jev_repo.answers_for_subjects(conn, **{**arguments, **kwargs})
+
+
+def _subject(text: str, subject_type: str = "web_excerpt") -> tuple[str, str]:
+    return (subject_type, text_sha256(text))
+
+
+class TestTheHarnessLabels:
+    async def test_one_labeller_or_every_labeller_of_one_question(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        mine = await jev_repo.record_label(conn, **_label(subject_id="a"))
+        theirs = await jev_repo.record_label(
+            conn, **_label(subject_id="a", labelled_by="operator:other")
+        )
+        # Each of these differs from the question read in one way alone.
+        for other in (
+            {"question_set": "research.hypothesis"},
+            {"question_set_version": 2},
+            {"question_key": "mechanism"},
+        ):
+            await jev_repo.record_label(conn, **_label(subject_id="a", **other))
+
+        def ids(rows: list[dict[str, Any]]) -> list[int]:
+            return [row["id"] for row in rows]
+
+        arguments = {
+            "question_set": "research.catalogue",
+            "version": 1,
+            "question_key": "asset_class",
+        }
+        assert ids(
+            await jev_repo.labels_for(
+                conn, **arguments, labelled_by="operator:quentin"
+            )
+        ) == [mine]
+        assert ids(await jev_repo.labels_for(conn, **arguments, labelled_by=None)) == [
+            mine,
+            theirs,
+        ]
+        (row,) = await jev_repo.labels_for(
+            conn, **arguments, labelled_by="operator:other"
+        )
+        assert (row["subject_type"], row["subject_id"], row["label"]) == (
+            "catalogue_entry",
+            "a",
+            "futures",
+        )
+
+
+class TestAnswersForSubjects:
+    async def test_the_canonical_answer_is_the_subjects(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """An ok row wins over a response refused whole, even a newer one."""
+        text = _text()
+        ok = await _asked(conn, CATALOGUE, text, answers=(_choice("bonds"),))
+        await _asked(conn, CATALOGUE, text, "invalid", answers=(_choice(valid=False),))
+        (answer,) = (await _answers(conn, text)).values()
+        assert (answer["request_id"], answer["argmax"], answer["valid"]) == (
+            ok,
+            "bonds",
+            True,
+        )
+        assert answer["probabilities"] == _choice("bonds").probabilities
+
+    async def test_without_one_the_newest_response_refused_whole(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        await _asked(conn, CATALOGUE, text, "invalid", answers=(_choice(valid=False),))
+        newest = await _asked(
+            conn, CATALOGUE, text, "invalid", answers=(_choice(valid=False),)
+        )
+        (answer,) = (await _answers(conn, text)).values()
+        assert (answer["request_id"], answer["request_status"]) == (newest, "invalid")
+        assert answer["valid"] is False and answer["invalid_reason"] == "tie"
+
+    async def test_an_ok_row_with_an_invalid_answer_is_still_the_answer(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """A tie inside an ok response is canonical: it replays, so it scores."""
+        text = _text()
+        tie = await _asked(conn, CATALOGUE, text, answers=(_choice(valid=False),))
+        (answer,) = (await _answers(conn, text)).values()
+        assert (answer["request_id"], answer["valid"]) == (tie, False)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"lane": "probe"}, id="a re-ask, a probe"),
+            pytest.param(
+                {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+                id="another model",
+            ),
+            pytest.param({"question_set": "research.hypothesis"}, id="another set"),
+            pytest.param({"question_set_version": 2}, id="another version"),
+            pytest.param({"subject_type": "hypothesis_title"}, id="another type"),
+        ],
+    )
+    async def test_an_answer_about_something_else_is_not_the_subjects(
+        self, conn: asyncpg.Connection, overrides: dict[str, Any]
+    ) -> None:
+        text = _text()
+        await _asked(conn, CATALOGUE, text, answers=(_choice(),), **overrides)
+        assert await _answers(conn, text) == {}
+
+    async def test_another_questions_answer_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        mechanism = dataclasses.replace(_choice(), question_key="mechanism")
+        await _asked(conn, CATALOGUE, text, answers=(mechanism,))
+        assert await _answers(conn, text) == {}
+        assert await _answers(conn, text, question_key="mechanism")
+
+    async def test_a_failed_call_is_no_answer(self, conn: asyncpg.Connection) -> None:
+        text = _text()
+        await _asked(conn, CATALOGUE, text, "error")
+        assert await _answers(conn, text) == {}
+
+    async def test_each_subject_its_own(self, conn: asyncpg.Connection) -> None:
+        first, second, unasked = _text(), _text(), _text()
+        await _asked(conn, CATALOGUE, first, answers=(_choice("bonds"),))
+        await _asked(conn, CATALOGUE, second, answers=(_choice("equities"),))
+        found = await _answers(conn, first, second, unasked)
+        assert {key: row["argmax"] for key, row in found.items()} == {
+            _subject(first): "bonds",
+            _subject(second): "equities",
+        }
+
+    async def test_nothing_asked_about_reads_nothing(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        assert await _answers(conn) == {}
+
+
+class TestItemDates:
+    async def _dated(
+        self,
+        conn: asyncpg.Connection,
+        text: str,
+        published: datetime | None,
+        source: str,
+    ) -> None:
+        await conn.execute(
+            "INSERT INTO web_documents (source, url, content_sha256, excerpt, "
+            "published_at) VALUES ($1, 'https://example.invalid/', $2, $3, $4)",
+            source,
+            text_sha256(text),
+            text,
+            published,
+        )
+
+    async def test_an_excerpt_is_as_old_as_its_earliest_document(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text = _text()
+        early = datetime(2026, 10, 3, tzinfo=UTC)
+        await self._dated(conn, text, early + timedelta(days=4), "one")
+        await self._dated(conn, text, early, "two")
+        assert await jev_repo.item_dates(conn, [_subject(text)]) == {
+            _subject(text): early
+        }
+
+    async def test_an_undated_document_makes_the_excerpt_undated(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """An unknown date could be the earliest, so the excerpt's is unknown."""
+        text = _text()
+        await self._dated(conn, text, datetime(2026, 10, 3, tzinfo=UTC), "one")
+        await self._dated(conn, text, None, "two")
+        assert await jev_repo.item_dates(conn, [_subject(text)]) == {
+            _subject(text): None
+        }
+
+    async def test_a_title_is_as_old_as_its_earliest_hypothesis(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Drift in Made-Up Shares"
+        early = datetime(2026, 9, 1, tzinfo=UTC)
+        await _hypothesis(conn, title, at=early + timedelta(days=40))
+        await _hypothesis(conn, title, at=early, origin="operator")
+        subject = _subject(title, "hypothesis_title")
+        assert await jev_repo.item_dates(conn, [subject]) == {subject: early}
+
+    async def test_what_nothing_holds_is_undated(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        subjects = [_subject(_text()), ("session", "2026-10-01")]
+        assert await jev_repo.item_dates(conn, subjects) == dict.fromkeys(subjects)
+
+
+class TestTheTextsAHarnessReads:
+    async def test_the_texts_of_stored_subjects(self, conn: asyncpg.Connection) -> None:
+        text, title, missing = _text(), "Invented Carry in Pretend Notes", _text()
+        await _document(conn, text)
+        await _hypothesis(conn, title)
+        subjects = [
+            _subject(text),
+            _subject(title, "hypothesis_title"),
+            _subject(missing),
+        ]
+        assert await jev_repo.subject_texts(conn, subjects) == {
+            _subject(text): text,
+            _subject(title, "hypothesis_title"): title,
+        }
+
+    async def test_what_a_labeller_could_be_shown(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Every stored content, each once with its earliest document's excerpt,
+        quarantined or not: whatever quarantined it, which may have been an
+        answer, is not read, and what the export leaves out is the harness's
+        to decide from the text (``jev_eval.export_labels``). Titles the
+        programme's model wrote within the cap, each once.
+        """
+        kept, held = _text(), _text()
+        await _document(conn, kept)
+        await _document(conn, kept, source="another")
+        await _quarantine(conn, await _document(conn, held))
+        shown = await jev_repo.subjects_to_label(conn, subject_type="web_excerpt")
+        assert [(row["subject_id"], row["text"]) for row in shown] == sorted(
+            [(text_sha256(kept), kept), (text_sha256(held), held)]
+        )
+
+        modelled = "Invented Momentum in Fictional Futures"
+        await _hypothesis(conn, modelled)
+        await _hypothesis(conn, modelled)
+        await _hypothesis(conn, "An Operator's Own Idea", origin="operator")
+        await _hypothesis(conn, "x" * (jev_questions.TITLE_MAX_CHARS + 1))
+        titles = await jev_repo.subjects_to_label(conn, subject_type="hypothesis_title")
+        assert [(row["subject_id"], row["text"]) for row in titles] == [
+            (text_sha256(modelled), modelled)
+        ]
+
+    async def test_a_subject_no_labeller_is_shown_is_refused(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        with pytest.raises(ValueError):
+            await jev_repo.subjects_to_label(conn, subject_type="session")
+
+
+class TestTheJobsAboutASubject:
+    async def test_the_ask_jobs_of_one_set_version_and_subject(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text, other = _text(), _text()
+        mine = await _ask_job(conn, CATALOGUE, text_sha256(text))
+        await _ask_job(conn, CATALOGUE, text_sha256(text), version=2)
+        await _ask_job(conn, SCREEN, text_sha256(text))
+        await _ask_job(conn, CATALOGUE, text_sha256(other))
+        await _job(
+            conn,
+            "jev_reask",
+            payload={
+                "set": CATALOGUE.name,
+                "version": 1,
+                "subject_type": "web_excerpt",
+                "subject_id": text_sha256(text),
+            },
+        )
+        found = await jev_repo.ask_jobs_about(
+            conn,
+            question_set=CATALOGUE.name,
+            version=CATALOGUE.version,
+            subjects=[_subject(text)],
+        )
+        assert [job["id"] for job in found] == [mine]
+        assert found[0]["payload"]["plan_hash"] == jev_prereg.plan_hash()
+        assert found[0]["result"] is None
+        assert (
+            await jev_repo.ask_jobs_about(
+                conn, question_set=CATALOGUE.name, version=1, subjects=[]
+            )
+            == []
+        )
+
+
+class TestTheWordsOfAVersion:
+    async def test_the_questions_a_version_was_asked_with_in_their_order(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        await _record(conn, question_set="old.set", question_set_version=3)
+        await _record(conn, question_set="old.set", question_set_version=3)
+        await _record(conn, question_set="old.set", question_set_version=4)
+        (asked,) = await jev_repo.recorded_questions(
+            conn, question_set="old.set", version=3
+        )
+        assert asked == QUESTIONS
+        assert list(asked["regime"]["criteria"]) == OPTIONS
+        nothing = await jev_repo.recorded_questions(
+            conn, question_set="old.set", version=9
+        )
+        assert nothing == []
+
+
+class TestTheQuarantines:
+    async def test_each_content_by_its_first_quarantine(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        text, clean = _text(), _text()
+        first = await _document(conn, text)
+        second = await _document(conn, text, source="another")
+        await _document(conn, clean)
+        await conn.execute(
+            "UPDATE web_documents SET quarantined = TRUE, quarantine_reason = $2 "
+            "WHERE id = $1",
+            first,
+            "code-screen v1: role_play",
+        )
+        await conn.execute(
+            "UPDATE web_documents SET quarantined = TRUE, quarantine_reason = $2 "
+            "WHERE id = $1",
+            second,
+            f"content quarantined earlier (document {first})",
+        )
+        assert await jev_repo.quarantine_reasons(conn) == {
+            text_sha256(text): "code-screen v1: role_play"
+        }
+
+
+def _evaluation_fields(**overrides: Any) -> dict[str, Any]:
+    """Every column ``record_evaluation`` takes, nothing measured."""
+    fields: dict[str, Any] = dict.fromkeys(jev_repo.EVALUATION_COLUMNS)
+    fields.update(
+        question_set="research.catalogue",
+        question_set_version=1,
+        question_key="asset_class",
+        model=MODEL,
+        split="test",
+        dataset_ref="operator:quentin",
+        dataset_sha256="a" * 64,
+        code_commit="f" * 40,
+        possibly_in_training=True,
+        n=3,
+        n_per_class={"equities": 2, "bonds": 1},
+    )
+    fields.update(overrides)
+    return fields
+
+
+class TestRecordEvaluation:
+    async def test_it_writes_every_column_and_reads_back(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        fields = _evaluation_fields(
+            accuracy=0.5,
+            accuracy_wilson_low=0.1,
+            accuracy_wilson_high=0.9,
+            per_class={"equities": {"n": 2, "recall": None}},
+            calibration_bins=[{"low": 0.5, "high": 0.6, "n": 1}],
+        )
+        evaluation_id = await jev_repo.record_evaluation(conn, **fields)
+        (row,) = await jev_repo.evaluations_for(conn, question_set="research.catalogue")
+        assert row["id"] == evaluation_id
+        assert {column: row[column] for column in jev_repo.EVALUATION_COLUMNS} == fields
+
+    @pytest.mark.parametrize("change", ["missing", "unknown"])
+    async def test_a_column_missing_or_unknown_is_refused_before_writing(
+        self, conn: asyncpg.Connection, change: str
+    ) -> None:
+        fields = _evaluation_fields()
+        if change == "missing":
+            del fields["brier"]
+        else:
+            fields["sharpe"] = 1.2
+        with pytest.raises(ValueError):
+            await jev_repo.record_evaluation(conn, **fields)
+        assert await _count(conn, "jev_evaluations", "TRUE") == 0
+
+    async def test_the_schema_holds_what_it_writes(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """A threshold on an upper bound is refused whoever writes it."""
+        fields = _evaluation_fields(
+            threshold_outcome="chosen",
+            threshold=0.4,
+            threshold_statistic="covered_accuracy",
+            threshold_target=0.8,
+            threshold_dataset_sha256="d" * 64,
+            n_at_threshold=1,
+        )
+        with pytest.raises(asyncpg.CheckViolationError) as refused:
+            async with conn.transaction():
+                await jev_repo.record_evaluation(conn, **fields)
+        assert refused.value.constraint_name == (
+            "jev_evaluations_no_threshold_on_an_upper_bound"
+        )
+
+    async def test_evaluations_are_read_by_set_and_narrowed(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        first = await jev_repo.record_evaluation(conn, **_evaluation_fields())
+        older_version = await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(question_set_version=0)
+        )
+        other_key = await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(question_key="mechanism")
+        )
+        other_model = await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(model="jev-1.14.0")
+        )
+        await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(question_set="guardrail.card")
+        )
+
+        def ids(rows: list[dict[str, Any]]) -> list[int]:
+            return [row["id"] for row in rows]
+
+        everything = await jev_repo.evaluations_for(
+            conn, question_set="research.catalogue"
+        )
+        assert ids(everything) == [other_model, other_key, older_version, first]
+        assert ids(
+            await jev_repo.evaluations_for(
+                conn,
+                question_set="research.catalogue",
+                version=1,
+                question_key="asset_class",
+                model=MODEL,
+            )
+        ) == [first]
+
+    async def test_the_newest_of_each_key_labeller_and_split(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        old = await jev_repo.record_evaluation(conn, **_evaluation_fields())
+        new = await jev_repo.record_evaluation(conn, **_evaluation_fields())
+        other_labeller = await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(dataset_ref="source:pwb-readme@0123456789ab")
+        )
+        other_split = await jev_repo.record_evaluation(
+            conn, **_evaluation_fields(split="all")
+        )
+        latest = await jev_repo.latest_evaluations(conn)
+        assert old not in [row["id"] for row in latest]
+        assert sorted(row["id"] for row in latest) == sorted(
+            [new, other_labeller, other_split]
+        )
