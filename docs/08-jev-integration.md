@@ -4133,6 +4133,13 @@ API's one change, a literal on a write it already made.
 `src/` and the protected entry points: every insert names its origin, every
 update sets the closure's columns alone, no write is anything else, and the
 two callers pass literals — each scan proved on sources that must trip it.
+From D1's review the update scan reads a `SET` list to the `WHERE`, `FROM` or
+`RETURNING` that ends it outside every parenthesis and string literal, where
+the first cut stopped at the first of those words anywhere, a subquery's or a
+literal's included, and missed every column set after it; and the caller scan
+counts the writer taken by its name — the literal `"raise_finding"`, or the
+`repo` module read by a computed name or as a namespace — as a call it cannot
+read.
 `test_programme_convene.py::TestThePanelSits::test_the_tick_raises_findings_as_model`
 holds the tick's value, and `test_programme_gates.py::TestTheVeto::test_veto_roles_are_role_keys`
 that no veto role holds a `:`, so a `jev:` raiser is never one.
@@ -4222,7 +4229,15 @@ each `JEV_HANDLERS` handler, each `ASKABLE` set's `load`, `admit`, `build` and
   no write of `system_flags` and no reference to a switch's writer anywhere in
   `src/programme`; and no state-changing queue call there but the loop's claim,
   completion, failure and lease of what it claimed and the planner's and the
-  tick's `enqueue`, never `requeue_expired`.
+  tick's `enqueue`, never `requeue_expired`. From D1's review the switch test
+  also walks everything each programme module reaches with `_Reach`, so a
+  switch written through a wrapper it imports — the API's `set_enabled` and
+  `set_autonomy` routes call `set_flag`, and no boundary keeps the programme
+  from importing them — is a write the walk finds; and the queue scan also
+  refuses the queue's module, or a package holding it, used as a value, its
+  `__dict__`, a name loader loading it, a star import of it, and a changer's
+  name handed to `getattr`, `attrgetter` or `methodcaller` on anything else,
+  as the enqueue scan always has.
 
 **The tests D1 moved** (the scope's 2l), re-derived by running both suites on
 this build: the 86 unit cases design section 13 listed, in the eight files it

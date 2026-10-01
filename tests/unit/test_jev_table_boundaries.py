@@ -782,10 +782,53 @@ FINDING_CALLERS = frozenset(
 
 _FINDINGS_TABLE = r'(?:"?\w+"?\.)?"?findings"?'
 _FINDINGS_UPDATE = re.compile(
-    rf"\bupdate\s+(?:only\s+)?{_FINDINGS_TABLE}\s+set\b"
-    r"(?P<set>.*?)(?=\bwhere\b|\breturning\b|\bfrom\b|;|$)",
-    re.IGNORECASE | re.DOTALL,
+    rf"\bupdate\s+(?:only\s+)?{_FINDINGS_TABLE}\s+set\b", re.IGNORECASE
 )
+
+#: What ends an ``UPDATE``'s ``SET`` list where it stands outside every
+#: parenthesis and string literal.
+_SET_LIST_END = re.compile(r"(?<![\w$])(?:where|from|returning)(?![\w$])", re.I)
+
+
+def _set_list(statement: str) -> str | None:
+    """
+    The ``SET`` list of an ``UPDATE findings`` in ``statement``, each string
+    literal in it read as an empty one, up to the ``WHERE``, ``FROM`` or
+    ``RETURNING`` that ends it outside every parenthesis and literal, or a
+    ``;``; ``None`` if ``statement`` updates no finding. The first cut ended
+    the list at the first of those words anywhere, inside a subquery or a
+    literal too, so a column set after one was never read (D1's review,
+    D1RS-5).
+    """
+    head = _FINDINGS_UPDATE.search(statement)
+    if head is None:
+        return None
+    text, kept, depth, index = statement, [], 0, head.end()
+    while index < len(text):
+        character = text[index]
+        if character == "'":
+            close = index + 1
+            while close < len(text):
+                if text.startswith("''", close):
+                    close += 2
+                elif text[close] == "'":
+                    break
+                else:
+                    close += 1
+            kept.append("''")
+            index = close + 1
+            continue
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif depth == 0 and (
+            character == ";" or _SET_LIST_END.match(text, index) is not None
+        ):
+            break
+        kept.append(character)
+        index += 1
+    return "".join(kept)
 _FINDINGS_INSERT = re.compile(
     rf"\binsert\s+into\s+{_FINDINGS_TABLE}\s*\((?P<columns>[^)]*)\)",
     re.IGNORECASE | re.DOTALL,
@@ -819,11 +862,11 @@ def _identifiers(names: list[str]) -> set[str] | None:
 
 def _set_columns(statement: str) -> set[str] | None:
     """The columns an ``UPDATE findings`` sets, or ``None`` where unreadable."""
-    match = _FINDINGS_UPDATE.search(statement)
-    if match is None:
+    listed = _set_list(statement)
+    if listed is None:
         return None
     columns: set[str] = set()
-    for assignment in _top_level(match.group("set")):
+    for assignment in _top_level(listed):
         target = assignment.split("=", 1)[0].strip()
         names = _top_level(target[1:-1]) if target.startswith("(") else [target]
         read = _identifiers(names)
@@ -895,6 +938,21 @@ def _called(node: ast.AST) -> str | None:
     return None
 
 
+def _repo_names(tree: ast.AST) -> set[str]:
+    """The names an import in ``tree`` binds to the programme's ``repo``."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "repo" or alias.name.endswith(".repo"):
+                    names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "src.programme.repo" and alias.asname:
+                    names.add(alias.asname)
+    return names
+
+
 def _raise_finding_calls(source: str) -> list[tuple[int, str | None]]:
     """
     Every call of ``raise_finding`` in ``source``, with the ``origin`` it
@@ -902,8 +960,16 @@ def _raise_finding_calls(source: str) -> list[tuple[int, str | None]]:
     spread ``**kwargs`` or ``*args``, or no origin at all. A reference to the
     function that is not a call is ``None`` too, since stored under another
     name its calls are ones this scan cannot read.
+
+    So is the function taken by its name (D1's review, D1RS-6): the literal
+    ``"raise_finding"`` wherever it stands — ``getattr(repo,
+    "raise_finding")``, ``attrgetter("raise_finding")`` — and the ``repo``
+    module read by a name the scan cannot read or as a namespace
+    (``getattr(repo, name)``, ``vars(repo)``, ``repo.__dict__``), as
+    ``test_job_ownership._enqueues`` reads ``enqueue``.
     """
     tree = ast.parse(source)
+    repos = _repo_names(tree)
     called = {
         id(node.func)
         for node in ast.walk(tree)
@@ -911,6 +977,29 @@ def _raise_finding_calls(source: str) -> list[tuple[int, str | None]]:
     }
     found: list[tuple[int, str | None]] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == "raise_finding":
+            found.append((node.lineno, None))
+        elif (
+            isinstance(node, ast.Attribute)
+            and node.attr == "__dict__"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in repos
+        ):
+            found.append((node.lineno, None))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("getattr", "vars")
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in repos
+            and (
+                node.func.id == "vars"
+                or len(node.args) < 2
+                or not isinstance(node.args[1], ast.Constant)
+            )
+        ):
+            found.append((node.lineno, None))
         if isinstance(node, ast.Call) and id(node.func) in called:
             spread = any(keyword.arg is None for keyword in node.keywords) or any(
                 isinstance(argument, ast.Starred) for argument in node.args
@@ -999,6 +1088,19 @@ def test_every_insert_into_findings_names_its_origin() -> None:
         'await conn.execute("INSERT INTO findings (id, ref, title) VALUES ($1,$2,$3)")',
         'await conn.execute("INSERT INTO findings SELECT * FROM old_findings")',
         'q = "INSERT INTO findings " + "(id, ref) VALUES ($1, $2)"',
+        # D1's review (D1RS-5): a word that ends a SET list, standing in a
+        # subquery or a string literal before a later column, ended the
+        # first cut's reading of the list there.
+        "q = 'UPDATE findings SET close_note = (SELECT note FROM notes LIMIT 1), "
+        "severity = $2 WHERE ref = $1'",
+        "q = \"UPDATE findings SET close_note = 'kept where it was', "
+        "severity = 'low' WHERE ref = $1\"",
+        "q = \"UPDATE findings SET close_note = 'from the panel', "
+        "raised_by = 'compliance' WHERE ref = $1\"",
+        "q = \"UPDATE findings SET close_note = 'it''s returning', "
+        "status = 'open', severity = 'low' WHERE ref = $1\"",
+        "q = 'UPDATE findings SET status = $2, close_note = coalesce($3, (SELECT n "
+        "FROM notes WHERE id = 1)), title = $4 WHERE ref = $1'",
     ],
 )
 def test_the_findings_scan_finds_each_offence(source: str) -> None:
@@ -1010,6 +1112,8 @@ def test_the_findings_scan_finds_each_offence(source: str) -> None:
     [
         'await conn.execute("UPDATE findings SET status=$2, closed_by=$3, '
         'close_note=$4, closed_at=NOW() WHERE ref=$1")',
+        "q = \"UPDATE findings SET close_note = 'from where it stood; returning', "
+        "status = $2, closed_at = (SELECT now() FROM clock) WHERE ref = $1\"",
         'q = "INSERT INTO findings (id, ref, origin) VALUES ($1, $2, $3)"',
         "await conn.fetch(\"SELECT * FROM findings WHERE status = 'open'\")",
         '"""Findings are closed by an operator, through the closure alone."""',
@@ -1086,6 +1190,18 @@ def test_its_callers_pass_literals() -> None:
         ("write = repo.raise_finding", [None]),
         ("WRITERS = {'finding': raise_finding}", [None]),
         ("await repo.raise_card_finding(conn)", []),
+        # D1's review (D1RS-6): the writer taken by its name, a literal the
+        # first cut never read, or off the module by one it cannot read.
+        (
+            "await getattr(repo, 'raise_finding')"
+            "(conn, None, 'r', 'high', 't', origin='model')",
+            [None],
+        ),
+        ("write = operator.attrgetter('raise_finding')(repo)", [None]),
+        ("from src.programme import repo\nwrite = getattr(repo, NAME)", [None]),
+        ("from src.programme import repo as r\nnames = vars(r)", [None]),
+        ("from src.programme import repo\nnames = repo.__dict__", [None]),
+        ("from src.programme import repo\nlimit = getattr(repo, 'LIMIT')", []),
     ],
 )
 def test_the_caller_scan_reads_each_spelling(
@@ -2443,19 +2559,71 @@ def _switch_writes(source: str) -> list[str]:
     return found
 
 
+def _switch_writes_reached(graph: Any, modules: list[str]) -> list[str]:
+    """
+    Every definition reached from the whole of each of ``modules`` — by
+    ``test_jev_jobs.py``'s ``_Reach``, however the reference is spelled, the
+    code each module it enters runs when imported included — that holds a
+    write of ``system_flags``, or a write whose table the scanner cannot
+    read, and every load the walk cannot read. A switch written through a
+    wrapper, an API route that calls ``set_flag`` among them, is a write the
+    wrapper holds, so the walk finds it where a scan of the programme's own
+    text cannot (D1's review, D1RS-4).
+    """
+    from tests.unit.test_jev_jobs import _Reach
+
+    reach = _Reach(graph)
+    for module in modules:
+        reach.whole(module)
+    while reach.pending:
+        where, node = reach.pending.pop()
+        reach.read(where, node)
+    writes: dict[str, list[Any]] = {}
+    found: dict[str, None] = {}
+    for (module, name), nodes in sorted(reach.reached.items(), key=lambda i: i[0]):
+        if module not in writes:
+            writes[module] = _table_writes(
+                graph.sources[module], "system_flags", bare_name=True
+            )
+        for first, last in _spans(nodes):
+            for write in writes[module]:
+                if first <= write.line <= last:
+                    shown = f"{write.verb} system_flags"
+                    found[f"{module}.{name} (line {write.line}): {shown}"] = None
+    unread = (f"a load the scan cannot read: {load}" for load in reach.unreadable)
+    found.update(dict.fromkeys(unread))
+    return list(found)
+
+
 def test_nothing_in_the_programme_writes_a_switch() -> None:
     """
     docs/09, M7: Jev, and the programme around it, never touches a switch —
     the kill switch, the programme's, Jev's own or the arming switch. Every
     switch is an operator's, written through the API, and 0015 seeds the one
-    D1 adds. Across every module of ``src/programme``.
+    D1 adds. Across every module of ``src/programme``: its own text, and from
+    D1's review everything it reaches, so a switch written through a wrapper
+    the programme imports — the API's routes wrap ``set_flag``, and nothing
+    keeps the programme from importing them — is refused too.
     """
+    from tests.unit.test_import_boundaries import _real_graph
+
     offenders = [
         f"{_label(path)} {offence}"
         for path in _python_files(PROGRAMME)
         for offence in _switch_writes(path.read_text(encoding="utf-8"))
     ]
     assert not offenders, "\n".join(offenders)
+    graph = _real_graph()
+    programme = sorted(
+        module
+        for module in graph.sources
+        if module == "src.programme" or module.startswith("src.programme.")
+    )
+    assert "src.programme.flags" in programme and "src.programme.tick" in programme
+    reached = _switch_writes_reached(graph, programme)
+    assert not reached, "the programme reaches a switch's writer:\n" + "\n".join(
+        reached
+    )
 
 
 @pytest.mark.parametrize(
@@ -2485,3 +2653,81 @@ def test_the_switch_scan_finds_each_spelling(source: str) -> None:
 )
 def test_the_switch_scan_ignores_a_read(source: str) -> None:
     assert _switch_writes(source) == [], source
+
+
+#: A synthetic tree: the switches' writer and reader, and an API route that
+#: wraps the writer, as ``src/api/routers/programme.py``'s ``set_enabled`` and
+#: ``set_autonomy`` do.
+_SWITCH_TREE = {
+    "src/__init__.py": "",
+    "src/db/__init__.py": "",
+    "src/db/repos/__init__.py": "",
+    "src/db/repos/flags.py": (
+        "async def set_flag(conn, key, value, actor):\n"
+        "    await conn.execute(\n"
+        "        'INSERT INTO system_flags (key, value) VALUES ($1, $2) '\n"
+        "        'ON CONFLICT (key) DO UPDATE SET value = $2', key, value\n"
+        "    )\n"
+        "async def get_flag(conn, key):\n"
+        "    return await conn.fetchval(\n"
+        "        'SELECT value FROM system_flags WHERE key = $1', key\n"
+        "    )\n"
+    ),
+    "src/api/__init__.py": "",
+    "src/api/routers/__init__.py": "",
+    "src/api/routers/programme.py": (
+        "from src.db.repos import flags\n"
+        "async def set_enabled(body, session, conn):\n"
+        "    await flags.set_flag(conn, 'programme_enabled', body, 'operator')\n"
+    ),
+    "src/programme/__init__.py": "",
+}
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        pytest.param(
+            "from src.api.routers.programme import set_enabled\n"
+            "async def go(conn):\n"
+            "    await set_enabled(True, None, conn)\n",
+            id="the-apis-route-imported",
+        ),
+        pytest.param(
+            "from src.api.routers import programme as api\n"
+            "async def go(conn):\n"
+            "    await api.set_enabled(True, None, conn)\n",
+            id="the-apis-route-off-its-module",
+        ),
+        pytest.param(
+            "from src.api.routers import programme as api\n"
+            "TURN_ON = [api.set_enabled]\n",
+            id="the-apis-route-stored",
+        ),
+        pytest.param(
+            "from src.db.repos import flags\n"
+            "WRITE = flags.set_flag\n",
+            id="the-writer-stored",
+        ),
+    ],
+)
+def test_the_switch_reach_finds_a_wrapped_writer(module: str) -> None:
+    """
+    D1's review (D1RS-4): the per-file scan reads each module's own text, so
+    a switch written through a wrapper the programme can import — the API's
+    own routes — passed it. The reach walk follows the reference into the
+    wrapper and finds the write there.
+    """
+    graph = _synthetic({**_SWITCH_TREE, "src/programme/x.py": module})
+    assert _switch_writes(module) == [] or "set_flag" in module
+    assert _switch_writes_reached(graph, ["src.programme.x"])
+
+
+def test_the_switch_reach_passes_a_reader() -> None:
+    module = (
+        "from src.db.repos import flags\n"
+        "async def read(conn):\n"
+        "    return await flags.get_flag(conn, 'programme_enabled')\n"
+    )
+    graph = _synthetic({**_SWITCH_TREE, "src/programme/x.py": module})
+    assert _switch_writes_reached(graph, ["src.programme.x"]) == []
