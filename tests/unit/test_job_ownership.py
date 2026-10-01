@@ -43,7 +43,7 @@ import pytest
 from src.db.repos import jobs as job_repo
 from src.db.repos import secrets as secret_repo
 from src.engine.scheduler import JobKind, plan_session
-from src.programme import flags
+from src.programme import flags, jev_prereg
 from src.programme import main as programme_main
 from src.programme.main import JEV_HANDLERS, JobFailedError, Programme
 from src.worker.main import HANDLERS, SCHEDULED_KINDS
@@ -435,6 +435,8 @@ class _Queue:
         self.claims: list[Any] = []
         self.completed: list[tuple[uuid.UUID, Any]] = []
         self.failed: list[tuple[uuid.UUID, str, bool]] = []
+        #: What each failure stored beside its error, in the same order.
+        self.failed_results: list[Any] = []
         self.extended: list[uuid.UUID] = []
 
     @staticmethod
@@ -459,9 +461,11 @@ class _Queue:
 
     async def fail(self, *args: Any, **kwargs: Any) -> str:
         arguments = self._bound("fail", *args, **kwargs)
+        json.dumps(arguments["result"])  # what the real one writes as jsonb
         self.failed.append(
             (arguments["job_id"], arguments["error"], arguments["retry"])
         )
+        self.failed_results.append(arguments["result"])
         return "queued" if arguments["retry"] else "failed"
 
     async def extend_lease(self, *args: Any, **kwargs: Any) -> None:
@@ -605,6 +609,38 @@ class TestTheProgrammeClaimsOnlyItsOwnKinds:
 
         assert queue.completed == []
         assert queue.failed == [(job.id, "the probe failed: auth (request 9)", retry)]
+        assert queue.failed_results == [None]
+
+    async def test_what_a_failed_attempt_recorded_is_kept_beside_its_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A handler whose attempt recorded something before it failed — an
+        ask's answer and the plans it was recorded under — hands it over on
+        its ``JobFailedError``, and the loop stores it with the error, so a
+        job that failed still names its answer's plans
+        (``jev_jobs.run_ask``; section 10a of the C7+C8 scope).
+        """
+        record = {"status": "invalid", "request_id": 9, "plan_hash": "ab" * 32}
+
+        async def refused(conn, payload, api_key):
+            raise JobFailedError(
+                "the response was refused whole (request 9)",
+                retry=False,
+                result=record,
+            )
+
+        monkeypatch.setitem(JEV_HANDLERS, "jev_ask", refused)
+        job = _job("jev_ask")
+        queue = _Queue(job)
+        programme = _programme(monkeypatch, queue, _on())
+
+        assert await programme._drain_jev() is True
+
+        assert queue.failed == [
+            (job.id, "the response was refused whole (request 9)", False)
+        ]
+        assert queue.failed_results == [record]
 
     async def test_a_switch_turned_off_mid_drain_stops_the_next_claim(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1197,6 +1233,7 @@ _PAYLOADS: dict[str, dict[str, Any]] = {
         "subject_type": "web_excerpt",
         "subject_id": hashlib.sha256(_EXCERPT.encode("utf-8")).hexdigest(),
         "source_id": 7,
+        **(jev_prereg.plans_in_force("guardrail.injection", 1) or {}),
     },
 }
 

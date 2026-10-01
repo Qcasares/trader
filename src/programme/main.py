@@ -539,8 +539,13 @@ class Programme:
             await job_repo.complete(conn, job.id, result)
             logger.info("Job %s (%s) succeeded", job.id, job.kind)
         except JobFailedError as failed:
+            # What the attempt recorded before it failed, if anything — an
+            # ask's answer and the plans it was recorded under — is kept on
+            # the job's row beside the error (``JobFailedError.result``).
             error = _without_secret(failed.error, api_key)
-            status = await job_repo.fail(conn, job.id, error, retry=failed.retry)
+            status = await job_repo.fail(
+                conn, job.id, error, retry=failed.retry, result=failed.result
+            )
             logger.warning("Job %s (%s) -> %s: %s", job.id, job.kind, status, error)
         except Exception as exc:  # noqa: BLE001 - recorded, then the loop continues
             # The job's error is shown on the jobs page. Whatever raised, the

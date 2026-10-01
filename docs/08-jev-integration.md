@@ -2859,36 +2859,39 @@ moved verbatim, `author` re-exporting every name, so
 (`tests/unit/test_claims.py`, `test_import_boundaries.py::test_the_pure_modules_load_nothing`).
 
 **The `jev_ask` job.** Its payload is the set, its version, the subject's type
-and address, and the row its text is read from — a document by its id, a
-hypothesis by its ref — never the text, which the handler reads again from
-that row. In order, the first that applies deciding:
+and address, the row its text is read from — a document by its id, a
+hypothesis by its ref — and the analysis plans it was planned under (below),
+never the text, which the handler reads again from that row. In order, the
+first that applies deciding:
 
 | # | Condition | Outcome |
 |---|---|---|
-| 0 | The payload is not those five names, its set is not one the job asks, or its subject type is not the set's | fail, no retry |
+| 0 | The payload is not those nine names, its set is not one the job asks, or its subject type is not the set's | fail, no retry |
 | 1 | Its version is not the registered set's | complete, `superseded` |
 | 2 | The set has no analysis plan | fail, no retry |
-| 3 | The row is not stored, or its text is not the subject | fail, no retry |
-| 4 | The text may not be asked about (below) | fail, no retry |
-| 5 | The state cannot be built | fail, no retry, nothing quoted |
-| 6 | The one ask, its follow-up, then the verdict | as `job_errors.ask_verdict` |
+| 3 | The plans its payload names are not the plans in force | complete, `superseded` |
+| 4 | The row is not stored, or its text is not the subject | fail, no retry |
+| 5 | The text may not be asked about (below) | fail, no retry |
+| 6 | The state cannot be built | fail, no retry, nothing quoted |
+| 7 | The one ask, its follow-up, then the verdict | as `job_errors.ask_verdict` |
 
-Step 4, for web text: content quarantined under any source is asked nothing;
+Step 5, for web text: content quarantined under any source is asked nothing;
 then the code screen reads the stored excerpt again, as it stands now, and a
 hit is quarantined by content with `web_sources.quarantine_reason` and fails
 the job, so a rule the screen gained since the page was read applies before
 any model is asked. For a title: only one the programme's model wrote
 (`origin = 'model'`; open item 28), and only within `TITLE_MAX_CHARS`, refused
 by that number before any state is built, so the refusal is the cap's and
-never pydantic's. Step 5: pydantic's `ValidationError` quotes the input it
+never pydantic's. Step 6: pydantic's `ValidationError` quotes the input it
 refused, so it is replaced by an error naming the document's id or the
-hypothesis's ref alone; anything else steps 3 to 6 raise — a read, a
+hypothesis's ref alone; anything else steps 4 to 7 raise — a read, a
 quarantine's write, the ask, the follow-up — is reported by its class,
 SQLSTATE and constraint (`job_errors.described`, moved there from
 `web_ingest`) and retried. The result is labels and numbers: the subject, the
-plans in force (below), the status, the request, whether it replayed, and per
-question its validity, reason, argmax, margin and, for a Noul, its
-probability.
+plans (below), the status, the request, whether it replayed, and per question
+its validity, reason, argmax, margin and, for a Noul, its probability. A job
+that fails after its ask wrote or read a row carries the same record on its
+failure, stored beside the error (below).
 
 What an answer changes is the design's table and nothing more:
 
@@ -2986,13 +2989,42 @@ other takes `s` — applied to every keyword's last word that is not "of", a
 keyword ending `*` being a stem matched at the start of a word (`diversif*`),
 and the test holds the forms of the whole list to a table written there and
 the labels to a copy of the rules written as literals
-(`tests/unit/test_jev_prereg.py::TestTheKeywordRules`). Each `jev_ask` job
-writes the plans in force into its result — the global plan's version and hash
-and the set's own (`jev_prereg.plans_in_force`) — as the regime job writes the
-plan in force into its result and the planner into each re-ask's payload, and
-a set with no plan is asked nothing (10a). **The harness (C9) scores an answer
-only under the plans in force when it was recorded**, never by a baseline
-chosen after the answers.
+(`tests/unit/test_jev_prereg.py::TestTheKeywordRules`).
+
+**The plans an answer was recorded under, however its job ends** (10a). The
+plans in force — the global plan's version and hash and the set's own
+(`jev_prereg.plans_in_force`) — are recorded for every answer twice over. The
+planner writes them into each `jev_ask` payload, as it writes the global plan
+into each re-ask's, and the handler asks nothing under any others (step 3), so
+every row any attempt of the job records — an answer, a response refused
+whole, a failed call — was recorded under the plans its payload has named
+since before its first attempt, whatever becomes of the job. And the job's row
+names the request its attempt recorded beside them: in the result of a job
+that succeeds, as the regime job writes its plan into its result, and, from
+the fixes to this part's review, in the result of one that fails after its ask
+wrote or read a row — a response refused whole, which the harness counts
+among the answers that were not valid and against the figure compared with
+the baselines, or an answer whose follow-up failed on every attempt. A
+handler's `JobFailedError` carries that record, the loop hands it to
+`job_repo.fail`, which stores it beside the error, and an attempt that
+recorded nothing leaves an earlier attempt's in place; every other caller of
+`fail`, the worker's among them, passes none and writes none. The first cut
+wrote the plans into a succeeding job's result alone, so neither of those
+answers was recorded under any plan. A set with no plan is planned nothing and
+asked nothing. **The harness (C9) scores an answer only under the plans in
+force when it was recorded**, never by a baseline chosen after the answers: it
+reads them from the job whose result names the answer's request, and, for an
+answer no result names — a lease that expired after the ask, an attempt
+superseded after an earlier one recorded — from the payloads of the jobs that
+asked about its subject, which every row they recorded was recorded under.
+`tests/unit/test_jev_jobs.py::TestTheAsk::test_a_response_refused_whole_is_recorded_with_its_plans`,
+`::test_an_answer_whose_follow_up_failed_is_recorded_with_its_plans`,
+`::test_a_job_planned_under_other_plans_asks_nothing` and
+`::test_an_attempt_that_recorded_nothing_names_nothing`;
+`tests/unit/test_job_ownership.py::TestTheProgrammeClaimsOnlyItsOwnKinds::test_what_a_failed_attempt_recorded_is_kept_beside_its_error`;
+`tests/unit/test_jev_plan.py::TestTheAsks::test_a_set_with_no_plan_is_planned_nothing`;
+and on PostgreSQL, through the loop,
+`tests/integration/test_jev_research.py::TestEveryAnswerIsRecordedWithItsPlans`.
 
 **The planner.** Four rules beside C4's and C6's, each set behind its own
 lane's area:
@@ -3088,7 +3120,8 @@ message quotes it, and its job's error names the document and nothing more.
 Two columns hold web text now, and CLAUDE.md's row says so.
 
 **The first build's review, item by item** (the scope's section 10). (a) The
-plans are recorded with each answer, and C9 scores under them. (b) The
+plans are recorded with each answer, in its job's payload and its result,
+whether the job succeeds or fails, and C9 scores under them. (b) The
 plurals are generated by the stated rule and tested over the whole list, and
 keywords match whole words. (c) A web re-ask is read through the code screen
 first. (d) A block's quarantine is derivable and repeated: the next ask about
@@ -3104,8 +3137,12 @@ invalid answer naming `false`.
 **Where C7+C8 departs from the design and its scope.** `Askable` carries what
 the handler needs beyond the design's five fields — the text in the row, an
 admission step that may refuse it, and how an error names the row — and
-`run_ask` reports anything steps 3 to 6 raise by class, a read or a
-quarantine's write as well as the ask. `ask_verdict`, `NOT_ASKED` and
+`run_ask` reports anything steps 4 to 7 raise by class, a read or a
+quarantine's write as well as the ask. The payload carries the plans beyond
+the design's five names, and a job planned under plans no longer in force
+completes `superseded`, as one planned under another version does; and a
+failed job's result holds what its attempt recorded, where the queue stored
+an error alone. `ask_verdict`, `NOT_ASKED` and
 `described` moved to `job_errors`. The re-ask's state rebuild is guarded and
 its failures reported by class, where C4's propagated. `documents_to_screen`
 plans content a block is on record for, where the design's row left such

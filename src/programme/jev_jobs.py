@@ -29,28 +29,31 @@ The ``jev_ask`` job
 :func:`run_ask` asks one of the sets in :data:`ASKABLE` about one subject, once:
 a stored web excerpt (``guardrail.injection``, ``research.catalogue``) or a
 hypothesis title the programme's own model wrote (``research.hypothesis``,
-``guardrail.card``). Its payload names the subject and the row it was read
-from, never its text, and the handler reads the text again from that row. In
-order; the first that applies decides:
+``guardrail.card``). Its payload names the subject, the row it was read from
+and the analysis plans it was planned under (:data:`PLAN_KEYS`), never its
+text, and the handler reads the text again from that row. In order; the first
+that applies decides:
 
 ==  =========================================================  ================
 #   Condition                                                  Outcome
 ==  =========================================================  ================
-0   The payload is anything but the five names, or its set is   fail, no retry
+0   The payload is anything but the nine names, or its set is   fail, no retry
     not one :data:`ASKABLE` holds, or its subject type is not
     that set's
 1   The payload's version is not the registered set's          complete,
                                                                ``superseded``
 2   The set has no analysis plan (``jev_prereg``)              fail, no retry
-3   The row is not stored, or its text is not the subject      fail, no retry
-4   The row may not be asked about (below)                     fail, no retry
-5   The state cannot be built                                  fail, no retry,
+3   The plans the payload names are not the plans in force     complete,
+                                                               ``superseded``
+4   The row is not stored, or its text is not the subject      fail, no retry
+5   The row may not be asked about (below)                     fail, no retry
+6   The state cannot be built                                  fail, no retry,
                                                                no text quoted
-6   The ask, once; then its follow-up; then its verdict        as
+7   The ask, once; then its follow-up; then its verdict        as
                                                                :func:`ask_verdict`
 ==  =========================================================  ================
 
-Step 4 for a web excerpt: content quarantined under any source is asked
+Step 5 for a web excerpt: content quarantined under any source is asked
 nothing; then the code screen reads the stored excerpt again, as it stands
 now, and a hit quarantines the content (``web_sources.quarantine_reason``) and
 fails the job — a rule added to the screen since the page was read applies
@@ -60,17 +63,30 @@ its own, docs/08 open item 28), and only a title within
 ``jev_questions.TITLE_MAX_CHARS``, refused by that number before any state is
 built, so the refusal is the cap's and never pydantic's.
 
-Step 5: pydantic's ``ValidationError`` quotes the input it refused, so it is
+Step 6: pydantic's ``ValidationError`` quotes the input it refused, so it is
 replaced by an error naming the document's id or the hypothesis's ref and
 nothing else; no web text and no title reaches ``jobs.error``. For the same
-reason anything else steps 3 to 6 raise — a read, a quarantine's write, the ask
+reason anything else steps 4 to 7 raise — a read, a quarantine's write, the ask
 or its follow-up — is reported by its class, its SQLSTATE and its constraint
 alone (``job_errors.described``), and retried.
 
-The result names the analysis plans in force as the job asked: the global
-plan's version and hash and the set's own plan's (``jev_prereg.plans_in_force``),
-so the harness scores the answer only under the plans it was recorded under,
-and never by a baseline chosen after it. A set with no plan is asked nothing.
+The plans an answer was recorded under
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The harness scores an answer only under the analysis plans in force when it
+was recorded — the global plan's version and hash and the set's own plan's
+(``jev_prereg.plans_in_force``) — and never by a baseline chosen after it. So
+they are recorded for every answer however its job ends, twice over. The
+planner writes them into the payload, and step 3 asks nothing under any
+others: every row any attempt of the job records — an answer, a response
+refused whole, a failed call — was recorded under the plans its payload has
+named since before the first attempt, whatever becomes of the job. And the
+job's row names the request its attempt recorded beside them: in the result
+of a job that succeeds, and in the result :class:`JobFailedError` carries for
+one that fails after its ask recorded a row — a response refused whole, which
+the harness counts, or an answer whose follow-up failed, which is canonical
+and in the ledger whether or not the follow-up is ever made. An attempt that
+recorded nothing leaves an earlier attempt's record in place
+(``job_repo.fail``). A set with no plan is asked nothing.
 
 What an answer changes
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -164,11 +180,17 @@ from src.programme.job_errors import (
 
 logger = logging.getLogger(__name__)
 
+#: The analysis plans a ``jev_ask`` job is planned and asked under, by the
+#: names ``jev_prereg.plans_in_force`` gives them: the global plan's version
+#: and hash, and the set's own plan's.
+PLAN_KEYS = ("plan_version", "plan_hash", "set_plan_version", "set_plan_hash")
+
 #: The names a ``jev_ask`` payload carries, and nothing else: the set and its
-#: version, the subject, and the row the subject's text is read from. Never the
-#: text: the handler reads it again from that row.
+#: version, the subject, the row the subject's text is read from, and the
+#: plans it was planned under. Never the text: the handler reads it again from
+#: that row.
 ASK_PAYLOAD_KEYS = frozenset(
-    {"set", "version", "subject_type", "subject_id", "source_id"}
+    {"set", "version", "subject_type", "subject_id", "source_id", *PLAN_KEYS}
 )
 
 #: The reason a content block quarantines its text, ``{request}`` the block's
@@ -457,10 +479,12 @@ async def run_ask(
     attempt. See the module docstring for every outcome.
 
     ``payload`` is ``{"set", "version", "subject_type", "subject_id",
-    "source_id"}``. Returns the subject, the plans in force, what the ask came
-    to and, per question, what was measured — labels and numbers, never text.
+    "source_id"}`` and the plans it was planned under (:data:`PLAN_KEYS`).
+    Returns the subject, the plans, what the ask came to and, per question,
+    what was measured — labels and numbers, never text; and a failure after
+    the ask recorded a row carries the same record (:class:`JobFailedError`).
     """
-    name, version, subject_type, subject_id, source_id = _ask_payload(payload)
+    name, version, subject_type, subject_id, source_id, planned = _ask_payload(payload)
     askable = ASKABLE.get(name)
     question_set = jev_questions.REGISTRY.get(name)
     if askable is None or question_set is None:
@@ -482,6 +506,7 @@ async def run_ask(
         "subject_type": subject_type,
         "subject_id": subject_id,
         "source_id": source_id,
+        **planned,
     }
     if version != question_set.version:
         logger.info(
@@ -502,11 +527,19 @@ async def run_ask(
             "is recorded with none in force; nothing was asked",
             retry=False,
         )
+    if planned != plans:
+        # Asked under other plans, every row this job records would be
+        # recorded under plans its payload does not name.
+        logger.info("jev_ask for %s superseded: its plans are no longer in force", name)
+        return {**asked_about, "status": "superseded", "plans_in_force": plans}
 
+    asked: jev_lane.AskResult | None = None
     try:
-        asked, followed = await _ask_once(
+        row, asked = await _ask_once(
             conn, askable, question_set, subject_id, source_id, api_key
         )
+        follow_up = askable.follow_up
+        followed = {} if follow_up is None else await follow_up(conn, row, asked)
     except JobFailedError:
         raise
     except Exception as error:  # noqa: BLE001 - reported by class, never by message
@@ -514,20 +547,17 @@ async def run_ask(
             f"asking {name} about the row {source_id!r} failed "
             f"({described(error)}); its text is not quoted",
             retry=True,
+            result=_recorded(asked_about, asked),
         ) from None
 
     error, retry = ask_verdict(asked)
     if error is not None:
-        raise JobFailedError(error + _quarantine_note(followed), retry=retry)
-    return {
-        **asked_about,
-        **plans,
-        "status": asked.status,
-        "request_id": asked.request_row_id,
-        "replayed": asked.replayed,
-        "answers": {key: _measured(answer) for key, answer in asked.answers.items()},
-        **followed,
-    }
+        raise JobFailedError(
+            error + _quarantine_note(followed),
+            retry=retry,
+            result=_recorded(asked_about, asked, followed),
+        )
+    return _record(asked_about, asked, followed)
 
 
 async def _ask_once(
@@ -537,12 +567,13 @@ async def _ask_once(
     subject_id: str,
     source_id: object,
     api_key: str | None,
-) -> tuple[jev_lane.AskResult, dict[str, Any]]:
+) -> tuple[Mapping[str, Any], jev_lane.AskResult]:
     """
-    Steps 3 to 6 of the module docstring's table: the row read, its text held
-    to the subject, admitted, built into a state, asked about once, and the
-    answer's follow-up. Returns what the ask came to and what the follow-up
-    changed; :func:`run_ask` reads the verdict.
+    Steps 4 to 7 of the module docstring's table, up to the answer: the row
+    read, its text held to the subject, admitted, built into a state and asked
+    about once. Returns the row and what the ask came to; :func:`run_ask` runs
+    the follow-up and reads the verdict, so that a follow-up which fails still
+    knows the answer it followed.
     """
     row = await askable.load(conn, source_id)
     if row is None:
@@ -570,25 +601,66 @@ async def _ask_once(
         api_key=api_key,
         probe=False,
     )
-    follow_up = askable.follow_up
-    followed = {} if follow_up is None else await follow_up(conn, row, asked)
-    return asked, followed
+    return row, asked
 
 
-def _ask_payload(payload: object) -> tuple[str, int, str, str, object]:
-    """The five names a ``jev_ask`` payload carries, checked, and nothing else."""
+def _record(
+    asked_about: Mapping[str, Any],
+    asked: jev_lane.AskResult,
+    followed: Mapping[str, Any],
+) -> dict[str, Any]:
+    """
+    What an attempt recorded, for the job's row: the subject, the plans it
+    was asked under, what the ask came to and, per question, what was
+    measured — labels and numbers, never text — and what the follow-up
+    changed.
+    """
+    return {
+        **asked_about,
+        "status": asked.status,
+        "request_id": asked.request_row_id,
+        "replayed": asked.replayed,
+        "answers": {key: _measured(answer) for key, answer in asked.answers.items()},
+        **followed,
+    }
+
+
+def _recorded(
+    asked_about: Mapping[str, Any],
+    asked: jev_lane.AskResult | None,
+    followed: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    :func:`_record` for an attempt that fails, where its ask wrote or read a
+    row; ``None`` where it recorded nothing, so the queue keeps whatever an
+    earlier attempt recorded (``job_repo.fail``).
+    """
+    if asked is None or asked.request_row_id is None:
+        return None
+    return _record(asked_about, asked, followed or {})
+
+
+def _ask_payload(
+    payload: object,
+) -> tuple[str, int, str, str, object, dict[str, Any]]:
+    """
+    The nine names a ``jev_ask`` payload carries, checked, and nothing else:
+    the set, its version, the subject, its row, and the plans, the last
+    returned as a mapping by :data:`PLAN_KEYS`.
+    """
     if not isinstance(payload, Mapping) or set(payload) != ASK_PAYLOAD_KEYS:
         raise JobFailedError(
             "a jev_ask job's payload is {set, version, subject_type, subject_id, "
-            "source_id} and nothing else, and this one is not; nothing was asked",
+            "source_id} and the plans it was planned under (plan_version, "
+            "plan_hash, set_plan_version, set_plan_hash), and nothing else, and "
+            "this one is not; nothing was asked",
             retry=False,
         )
     name, version = payload["set"], payload["version"]
     subject_type, subject_id = payload["subject_type"], payload["subject_id"]
     if (
         not isinstance(name, str)
-        or isinstance(version, bool)
-        or not isinstance(version, int)
+        or not _is_count(version)
         or not isinstance(subject_type, str)
         or not _is_sha256(subject_id)
     ):
@@ -597,7 +669,23 @@ def _ask_payload(payload: object) -> tuple[str, int, str, str, object]:
             "subject by its type and the sha256 of its text; nothing was asked",
             retry=False,
         )
-    return name, version, subject_type, subject_id, payload["source_id"]
+    planned = {key: payload[key] for key in PLAN_KEYS}
+    if not (
+        _is_count(planned["plan_version"])
+        and _is_sha256(planned["plan_hash"])
+        and _is_count(planned["set_plan_version"])
+        and _is_sha256(planned["set_plan_hash"])
+    ):
+        raise JobFailedError(
+            "a jev_ask job names each plan it was planned under by its version, "
+            "a number, and its sha256; nothing was asked",
+            retry=False,
+        )
+    return name, version, subject_type, subject_id, payload["source_id"], planned
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _is_sha256(value: object) -> bool:
@@ -814,6 +902,7 @@ __all__ = [
     "ASK_PAYLOAD_KEYS",
     "CONTENT_BLOCK_REASON",
     "NOT_ASKED",
+    "PLAN_KEYS",
     "Askable",
     "ask_verdict",
     "quarantine_if_blocked",

@@ -48,8 +48,10 @@ Each with the area it needs, what it enqueues, when, and under which key:
   date}`` (``jev_repo.ask_job_key``), at most :data:`ASKS_PER_PASS` of a set
   a pass: the injection screen (25) and the card check (10) behind
   guardrails, the catalogue (25) and the hypothesis categories (10) behind
-  research. The payload names the set, its version, the subject and the row
-  its text is read from, never the text. The subjects are ``jev_repo``'s
+  research. The payload names the set, its version, the subject, the row its
+  text is read from and the analysis plans in force, which the handler asks
+  under and no others, never the text; a set with no plan is planned nothing.
+  The subjects are ``jev_repo``'s
   reads: stored content the screen has not answered, content a block is on
   record for first; content the screen cleared, for the catalogue, and never
   any other; model-written hypothesis titles within their cap, newest first.
@@ -402,12 +404,15 @@ async def _plan_asks(
         area = jev_catalogue.LANE_AREA.get(question_set.lane)
         if area is None or not await flags.jev_area_enabled(conn, area):
             continue
+        plans = jev_prereg.plans_in_force(name, question_set.version)
+        if plans is None:
+            continue
         if await jev_repo.set_refused(
             conn, question_set=name, version=question_set.version, model=model
         ):
             continue
         subjects = await _ask_subjects(conn, question_set, model, day)
-        planned += await _enqueue_asks(conn, now, question_set, subjects, room)
+        planned += await _enqueue_asks(conn, now, question_set, plans, subjects, room)
     return planned
 
 
@@ -458,13 +463,17 @@ async def _enqueue_asks(
     conn: asyncpg.Connection,
     now: datetime,
     question_set: jev_questions.QuestionSet,
+    plans: Mapping[str, Any],
     subjects: Sequence[tuple[str, object, bool]],
     room: _Room,
 ) -> list[str]:
     """
     One ``jev_ask`` job for each subject, in the order given, until the lane's
     share has no call left: the payload names the set, its version, the
-    subject and the row its text is read from, never the text.
+    subject, the row its text is read from and the analysis plans in force
+    (``jev_prereg.plans_in_force``), never the text. The handler asks nothing
+    under other plans, so every answer the job records is recorded under the
+    plans its payload names.
     """
     day = now.astimezone(UTC).date()
     subject_type = jev_questions.STATE_SUBJECT[question_set.state_model]
@@ -484,6 +493,7 @@ async def _enqueue_asks(
                 "subject_type": subject_type,
                 "subject_id": subject_id,
                 "source_id": source_id,
+                **plans,
             },
             priority=ASK_PRIORITY,
             max_attempts=ASK_ATTEMPTS,

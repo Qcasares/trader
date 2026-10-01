@@ -47,7 +47,7 @@ import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import jobs as job_repo  # noqa: E402
-from src.programme import jev_clock, jev_questions, jev_repo  # noqa: E402
+from src.programme import jev_clock, jev_prereg, jev_questions, jev_repo  # noqa: E402
 from src.programme.jev_hash import text_sha256  # noqa: E402
 
 TEST_DSN = os.environ.get("TEST_DATABASE_URL", "")
@@ -2034,6 +2034,9 @@ async def _ask_job(
             "subject_type": subject_type,
             "subject_id": subject_id,
             "source_id": 1,
+            **(
+                jev_prereg.plans_in_force(question_set.name, question_set.version) or {}
+            ),
         },
     )
 

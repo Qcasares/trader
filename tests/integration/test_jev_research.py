@@ -26,6 +26,11 @@ the address check inside the test alone. What must hold:
   the job's next attempt, refused by the road for the block on record, makes
   it; and when every attempt fails, a later day's pass plans the screen for
   the blocked content again, and that makes it, with no call.
+* **Every answer is recorded with its plans** (section 10a), however its job
+  ends: a response refused whole, and an answer whose follow-up failed on
+  every attempt, are named by their failed job beside the plans its payload
+  was planned under, and the queue keeps an attempt's record when a later
+  one records nothing.
 * **The hypothesis and card asks change nothing**: the hypotheses, candidates
   and findings tables are what they were whatever Jev answers, or fails to.
 * **The canary**: a token in every title of a page read, screened and
@@ -110,6 +115,9 @@ SCREEN = jev_questions.GUARDRAIL_INJECTION
 CATALOGUE = jev_questions.RESEARCH_CATALOGUE
 HYPOTHESIS = jev_questions.RESEARCH_HYPOTHESIS
 CARD = jev_questions.GUARDRAIL_CARD
+
+#: The plans in force for the screen, as the planner writes them into a job.
+_IN_FORCE = jev_prereg.plans_in_force(SCREEN.name, SCREEN.version) or {}
 
 #: Invented titles. The fake vendor finds ``ADDRESSED`` addressed to an AI
 #: system, and ties on ``TIED``.
@@ -570,6 +578,7 @@ class TestRetiringAndReplanning:
                 "subject_type": "web_excerpt",
                 "subject_id": waiting,
                 "source_id": 1,
+                **_IN_FORCE,
             },
             scheduled_for=_tomorrow(5),
             dedupe_key=jev_repo.ask_job_key(
@@ -719,6 +728,118 @@ class TestABlocksQuarantineSurvivesAFailedWrite:
             in (document["quarantine_reason"])
         )
         assert len(vendor.about(CLEAN)) == 2, "the repair made a call"
+
+
+# ---------------------------------------------------------------------------
+# Every answer is recorded with the plans it was recorded under (section 10a)
+# ---------------------------------------------------------------------------
+
+
+def _plans_of(row: Any) -> dict[str, Any]:
+    """The analysis plans a job's payload or result names."""
+    found = json.loads(row) if isinstance(row, str) else row
+    return {key: found[key] for key in _IN_FORCE}
+
+
+class TestEveryAnswerIsRecordedWithItsPlans:
+    """
+    Section 10a of the scope, for every outcome that records an answer, a job
+    that fails included: the plans a ``jev_ask`` job is asked under are in
+    its payload from the moment it is planned, and its row names the request
+    its attempt recorded beside them. The first build wrote them only into a
+    succeeding job's result, so a response refused whole, which the harness
+    counts, and an answer whose follow-up failed were recorded under no plan.
+    """
+
+    async def test_a_response_refused_whole(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db: tuple[str, asyncpg.Connection],
+        vendor: _Vendor,
+    ) -> None:
+        dsn, conn = db
+        assert _IN_FORCE, "the screen has no plan to record"
+        vendor.failing = {CLEAN: "invalid"}
+        _page(monkeypatch, {"Equities": [CLEAN]})
+        await _loop(monkeypatch, dsn)
+        (request,) = await _requests(conn, SCREEN, CLEAN)
+        assert request["status"] == "invalid"
+        (job,) = await _asks(conn, SCREEN, CLEAN)
+        assert (job["status"], job["attempts"]) == ("failed", 1)
+        assert _plans_of(job["payload"]) == _IN_FORCE
+        assert job["result"] is not None, "the refused answer names no plan"
+        result = json.loads(job["result"])
+        assert (result["status"], result["request_id"]) == ("invalid", request["id"])
+        assert _plans_of(result) == _IN_FORCE
+
+    async def test_an_answer_whose_follow_up_failed_on_every_attempt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        db: tuple[str, asyncpg.Connection],
+        vendor: _Vendor,
+    ) -> None:
+        dsn, conn = db
+        vendor.noul = {ADDRESSED: 0.87}
+        _flaky_quarantine(monkeypatch, failures=3)
+        _page(monkeypatch, {"Commodities": [ADDRESSED]})
+        await _loop(monkeypatch, dsn)
+        (request,) = await _requests(conn, SCREEN, ADDRESSED)
+        assert request["status"] == "ok"
+        (job,) = await _asks(conn, SCREEN, ADDRESSED)
+        assert (job["status"], job["attempts"]) == ("failed", 3), job["error"]
+        assert "deadlock" not in job["error"]
+        assert _plans_of(job["payload"]) == _IN_FORCE
+        assert job["result"] is not None, "the answer names no plan"
+        result = json.loads(job["result"])
+        assert (result["status"], result["request_id"]) == ("ok", request["id"])
+        assert _plans_of(result) == _IN_FORCE
+
+    async def test_the_queue_keeps_what_a_failed_attempt_recorded(
+        self, db: tuple[str, asyncpg.Connection]
+    ) -> None:
+        """
+        ``job_repo.fail`` on PostgreSQL: a failure that carries a record
+        stores it beside the error; a later attempt that carries none leaves
+        it in place; a success replaces it, as it always did.
+        """
+        _, conn = db
+        job_id = await job_repo.enqueue(conn, "jev_ask", {}, max_attempts=3)
+        stored = "SELECT status, error, result FROM jobs WHERE id = $1"
+
+        await job_repo.claim(conn, "test", kinds=["jev_ask"])
+        record = {"status": "ok", "request_id": 7, **_IN_FORCE}
+        assert await job_repo.fail(conn, job_id, "first", result=record) == "queued"
+        row = await conn.fetchrow(stored, job_id)
+        assert (row["error"], json.loads(row["result"])) == ("first", record)
+
+        await conn.execute(
+            "UPDATE jobs SET scheduled_for = now() WHERE id = $1", job_id
+        )
+        await job_repo.claim(conn, "test", kinds=["jev_ask"])
+        assert await job_repo.fail(conn, job_id, "second") == "queued"
+        row = await conn.fetchrow(stored, job_id)
+        assert (row["error"], json.loads(row["result"])) == ("second", record)
+
+        await conn.execute(
+            "UPDATE jobs SET scheduled_for = now() WHERE id = $1", job_id
+        )
+        await job_repo.claim(conn, "test", kinds=["jev_ask"])
+        await job_repo.complete(conn, job_id, {"status": "ok", "request_id": 7})
+        row = await conn.fetchrow(stored, job_id)
+        assert row["status"] == "succeeded" and row["error"] is None
+        assert json.loads(row["result"]) == {"status": "ok", "request_id": 7}
+
+    async def test_a_failure_that_records_nothing_stores_nothing(
+        self, db: tuple[str, asyncpg.Connection]
+    ) -> None:
+        """Every caller that passes no record — the worker's — writes none."""
+        _, conn = db
+        job_id = await job_repo.enqueue(conn, "jev_ask", {}, max_attempts=1)
+        await job_repo.claim(conn, "test", kinds=["jev_ask"])
+        assert await job_repo.fail(conn, job_id, "no record") == "failed"
+        assert (
+            await conn.fetchval("SELECT result FROM jobs WHERE id = $1", job_id) is None
+        )
 
 
 # ---------------------------------------------------------------------------

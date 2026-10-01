@@ -59,6 +59,7 @@ from src.programme import (  # noqa: E402
     jev_catalogue,
     jev_client,
     jev_clock,
+    jev_prereg,
     jev_repo,
     web_fetch,
 )
@@ -259,6 +260,7 @@ _PAYLOADS: dict[str, dict[str, Any]] = {
         "subject_type": "web_excerpt",
         "subject_id": hashlib.sha256(b"An Invented Title").hexdigest(),
         "source_id": 1,
+        **(jev_prereg.plans_in_force("guardrail.injection", 1) or {}),
     },
 }
 

@@ -24,7 +24,10 @@ weight, each failing silently if it goes:
   writes, naming a row by its id alone.
 * **An answer is recorded beside the plans it is to be scored under**: the
   global plan's hash and the set's own, so no baseline chosen after the
-  answers can be applied to them.
+  answers can be applied to them. However the job ends: its payload names
+  them and nothing is asked under any others, and a failure after the ask
+  wrote a row — a response refused whole, a follow-up that failed — carries
+  the record a success would.
 * **What an answer changes is the design's table and nothing more.** A valid
   ``true`` from the injection screen, and a vendor content block on web text,
   quarantine the text by content, in the design's words; nothing else does; a
@@ -278,6 +281,30 @@ def _choice(key: str, argmax: str) -> ValidatedAnswer:
 def _blocked() -> AskResult:
     """A call the vendor answered with a content block, recorded as request 12."""
     return AskResult("error", request_row_id=12, error_kind="content_block")
+
+
+#: The names of the analysis plans a ``jev_ask`` job is asked under.
+PLAN_KEYS = ("plan_version", "plan_hash", "set_plan_version", "set_plan_hash")
+
+
+def _refused(name: str) -> dict[str, ValidatedAnswer]:
+    """Every question of ``name`` as a response refused whole records it."""
+    answers: dict[str, ValidatedAnswer] = {}
+    for key, question in REGISTRY[name].questions:
+        answers[key] = ValidatedAnswer(
+            question_key=key,
+            question_type=question["type"],
+            noul=None,
+            choice=None,
+            score=None,
+            probabilities=None,
+            confidence=None,
+            argmax=None,
+            margin=None,
+            valid=False,
+            invalid_reason="model_mismatch",
+        )
+    return answers
 
 
 def _answers(name: str, *, p: float = 0.04) -> dict[str, ValidatedAnswer]:
@@ -762,6 +789,7 @@ def _hypothesis(**overrides: Any) -> dict[str, Any]:
 
 
 def _payload(name: str, **overrides: Any) -> dict[str, Any]:
+    """A ``jev_ask`` payload as the planner writes one, the plans in force in it."""
     web = name in WEB_SETS
     payload = {
         "set": name,
@@ -769,6 +797,7 @@ def _payload(name: str, **overrides: Any) -> dict[str, Any]:
         "subject_type": "web_excerpt" if web else "hypothesis_title",
         "subject_id": EXCERPT_SHA if web else TITLE_SHA,
         "source_id": 7 if web else "H-0007",
+        **(jev_prereg.plans_in_force(name, REGISTRY[name].version) or {}),
     }
     payload.update(overrides)
     return payload
@@ -931,11 +960,109 @@ class TestTheAsk:
         )
 
     @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    def test_the_payloads_plans_are_the_plans_in_force(self, name: str) -> None:
+        """The names a payload's plans go by are those ``plans_in_force`` gives."""
+        plans = jev_prereg.plans_in_force(name, REGISTRY[name].version)
+        assert plans is not None
+        assert tuple(plans) == jev_jobs.PLAN_KEYS == PLAN_KEYS
+        assert set(PLAN_KEYS) <= jev_jobs.ASK_PAYLOAD_KEYS
+
+    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    @pytest.mark.parametrize("key", PLAN_KEYS)
+    async def test_a_job_planned_under_other_plans_asks_nothing(
+        self, ask_rig: AskRig, name: str, key: str
+    ) -> None:
+        """
+        Step 3: a job planned under plans no longer in force — a plan bumped
+        between the plan and the claim — completes ``superseded``, reading
+        and asking nothing: asked now, its answer would be recorded under
+        plans its payload does not name. Whichever of the four moved.
+        """
+        moved = 99 if key.endswith("version") else "f" * 64
+        result = await ask_rig.run(_payload(name, **{key: moved}))
+        assert result["status"] == "superseded"
+        assert result[key] == moved, "the result names the plans it was planned under"
+        assert result["plans_in_force"] == jev_prereg.plans_in_force(name, 1)
+        assert ask_rig.asks == [] and ask_rig.loaded == []
+
+    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
+    async def test_a_response_refused_whole_is_recorded_with_its_plans(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        """
+        Section 10a, for a job that fails. A response refused whole is in the
+        ledger, and the harness counts it — among the answers that were not
+        valid, and against the figure compared with the baselines — so it
+        must say under which plans. The job fails for good, as
+        ``ask_verdict`` says, and its failure carries what a success would:
+        the request it recorded and the plans in force.
+        """
+        ask_rig.result = AskResult("invalid", request_row_id=88, answers=_refused(name))
+        failed = await ask_rig.fails(_payload(name))
+        assert failed.retry is False
+        assert failed.error == "the response was refused whole (request 88)"
+        recorded = failed.result
+        assert recorded is not None, "the refused answer's plans are recorded nowhere"
+        assert (recorded["status"], recorded["request_id"]) == ("invalid", 88)
+        assert {key: recorded[key] for key in PLAN_KEYS} == jev_prereg.plans_in_force(
+            name, REGISTRY[name].version
+        )
+        assert all(not answer["valid"] for answer in recorded["answers"].values())
+
+    async def test_an_answer_whose_follow_up_failed_is_recorded_with_its_plans(
+        self, ask_rig: AskRig
+    ) -> None:
+        """
+        An ``ok`` answer is recorded, and canonical, before its follow-up runs;
+        a follow-up that then fails fails the attempt, for a retry, and the
+        failure names the answer and the plans it was recorded under, so a job
+        whose every attempt fails still says so.
+        """
+        ask_rig.quarantine.failures = [_QuotingError(f"deadlock near {CANARY}")]
+        ask_rig.result = AskResult(
+            "ok", request_row_id=88, answers=_answers("guardrail.injection", p=0.87)
+        )
+        failed = await ask_rig.fails(_payload("guardrail.injection"))
+        assert failed.retry is True
+        assert CANARY not in failed.error
+        recorded = failed.result
+        assert recorded is not None, "the answer's plans are recorded nowhere"
+        assert (recorded["status"], recorded["request_id"]) == ("ok", 88)
+        assert {key: recorded[key] for key in PLAN_KEYS} == jev_prereg.plans_in_force(
+            "guardrail.injection", 1
+        )
+        assert recorded["answers"]["addressed_to_ai"]["argmax"] == "true"
+        assert "quarantined" not in recorded, "the quarantine was not written"
+
+    @pytest.mark.parametrize(
+        "outcome",
+        ["quarantined-before", "a-road-status-that-wrote-no-row", "the-road-raised"],
+    )
+    async def test_an_attempt_that_recorded_nothing_names_nothing(
+        self, ask_rig: AskRig, outcome: str
+    ) -> None:
+        """
+        A failure carries a record only when its ask wrote or read a row: one
+        that recorded nothing carries ``None``, so the queue keeps whatever an
+        earlier attempt of the job recorded rather than erase it.
+        """
+        if outcome == "quarantined-before":
+            ask_rig.quarantine.quarantined_by = 3
+        elif outcome == "a-road-status-that-wrote-no-row":
+            ask_rig.result = AskResult("disabled")
+        else:
+            ask_rig.raises = _QuotingError("the road fell over")
+        failed = await ask_rig.fails(_payload("guardrail.injection"))
+        assert failed.result is None
+
+    @pytest.mark.parametrize("name", [*WEB_SETS, *TITLE_SETS])
     async def test_a_set_with_no_plan_is_asked_nothing(
         self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
+        """A plan withdrawn after the job was planned: nothing is asked."""
+        payload = _payload(name)
         monkeypatch.setattr(jev_prereg, "plans_in_force", lambda *args: None)
-        failed = await ask_rig.fails(_payload(name))
+        failed = await ask_rig.fails(payload)
         assert failed.retry is False
         assert "no analysis plan" in failed.error
         assert ask_rig.asks == [] and ask_rig.loaded == []
@@ -987,6 +1114,20 @@ class TestWhatIsNotAsked:
             _payload("guardrail.injection", subject_id=EXCERPT_SHA.upper()),
             _payload("guardrail.injection", subject_id=EXCERPT_SHA[:63]),
             _payload("guardrail.injection", set=1),
+            {
+                k: v
+                for k, v in _payload("guardrail.injection").items()
+                if k not in PLAN_KEYS
+            },
+            {
+                k: v
+                for k, v in _payload("guardrail.injection").items()
+                if k != "set_plan_hash"
+            },
+            _payload("guardrail.injection", plan_version="1"),
+            _payload("guardrail.injection", set_plan_version=True),
+            _payload("guardrail.injection", plan_hash=None),
+            _payload("guardrail.injection", set_plan_hash="ab" * 31),
         ],
         ids=[
             "empty",
@@ -997,6 +1138,12 @@ class TestWhatIsNotAsked:
             "address-not-lower-hex",
             "address-short",
             "set-not-a-name",
+            "no-plans",
+            "no-set-plan-hash",
+            "plan-version-as-text",
+            "set-plan-version-as-bool",
+            "plan-hash-absent",
+            "set-plan-hash-short",
         ],
     )
     async def test_a_payload_that_is_not_the_five_names_fails_for_good(

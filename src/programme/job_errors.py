@@ -21,23 +21,34 @@ attributes, so the lane, which holds the client, is not imported.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class JobFailedError(Exception):
     """
-    A handler's verdict that its job failed, and whether asking again could
-    change it.
+    A handler's verdict that its job failed, whether asking again could change
+    it, and what the failed attempt recorded, where it recorded something.
 
     Raised rather than returned, so that a job whose work came to nothing is
     never recorded as ``succeeded`` with its reason buried in a result nobody
     reads. The jobs page shows status and error; this puts the verdict in both.
+
+    ``result`` is for an attempt that wrote something worth naming before it
+    failed: a ``jev_ask`` attempt whose ask recorded a row — a response refused
+    whole, an answer whose follow-up failed — names the row and the analysis
+    plans it was recorded under, so a job that failed still says under which
+    plans its answer is to be scored. The programme writes it to the job's
+    result beside the error, and an attempt that recorded nothing leaves an
+    earlier one's in place (``job_repo.fail``).
     """
 
-    def __init__(self, error: str, *, retry: bool) -> None:
+    def __init__(
+        self, error: str, *, retry: bool, result: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(error)
         self.error = error
         self.retry = retry
+        self.result = None if result is None else dict(result)
 
 
 #: The failed calls another attempt could change: no response, a rate limit or

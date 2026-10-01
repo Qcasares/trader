@@ -884,13 +884,16 @@ class TestTheAsks:
             job = queue.jobs[key]
             name = key.split(":")[1].split("@")[0]
             assert job["kind"] == "jev_ask"
+            plans = jev_prereg.plans_in_force(name, 1)
+            assert plans is not None
             assert job["payload"] == {
                 "set": name,
                 "version": 1,
                 "subject_type": subject_type,
                 "subject_id": subject_id,
                 "source_id": source_id,
-            }
+                **plans,
+            }, "the plans in force are named, and nothing else is"
             assert (job["priority"], job["max_attempts"]) == (0, 3)
             assert job["scheduled_for"] == MORNING
             assert key == jev_repo.ask_job_key(
@@ -1035,6 +1038,27 @@ class TestTheAsks:
             "guardrail.card",
             "research.hypothesis",
         }
+
+    async def test_a_set_with_no_plan_is_planned_nothing(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Every ``jev_ask`` payload names the plans its answer will be recorded
+        under, and the handler asks a set with none nothing, so the planner
+        plans it nothing, and reads no subject for it.
+        """
+        real = jev_prereg.plans_in_force
+
+        def only_the_card(name: str, version: int) -> dict[str, Any] | None:
+            return real(name, version) if name == "guardrail.card" else None
+
+        monkeypatch.setattr(jev_prereg, "plans_in_force", only_the_card)
+        queue.screens = _screens(2)
+        queue.descriptions = [DESCRIBE_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        await _plan(_switches(**ASKS_ON))
+        assert {job["payload"]["set"] for job in _asks(queue)} == {"guardrail.card"}
+        assert [read["set"].name for read in queue.subject_reads] == ["guardrail.card"]
 
     async def test_planning_again_the_same_day_adds_nothing(self, queue: Queue) -> None:
         queue.screens = [SCREEN_SUBJECT]

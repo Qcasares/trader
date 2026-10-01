@@ -69,11 +69,16 @@ global plan's ``regime`` section, and the connectivity probe measures the
 vendor, not a set, so neither has one.
 
 A plan is in force for the answers recorded under it, and for no others. So
-every ``jev_ask`` job writes the set plan's version and hash, and the global
-plan's, into its result as it asks (``jev_jobs.run_ask``), as the regime job
-writes the global plan into its result; and the harness (C9) scores an answer
-only under the plans in force when it was recorded. A baseline chosen after
-the answers cannot be applied to them: a changed plan is a new
+every ``jev_ask`` job is planned with the set plan's version and hash, and the
+global plan's, in its payload (:func:`plans_in_force`, written by ``jev_plan``),
+and asks nothing under any others (``jev_jobs.run_ask``): every row it records,
+on any attempt and however the job ends, was recorded under the plans its
+payload names. Its row names the request its attempt recorded beside them too,
+in the result of a job that succeeds and of one that fails after its ask wrote
+a row — a response refused whole, an answer whose follow-up failed — as the
+regime job writes the global plan into its result. The harness (C9) scores an
+answer only under the plans in force when it was recorded. A baseline chosen
+after the answers cannot be applied to them: a changed plan is a new
 :data:`SET_PLAN_VERSIONS` entry, with its hash appended, and the answers
 recorded under the old one stay scored under the old one.
 
