@@ -129,6 +129,8 @@ class _Ledger:
         self.quarantines: list[tuple[str, str]] = []
         self.quarantine_counts: dict[str, int] = {}
         self.fail_with: Exception | None = None
+        self.labels: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.label_calls: list[dict[str, Any]] = []
 
     async def earliest_quarantined(self, conn: Any, contents: Any) -> dict[str, int]:
         assert conn is self.conn and conn.open
@@ -153,6 +155,26 @@ class _Ledger:
         assert conn is self.conn and conn.open
         self.quarantines.append((content, reason))
         return self.quarantine_counts.get(content, 0)
+
+    async def record_label_once(self, conn: Any, **label: Any) -> int | None:
+        """``jev_labels``' one label per labeller per item, as the schema keeps it."""
+        assert conn is self.conn and conn.open
+        assert set(label) == {
+            "question_set",
+            "question_set_version",
+            "question_key",
+            "subject_type",
+            "subject_id",
+            "label",
+            "labelled_by",
+            "note",
+        }
+        key = tuple(label[k] for k in sorted(label) if k not in ("label", "note"))
+        self.label_calls.append(label)
+        if key in self.labels:
+            return None
+        self.labels[key] = label
+        return len(self.labels)
 
 
 class _Fetch:
@@ -180,7 +202,12 @@ def conn() -> _Conn:
 @pytest.fixture
 def ledger(monkeypatch: pytest.MonkeyPatch, conn: _Conn) -> _Ledger:
     fake = _Ledger(conn)
-    for name in ("earliest_quarantined", "insert_documents", "quarantine_content"):
+    for name in (
+        "earliest_quarantined",
+        "insert_documents",
+        "quarantine_content",
+        "record_label_once",
+    ):
         monkeypatch.setattr(jev_repo, name, getattr(fake, name))
     return fake
 
@@ -519,6 +546,9 @@ class TestWhatIsStored:
         _fetching(monkeypatch, page)
         result = await web_ingest.run_job(conn, dict(PAYLOAD))
         assert tuple(result) == web_ingest.RESULT_KEYS
+        assert web_ingest.RESULT_KEYS[-1] == "labels"
+        assert tuple(result["labels"]) == web_ingest.LABEL_COUNTS
+        assert all(isinstance(n, int) for n in result["labels"].values())
         assert result["source"] == "pwb-readme"
         assert (result["bytes"], result["sha256"]) == (page.bytes, page.sha256)
         assert result["unparsed"] == 0
@@ -528,6 +558,154 @@ class TestWhatIsStored:
                 for word in title.split():
                     if len(word) > 4:
                         assert word not in written, word
+
+
+#: A title under the Bonds heading, invented.
+LENDER = "Term Spreads for a Patient Lender"
+
+#: ``CLEAN`` with a zero-width space inside it: it normalises to ``CLEAN``, and
+#: its cell trips the screen, so the row is dropped as decoration.
+DECORATED = "Quiet Momentum​ in Invented Mid-Cap Shares"
+
+
+def _labelled(ledger: _Ledger) -> dict[str, str]:
+    """Each label recorded, by the subject's address."""
+    return {label["subject_id"]: label["label"] for label in ledger.labels.values()}
+
+
+class TestTheSourcesOwnHeadings:
+    """
+    Phase C7: each excerpt in use that the snapshot lists under exactly one
+    heading is labelled with that heading, as the catalogue's asset class, once
+    per labeller, in ``jev_labels`` and nowhere else.
+    """
+
+    async def test_each_excerpt_in_use_under_one_heading_is_labelled(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        titles = {"Equities": [CLEAN], "Bonds": [LENDER]}
+        _fetching(monkeypatch, _page(titles))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        labeller = web_sources.dataset_labeller(
+            "pwb-readme", [("equities", CLEAN), ("bonds", LENDER)]
+        )
+        expected = sorted(
+            [(text_sha256(CLEAN), "equities"), (text_sha256(LENDER), "bonds")]
+        )
+        assert expected[0][0] == text_sha256(LENDER), "page order is content order"
+        assert [
+            (call["subject_id"], call["label"]) for call in ledger.label_calls
+        ] == expected, "in content order"
+        for call in ledger.label_calls:
+            assert call == {
+                "question_set": "research.catalogue",
+                "question_set_version": 1,
+                "question_key": "asset_class",
+                "subject_type": "web_excerpt",
+                "subject_id": call["subject_id"],
+                "label": call["label"],
+                "labelled_by": labeller,
+                "note": "the README's own section heading",
+            }
+        assert result["labels"] == {"recorded": 2, "already": 0, "several_headings": 0}
+
+    async def test_the_heading_never_reaches_the_excerpt(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        _fetching(monkeypatch, _page({"Equities": [CLEAN], "Bonds": [LENDER]}))
+        await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert sorted(row.excerpt for row in ledger.rows) == sorted([CLEAN, LENDER])
+        for row in ledger.rows:
+            assert not any(
+                heading in row.excerpt or label in row.excerpt
+                for heading, label in web_sources.HEADING_LABELS.items()
+            )
+
+    async def test_an_excerpt_under_two_headings_is_not_labelled(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        titles = {"Equities": [CLEAN], "Multi-asset": [CLEAN], "Bonds": [LENDER]}
+        _fetching(monkeypatch, _page(titles))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert _labelled(ledger) == {text_sha256(LENDER): "bonds"}
+        assert result["labels"] == {"recorded": 1, "already": 0, "several_headings": 1}
+
+    async def test_the_headings_are_counted_over_every_row_read(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        """
+        Section 10e of the scope: a copy of a title the screen drops as
+        decoration is still a listing of it under its heading. Counted over the
+        rows the screen kept, the title below read as under Bonds alone and was
+        labelled bonds, though the snapshot lists it under Equities too.
+        """
+        assert web_sources.normalise_excerpt(DECORATED) == CLEAN
+        decided = web_sources.screen_cell(DECORATED)
+        assert (decided.fate, decided.rule) == ("drop", "hidden_characters")
+        _fetching(monkeypatch, _page({"Equities": [DECORATED], "Bonds": [CLEAN]}))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert [row.excerpt for row in ledger.rows] == [CLEAN]
+        assert ledger.labels == {}
+        assert result["labels"] == {"recorded": 0, "already": 0, "several_headings": 1}
+
+    async def test_quarantined_excerpts_are_not_labelled(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        """By the screen, earlier under any source: neither is in use."""
+        ledger.quarantined[text_sha256(LENDER)] = 17
+        titles = {"Equities": [CLEAN, INSTRUCTION], "Bonds": [LENDER]}
+        _fetching(monkeypatch, _page(titles))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert _labelled(ledger) == {text_sha256(CLEAN): "equities"}
+        assert result["labels"]["recorded"] == 1
+
+    async def test_the_labeller_is_the_snapshots_grouping_at_its_hash(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        """
+        Every kept row's heading label and excerpt, a quarantined one included;
+        a dropped row is none of the grouping. A title added is a new labeller.
+        """
+        titles = {"Equities": [CLEAN, INSTRUCTION, HIDDEN], "Bonds": [LENDER]}
+        _fetching(monkeypatch, _page(titles))
+        await web_ingest.run_job(conn, dict(PAYLOAD))
+        pairs = [("equities", CLEAN), ("equities", INSTRUCTION), ("bonds", LENDER)]
+        labellers = {label["labelled_by"] for label in ledger.labels.values()}
+        assert labellers == {web_sources.dataset_labeller("pwb-readme", pairs)}
+
+        titles["Bonds"].append("An Invented Title Added Later")
+        _fetching(monkeypatch, _page(titles))
+        await web_ingest.run_job(conn, dict(PAYLOAD))
+        labellers = {label["labelled_by"] for label in ledger.labels.values()}
+        assert len(labellers) == 2
+
+    async def test_the_same_page_read_again_records_nothing_new(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        _fetching(monkeypatch, _page({"Equities": [CLEAN], "Bonds": [LENDER]}))
+        await web_ingest.run_job(conn, dict(PAYLOAD))
+        again = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert again["labels"] == {"recorded": 0, "already": 2, "several_headings": 0}
+        assert len(ledger.labels) == 2
+
+    async def test_a_page_with_nothing_kept_labels_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        _fetching(monkeypatch, _page({"Equities": [HIDDEN, ADDRESS_ONLY]}))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert ledger.label_calls == []
+        assert result["labels"] == {"recorded": 0, "already": 0, "several_headings": 0}
+
+    async def test_nothing_is_labelled_for_a_catalogue_not_registered(
+        self, monkeypatch: pytest.MonkeyPatch, conn: _Conn, ledger: _Ledger
+    ) -> None:
+        from src.programme import jev_questions
+
+        monkeypatch.delitem(jev_questions.REGISTRY, "research.catalogue")
+        _fetching(monkeypatch, _page({"Equities": [CLEAN]}))
+        result = await web_ingest.run_job(conn, dict(PAYLOAD))
+        assert ledger.label_calls == [] and [r.excerpt for r in ledger.rows] == [CLEAN]
+        assert result["labels"]["recorded"] == 0
 
 
 class TestAFailureWhileStoring:

@@ -2556,8 +2556,11 @@ def test_the_jev_module_the_runners_may_load_loads_no_other() -> None:
 
 #: The pure modules of the programme, which the API, the planner and the
 #: harness all read: each may load the standard library and itself, and
-#: nothing else, however it is imported.
+#: nothing else, however it is imported. ``claims`` joined in phase C8, when
+#: the performance-claim check moved out of ``author``, which prompts a
+#: generative model, so that reading the rule no longer loads one.
 PURE_PROGRAMME_MODULES = (
+    "src.programme.claims",
     "src.programme.jev_hash",
     "src.programme.jev_prereg",
     "src.programme.jev_stats",

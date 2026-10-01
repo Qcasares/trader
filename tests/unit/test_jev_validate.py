@@ -2303,7 +2303,15 @@ class _Fuzz:
         # The top two levelled at their mean, so the sum still holds and the
         # tie is judged as a tie rather than filed under the sum; and a Score's
         # score moved to its new mean, so the tie is not filed under the
-        # consistency check either.
+        # consistency check either. And the first Noul with no distribution
+        # tied at exactly 0.5, besides: before phase C7 nothing here tied a
+        # Noul, one case in four thousand reached its tie by an edge value
+        # alone, and the corpus, which draws from the registry, lost it when
+        # the registry grew.
+        for answer in _answer_objects(body):
+            if answer.get("type") == "noul" and "probabilities" not in answer:
+                answer["noul"] = 0.5
+                break
         for answer in _answer_objects(body):
             probabilities = answer.get("probabilities")
             if isinstance(probabilities, dict):

@@ -94,6 +94,24 @@ order rather than the page's, so two writers at once — two ingests, or an
 ingest beside another writer's quarantine — never each hold what the other
 waits for (``tests/integration/test_web_ingest.py::TestTwoWritersAtOnce``).
 
+The source's own headings are labels (phase C7)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The README sorts its strategies under asset-class headings, and that sorting
+is a labelled dataset the catalogue's ``asset_class`` answers can be measured
+against. So, in the same transaction and in content order, each excerpt
+stored and in use — quarantined by nothing — that the snapshot lists under
+exactly one heading gets that heading's label in ``jev_labels``, once per
+labeller (``jev_repo.record_label_once``): the catalogue at its registered
+version, question ``asset_class``, the excerpt's content address, the
+labeller ``web_sources.dataset_labeller`` of every kept row's heading label
+and excerpt, and the note ``the README's own section heading``. The heading
+is read from the parser's ``Entry.label``, never from the excerpt, and is
+written to ``jev_labels`` alone, so no label reaches what any set is asked
+about. The headings an excerpt is listed under are counted over every row the
+parser read, one the screen dropped as decoration included, so a title under
+two headings anywhere in the snapshot has no one label, and is counted
+instead.
+
 No web text leaves by any other road
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The result, every error and every log line carry counts, hashes, rule names,
@@ -111,13 +129,14 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import asyncpg
 
-from src.programme import flags, jev_repo, web_fetch, web_sources
-from src.programme.job_errors import JobFailedError
+from src.programme import flags, jev_questions, jev_repo, web_fetch, web_sources
+from src.programme.job_errors import JobFailedError, described
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +161,22 @@ RESULT_KEYS: tuple[str, ...] = (
     "quarantined_by_code",
     "quarantined_earlier",
     "quarantined_now",
+    "labels",
 )
+
+#: What a source's own heading labels (phase C7): the catalogue's asset class,
+#: whose options less the escape are the heading labels
+#: (``test_jev_questions.py::test_the_heading_labels_are_the_catalogue_options``).
+LABELLED_SET = "research.catalogue"
+LABELLED_QUESTION = "asset_class"
+
+#: What a heading's label records as its note.
+LABEL_NOTE = "the README's own section heading"
+
+#: The keys of the result's ``labels``: labels recorded, labels this labeller
+#: had recorded already, and excerpts left unlabelled because the snapshot
+#: lists them under more than one heading.
+LABEL_COUNTS: tuple[str, ...] = ("recorded", "already", "several_headings")
 
 
 def earlier_reason(document_id: int) -> str:
@@ -173,7 +207,11 @@ async def run_job(conn: asyncpg.Connection, payload: dict[str, Any]) -> dict[str
     * ``quarantined_by_code``: distinct excerpts the code screen quarantines;
       ``quarantined_earlier``: distinct excerpts it passes that were already
       quarantined, under any source; ``quarantined_now``: documents already
-      stored that this job quarantined.
+      stored that this job quarantined;
+    * ``labels`` (phase C7): counts, by :data:`LABEL_COUNTS`, of the source's
+      own headings recorded as labels, of those its labeller had recorded
+      already, and of excerpts listed under several headings and left
+      unlabelled.
     """
     name = _source_name(payload)
     source = web_sources.ALLOWED_SOURCES[name]
@@ -239,14 +277,23 @@ async def run_job(conn: asyncpg.Connection, payload: dict[str, Any]) -> dict[str
         for content, screened in kept.items()
         if screened.fate == "quarantine"
     }
+    pairs = [
+        (entry.label, screened.excerpt)
+        for entry, screened in zip(snapshot.entries, decided, strict=True)
+        if screened.fate != "drop"
+    ]
+    labelling = _Labelling(
+        headings=_headings(snapshot.entries),
+        labelled_by=web_sources.dataset_labeller(name, pairs) if pairs else None,
+    )
 
     try:
-        stored, earlier, quarantined_now = await _store(
-            conn, name, written.url, kept, flagged
+        stored, earlier, quarantined_now, labels = await _store(
+            conn, name, written.url, kept, flagged, labelling
         )
     except Exception as error:  # noqa: BLE001 - reported by class, never by message
         raise JobFailedError(
-            f"storing the snapshot of {name} failed ({_described(error)}); "
+            f"storing the snapshot of {name} failed ({described(error)}); "
             "nothing from it was stored",
             retry=True,
         ) from None
@@ -263,10 +310,12 @@ async def run_job(conn: asyncpg.Connection, payload: dict[str, Any]) -> dict[str
         "quarantined_by_code": len(flagged),
         "quarantined_earlier": len(earlier),
         "quarantined_now": quarantined_now,
+        "labels": labels,
     }
     logger.info(
         "web ingest of %s: %d rows, %d distinct, %d new, %d dropped, %d quarantined "
-        "by the code screen, %d quarantined earlier, %d quarantined now",
+        "by the code screen, %d quarantined earlier, %d quarantined now, %d labels "
+        "recorded, %d already, %d excerpts under several headings",
         name,
         result["rows"],
         result["distinct"],
@@ -275,8 +324,41 @@ async def run_job(conn: asyncpg.Connection, payload: dict[str, Any]) -> dict[str
         result["quarantined_by_code"],
         result["quarantined_earlier"],
         result["quarantined_now"],
+        labels["recorded"],
+        labels["already"],
+        labels["several_headings"],
     )
     return result
+
+
+@dataclass(frozen=True)
+class _Labelling:
+    """
+    What the snapshot says about its own grouping: the headings each excerpt
+    is listed under, over every row the parser read, and the labeller the
+    grouping is recorded as, ``None`` when no row was kept to label.
+    """
+
+    headings: Mapping[str, frozenset[str]]
+    labelled_by: str | None
+
+
+def _headings(entries: Sequence[web_sources.Entry]) -> dict[str, frozenset[str]]:
+    """
+    The heading labels each excerpt is listed under, by its content address,
+    over every row the parser read — a row the screen drops as decoration
+    included, so a title listed under two headings is under two, whichever
+    copy the screen kept. A row whose excerpt normalises to nothing names no
+    excerpt.
+    """
+    found: dict[str, set[str]] = {}
+    for entry in entries:
+        excerpt = web_sources.normalise_excerpt(entry.cell)
+        if excerpt:
+            found.setdefault(web_sources.content_sha256(excerpt), set()).add(
+                entry.label
+            )
+    return {content: frozenset(labels) for content, labels in found.items()}
 
 
 async def _store(
@@ -285,21 +367,24 @@ async def _store(
     url: str,
     kept: Mapping[str, web_sources.Screened],
     flagged: Mapping[str, str],
-) -> tuple[list[tuple[int, str, bool]], dict[str, int], int]:
+    labelling: _Labelling,
+) -> tuple[list[tuple[int, str, bool]], dict[str, int], int, dict[str, int]]:
     """
     Every write of one snapshot, in one transaction: the documents, then the
-    quarantine of what was stored before and is quarantined now. Returns what
-    ``insert_documents`` returned, the earlier quarantines found, and how many
-    stored documents this quarantined.
+    quarantine of what was stored before and is quarantined now, then the
+    source's labels. Returns what ``insert_documents`` returned, the earlier
+    quarantines found, how many stored documents this quarantined, and the
+    label counts (:func:`_record_labels`).
 
     Each lock is taken in one order: ``insert_documents`` writes in its
     index's order, and the quarantines, the screen's and the earlier ones
     together, are made in one pass in content order, since a quarantine holds
-    every row of its content until the transaction commits. Two writers at
-    once — two ingests, or an ingest beside another writer's quarantine —
-    then never each hold what the other waits for; in page order, or the
-    screen's before the earlier ones, they did, and PostgreSQL ended one with
-    a deadlock (``tests/integration/test_web_ingest.py::TestTwoWritersAtOnce``).
+    every row of its content until the transaction commits; the labels too.
+    Two writers at once — two ingests, or an ingest beside another writer's
+    quarantine — then never each hold what the other waits for; in page
+    order, or the screen's before the earlier ones, they did, and PostgreSQL
+    ended one with a deadlock
+    (``tests/integration/test_web_ingest.py::TestTwoWritersAtOnce``).
     """
     async with conn.transaction(isolation="read_committed"):
         earlier = await jev_repo.earliest_quarantined(
@@ -328,7 +413,52 @@ async def _store(
             quarantined_now += await jev_repo.quarantine_content(
                 conn, content, reasons[content]
             )
-    return stored, earlier, quarantined_now
+        labels = await _record_labels(
+            conn, [content for content in kept if content not in reasons], labelling
+        )
+    return stored, earlier, quarantined_now, labels
+
+
+async def _record_labels(
+    conn: asyncpg.Connection, contents: Sequence[str], labelling: _Labelling
+) -> dict[str, int]:
+    """
+    The source's own heading for each excerpt in use that the snapshot lists
+    under exactly one heading, recorded once per labeller as the catalogue's
+    asset class (phase C7), in content order; :data:`LABEL_COUNTS` counted.
+
+    ``contents`` are the excerpts stored and in use: none quarantined, by the
+    screen, earlier or now. The label goes to ``jev_labels`` and nowhere
+    else — never into the excerpt, which is what a set is asked about. An
+    excerpt the snapshot lists under two headings, anywhere in it, has no one
+    heading to be labelled by, and is counted instead. The labeller is the
+    snapshot's grouping at its hash (``web_sources.dataset_labeller``), so a
+    page read again unchanged records nothing new, and a changed grouping is a
+    new labeller with labels of its own.
+    """
+    counts = dict.fromkeys(LABEL_COUNTS, 0)
+    catalogue = jev_questions.REGISTRY.get(LABELLED_SET)
+    if labelling.labelled_by is None or catalogue is None:
+        return counts
+    for content in sorted(contents):
+        headings = labelling.headings[content]
+        if len(headings) != 1:
+            counts["several_headings"] += 1
+            continue
+        (label,) = headings
+        label_id = await jev_repo.record_label_once(
+            conn,
+            question_set=catalogue.name,
+            question_set_version=catalogue.version,
+            question_key=LABELLED_QUESTION,
+            subject_type="web_excerpt",
+            subject_id=content,
+            label=label,
+            labelled_by=labelling.labelled_by,
+            note=LABEL_NOTE,
+        )
+        counts["recorded" if label_id is not None else "already"] += 1
+    return counts
 
 
 def _source_name(payload: object) -> str:
@@ -368,21 +498,13 @@ def _reason(
     return None
 
 
-def _described(error: BaseException) -> str:
-    """An error by its class, SQLSTATE and constraint: nothing it quoted."""
-    parts = [type(error).__name__]
-    sqlstate = getattr(error, "sqlstate", None)
-    if isinstance(sqlstate, str) and sqlstate:
-        parts.append(f"SQLSTATE {sqlstate}")
-    constraint = getattr(error, "constraint_name", None)
-    if isinstance(constraint, str) and constraint:
-        parts.append(f"constraint {constraint}")
-    return ", ".join(parts)
-
-
 __all__ = [
     "AREA",
     "EMPTY_EXCERPT",
+    "LABELLED_QUESTION",
+    "LABELLED_SET",
+    "LABEL_COUNTS",
+    "LABEL_NOTE",
     "RESULT_KEYS",
     "earlier_reason",
     "run_job",

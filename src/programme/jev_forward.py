@@ -43,7 +43,7 @@ In order; the first that applies decides.
 6   The ask recorded a response, ``ok`` or ``invalid``          record the signal,
                                                                complete
 7   Anything else the ask came to                              as
-                                                               ``jev_jobs.ask_verdict``
+                                                               ``job_errors.ask_verdict``
 ==  =========================================================  ==================
 
 Steps 3 to 5 are retried because each can change before the cutoff — an
@@ -75,7 +75,7 @@ One ask per attempt, through the module attribute ``jev_lane.ask`` with every
 argument named: the SDK suite hands the road a transport by replacing that
 attribute, and nothing here may pass one itself. So a session is asked at
 most once per attempt, not once in all: an attempt whose call got no response
-(``jev_jobs.ask_verdict``: no connection, a timeout, a rate limit or a vendor
+(``job_errors.ask_verdict``: no connection, a timeout, a rate limit or a vendor
 fault) is retried before the cutoff, and asks again, since an ``error`` row is
 not an answer to replay. The queue's backoff fits up to eleven attempts in the
 ten minutes to the cutoff, so a vendor timing out every call is called up to
@@ -102,14 +102,13 @@ from src.programme import (
     flags,
     jev_clock,
     jev_features,
-    jev_jobs,
     jev_lane,
     jev_prereg,
     jev_questions,
     jev_repo,
     repo,
 )
-from src.programme.job_errors import JobFailedError
+from src.programme.job_errors import JobFailedError, ask_verdict
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +239,7 @@ async def collect(
             "replayed": asked.replayed,
             "inserted": record.inserted,
         }
-    error, retry = jev_jobs.ask_verdict(asked)
+    error, retry = ask_verdict(asked)
     assert error is not None  # ok is handled above
     raise JobFailedError(error, retry=retry)
 

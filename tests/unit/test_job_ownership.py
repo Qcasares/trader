@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import inspect
 import json
 import pathlib
@@ -42,7 +43,7 @@ import pytest
 from src.db.repos import jobs as job_repo
 from src.db.repos import secrets as secret_repo
 from src.engine.scheduler import JobKind, plan_session
-from src.programme import flags
+from src.programme import flags, jev_prereg
 from src.programme import main as programme_main
 from src.programme.main import JEV_HANDLERS, JobFailedError, Programme
 from src.worker.main import HANDLERS, SCHEDULED_KINDS
@@ -434,6 +435,8 @@ class _Queue:
         self.claims: list[Any] = []
         self.completed: list[tuple[uuid.UUID, Any]] = []
         self.failed: list[tuple[uuid.UUID, str, bool]] = []
+        #: What each failure stored beside its error, in the same order.
+        self.failed_results: list[Any] = []
         self.extended: list[uuid.UUID] = []
 
     @staticmethod
@@ -458,9 +461,11 @@ class _Queue:
 
     async def fail(self, *args: Any, **kwargs: Any) -> str:
         arguments = self._bound("fail", *args, **kwargs)
+        json.dumps(arguments["result"])  # what the real one writes as jsonb
         self.failed.append(
             (arguments["job_id"], arguments["error"], arguments["retry"])
         )
+        self.failed_results.append(arguments["result"])
         return "queued" if arguments["retry"] else "failed"
 
     async def extend_lease(self, *args: Any, **kwargs: Any) -> None:
@@ -604,6 +609,38 @@ class TestTheProgrammeClaimsOnlyItsOwnKinds:
 
         assert queue.completed == []
         assert queue.failed == [(job.id, "the probe failed: auth (request 9)", retry)]
+        assert queue.failed_results == [None]
+
+    async def test_what_a_failed_attempt_recorded_is_kept_beside_its_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A handler whose attempt recorded something before it failed — an
+        ask's answer and the plans it was recorded under — hands it over on
+        its ``JobFailedError``, and the loop stores it with the error, so a
+        job that failed still names its answer's plans
+        (``jev_jobs.run_ask``; section 10a of the C7+C8 scope).
+        """
+        record = {"status": "invalid", "request_id": 9, "plan_hash": "ab" * 32}
+
+        async def refused(conn, payload, api_key):
+            raise JobFailedError(
+                "the response was refused whole (request 9)",
+                retry=False,
+                result=record,
+            )
+
+        monkeypatch.setitem(JEV_HANDLERS, "jev_ask", refused)
+        job = _job("jev_ask")
+        queue = _Queue(job)
+        programme = _programme(monkeypatch, queue, _on())
+
+        assert await programme._drain_jev() is True
+
+        assert queue.failed == [
+            (job.id, "the response was refused whole (request 9)", False)
+        ]
+        assert queue.failed_results == [record]
 
     async def test_a_switch_turned_off_mid_drain_stops_the_next_claim(
         self, monkeypatch: pytest.MonkeyPatch
@@ -977,13 +1014,64 @@ def _handler_modules() -> dict[str, pathlib.Path]:
 
 
 #: How many calls to the road each kind makes an attempt, at most. The web
-#: ingest (phase C6) fetches a page and stores it, and calls nothing.
+#: ingest (phase C6) fetches a page and stores it, and calls nothing; the ask
+#: (phases C7 and C8) asks one set about one text, once.
 ROAD_CALLS: dict[str, int] = {
     "jev_probe": 1,
     "jev_regime": 1,
     "jev_reask": 1,
     "jev_web_ingest": 0,
+    "jev_ask": 1,
 }
+
+
+def _module_symbols(tree: ast.Module) -> dict[str, ast.AST]:
+    """Each name a module binds at its top level, to a definition or a value."""
+    symbols: dict[str, ast.AST] = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            symbols[node.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    symbols[target.id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            symbols[node.target.id] = node.value
+    return symbols
+
+
+def _reachable_road_calls(tree: ast.Module, handler: str) -> list[ast.Call]:
+    """
+    Every call to the road reachable from ``handler`` within its module: in
+    its own body, and in every top-level definition or value it names, and
+    they name, in turn — a follow-up held in a table the handler reads is
+    reached through the table. Since phase C7 one module holds two handlers
+    that ask, the re-ask and the ask, so the count is each handler's own and
+    not its module's.
+    """
+    symbols = _module_symbols(tree)
+    assert handler in symbols, f"{handler} is not defined at the module's top level"
+    seen: set[str] = set()
+    pending = [handler]
+    calls: dict[int, ast.Call] = {}
+    while pending:
+        name = pending.pop()
+        if name in seen or name not in symbols:
+            continue
+        seen.add(name)
+        node = symbols[name]
+        for call in _road_calls(node):
+            calls[id(call)] = call
+        pending += [
+            child.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name) and child.id in symbols
+        ]
+    return list(calls.values())
 
 
 class TestEveryJevHandlerMakesAtMostOneCall:
@@ -1004,19 +1092,32 @@ class TestEveryJevHandlerMakesAtMostOneCall:
             tree = ast.parse(path.read_text("utf-8"))
             assert _road_calls_in_loops(tree) == [], path.name
 
-    def test_each_handler_module_takes_the_road_once(self) -> None:
+    def test_each_handler_takes_the_road_once(self) -> None:
         """
-        One call site per module holding a handler that asks, and one ``ask``
-        in the probe: two sites in one module is a job that can take both. None
-        in the ingest job's module, which asks nothing.
+        One call site reachable from each handler that asks, and one ``ask``
+        in the probe: two sites a handler can reach is a job that can take
+        both. None reachable from the ingest job, which asks nothing. Counted
+        per handler rather than per module since phase C7, when the ask joined
+        the re-ask in ``jev_jobs``; the module as a whole holds exactly the
+        sites its handlers reach, so no call sits there unread.
         """
         modules = _handler_modules()
         assert modules["jev_web_ingest"] == SRC / "programme" / "web_ingest.py"
+        assert modules["jev_ask"] == SRC / "programme" / "jev_jobs.py"
+        by_module: dict[pathlib.Path, set[int]] = {}
+        trees: dict[pathlib.Path, ast.Module] = {}
         for kind, path in modules.items():
-            calls = _road_calls(ast.parse(path.read_text("utf-8")))
+            tree = trees.setdefault(path, ast.parse(path.read_text("utf-8")))
+            handler = inspect.unwrap(JEV_HANDLERS[kind]).__name__
+            calls = _reachable_road_calls(tree, handler)
             assert len(calls) == ROAD_CALLS[kind], (
                 kind,
                 [ast.unparse(c) for c in calls],
+            )
+            by_module.setdefault(path, set()).update(id(c) for c in calls)
+        for path, tree in trees.items():
+            assert {id(c) for c in _road_calls(tree)} == by_module[path], (
+                f"{path.name} holds a call to the road no handler of it reaches"
             )
         lane = ast.parse((SRC / "programme" / "jev_lane.py").read_text("utf-8"))
         (run_probe,) = [
@@ -1025,6 +1126,25 @@ class TestEveryJevHandlerMakesAtMostOneCall:
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_probe"
         ]
         assert len(_road_calls(run_probe)) == 1
+
+    def test_the_reach_follows_a_table_of_follow_ups(self) -> None:
+        """
+        Guards the guard: a second call hidden in a follow-up the handler
+        reaches only through a module-level table is counted, and a call in a
+        function nothing reaches is not the handler's.
+        """
+        tree = ast.parse(
+            "async def follow(conn):\n"
+            "    await jev_lane.ask(conn)\n"
+            "async def unused(conn):\n"
+            "    await jev_lane.ask(conn)\n"
+            "TABLE = {'x': Askable(follow_up=follow)}\n"
+            "async def handler(conn):\n"
+            "    await jev_lane.ask(conn)\n"
+            "    await TABLE['x'].follow_up(conn)\n"
+        )
+        assert len(_reachable_road_calls(tree, "handler")) == 2
+        assert len(_reachable_road_calls(tree, "unused")) == 1
 
     def test_the_scan_sees_a_call_in_a_loop(self) -> None:
         tree = ast.parse(
@@ -1098,12 +1218,23 @@ class TestEveryJevHandlerMakesAtMostOneCall:
         assert set(_PAYLOADS) == set(JEV_HANDLERS)
 
 
+#: The excerpt the counted run of ``jev_ask`` asks the screen about. Invented.
+_EXCERPT = "Quiet Momentum in Invented Mid-Cap Shares"
+
 #: Each Jev kind's payload for the counted run above.
 _PAYLOADS: dict[str, dict[str, Any]] = {
     "jev_probe": {},
     "jev_regime": {"session": "2026-09-28", "set": "decision.regime", "version": 1},
     "jev_reask": {"request_id": 41},
     "jev_web_ingest": {"source": "pwb-readme"},
+    "jev_ask": {
+        "set": "guardrail.injection",
+        "version": 1,
+        "subject_type": "web_excerpt",
+        "subject_id": hashlib.sha256(_EXCERPT.encode("utf-8")).hexdigest(),
+        "source_id": 7,
+        **(jev_prereg.plans_in_force("guardrail.injection", 1) or {}),
+    },
 }
 
 
@@ -1214,11 +1345,49 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
         async def usable_pin(conn: Any) -> str:
             return "jev-1.13.0"
 
+        async def labelled(conn: Any, **label: Any) -> int:
+            return 1
+
         monkeypatch.setattr(web_fetch, "fetch", fetch)
         monkeypatch.setattr(flags, "jev_model", usable_pin)
         monkeypatch.setattr(jev_repo, "earliest_quarantined", none_quarantined)
         monkeypatch.setattr(jev_repo, "insert_documents", stored)
         monkeypatch.setattr(jev_repo, "quarantine_content", quarantined)
+        monkeypatch.setattr(jev_repo, "record_label_once", labelled)
+    elif kind == "jev_ask":
+        # The screen asked about a stored excerpt the code screen passes, so
+        # every follow-up the road's outcome can reach runs: a block's, by
+        # this call's row or the earliest on record, and the screen's own.
+        async def document(conn: Any, document_id: int) -> dict[str, Any]:
+            return {
+                "id": document_id,
+                "excerpt": _EXCERPT,
+                "content_sha256": _PAYLOADS["jev_ask"]["subject_id"],
+                "quarantined": False,
+                "fetched_at": datetime(2026, 9, 28, 6, tzinfo=UTC),
+            }
+
+        async def not_quarantined(conn: Any, content: str) -> None:
+            return None
+
+        async def not_flagged(conn: Any, content: str) -> None:
+            return None
+
+        async def quarantine(conn: Any, content: str, reason: str) -> int:
+            return 1
+
+        async def earliest_block(conn: Any, **kwargs: Any) -> int:
+            return 5
+
+        async def answered(conn: Any, request_id: int) -> dict[str, Any]:
+            return {"id": request_id, "model_answered": "jev-1.13.0"}
+
+        monkeypatch.setattr(jev_repo, "get_document", document)
+        monkeypatch.setattr(jev_repo, "content_quarantined", not_quarantined)
+        monkeypatch.setattr(jev_repo, "screen_flag", not_flagged)
+        monkeypatch.setattr(jev_repo, "quarantine_content", quarantine)
+        monkeypatch.setattr(jev_repo, "content_block_request", earliest_block)
+        monkeypatch.setattr(jev_repo, "get_request", answered)
     elif kind != "jev_probe":
         raise AssertionError(f"{kind} has no counted run: add one")
 
@@ -1254,6 +1423,7 @@ def test_the_programme_owns_the_forward_clock_and_the_reasks() -> None:
         "jev_regime",
         "jev_reask",
         "jev_web_ingest",
+        "jev_ask",
     }
     kinds, _ = _every_enqueue()
     for kind in (
@@ -1262,6 +1432,7 @@ def test_the_programme_owns_the_forward_clock_and_the_reasks() -> None:
         "jev_reask",
         "ingest_reference_bars",
         "jev_web_ingest",
+        "jev_ask",
     ):
         assert kinds.get(kind) == {"src/programme/jev_plan.py"}, (kind, kinds.get(kind))
     assert "ingest_reference_bars" in HANDLERS

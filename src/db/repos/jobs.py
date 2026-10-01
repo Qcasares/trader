@@ -172,10 +172,22 @@ async def complete(
 
 
 async def fail(
-    conn: asyncpg.Connection, job_id: uuid.UUID, error: str, retry: bool = True
+    conn: asyncpg.Connection,
+    job_id: uuid.UUID,
+    error: str,
+    retry: bool = True,
+    result: dict[str, Any] | None = None,
 ) -> str:
     """
     Mark a job failed. Requeues it if retries remain and ``retry`` is set.
+
+    ``result``, when given, is stored beside the error: what the failed
+    attempt recorded, for a handler whose attempt can write something before
+    it fails — the programme's ``jev_ask``, whose answer must say which plans
+    it was recorded under however the job ends. When it is not given the
+    column is left as it was, so an attempt that recorded nothing does not
+    erase an earlier attempt's record; every caller that passes none, the
+    worker's among them, leaves the column exactly as before.
 
     Returns the resulting status so the caller can log which happened.
     """
@@ -192,6 +204,9 @@ async def fail(
         UPDATE jobs
         SET status = $2,
             error = $3,
+            -- what this attempt recorded, or, given nothing, what an earlier
+            -- attempt did
+            result = COALESCE($4::jsonb, result),
             lease_expires_at = NULL,
             locked_by = NULL,
             finished_at = CASE WHEN $2 = 'failed' THEN NOW() ELSE NULL END,
@@ -204,6 +219,7 @@ async def fail(
         job_id,
         status,
         error[:4000],
+        None if result is None else json.dumps(result),
     )
     return status
 

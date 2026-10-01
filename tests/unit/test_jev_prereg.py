@@ -13,9 +13,11 @@ finds something; these tests are what make the choice unrevisable:
   the plan, so re-recording the golden after an edit still fails;
 * every constant of the plan is in the hash, so a number cannot move without
   moving it;
-* the functions of the plan — the split, the re-ask strata, the baseline rule —
-  are checked against copies written here independently, with their numbers as
-  literals, so a changed formula fails even where its constants did not move;
+* the functions of the plan — the split, the re-ask strata, the baseline rule,
+  and from phases C7 and C8 the sets' keyword baselines, the card's claims
+  check among them — are checked against copies written here independently,
+  with their numbers as literals, so a changed formula fails even where its
+  constants did not move;
 * the baseline rule is total over every equities state and never abstains, and
   reads only the regime state's own fields and labels.
 """
@@ -209,9 +211,28 @@ _MOVED: dict[str, Any] = {
     ),
 }
 
-#: The upper-case names in ``__all__`` that are not choices of the plan:
-#: ``ANY_OF`` is the rule's own syntax, and the golden is the plan's hash.
-_NOT_CHOICES = frozenset({"ANY_OF", "GOLDEN_PLAN_HASH"})
+#: The upper-case names in ``__all__`` that are choices of the set plans, not
+#: of the global plan: each has a move in ``_MOVED_SET``, held below to move a
+#: set plan's hash and leave the global plan's alone.
+_SET_PLAN_CHOICES = frozenset(
+    {
+        "ASSET_CLASS_KEYWORDS",
+        "CODE_SCREEN_BASELINE",
+        "KEYWORD_FALLBACK",
+        "KEYWORD_MATCHER",
+        "MECHANISM_KEYWORDS",
+        "PERFORMANCE_CLAIM_BASELINE",
+        "SET_PLAN_VERSIONS",
+        "SET_TARGETS",
+    }
+)
+
+#: The upper-case names in ``__all__`` that are not choices of the global plan:
+#: ``ANY_OF`` is the rule's own syntax, the goldens are hashes, and the set
+#: plans' choices are held by their own test below.
+_NOT_CHOICES = frozenset({"ANY_OF", "GOLDEN_PLAN_HASH", "GOLDEN_SET_PLAN_HASHES"}) | (
+    _SET_PLAN_CHOICES
+)
 
 
 class TestEveryConstantIsHashed:
@@ -599,3 +620,882 @@ class TestTheReaskSample:
     def test_a_negative_limit_is_refused(self) -> None:
         with pytest.raises(ValueError):
             jev_prereg.reask_sample([], limit=-1)
+
+
+# ---------------------------------------------------------------------------
+# The set plans (phases C7 and C8)
+# ---------------------------------------------------------------------------
+
+#: Every released set plan's hash, by set name, set version and plan version.
+#: Append-only, as ``RELEASED_PLAN_HASHES`` is: the module's
+#: ``GOLDEN_SET_PLAN_HASHES`` sits beside the plans, so re-recording it is the
+#: edit a failing hash test invites, and this history is what refuses it. A
+#: plan changed after answers were recorded under it is a new plan version,
+#: and those answers stay scored under the old one.
+RELEASED_SET_PLAN_HASHES: dict[tuple[str, int, int], str] = {
+    ("guardrail.injection", 1, 1): (
+        "2ba46f373fb98c836610d952cfa2d8737b53d8f30db6c2147d6c97bd14eff8f7"
+    ),
+    ("research.catalogue", 1, 1): (
+        "9ab204c87f7517215d9a63bac26cee7a853232d8dffba31c6f434ca0a5292deb"
+    ),
+    ("research.hypothesis", 1, 1): (
+        "1f7274a6d9d39de92d22806edf09d0da49c29804ca44ce64797873e36a07f050"
+    ),
+    ("guardrail.card", 1, 1): (
+        "a72753b5ea04d5af9392657928d777be19b9bbbbd9e013700f2e97e0d231956d"
+    ),
+}
+
+#: The sets with no plan of their own: the probe measures the vendor, not a
+#: set, and the regime is the global plan's ``regime`` section.
+WITHOUT_A_SET_PLAN = frozenset({"probe.connectivity", "decision.regime"})
+
+
+def _set_plan_release_problems(module: types.ModuleType) -> list[str]:
+    problems: list[str] = []
+    for (name, version), plan_version in module.SET_PLAN_VERSIONS.items():
+        computed = module.set_plan_hash(name, version)
+        golden = module.GOLDEN_SET_PLAN_HASHES.get((name, version))
+        if computed != golden:
+            problems.append(f"{name} v{version}'s plan hashes to {computed}")
+        released = RELEASED_SET_PLAN_HASHES.get((name, version, plan_version))
+        if released is None:
+            problems.append(
+                f"{name} v{version} plan v{plan_version} is not in "
+                "RELEASED_SET_PLAN_HASHES: append it"
+            )
+        elif computed != released:
+            problems.append(
+                f"{name} v{version} plan v{plan_version} hashes to {computed}, "
+                f"but was released as {released}: a released plan is frozen, so "
+                "bump its plan version and append a row"
+            )
+        released_versions = [
+            p for (n, v, p) in RELEASED_SET_PLAN_HASHES if (n, v) == (name, version)
+        ]
+        if released_versions and plan_version != max(released_versions):
+            problems.append(f"{name} v{version} is not at its newest plan")
+    if set(module.GOLDEN_SET_PLAN_HASHES) != set(module.SET_PLAN_VERSIONS):
+        problems.append("a golden without a plan, or a plan without a golden")
+    return problems
+
+
+class TestTheSetPlansAreTheirReleasedHashes:
+    def test_every_set_plan_is_its_released_hash(self) -> None:
+        assert _set_plan_release_problems(jev_prereg) == []
+
+    def test_editing_a_plan_with_its_golden_redone_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A keyword rule changed after answers were recorded under the plan, and
+        the golden re-recorded: the module agrees with itself, the released
+        history does not, and the change must be a new plan version.
+        """
+        source = MODULE.read_text(encoding="utf-8")
+        line = '("currencies", ("currency", "foreign exchange", "fx", "carry")),'
+        assert source.count(line) == 1
+        edited = line.replace('"carry")', '"carry", "peg")')
+        variant = _execute_variant(monkeypatch, source.replace(line, edited))
+        key = ("research.catalogue", 1)
+        variant.GOLDEN_SET_PLAN_HASHES = {
+            **variant.GOLDEN_SET_PLAN_HASHES,
+            key: variant.set_plan_hash(*key),
+        }
+        problems = _set_plan_release_problems(variant)
+        assert any("a released plan is frozen" in p for p in problems), problems
+
+    def test_a_bump_without_its_row_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = MODULE.read_text(encoding="utf-8")
+        line = '("guardrail.card", 1): 1,'
+        assert source.count(line) == 1
+        variant = _execute_variant(
+            monkeypatch, source.replace(line, '("guardrail.card", 1): 2,')
+        )
+        key = ("guardrail.card", 1)
+        variant.GOLDEN_SET_PLAN_HASHES = {
+            **variant.GOLDEN_SET_PLAN_HASHES,
+            key: variant.set_plan_hash(*key),
+        }
+        problems = _set_plan_release_problems(variant)
+        assert any("append it" in p for p in problems), problems
+
+    def test_released_set_plans_are_pairwise_distinct(self) -> None:
+        values = list(RELEASED_SET_PLAN_HASHES.values())
+        assert len(set(values)) == len(values)
+
+    def test_the_hash_is_of_the_plan_as_compact_sorted_json(self) -> None:
+        for name, version in jev_prereg.SET_PLAN_VERSIONS:
+            plan = jev_prereg.set_plan(name, version)
+            text = json.dumps(plan, sort_keys=True, separators=(",", ":"))
+            assert hashlib.sha256(text.encode()).hexdigest() == (
+                jev_prereg.set_plan_hash(name, version)
+            )
+            assert json.loads(json.dumps(plan, allow_nan=False)) == plan
+
+    def test_a_set_with_no_plan_has_no_hash_and_no_plans_in_force(self) -> None:
+        assert jev_prereg.set_plan("decision.regime", 1) is None
+        assert jev_prereg.set_plan_hash("decision.regime", 1) is None
+        assert jev_prereg.plans_in_force("decision.regime", 1) is None
+        assert jev_prereg.plans_in_force("research.catalogue", 2) is None
+
+    def test_plans_in_force_names_both_plans(self) -> None:
+        assert jev_prereg.plans_in_force("research.catalogue", 1) == {
+            "plan_version": jev_prereg.PLAN_VERSION,
+            "plan_hash": jev_prereg.plan_hash(),
+            "set_plan_version": 1,
+            "set_plan_hash": jev_prereg.set_plan_hash("research.catalogue", 1),
+        }
+
+    def test_the_global_plan_did_not_move(self) -> None:
+        """The set plans are beside the global plan, not in it."""
+        assert jev_prereg.PLAN_VERSION == 1
+        assert jev_prereg.plan_hash() == RELEASED_PLAN_HASHES[1]
+
+
+#: A different value for every choice of the set plans.
+_MOVED_SET: dict[str, Any] = {
+    "ASSET_CLASS_KEYWORDS": jev_prereg.ASSET_CLASS_KEYWORDS[1:],
+    "CODE_SCREEN_BASELINE": {**jev_prereg.CODE_SCREEN_BASELINE, "version": 2},
+    "KEYWORD_FALLBACK": "unclear",
+    "KEYWORD_MATCHER": "keywords/v2",
+    "MECHANISM_KEYWORDS": jev_prereg.MECHANISM_KEYWORDS[::-1],
+    "PERFORMANCE_CLAIM_BASELINE": {
+        **jev_prereg.PERFORMANCE_CLAIM_BASELINE,
+        "proximity": 41,
+    },
+    "SET_PLAN_VERSIONS": MappingProxyType(
+        {**jev_prereg.SET_PLAN_VERSIONS, ("guardrail.injection", 1): 2}
+    ),
+    "SET_TARGETS": MappingProxyType(
+        {
+            **jev_prereg.SET_TARGETS,
+            ("guardrail.card", "performance_claim"): {
+                **jev_prereg.SET_TARGETS[("guardrail.card", "performance_claim")],
+                "at_least": 0.95,
+            },
+        }
+    ),
+}
+
+
+def _set_plan_hashes() -> dict[tuple[str, int], str | None]:
+    return {
+        key: jev_prereg.set_plan_hash(*key) for key in jev_prereg.GOLDEN_SET_PLAN_HASHES
+    }
+
+
+class TestEverySetPlanChoiceIsHashed:
+    def test_every_choice_has_a_move(self) -> None:
+        constants = {name for name in jev_prereg.__all__ if name.isupper()}
+        assert _SET_PLAN_CHOICES <= constants
+        assert set(_MOVED_SET) == _SET_PLAN_CHOICES
+
+    @pytest.mark.parametrize("name", sorted(_MOVED_SET))
+    def test_moving_it_moves_a_set_plan_and_not_the_global_plan(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        before, global_before = _set_plan_hashes(), jev_prereg.plan_hash()
+        monkeypatch.setattr(jev_prereg, name, _MOVED_SET[name])
+        assert _set_plan_hashes() != before, name
+        assert jev_prereg.plan_hash() == global_before, name
+
+    def test_nothing_in_a_set_plan_can_be_changed_in_place(self) -> None:
+        card = ("guardrail.card", "performance_claim")
+        with pytest.raises(TypeError):
+            jev_prereg.SET_PLAN_VERSIONS[("guardrail.card", 1)] = 2  # type: ignore[index]
+        with pytest.raises(TypeError):
+            jev_prereg.SET_TARGETS[card]["at_least"] = 0.5  # type: ignore[index]
+        with pytest.raises(TypeError):
+            jev_prereg.CODE_SCREEN_BASELINE["version"] = 2  # type: ignore[index]
+        with pytest.raises(TypeError):
+            jev_prereg.PERFORMANCE_CLAIM_BASELINE["proximity"] = 1  # type: ignore[index]
+
+
+def _registered() -> dict[str, Any]:
+    from src.programme import jev_questions
+
+    return dict(jev_questions.REGISTRY)
+
+
+class TestEveryAskedSetHasItsPlan:
+    def test_every_registered_set_asking_a_question_has_a_plan(self) -> None:
+        """
+        A plan lands no later than its set: a registered set with no plan, or
+        a plan that does not cover each of its questions, fails here, so no
+        answer is ever recorded with no plan in force. The probe is exempt,
+        and the regime is the global plan's.
+        """
+        for name, question_set in _registered().items():
+            plan = jev_prereg.set_plan(name, question_set.version)
+            if name in WITHOUT_A_SET_PLAN:
+                assert plan is None, name
+                continue
+            assert plan is not None, f"{name} v{question_set.version} has no plan"
+            keys = [key for key, _ in question_set.questions]
+            assert sorted(plan["questions"]) == sorted(keys), name
+        assert "regime" in jev_prereg.global_plan()
+
+    def test_every_plan_is_of_a_registered_set(self) -> None:
+        registered = {(qs.name, qs.version) for qs in _registered().values()}
+        assert set(jev_prereg.SET_PLAN_VERSIONS) <= registered
+
+    def test_the_check_bites(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A set registered with no plan is found by the test above."""
+        monkeypatch.setattr(
+            jev_prereg,
+            "SET_PLAN_VERSIONS",
+            MappingProxyType(
+                {
+                    key: value
+                    for key, value in jev_prereg.SET_PLAN_VERSIONS.items()
+                    if key != ("guardrail.card", 1)
+                }
+            ),
+        )
+        with pytest.raises(AssertionError, match="guardrail.card v1 has no plan"):
+            self.test_every_registered_set_asking_a_question_has_a_plan()
+
+
+def _target_problems(plan: dict[str, Any], lane: str) -> list[str]:
+    """How a plan's targets fall short of its lane's, if they do."""
+    lane_target = jev_prereg.LANE_TARGETS[lane]
+    problems = []
+    for key, question in plan["questions"].items():
+        if question["statistic"] != lane_target["statistic"]:
+            problems.append(f"{key} measures {question['statistic']}")
+        if question["bound"] != lane_target["bound"]:
+            problems.append(f"{key} is bounded by {question['bound']}")
+        if question["at_least"] < lane_target["at_least"]:
+            problems.append(f"{key}'s target is below its lane's")
+    return problems
+
+
+class TestTheTargets:
+    def test_a_set_plan_may_raise_a_target_never_lower_it(self) -> None:
+        """
+        The lane's target is a floor: the same statistic, read the same way —
+        a Wilson lower bound at the gate level — and at least as high.
+        """
+        for name, question_set in _registered().items():
+            plan = jev_prereg.set_plan(name, question_set.version)
+            if plan is not None:
+                assert _target_problems(plan, question_set.lane) == [], name
+
+    def test_the_target_check_bites(self) -> None:
+        plan = jev_prereg.set_plan("guardrail.card", 1)
+        assert plan is not None
+        plan["questions"]["performance_claim"]["at_least"] = 0.85
+        assert _target_problems(plan, "guardrail") == [
+            "performance_claim's target is below its lane's"
+        ]
+
+    def test_the_design_targets(self) -> None:
+        """Covered precision of at least 0.90 for the guardrails, covered
+        accuracy of at least 0.80 for the research sets."""
+        expected = {
+            "guardrail.injection": ("covered_precision_of_the_acting_class", 0.90),
+            "guardrail.card": ("covered_precision_of_the_acting_class", 0.90),
+            "research.catalogue": ("covered_accuracy", 0.80),
+            "research.hypothesis": ("covered_accuracy", 0.80),
+        }
+        for name, (statistic, at_least) in expected.items():
+            plan = jev_prereg.set_plan(name, 1)
+            assert plan is not None
+            for question in plan["questions"].values():
+                assert (question["statistic"], question["at_least"]) == (
+                    statistic,
+                    at_least,
+                ), name
+
+    def test_the_acting_class_is_an_answer_its_question_can_give(self) -> None:
+        """
+        A guardrail acts on ``true`` — a quarantine, a refusal — so its
+        precision is measured on ``true``; a research answer acts on nothing.
+        """
+        for name, question_set in _registered().items():
+            plan = jev_prereg.set_plan(name, question_set.version)
+            if plan is None:
+                continue
+            for key, question in question_set.questions:
+                acting = plan["questions"][key]["acting_class"]
+                if question_set.lane == "guardrail":
+                    assert question["type"] == "noul" and acting == "true", key
+                else:
+                    assert acting is None, key
+
+
+class TestTheKeywordBaselinesAreWhatTheyName:
+    def test_the_injection_baseline_is_the_code_screen_v1(self) -> None:
+        """
+        Its rules pinned by their hash: the plan names the code screen as it
+        is, and a new version of the screen is a new plan.
+        """
+        from src.programme import web_sources
+
+        plan = jev_prereg.set_plan("guardrail.injection", 1)
+        assert plan is not None
+        baseline = plan["questions"]["addressed_to_ai"]["keyword_baseline"]
+        assert baseline == {
+            "rule": "web_sources.code_screen",
+            "version": web_sources.CODE_SCREEN_VERSION,
+            "rules_sha256": web_sources.code_screen_sha256(),
+            "true_when": "a rule fires",
+            "reads": "excerpt",
+        }
+        assert baseline["rules_sha256"] == web_sources.GOLDEN_CODE_SCREEN_SHA256
+
+    def test_the_card_baseline_is_the_claims_check(self) -> None:
+        from src.programme import claims
+
+        plan = jev_prereg.set_plan("guardrail.card", 1)
+        assert plan is not None
+        baseline = plan["questions"]["performance_claim"]["keyword_baseline"]
+        assert baseline["rule"] == "claims.find_performance_claim"
+        assert baseline["reads"] == "title"
+        assert tuple(baseline["terms"]) == claims.PERFORMANCE_TERMS
+        assert baseline["proximity"] == claims._PROXIMITY
+        assert baseline["number"] == claims._NUMBER.pattern
+
+    def test_the_research_sets_read_the_same_rules_from_their_own_text(
+        self,
+    ) -> None:
+        catalogue = jev_prereg.set_plan("research.catalogue", 1)
+        hypothesis = jev_prereg.set_plan("research.hypothesis", 1)
+        assert catalogue is not None and hypothesis is not None
+        for key in ("asset_class", "mechanism"):
+            mine = dict(catalogue["questions"][key]["keyword_baseline"])
+            theirs = dict(hypothesis["questions"][key]["keyword_baseline"])
+            assert (mine.pop("reads"), theirs.pop("reads")) == ("excerpt", "title")
+            assert mine == theirs
+
+
+#: The card check's rule, ``claims.find_performance_claim``, written out here
+#: as literals and read by hand, apart from the module: its terms, how far a
+#: term may be from a number, and what a number is. The plan hashes the
+#: module's constants (``jev_prereg.PERFORMANCE_CLAIM_BASELINE``); this copy
+#: holds what the rule does with them, which no hash sees.
+CLAIM_TERMS_AS_WRITTEN = (
+    "sharpe",
+    "sortino",
+    "calmar",
+    "cagr",
+    "return",
+    "returns",
+    "drawdown",
+    "alpha",
+    "profit",
+    "profitable",
+    "pnl",
+    "p&l",
+    "win rate",
+    "hit rate",
+    "annualised",
+    "annualized",
+    "outperform",
+)
+CLAIM_REACH_AS_WRITTEN = 40
+
+
+def _numbers_as_written(text: str) -> list[tuple[int, int]]:
+    """
+    Every number in ``text``, as spans, read left to right without overlap: a
+    run of decimal digits, a minus before it if one is there, one decimal part
+    after a point or a comma if digits follow it, and a percent sign after it
+    if one is there.
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        start = i
+        if text[i] == "-" and i + 1 < n and text[i + 1].isdecimal():
+            i += 1
+        if not text[i].isdecimal():
+            i = start + 1
+            continue
+        while i < n and text[i].isdecimal():
+            i += 1
+        if i + 1 < n and text[i] in ".," and text[i + 1].isdecimal():
+            i += 1
+            while i < n and text[i].isdecimal():
+                i += 1
+        if i < n and text[i] == "%":
+            i += 1
+        spans.append((start, i))
+    return spans
+
+
+def _claim_as_written(text: str) -> str | None:
+    """
+    The first number whose surroundings — forty characters either side of it,
+    in the lowercased text — hold a term anywhere, a longer word holding one
+    included, as those surroundings of the text as written, stripped; or
+    ``None``. Counted in the lowercased text, which is how the rule counts.
+    """
+    lowered = text.lower()
+    for start, end in _numbers_as_written(lowered):
+        before = max(0, start - CLAIM_REACH_AS_WRITTEN)
+        near = lowered[before : end + CLAIM_REACH_AS_WRITTEN]
+        if any(term in near for term in CLAIM_TERMS_AS_WRITTEN):
+            return text[before : end + CLAIM_REACH_AS_WRITTEN].strip()
+    return None
+
+
+#: What the card baseline decides about each of these invented titles — a
+#: claim found or not — as each plan version of ``guardrail.card`` registered
+#: it, by plan version. A change to what the rule decides is a new plan
+#: version with a row of its own here, and its hash appended to
+#: ``RELEASED_SET_PLAN_HASHES``; re-recording a released row, the edit a
+#: failing test invites, moves the baseline answers were already measured
+#: against.
+CARD_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, bool], ...]] = {
+    1: (
+        ("14% Annualised Returns From Invented Carry", True),
+        ("Invented Carry Returns 14%", True),
+        ("A Sharpe of 1.2 in Fictional Bond Futures", True),
+        ("Drawdowns Under -3% in Made-Up Markets", True),
+        ("Profitability of 2 Invented Signals", True),
+        ("Unprofitable Carry Over 12 Imaginary Pairs", True),
+        ("Alphabet Soup of 7 Invented Factors", True),
+        ("Win Rate Near 60 in Fictional Pairs", True),
+        ("PNL Of 3,5 On Invented Lots", True),
+        ("Return" + "x" * 34 + "12", True),
+        ("Return" + "x" * 35 + "12", False),
+        ("12" + "x" * 34 + "return", True),
+        ("12" + "x" * 35 + "return", False),
+        ("In 1999" + "x" * 45 + " a Sharpe of 2", True),
+        ("Carry in 12 Fictional Markets", False),
+        ("Momentum Over 2026 and Beyond", False),
+        ("Returns Without a Figure", False),
+        ("Invented Value in Mid-Caps", False),
+        ("--Seven Returns--", False),
+    ),
+}
+
+
+class TestTheCardBaselineIsPinnedByWhatItDoes:
+    """
+    C7+C8's review: the card's plan hashed the claims check's terms, reach and
+    number pattern, and nothing held how the check applies them, so a rule
+    that read a term only before its number left the plan's hash golden and
+    every test green, and a card answer recorded under plan version 1 would
+    have been measured against a different baseline still calling itself
+    version 1. The design's rule for every keyword baseline holds here too:
+    tested against a copy written as literals. And its verdicts on invented
+    titles are recorded under the plan version that registered them.
+    """
+
+    def test_the_copy_names_the_constants_the_plan_hashes(self) -> None:
+        plan = jev_prereg.set_plan("guardrail.card", 1)
+        assert plan is not None
+        baseline = plan["questions"]["performance_claim"]["keyword_baseline"]
+        assert tuple(baseline["terms"]) == CLAIM_TERMS_AS_WRITTEN
+        assert baseline["proximity"] == CLAIM_REACH_AS_WRITTEN
+
+    def test_the_check_is_the_copy_written_here(self) -> None:
+        """
+        A seeded corpus of invented titles built to sit on the rule's edges:
+        a term before its number and after it, at the reach and one beyond,
+        inside a longer word, in any case, with numbers negative, decimal by a
+        point or a comma, in percent, run together, and in digits of other
+        scripts, which the rule reads as digits.
+        """
+        from src.programme import claims
+
+        rng = random.Random(29)
+        words = [
+            "Invented",
+            "Carry",
+            "Momentum",
+            "in",
+            "Fictional",
+            "Bond",
+            "Futures",
+            "Imaginary",
+            *CLAIM_TERMS_AS_WRITTEN,
+            "Returnable",
+            "Drawdowns",
+            "Alphabet",
+            "Profitability",
+            "Unprofitable",
+            "Outperformance",
+            "Sharpening",
+            "Hit Rates",
+            "PnL",
+            "İstanbul",
+        ]
+        numbers = [
+            "12",
+            "-3",
+            "0.5",
+            "1,5",
+            "14%",
+            "-2.75%",
+            "2026",
+            "1,234,567",
+            "3-4",
+            "--7",
+            "12%%",
+            "٣٤",
+            "１２",
+        ]
+        fillers = ["x" * width for width in range(30, 45)]
+        found = {"claim": 0, "none": 0}
+        for _ in range(5_000):
+            pieces = [
+                rng.choice(rng.choice((words, words, numbers, fillers)))
+                for _ in range(rng.randint(1, 6))
+            ]
+            title = rng.choice([" ", "-", ", ", ""]).join(pieces)
+            title = rng.choice([title, title.title(), title.upper()])
+            claim = claims.find_performance_claim(title)
+            assert claim == _claim_as_written(title), title
+            found["claim" if claim is not None else "none"] += 1
+        assert min(found.values()) > 500, found
+
+    @pytest.mark.parametrize(
+        ("title", "verdict"),
+        CARD_VERDICTS_AS_REGISTERED[
+            jev_prereg.SET_PLAN_VERSIONS[("guardrail.card", 1)]
+        ],
+    )
+    def test_it_decides_as_its_plan_version_registered(
+        self, title: str, verdict: bool
+    ) -> None:
+        from src.programme import claims
+
+        assert (claims.find_performance_claim(title) is not None) is verdict
+        assert (_claim_as_written(title) is not None) is verdict
+
+    def test_every_card_plan_version_has_its_verdicts(self) -> None:
+        version = jev_prereg.SET_PLAN_VERSIONS[("guardrail.card", 1)]
+        released = {
+            p for (n, v, p) in RELEASED_SET_PLAN_HASHES if n == "guardrail.card"
+        }
+        assert version in CARD_VERDICTS_AS_REGISTERED
+        assert set(CARD_VERDICTS_AS_REGISTERED) == released
+
+
+#: The design's ordered keyword rules (design part C7), written here as
+#: literals, apart from the module: the module's data is checked against
+#: these, not against itself. "Crypto words" are the build's list;
+#: ``diversif*`` is the design's stem.
+ASSET_CLASS_RULES_AS_WRITTEN = (
+    (
+        "cryptocurrencies",
+        ("crypto", "cryptocurrency", "bitcoin", "ethereum", "blockchain"),
+    ),
+    (
+        "bonds",
+        (
+            "bond",
+            "treasury",
+            "yield",
+            "fixed income",
+            "sovereign",
+            "credit",
+            "term premium",
+            "interest rate",
+        ),
+    ),
+    ("commodities", ("commodity", "gold", "silver", "oil", "crude", "metal", "grain")),
+    ("currencies", ("currency", "foreign exchange", "fx", "carry")),
+    ("derivatives", ("option", "volatility", "vix", "covered call", "derivative")),
+    (
+        "multi_asset",
+        ("multi-asset", "asset allocation", "risk parity", "tactical", "portfolio of"),
+    ),
+    ("equities", ("equity", "stock", "share", "company", "capm", "size effect")),
+)
+MECHANISM_RULES_AS_WRITTEN = (
+    ("trend_or_momentum", ("momentum", "trend")),
+    ("reversal", ("reversal", "mean reversion", "overreaction")),
+    ("value", ("value", "book-to-market")),
+    ("carry", ("carry", "yield")),
+    ("size", ("size", "small")),
+    ("low_risk", ("low volatility", "low beta", "betting against beta")),
+    ("seasonality", ("season", "calendar", "month", "weekday", "holiday")),
+    ("event", ("auction", "earnings", "announcement", "intervention")),
+    ("sentiment", ("media", "tone", "sentiment", "news", "attention")),
+    (
+        "allocation",
+        ("risk parity", "optimisation", "optimization", "allocation", "diversif*"),
+    ),
+)
+
+#: Every keyword's second form, written out: its last word that is not "of"
+#: in the plural, by the rule the module states — a consonant and ``y``
+#: become ``ies``; ``s``, ``x``, ``z``, ``ch`` or ``sh`` takes ``es``;
+#: anything else ``s`` — for the whole list, so a rule the data broke would
+#: show here. The first build's docs claimed a plural rule its data kept for
+#: five keywords.
+PLURALS = {
+    "crypto": "cryptos",
+    "cryptocurrency": "cryptocurrencies",
+    "bitcoin": "bitcoins",
+    "ethereum": "ethereums",
+    "blockchain": "blockchains",
+    "bond": "bonds",
+    "treasury": "treasuries",
+    "yield": "yields",
+    "fixed income": "fixed incomes",
+    "sovereign": "sovereigns",
+    "credit": "credits",
+    "term premium": "term premiums",
+    "interest rate": "interest rates",
+    "commodity": "commodities",
+    "gold": "golds",
+    "silver": "silvers",
+    "oil": "oils",
+    "crude": "crudes",
+    "metal": "metals",
+    "grain": "grains",
+    "currency": "currencies",
+    "foreign exchange": "foreign exchanges",
+    "fx": "fxes",
+    "carry": "carries",
+    "option": "options",
+    "volatility": "volatilities",
+    "vix": "vixes",
+    "covered call": "covered calls",
+    "derivative": "derivatives",
+    "multi-asset": "multi-assets",
+    "asset allocation": "asset allocations",
+    "risk parity": "risk parities",
+    "tactical": "tacticals",
+    "portfolio of": "portfolios of",
+    "equity": "equities",
+    "stock": "stocks",
+    "share": "shares",
+    "company": "companies",
+    "capm": "capms",
+    "size effect": "size effects",
+    "momentum": "momentums",
+    "trend": "trends",
+    "reversal": "reversals",
+    "mean reversion": "mean reversions",
+    "overreaction": "overreactions",
+    "value": "values",
+    "book-to-market": "book-to-markets",
+    "size": "sizes",
+    "small": "smalls",
+    "low volatility": "low volatilities",
+    "low beta": "low betas",
+    "betting against beta": "betting against betas",
+    "season": "seasons",
+    "calendar": "calendars",
+    "month": "months",
+    "weekday": "weekdays",
+    "holiday": "holidays",
+    "auction": "auctions",
+    "earnings": "earningses",
+    "announcement": "announcements",
+    "intervention": "interventions",
+    "media": "medias",
+    "tone": "tones",
+    "sentiment": "sentiments",
+    "news": "newses",
+    "attention": "attentions",
+    "optimisation": "optimisations",
+    "optimization": "optimizations",
+    "allocation": "allocations",
+}
+
+_KEYWORDS = sorted(
+    {
+        keyword
+        for rules in (ASSET_CLASS_RULES_AS_WRITTEN, MECHANISM_RULES_AS_WRITTEN)
+        for _, keywords in rules
+        for keyword in keywords
+    }
+)
+
+
+def _holds(keyword: str, text: str) -> bool:
+    """
+    Whether ``text`` holds ``keyword``, worked out again here with a plain
+    scan of whole words and the plural table above, apart from the module.
+    """
+    import re
+
+    words = [w for w in re.split(r"[^\w]+|_", text.casefold()) if w]
+    if keyword.endswith("*"):
+        return any(w.startswith(keyword[:-1]) for w in words)
+    for form in (keyword, PLURALS[keyword]):
+        parts = re.split(r"[ -]", form)
+        for i in range(len(words) - len(parts) + 1):
+            if words[i : i + len(parts)] == parts:
+                return True
+    return False
+
+
+def _label(rules: Any, text: str) -> str:
+    for name, keywords in rules:
+        if any(_holds(keyword, text) for keyword in keywords):
+            return name
+    return "insufficient_evidence"
+
+
+#: Two labels the cases below name often.
+_MOMENTUM = "trend_or_momentum"
+_NO_KEYWORD = "insufficient_evidence"
+
+
+class TestTheKeywordRules:
+    def test_the_rules_are_the_designs_as_written(self) -> None:
+        assert jev_prereg.ASSET_CLASS_KEYWORDS == ASSET_CLASS_RULES_AS_WRITTEN
+        assert jev_prereg.MECHANISM_KEYWORDS == MECHANISM_RULES_AS_WRITTEN
+        assert jev_prereg.KEYWORD_FALLBACK == "insufficient_evidence"
+
+    def test_each_rules_labels_are_its_questions_options(self) -> None:
+        """
+        In the catalogue's own vocabulary, so a baseline's answer and Jev's
+        are compared option for option; the fallback is the escape, and no
+        rule answers ``other_mechanism``.
+        """
+        from src.programme.jev_questions import (
+            ASSET_CLASS_CRITERIA,
+            MECHANISM_CRITERIA,
+            RESEARCH_CATALOGUE,
+        )
+
+        escapes = RESEARCH_CATALOGUE.escape_options
+        for rules, criteria, key in (
+            (jev_prereg.ASSET_CLASS_KEYWORDS, ASSET_CLASS_CRITERIA, "asset_class"),
+            (jev_prereg.MECHANISM_KEYWORDS, MECHANISM_CRITERIA, "mechanism"),
+        ):
+            labels = [label for label, _ in rules]
+            assert len(labels) == len(set(labels))
+            assert set(labels) <= set(criteria) - {escapes[key], "other_mechanism"}
+            assert jev_prereg.KEYWORD_FALLBACK == escapes[key]
+        asset_options = set(ASSET_CLASS_CRITERIA) - {escapes["asset_class"]}
+        assert {label for label, _ in jev_prereg.ASSET_CLASS_KEYWORDS} == asset_options
+
+    def test_every_keyword_is_lowercase_and_spelt_plainly(self) -> None:
+        for keyword in _KEYWORDS:
+            assert keyword == keyword.casefold().strip(), keyword
+            assert all(
+                ch.isalpha() or ch in " -" for ch in keyword.removesuffix("*")
+            ), keyword
+
+    @pytest.mark.parametrize("keyword", _KEYWORDS)
+    def test_the_plural_is_formed_by_the_stated_rule(self, keyword: str) -> None:
+        if keyword.endswith("*"):
+            assert jev_prereg.keyword_forms(keyword) == (keyword,)
+            return
+        assert jev_prereg.keyword_forms(keyword) == (keyword, PLURALS[keyword])
+
+    def test_the_table_covers_the_whole_list(self) -> None:
+        assert set(PLURALS) == {k for k in _KEYWORDS if not k.endswith("*")}
+        assert [k for k in _KEYWORDS if k.endswith("*")] == ["diversif*"]
+
+    @pytest.mark.parametrize("keyword", _KEYWORDS)
+    def test_every_form_is_found_as_whole_words(self, keyword: str) -> None:
+        """
+        Each form in a title, capitalised, its words apart by a space or a
+        hyphen, is found; inside a longer word it is not.
+        """
+        rules = (("found", (keyword,)),)
+        for form in jev_prereg.keyword_forms(keyword):
+            stem = form.removesuffix("*")
+            written = stem.title()
+            spellings = (written, written.replace(" ", "-"), written.replace("-", " "))
+            for spelling in spellings:
+                title = f"An Invented {spelling} Study"
+                assert jev_prereg.keyword_label(rules, title) == "found", title
+            inside = f"Xq{stem}"
+            assert jev_prereg.keyword_label(rules, inside) != "found", inside
+            if not form.endswith("*"):
+                after = f"{stem}qx"
+                assert jev_prereg.keyword_label(rules, after) != "found", after
+
+    def test_the_stem_is_found_in_any_ending(self) -> None:
+        rules = (("allocation", ("diversif*",)),)
+        for title in ("Diversification Premia", "A Diversified Book", "Diversifying"):
+            assert jev_prereg.keyword_label(rules, title) == "allocation", title
+        assert jev_prereg.keyword_label(rules, "Undiversified") != "allocation"
+
+    def test_turmoil_in_the_soil_holds_no_oil(self) -> None:
+        """
+        Whole words, at both ends: the first build's matching read "oil" in
+        "Turmoil" and "Soil".
+        """
+        asset = jev_prereg.ASSET_CLASS_KEYWORDS
+        assert jev_prereg.keyword_label(asset, "Turmoil in the Soil") == (
+            "insufficient_evidence"
+        )
+        assert jev_prereg.keyword_label(asset, "Oil after the Turmoil") == (
+            "commodities"
+        )
+
+    @pytest.mark.parametrize(
+        ("title", "asset_class", "mechanism"),
+        [
+            ("Momentum in Invented Commodity Futures", "commodities", _MOMENTUM),
+            ("Commodities Momentum, Invented", "commodities", _MOMENTUM),
+            ("Bitcoin Overnight Drift", "cryptocurrencies", _NO_KEYWORD),
+            ("Yield Curve Carry in Invented Markets", "bonds", "carry"),
+            ("Fixed-Income Value, Invented", "bonds", "value"),
+            ("Multi Asset Trend Following", "multi_asset", _MOMENTUM),
+            ("Portfolios of Risk Parity", "multi_asset", "allocation"),
+            ("Diversification Without Forecasts", _NO_KEYWORD, "allocation"),
+            ("Small Firms in an Invented Market", _NO_KEYWORD, "size"),
+            ("Pre-Holiday Drift", _NO_KEYWORD, "seasonality"),
+            ("FX Carry Revisited", "currencies", "carry"),
+            ("Betting Against Beta, Again", _NO_KEYWORD, "low_risk"),
+            ("Goldman Rotation", _NO_KEYWORD, _NO_KEYWORD),
+            ("Seasonality in Stock Returns", "equities", _NO_KEYWORD),
+        ],
+    )
+    def test_the_first_rule_that_holds_gives_the_label(
+        self, title: str, asset_class: str, mechanism: str
+    ) -> None:
+        """
+        Order decides: a title naming a bond's yield and a currency's carry is
+        a bond title, since bonds come first. And whole words decide too:
+        "Goldman" holds no gold, and "Seasonality" no season.
+        """
+        assert jev_prereg.keyword_label(jev_prereg.ASSET_CLASS_KEYWORDS, title) == (
+            asset_class
+        )
+        assert jev_prereg.keyword_label(jev_prereg.MECHANISM_KEYWORDS, title) == (
+            mechanism
+        )
+
+    def test_it_is_pure_and_deterministic(self) -> None:
+        """The text alone decides: the same text, the same label, in any order."""
+        rng = random.Random(7)
+        words = [k for k in _KEYWORDS if not k.endswith("*")] + ["invented", "drift"]
+        titles = [
+            " ".join(rng.choice(words) for _ in range(rng.randint(1, 6)))
+            for _ in range(500)
+        ]
+        rules = jev_prereg.MECHANISM_KEYWORDS
+        first = [jev_prereg.keyword_label(rules, title) for title in titles]
+        shuffled = list(enumerate(titles))
+        rng.shuffle(shuffled)
+        for index, title in shuffled:
+            assert jev_prereg.keyword_label(rules, title) == first[index]
+
+    def test_the_rule_is_read_as_a_copy_written_here_reads_it(self) -> None:
+        """
+        The label worked out again here, from the literal rules, the plural
+        table and a plain scan of whole words, agrees with the module's on a
+        seeded corpus of invented titles built from the keywords themselves,
+        their plurals, and words that hold a keyword inside them.
+        """
+        rng = random.Random(11)
+        words = [k for k in _KEYWORDS if not k.endswith("*")]
+        words += [PLURALS[k] for k in words]
+        words += ["Diversification", "Turmoil", "Soil", "Goldman", "Seasonality"]
+        for _ in range(2_000):
+            title = rng.choice([" ", "-", ", "]).join(
+                rng.choice(words).title() for _ in range(rng.randint(1, 5))
+            )
+            for rules in (ASSET_CLASS_RULES_AS_WRITTEN, MECHANISM_RULES_AS_WRITTEN):
+                assert jev_prereg.keyword_label(rules, title) == _label(rules, title), (
+                    title
+                )

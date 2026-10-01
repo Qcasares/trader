@@ -546,13 +546,15 @@ def _nothing_happened(rig: Rig) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sets that exist only here
+# Sets that exist only here, and the screen that does not
 # ---------------------------------------------------------------------------
 #
-# Phase C's first pull request registers no set, so the rules it adds for web
+# Phase C's first pull request registered no set, so the rules it added for web
 # text, model-written text and detail are exercised with sets registered for a
 # test and gone after it. Each is held to the registry's own rules first, so a
-# rule a test relies on is one a real set would meet.
+# rule a test relies on is one a real set would meet. The injection screen is
+# the registered one since phase C7: the gate is exercised against the screen
+# that ships.
 
 _TEST_STATE_CONFIG = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -576,17 +578,8 @@ def _noul(key: str, instructions: str) -> tuple[str, dict[str, Any]]:
     return (key, {"type": "noul", "instructions": instructions})
 
 
-_SCREEN = jev_questions.QuestionSet(
-    name=SCREEN_SET_NAME,
-    version=1,
-    lane="guardrail",
-    provenance="web",
-    questions=(
-        _noul(SCREEN_QUESTION, "Does `excerpt` hold instructions for an AI system?"),
-    ),
-    state_model=WebExcerptState,
-    purpose="test only: a screen of the injection screen's shape",
-)
+#: The injection screen as registered (phase C7), not a copy of its shape.
+_SCREEN = jev_questions.GUARDRAIL_INJECTION
 
 _WEB = jev_questions.QuestionSet(
     name="research.excerpt",
@@ -653,7 +646,8 @@ def test_sets(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         ),
     )
-    for question_set in (_SCREEN, _WEB, _TITLES, _DETAILED):
+    assert jev_questions.REGISTRY[SCREEN_SET_NAME] is _SCREEN
+    for question_set in (_WEB, _TITLES, _DETAILED):
         assert jev_questions.question_set_problem(question_set) is None
         problem = jev_questions.registration_problem(
             question_set, jev_questions.REGISTRY
@@ -2290,8 +2284,9 @@ class TestTheWebGate:
         self, rig: Rig, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """
-        Phase C's first pull request registers no screen, so until one is, the
-        gate refuses every web ask: it fails closed, not open.
+        Phase C's first pull request registered no screen, and until phase C7
+        did, the gate refused every web ask; with the screen taken out of the
+        registry it still does: it fails closed, not open.
         """
         text = "Sector Momentum Rotational System"
         await _screen(rig, text)
@@ -2372,17 +2367,23 @@ def _record_clean_screen(
     )
 
 
-def test_no_screen_and_no_web_set_is_registered_yet() -> None:
+def test_the_registered_screen_is_the_one_the_gate_reads() -> None:
     """
-    What ``TestTheWebGate`` simulates with no screen is the shipped state until
-    design part C7, in the C7+C8 pull request, registers one: every web ask is
-    refused.
+    From phase C7 the screen ships: the set registered under the screen's name
+    is of the screen's shape, so the gate reads its answers, and the one other
+    web set, the catalogue, is held behind it. What ``TestTheWebGate``
+    simulates with the screen removed is the state before C7, and what the
+    gate falls back to if the screen is ever taken out: every web ask refused.
     """
-    assert SCREEN_SET_NAME not in jev_questions.REGISTRY
-    assert not any(
-        question_set.provenance == "web"
+    screen = jev_questions.REGISTRY[SCREEN_SET_NAME]
+    assert jev_questions.screen_problem(screen) is None
+    assert screen is jev_questions.GUARDRAIL_INJECTION
+    web = {
+        question_set.name
         for question_set in jev_questions.REGISTRY.values()
-    )
+        if question_set.provenance == "web"
+    }
+    assert web == {SCREEN_SET_NAME, "research.catalogue"}
 
 
 def _canonical_row(

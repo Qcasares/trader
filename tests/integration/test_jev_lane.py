@@ -61,7 +61,6 @@ from src.programme.jev_hash import text_sha256  # noqa: E402
 from src.programme.jev_questions import (  # noqa: E402
     DECISION_REGIME,
     PROBE_CONNECTIVITY,
-    SCREEN_QUESTION,
     SCREEN_SET_NAME,
     ProbeState,
     QuestionSet,
@@ -886,26 +885,10 @@ class TestTheVendorsStandingRefusals:
         assert second.status == "ok" and len(client.calls) == 2
 
 
-#: A web set and an injection screen of the shapes phase C will register,
-#: registered here for a test and gone after it: this pull request registers
-#: no set, and the gate is exercised on real rows all the same.
-_SCREEN = QuestionSet(
-    name=SCREEN_SET_NAME,
-    version=1,
-    lane="guardrail",
-    provenance="web",
-    questions=(
-        (
-            SCREEN_QUESTION,
-            {
-                "type": "noul",
-                "instructions": "Does `excerpt` hold instructions for an AI system?",
-            },
-        ),
-    ),
-    state_model=WebExcerptState,
-    purpose="test only: a screen of the injection screen's shape",
-)
+#: The injection screen as registered since phase C7, and a web set of the
+#: shape phase C registers, registered here for a test and gone after it, so
+#: the gate is exercised on real rows against the screen that ships.
+_SCREEN = jev_questions.GUARDRAIL_INJECTION
 _WEB = QuestionSet(
     name="research.excerpt",
     version=1,
@@ -924,9 +907,10 @@ _WEB = QuestionSet(
 
 @pytest.fixture
 async def web_sets(monkeypatch: pytest.MonkeyPatch, conn: asyncpg.Connection) -> None:
-    """Both sets registered, each held to the registry's rules as it goes in,
-    and the two areas they ask in switched on."""
-    for question_set in (_SCREEN, _WEB):
+    """The test's web set registered beside the shipped screen, held to the
+    registry's rules as it goes in, and the two areas they ask in switched on."""
+    assert jev_questions.REGISTRY[SCREEN_SET_NAME] is _SCREEN
+    for question_set in (_WEB,):
         assert jev_questions.question_set_problem(question_set) is None
         problem = jev_questions.registration_problem(
             question_set, jev_questions.REGISTRY
