@@ -1838,24 +1838,28 @@ async def subject_texts(
 
 
 async def subjects_to_label(
-    conn: asyncpg.Connection, *, subject_type: str, include_quarantined: bool
+    conn: asyncpg.Connection, *, subject_type: str
 ) -> list[dict[str, Any]]:
     """
     Every subject of ``subject_type`` a labeller could be asked to label, by
-    its address, with its text: stored web content, the earliest document's
-    excerpt, and none quarantined under any source unless
-    ``include_quarantined``; or each title of a hypothesis the programme's
-    model wrote within ``jev_questions.TITLE_MAX_CHARS``, the titles the sets
-    ask about. In address order. Nothing about any answer is read, so what a
-    labeller is shown cannot depend on what Jev said.
+    its address, with its text: all stored web content, each once with its
+    earliest document's excerpt, quarantined or not; or each title of a
+    hypothesis the programme's model wrote within
+    ``jev_questions.TITLE_MAX_CHARS``, the titles the sets ask about. In
+    address order.
+
+    Nothing about any answer is read, and neither is whether or why content
+    is quarantined: a quarantine may have been an answer — the injection
+    screen's ``true`` — or a vendor's block, and a population chosen by one
+    would be chosen by what Jev or the vendor said. What the export leaves
+    out is decided from the text alone, by the harness
+    (``jev_eval.export_labels``).
     """
     if subject_type == "web_excerpt":
-        having = "" if include_quarantined else "HAVING NOT bool_or(quarantined) "
         rows = await conn.fetch(
             "SELECT content_sha256 AS subject_id, "
             "(array_agg(excerpt ORDER BY id))[1] AS text "
-            f"FROM web_documents GROUP BY content_sha256 {having}"
-            "ORDER BY content_sha256"
+            "FROM web_documents GROUP BY content_sha256 ORDER BY content_sha256"
         )
     elif subject_type == "hypothesis_title":
         rows = await conn.fetch(

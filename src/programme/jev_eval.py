@@ -79,7 +79,10 @@ prints "not measured: no labelled items".
 
 ``labels export --blind`` prints the subjects a labeller is to label, with
 their text and with no answer column, the sample chosen by the subjects'
-content addresses and never by any answer. ``labels import`` records a file of
+content addresses and never by any answer: every stored subject but the web
+text the code screen flags, content Jev's own screen quarantined among them,
+since leaving that out would choose the subjects by what Jev said
+(:func:`export_labels`). ``labels import`` records a file of
 labels only if every row names the registered set, version and question, an
 option that is not the escape, and a subject that is stored; ``labels copy``
 carries one version's labels to the registered version only where the
@@ -1750,22 +1753,33 @@ async def export_labels(
 ) -> str:
     """
     The subjects a labeller is to label for one question, as CSV with
-    :data:`EXPORT_COLUMNS` and no answer column: every subject the set is
-    asked about, in the order of their content addresses, the first
-    ``sample`` of them where one is asked for. Nothing about any answer is
-    read, so what a labeller is shown, and which subjects, cannot depend on
-    what Jev said.
+    :data:`EXPORT_COLUMNS` and no answer column: every stored subject of the
+    set's kind, in the order of their content addresses, the first ``sample``
+    of them where one is asked for.
+
+    Which subjects is decided by the stored texts and the code alone. Web
+    text the code screen, run on it now, flags is left out unless
+    ``include_quarantined`` — a quarantine made by code, from the words, and
+    never asked about by any set — and nothing else is. Content Jev's own
+    injection screen quarantined, or a vendor's content block, is exported
+    like any other: those were decided by a response to a request, and
+    leaving them out chose the subjects by what Jev said, so that an
+    evaluation of the screen never saw one of its own ``true`` answers
+    (docs/08, C9). Nothing about any answer, request or quarantine is read,
+    so neither what a labeller sees nor which subjects can depend on what Jev
+    or the vendor said
+    (``tests/unit/test_jev_eval.py::TestTheBlindExport``, and on PostgreSQL
+    ``tests/integration/test_jev_evaluations.py::TestTheCommandsOnPostgres``).
     """
     problem = question_problem(question_set, question_key)
     if problem is not None:
         raise Refused(problem)
     if sample is not None and sample < 1:
         raise Refused(f"a sample is at least one subject, not {sample}")
-    rows = await jev_repo.subjects_to_label(
-        conn,
-        subject_type=_subject_type(question_set),
-        include_quarantined=include_quarantined,
-    )
+    subject_type = _subject_type(question_set)
+    rows = await jev_repo.subjects_to_label(conn, subject_type=subject_type)
+    if subject_type == "web_excerpt" and not include_quarantined:
+        rows = [row for row in rows if web_sources.code_screen(row["text"]) is None]
     chosen = sorted(rows, key=lambda row: row["subject_id"])
     if sample is not None:
         chosen = chosen[:sample]
@@ -2614,7 +2628,16 @@ def _parser() -> argparse.ArgumentParser:
         help="required: no export shows an answer",
     )
     export.add_argument("--sample", type=_positive)
-    export.add_argument("--include-quarantined", action="store_true")
+    export.add_argument(
+        "--include-quarantined",
+        action="store_true",
+        help=(
+            "also the web text the code screen flags, which no set is asked "
+            "about; what Jev's screen or a vendor's block quarantined is "
+            "always exported, since leaving it out would choose the subjects "
+            "by what was answered"
+        ),
+    )
     imported = label_commands.add_parser("import", help="record a file of labels")
     imported.add_argument("--file", type=Path, required=True)
     who = imported.add_mutually_exclusive_group(required=True)

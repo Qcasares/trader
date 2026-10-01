@@ -2944,25 +2944,23 @@ class TestTheTextsAHarnessReads:
             _subject(title, "hypothesis_title"): title,
         }
 
-    async def test_what_a_labeller_is_shown(self, conn: asyncpg.Connection) -> None:
+    async def test_what_a_labeller_could_be_shown(
+        self, conn: asyncpg.Connection
+    ) -> None:
         """
-        Stored content, each once, quarantined content only when asked for;
-        titles the programme's model wrote within the cap, each once.
+        Every stored content, each once with its earliest document's excerpt,
+        quarantined or not: whatever quarantined it, which may have been an
+        answer, is not read, and what the export leaves out is the harness's
+        to decide from the text (``jev_eval.export_labels``). Titles the
+        programme's model wrote within the cap, each once.
         """
         kept, held = _text(), _text()
         await _document(conn, kept)
         await _document(conn, kept, source="another")
         await _quarantine(conn, await _document(conn, held))
-        shown = await jev_repo.subjects_to_label(
-            conn, subject_type="web_excerpt", include_quarantined=False
-        )
-        assert [row["subject_id"] for row in shown] == [text_sha256(kept)]
-        assert shown[0]["text"] == kept
-        every = await jev_repo.subjects_to_label(
-            conn, subject_type="web_excerpt", include_quarantined=True
-        )
-        assert [row["subject_id"] for row in every] == sorted(
-            [text_sha256(kept), text_sha256(held)]
+        shown = await jev_repo.subjects_to_label(conn, subject_type="web_excerpt")
+        assert [(row["subject_id"], row["text"]) for row in shown] == sorted(
+            [(text_sha256(kept), kept), (text_sha256(held), held)]
         )
 
         modelled = "Invented Momentum in Fictional Futures"
@@ -2970,9 +2968,7 @@ class TestTheTextsAHarnessReads:
         await _hypothesis(conn, modelled)
         await _hypothesis(conn, "An Operator's Own Idea", origin="operator")
         await _hypothesis(conn, "x" * (jev_questions.TITLE_MAX_CHARS + 1))
-        titles = await jev_repo.subjects_to_label(
-            conn, subject_type="hypothesis_title", include_quarantined=False
-        )
+        titles = await jev_repo.subjects_to_label(conn, subject_type="hypothesis_title")
         assert [(row["subject_id"], row["text"]) for row in titles] == [
             (text_sha256(modelled), modelled)
         ]
@@ -2981,9 +2977,7 @@ class TestTheTextsAHarnessReads:
         self, conn: asyncpg.Connection
     ) -> None:
         with pytest.raises(ValueError):
-            await jev_repo.subjects_to_label(
-                conn, subject_type="session", include_quarantined=False
-            )
+            await jev_repo.subjects_to_label(conn, subject_type="session")
 
 
 class TestTheJobsAboutASubject:
