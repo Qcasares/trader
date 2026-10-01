@@ -20,6 +20,10 @@ the switches as the migrations seed them:
   what they are for (docs/08, the switch order); with the decisions area as
   well, the forward clock starts; with the research area, the day's web
   ingest is planned and fetches its page, and asks nothing.
+* **A stored text needs two areas** (phases C7 and C8): the guardrails area
+  joins the matrix, and only with it and the research area both on is a text
+  the ingest stored screened and, once cleared, described; either alone sends
+  nothing about it.
 * **The research area on its own fetches nothing** (phase C6): with it on and
   the programme or Jev off, or with no key, no page is fetched and no job
   planned.
@@ -55,6 +59,7 @@ from src.programme import (  # noqa: E402
     jev_catalogue,
     jev_client,
     jev_clock,
+    jev_repo,
     web_fetch,
 )
 from src.programme import main as programme_main  # noqa: E402
@@ -82,6 +87,7 @@ PROGRAMME = flags.PROGRAMME_ENABLED
 JEV = flags.JEV_ENABLED
 DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
 RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
+GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
 
 
 def _derived(suffix: str) -> str:
@@ -125,7 +131,14 @@ async def seeded() -> AsyncIterator[tuple[str, asyncpg.Connection]]:
 
 
 class _Client:
-    """``jev_client.ask``, answering every question cleanly, counting calls."""
+    """
+    ``jev_client.ask``, answering every question cleanly, counting calls: a
+    Noul ``true``, but the injection screen and the card check ``false``, so
+    a text screened is cleared rather than quarantined.
+    """
+
+    #: The Noul questions answered ``false``.
+    CLEARED = frozenset({"addressed_to_ai", "performance_claim"})
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -135,16 +148,20 @@ class _Client:
         answers: dict[str, Any] = {}
         for key, question in kwargs["questions"].items():
             if question["type"] == "noul":
-                answers[key] = {"type": "noul", "noul": 0.99}
+                noul = 0.02 if key in self.CLEARED else 0.99
+                answers[key] = {"type": "noul", "noul": noul}
             else:
+                # The first option at 0.7 and the rest sharing 0.3, however
+                # many there are: the regime has four, the catalogue more.
                 options = list(question["criteria"])
+                rest = round(0.3 / (len(options) - 1), 6)
+                probabilities = dict.fromkeys(options, rest)
+                probabilities[options[0]] = round(1 - rest * (len(options) - 1), 6)
                 answers[key] = {
                     "type": "choice",
                     "choice": options[0],
                     "confidence": 0.5,
-                    "probabilities": dict(
-                        zip(options, (0.7, 0.1, 0.1, 0.1), strict=True)
-                    ),
+                    "probabilities": probabilities,
                 }
         body = json.dumps({"model": kwargs["model"], "answers": answers, "usage": {}})
         return jev_client.JevCall(
@@ -298,7 +315,7 @@ class TestSeededItIsDark:
 
 
 #: The switches the matrix turns on and off, each alone and in every company.
-SWITCHES = (PROGRAMME, JEV, DECISIONS, RESEARCH)
+SWITCHES = (PROGRAMME, JEV, DECISIONS, RESEARCH, GUARDRAILS)
 
 
 def _combinations() -> list[tuple[str, ...]]:
@@ -326,7 +343,10 @@ class TestTheSwitchMatrix:
         and send the daily probe and nothing else; with the decisions area too,
         the forward clock's jobs are planned for the sessions ahead, each due
         at its own minute after a close; with the research area, the day's
-        web ingest, which fetches its page once and asks nothing.
+        web ingest, which fetches its page once and asks nothing. From phases
+        C7 and C8, a stored text is asked about only with both the guardrails
+        and the research areas on — screened, then, once cleared, described —
+        and either alone sends nothing about it.
         """
         dsn, conn = seeded
         await _set(conn, {switch: switch in on for switch in SWITCHES})
@@ -356,15 +376,31 @@ class TestTheSwitchMatrix:
         else:
             assert fetcher.fetched == []
             assert (await _jev_rows(conn))["web_documents"] == 0
-        if DECISIONS not in on:
-            assert keys == probe | ingest
-            assert len(client.calls) == 1, "the web ingest asked something"
-            return
+        asks: set[str] = set()
+        contents = [
+            row["content_sha256"]
+            for row in await conn.fetch(
+                "SELECT DISTINCT content_sha256 FROM web_documents "
+                "WHERE NOT quarantined"
+            )
+        ]
+        if RESEARCH in on and GUARDRAILS in on:
+            for content in contents:
+                for name in ("guardrail.injection", "research.catalogue"):
+                    asks.add(
+                        jev_repo.ask_job_key(
+                            name, 1, "web_excerpt", content, now.astimezone(UTC).date()
+                        )
+                    )
+        about_text = [c for c in client.calls if "excerpt" in c["state"]]
+        assert len(about_text) == len(asks), "a text was asked about, or not, wrongly"
+        assert len(client.calls) == 1 + len(asks)
         clock = set()
-        for session in jev_clock.sessions_to_plan(now):
-            clock.add(jev_clock.reference_job_key(session))
-            clock.add(jev_clock.regime_job_key(DECISION_REGIME, session))
-        assert keys == probe | clock | ingest
+        if DECISIONS in on:
+            for session in jev_clock.sessions_to_plan(now):
+                clock.add(jev_clock.reference_job_key(session))
+                clock.add(jev_clock.regime_job_key(DECISION_REGIME, session))
+        assert keys == probe | clock | ingest | asks
 
 
 class TestTheResearchAreaAloneFetchesNothing:
