@@ -155,11 +155,97 @@ GOOD_CHOICE = {"red": "It is red.", "blue": "It is blue.", "unclear": "It is unc
 # ---------------------------------------------------------------------------
 
 
+#: Every registered set, exactly: its version, lane, provenance and state
+#: model. Phase B's probe and regime; phase C7's injection screen and
+#: catalogue, asked about web text; phase C8's two sets asked about the titles
+#: the programme's own model writes.
+REGISTERED: dict[str, tuple[int, str, str, type[BaseModel]]] = {
+    "probe.connectivity": (1, "probe", "internal", jq.ProbeState),
+    "decision.regime": (1, "decision", "internal", jq.RegimeState),
+    "guardrail.injection": (1, "guardrail", "web", jq.WebExcerptState),
+    "research.catalogue": (1, "research", "web", jq.WebExcerptState),
+    "research.hypothesis": (1, "research", "model", jq.HypothesisTitleState),
+    "guardrail.card": (1, "guardrail", "model", jq.HypothesisTitleState),
+}
+
+
 class TestTheRegistry:
-    def test_phase_b_registers_the_probe_and_the_regime(self) -> None:
-        assert set(jq.REGISTRY) == {"probe.connectivity", "decision.regime"}
+    def test_the_registry_is_exactly_the_six_sets(self) -> None:
+        """
+        An exact pin, both ways: a set added, removed, moved to another lane
+        or provenance, or given another state is a reviewer's edit here, with
+        its words, its golden and its released rows beside it.
+        """
+        assert {
+            name: (qs.version, qs.lane, qs.provenance, qs.state_model)
+            for name, qs in jq.REGISTRY.items()
+        } == REGISTERED
         assert jq.PROBE_CONNECTIVITY is PROBE
         assert jq.DECISION_REGIME is REGIME
+        assert jq.GUARDRAIL_INJECTION is jq.get(jq.SCREEN_SET_NAME)
+        assert jq.RESEARCH_CATALOGUE is jq.get("research.catalogue")
+        assert jq.RESEARCH_HYPOTHESIS is jq.get("research.hypothesis")
+        assert jq.GUARDRAIL_CARD is jq.get("guardrail.card")
+        assert not any(qs.internal_detail for qs in jq.REGISTRY.values())
+
+    def test_the_registered_screen_is_the_screen(self) -> None:
+        """
+        The lane lets the screen alone ask about unscreened text and reads its
+        valid ``false`` as clean, so the registered screen must be of the
+        screen's shape (``screen_problem``), and its ``false`` must be the
+        answer that means the text is written for people.
+        """
+        screen = jq.get(jq.SCREEN_SET_NAME)
+        assert jq.screen_problem(screen) is None
+        ((key, question),) = screen.questions
+        assert (key, question["type"]) == (jq.SCREEN_QUESTION, "noul")
+        assert jq.SCREEN_CLEAR_ARGMAX == "false"
+        assert question["criteria"]["false"].startswith(
+            "`excerpt` is written for human readers"
+        )
+
+    def test_the_two_title_sets_share_the_catalogues_options(self) -> None:
+        """
+        Word for word, option for option, so the programme's hypotheses can be
+        compared with what is published; the instructions differ, which keeps
+        each set's questions its own (open item 15).
+        """
+        catalogue = dict(jq.RESEARCH_CATALOGUE.questions)
+        hypothesis = dict(jq.RESEARCH_HYPOTHESIS.questions)
+        assert list(catalogue) == list(hypothesis) == ["asset_class", "mechanism"]
+        for key in catalogue:
+            assert catalogue[key]["criteria"] == hypothesis[key]["criteria"]
+            assert list(catalogue[key]["criteria"]) == list(
+                hypothesis[key]["criteria"]
+            )
+            assert catalogue[key]["instructions"] != hypothesis[key]["instructions"]
+        assert dict(catalogue["asset_class"]["criteria"]) == dict(
+            jq.ASSET_CLASS_CRITERIA
+        )
+        assert dict(catalogue["mechanism"]["criteria"]) == dict(jq.MECHANISM_CRITERIA)
+
+    def test_other_mechanism_is_an_option_and_not_a_second_escape(self) -> None:
+        assert jq.RESEARCH_CATALOGUE.escape_options == {
+            "asset_class": "insufficient_evidence",
+            "mechanism": "insufficient_evidence",
+        }
+        assert "other_mechanism" in jq.MECHANISM_CRITERIA
+        assert "other_mechanism" not in jq.ESCAPE_OPTIONS
+
+    def test_the_heading_labels_are_the_catalogue_options(self) -> None:
+        """
+        The README's seven headings are its own grouping, recorded as labels
+        of ``research.catalogue``'s ``asset_class`` (``web_ingest``): each
+        heading's label must be an option of that question, in the same
+        order, and together they are every option but the escape, so no label
+        names a class the question cannot answer and no class has no heading.
+        """
+        from src.programme import web_sources
+
+        options = list(jq.ASSET_CLASS_CRITERIA)
+        escape = jq.RESEARCH_CATALOGUE.escape_options["asset_class"]
+        assert options[-1] == escape
+        assert list(web_sources.HEADING_LABELS.values()) == options[:-1]
 
     def test_an_unknown_name_is_a_key_error_naming_the_known_ones(self) -> None:
         with pytest.raises(KeyError, match="decision.regime"):
@@ -360,6 +446,19 @@ RELEASED_PACK_HASHES: dict[tuple[str, int], str] = {
     ("decision.regime", 1): (
         "5a773b26917236fd8cf0174dfde9cc9fe81d0af4027a3eb0a2261f54dc6acff9"
     ),
+    # Phase C7 and C8: the hashes design section 5 computed from these words.
+    ("guardrail.injection", 1): (
+        "85229106585af6df8c8ca06ffd3389f1f193518bad04f27a948814da84068ab6"
+    ),
+    ("research.catalogue", 1): (
+        "d38726771baf313f3ff28f19059f075258d58ba34854d8ee29b2547418a3976d"
+    ),
+    ("research.hypothesis", 1): (
+        "35124e7667f7a2b3883c35d7e82806d349e8fe71ac769f644cba5f944eb0e0eb"
+    ),
+    ("guardrail.card", 1): (
+        "3f98bbc1511995b4ba35563f271a3d043eb4db43e23912d035785605e0ebd455"
+    ),
 }
 
 
@@ -377,6 +476,18 @@ RELEASED_QUESTION_HASHES: dict[tuple[str, int], str] = {
     ),
     ("decision.regime", 1): (
         "6dce8dbea5303a4836a4677ca3090272c29ae3f9a11e44387009ddc9fd815c9f"
+    ),
+    ("guardrail.injection", 1): (
+        "99cdb40396c439a2c6cdb37e91c0f9df0eeeda72fc01b68c80d78a851c00f746"
+    ),
+    ("research.catalogue", 1): (
+        "d26085158868df35d2b8ecfc6ffb31f7a3fa7de52bcbc3a9b1a9554c8ebbfc18"
+    ),
+    ("research.hypothesis", 1): (
+        "5a75a21d2acc4800f9c197939ede7fe5f7a79a897a46fa56706cb4d603513a57"
+    ),
+    ("guardrail.card", 1): (
+        "47c322e70d5b3f5cdb69bb6547150c54d2d99197fb922e785917e7f11b42c130"
     ),
 }
 
@@ -1401,11 +1512,25 @@ class TestTheDetailRuleFailsClosed:
         assert jq.registration_problem(_one_noul(state_model=model), {}) is None
 
     def test_the_registered_states_still_pass(self) -> None:
-        """The regime's labels and the probe's fixed sentence are not detail."""
+        """
+        The regime's labels and the probe's fixed sentence carry no text at
+        all; a hypothesis title carries a title and nothing beyond it, which
+        is not detail; and an excerpt is web text, an outsider's, which the
+        web gate holds rather than this rule.
+        """
         for question_set in jq.REGISTRY.values():
+            model = question_set.state_model
+            if question_set.provenance == "web":
+                assert model in jq.WEB_STATE_MODELS, question_set.name
+                continue
             assert not jq._model_carries_text(
-                question_set.state_model, set(), exempt=()
+                model, set(), exempt=("title",)
             ), question_set.name
+            if model not in jq.TEXT_SUBJECT_FIELD:
+                assert not jq._model_carries_text(
+                    model, set(), exempt=()
+                ), question_set.name
+        assert jq._model_carries_text(jq.HypothesisTitleState, set(), exempt=())
 
     def test_a_web_set_is_not_held_to_it(self) -> None:
         """Web text is an outsider's, not this system's detail: the web gate is
@@ -1510,6 +1635,94 @@ class TestTheWebExcerpt:
         state = jq.WebExcerptState(excerpt="x")
         with pytest.raises(ValidationError):
             state.excerpt = "y"  # type: ignore[misc]
+
+
+class TestTheHypothesisTitle:
+    """
+    The one state a title set is asked about (phase C8): a title of 1 to 300
+    characters, the programme's own model's words, and nothing else of the
+    card. Its subject is the title's address, and it is recorded as ``model``.
+    """
+
+    def test_the_cap_is_300_characters(self) -> None:
+        assert jq.TITLE_MAX_CHARS == 300
+
+    @pytest.mark.parametrize("title", ["x", "x" * 300, "€" * 300])
+    def test_a_title_within_the_cap_is_a_state(self, title: str) -> None:
+        assert jq.HypothesisTitleState(title=title).title == title
+
+    @pytest.mark.parametrize(
+        "title",
+        ["", "x" * 301, "€" * 301, 3, None, b"x"],
+        ids=["empty", "one-over", "one-over-beyond-ascii", "a-number", "null", "bytes"],
+    )
+    def test_anything_else_is_refused(self, title: Any) -> None:
+        with pytest.raises(ValidationError):
+            jq.HypothesisTitleState(title=title)
+
+    def test_it_is_closed_and_frozen(self) -> None:
+        with pytest.raises(ValidationError):
+            jq.HypothesisTitleState(title="x", card="more")  # type: ignore[call-arg]
+        state = jq.HypothesisTitleState(title="x")
+        with pytest.raises(ValidationError):
+            state.title = "y"  # type: ignore[misc]
+
+    def test_its_subject_is_the_titles_address_and_its_writer_the_model(
+        self,
+    ) -> None:
+        assert jq.STATE_SUBJECT[jq.HypothesisTitleState] == "hypothesis_title"
+        assert jq.TEXT_SUBJECT_FIELD[jq.HypothesisTitleState] == "title"
+        assert jq.TEXT_SUBJECT_PROVENANCE["hypothesis_title"] == "model"
+
+    def test_a_title_is_not_detail(self) -> None:
+        """
+        The one field of this system's own text sent without the detail
+        switch (docs/08, fact 7): the registered title sets declare no
+        ``internal_detail``, and the dump sends the title and nothing else.
+        """
+        for question_set in (jq.RESEARCH_HYPOTHESIS, jq.GUARDRAIL_CARD):
+            assert question_set.internal_detail is False
+            sent = question_set.dump_state(
+                jq.HypothesisTitleState(title="Carry in Invented Bonds")
+            )
+            assert sent == {"title": "Carry in Invented Bonds"}
+
+
+#: Each text state model and the constant its length cap is read from, as the
+#: module's source writes it.
+TEXT_CAPS: dict[type[BaseModel], str] = {
+    jq.WebExcerptState: "EXCERPT_MAX_CHARS",
+    jq.HypothesisTitleState: "TITLE_MAX_CHARS",
+}
+
+
+@pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+def test_the_worst_state_at_the_cap_fits_the_seeded_limits(name: str) -> None:
+    """
+    Design section 5: a text state at its cap, written in three-byte
+    characters, is about 905 estimated tokens with its questions, far inside
+    the seeded ``jev_max_state_tokens`` of 8,000 and the vendor's limits, so
+    no stored excerpt or title the caps admit is refused for its size.
+    """
+    question_set = jq.get(name)
+    model = question_set.state_model
+    if model not in TEXT_CAPS:
+        return
+    cap = getattr(jq, TEXT_CAPS[model])
+    field = jq.TEXT_SUBJECT_FIELD[model]
+    state = question_set.dump_state(model(**{field: "€" * cap}))
+    questions = {
+        key: json.dumps(q, ensure_ascii=False)
+        for key, q in question_set.as_request_questions().items()
+    }
+    problem = jev_catalogue.request_size_problem(
+        json.dumps(state, ensure_ascii=False),
+        questions,
+        jev_catalogue.DEFAULT_MAX_STATE_TOKENS,
+    )
+    assert problem is None, problem
+    state_tokens = jev_catalogue.estimate_tokens(json.dumps(state, ensure_ascii=False))
+    assert state_tokens < jev_catalogue.DEFAULT_MAX_STATE_TOKENS / 8
 
 
 class TestPercentagesAreWrittenExactly:
@@ -2644,18 +2857,6 @@ class TestTheRegimeQuestionIsWrittenPlainly:
     def test_the_negation_check_reads_labels_as_labels(self) -> None:
         assert _negations('drawdown "none" or "shallow"') == []
 
-    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
-    def test_no_question_is_asked_with_a_negation(self, name: str) -> None:
-        for text in _prose(jq.get(name)):
-            assert not _negations(text), (_negations(text), text)
-
-    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
-    def test_the_instructions_open_with_the_question(self, name: str) -> None:
-        """The judgment goes in the instructions, first, as a question."""
-        for _, question in jq.get(name).questions:
-            first = re.split(r"(?<=[.?])\s", question["instructions"])[0]
-            assert first.endswith("?"), first
-
     def test_every_quoted_label_is_one_the_state_can_hold(self) -> None:
         """
         The question and the state must use one vocabulary. A criterion that
@@ -2667,22 +2868,6 @@ class TestTheRegimeQuestionIsWrittenPlainly:
         }
         assert quoted, "the regime question quotes no labels at all"
         assert quoted <= _state_labels(), quoted - _state_labels()
-
-    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
-    def test_every_field_the_question_names_is_one_the_state_has(
-        self, name: str
-    ) -> None:
-        """
-        Fields are named by backticked path, as TypeSafe's guidance has it. A
-        path that does not resolve — ``equity.trend``, ``bonds.volatility`` —
-        points the model at nothing, and it answers anyway.
-        """
-        question_set = jq.get(name)
-        paths = set(_field_paths(question_set.state_model))
-        known = paths | {path.rsplit(".", 1)[-1] for path in paths}
-        named = {path for text in _prose(question_set) for path in _backticked(text)}
-        assert named, f"{name} names no state field"
-        assert named <= known, named - known
 
     def test_the_criteria_name_each_field_by_its_whole_path(self) -> None:
         """
@@ -2759,6 +2944,101 @@ class TestTheRegimeQuestionIsWrittenPlainly:
             assert not re.search(r"\b(1[89]|20)\d\d\b", text), text
             assert not re.search(r"\b\d{4}-\d{2}-\d{2}\b", text), text
             assert not re.search(r"\b[A-Z]{2,5}\b", text), text
+
+
+class TestEverySetIsWrittenPlainly:
+    """
+    The design's wording rules (design section 5), applied to every
+    registered set rather than to the words one reviewer read once: the
+    script that first checked them was lost in a container restart, and the
+    tests are the check now.
+
+    * the escape option comes last, and is the only one;
+    * no negation word: the suite's list, and any word ending in "n't" or
+      "less";
+    * the first sentence of every instruction is the question;
+    * every backticked name resolves to a field of the set's state;
+    * each length cap is rendered into the words from its constant, so a
+      changed cap changes the pack hash.
+    """
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_the_escape_option_comes_last(self, name: str) -> None:
+        for key, question in jq.get(name).questions:
+            if question["type"] != "choice":
+                continue
+            options = list(question["criteria"])
+            escapes = [option for option in options if option in jq.ESCAPE_OPTIONS]
+            assert escapes == [options[-1]], (name, key, escapes)
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_no_question_is_asked_with_a_negation(self, name: str) -> None:
+        for text in _prose(jq.get(name)):
+            assert not _negations(text), (_negations(text), text)
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_the_instructions_open_with_the_question(self, name: str) -> None:
+        """The judgment goes in the instructions, first, as a question."""
+        for _, question in jq.get(name).questions:
+            first = re.split(r"(?<=[.?])\s", question["instructions"])[0]
+            assert first.endswith("?"), first
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_every_field_the_question_names_is_one_the_state_has(
+        self, name: str
+    ) -> None:
+        """
+        Fields are named by backticked path, as TypeSafe's guidance has it. A
+        path that does not resolve — ``equity.trend``, ``bonds.volatility`` —
+        points the model at nothing, and it answers anyway.
+        """
+        question_set = jq.get(name)
+        paths = set(_field_paths(question_set.state_model))
+        known = paths | {path.rsplit(".", 1)[-1] for path in paths}
+        named = {path for text in _prose(question_set) for path in _backticked(text)}
+        assert named, f"{name} names no state field"
+        assert named <= known, named - known
+
+    @pytest.mark.parametrize("name", sorted(jq.REGISTRY))
+    def test_every_cap_is_rendered_from_its_constant(
+        self, name: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A set asked about text says how long the text can be, in every
+        question, and the number is its state's own cap, read from the
+        constant the state is built with. Proved by executing the module's
+        source with the constant moved by one: the state's limit and the set's
+        words, and so its pack hash, move with it, and a set whose state is
+        capped by the other constant does not move. A set asked about no text
+        has no cap to say.
+        """
+        question_set = jq.get(name)
+        model = question_set.state_model
+        if model not in jq.TEXT_SUBJECT_FIELD:
+            assert model not in TEXT_CAPS, name
+            return
+        constant = TEXT_CAPS[model]
+        cap = getattr(jq, constant)
+        field = jq.TEXT_SUBJECT_FIELD[model]
+        metadata = model.model_fields[field].metadata
+        limits = [m.max_length for m in metadata if hasattr(m, "max_length")]
+        assert limits == [cap], limits
+        for _, question in question_set.questions:
+            assert f"up to {cap} characters" in question["instructions"], name
+
+        source = MODULE.read_text(encoding="utf-8")
+        line = f"\n{constant} = {cap}\n"
+        assert source.count(line) == 1, f"{constant} is not defined once as {cap}"
+        moved = _execute_variant(
+            monkeypatch, source.replace(line, f"\n{constant} = {cap - 1}\n")
+        )
+        variant = moved.REGISTRY[name]
+        assert variant.pack_hash != question_set.pack_hash, constant
+        for _, question in variant.questions:
+            assert f"up to {cap - 1} characters" in question["instructions"]
+        for other, registered in moved.REGISTRY.items():
+            if TEXT_CAPS.get(jq.get(other).state_model) != constant:
+                assert registered.pack_hash == jq.get(other).pack_hash, other
 
 
 def test_the_api_importable_modules_load_no_client_and_no_io() -> None:

@@ -277,7 +277,8 @@ class TestAFirstIngest:
         is about to send and refuses one that differs; asked about each stored
         excerpt by its stored address, it accepts the address and its web gate
         finds the quarantine by it: the quarantined document is refused as
-        quarantined, the other as unscreened, since no screen is registered.
+        quarantined, the other as unscreened, since the screen has not been
+        asked about it.
         """
         _, conn = db
         _serve(monkeypatch, _page({"Equities": [CLEAN, INSTRUCTION]}))
