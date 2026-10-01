@@ -1330,9 +1330,13 @@ class TestTheSchemaAdmitsWhatTheHarnessComputes:
         self, conn: asyncpg.Connection, acting: bool
     ) -> None:
         """
-        A threshold chosen on 120 development items and measured on 40 test
+        A threshold chosen on 160 development items and measured on 40 test
         items, with re-asks near it and away from it: the one part of a row no
-        seeded ledger reaches, since a search needs a hundred items.
+        seeded ledger reaches, since a search needs a hundred items. From plan
+        version 2 the unit suite's book holds 100 development items right
+        above the coin, since at its gate level a covered precision of 0.90
+        needs 94 covered items all right, so a precision threshold is chosen
+        under it too.
         """
         book, _, test = unit._threshold_book(acting)
         rng = random.Random(9)
@@ -1752,18 +1756,29 @@ class TestTheLedgerTheJobsWrote:
             == (jev_eval.keyword_baseline(CATALOGUE, "asset_class")[1])
         )
 
-    async def test_the_test_split_leaves_the_development_item_out(
+    async def test_the_test_split_leaves_the_development_items_out(
         self, written: asyncpg.Connection
     ) -> None:
-        assert jev_prereg.split_of("web_excerpt", text_sha256(B1)) == "dev"
-        assert {
-            jev_prereg.split_of("web_excerpt", text_sha256(text))
+        """
+        By content, under plan version 2's five tenths (M1), E1, C1 and X1
+        are test items and the other five development items; under version
+        1's three tenths only B1 was a development item. The test-split row
+        reads the three: E1 answered right, C1 quarantined by the screen and
+        never asked, and X1's answer a tie.
+        """
+        splits = {
+            text: jev_prereg.split_of("web_excerpt", text_sha256(text))
             for text in EXCERPTS
-            if text != B1
-        } == {"test"}
+        }
+        assert [text for text in EXCERPTS if splits[text] == "test"] == [E1, C1, X1]
         row = await _stored(written, CATALOGUE, "asset_class", TESTER, "test")
-        assert (row["n"], row["n_valid"], row["n_not_asked"]) == (7, 5, 1)
-        assert row["accuracy"] == 2 / 5
+        assert (
+            row["n"],
+            row["n_valid"],
+            row["n_invalid"],
+            row["n_not_asked"],
+        ) == (3, 1, 1, 1)
+        assert row["accuracy"] == 1.0
 
     async def test_the_catalogue_against_the_readme(
         self, ledger: SimpleNamespace, written: asyncpg.Connection

@@ -79,9 +79,16 @@ prints "not measured: no labelled items".
   test, at the gate level, of the items only one of the two got right, which
   the row records (``jev_stats.sign_test``), and "too few to say" where not
   even every one of them going Jev's way could reach the level.
+* **Flips are the population's** (plan version 2, M2): a flip rate counts
+  every canonical answer to the question under the model that was asked
+  again, labelled or not, in the stratum its re-ask was sampled in and under
+  the plan that sampled it, since a flip uses no label and an armed threshold
+  would act on every answer; so a flip count may exceed ``n``, which migration
+  0015 allows.
 * **Every level is the row's**: each interval at its ``ci_level`` and each
   gate at its ``gate_ci_level``, as recorded, never the plan in force when it
-  is read.
+  is read, and printed as the decimal it was written as (99.9375%, never a
+  rounded 99.9%).
 * **A figure over nothing is "not measured"**, never 0 or 0.00, and nothing is
   sorted by a figure, so an unknown is never sorted as a low.
 
@@ -127,12 +134,16 @@ Each figure is quoted as what it is (docs/08, phase C, design section 10.3):
   after a change of pin they are two judges.
 * **Under the plan that registered them.** Agreement is scored by
   ``jev_prereg.REGIME_BASELINE_RULE`` only over answers first recorded under
-  the plan this report runs, which the regime job records in its result when
-  it asks; an answer recorded under another plan, or with no plan recorded,
-  is counted apart by the plan it was recorded under and never scored by a
-  rule registered after it. A flip rate likewise counts only the re-asks
-  sampled under this plan, in the stratum they were sampled in, which the
-  planner records in the re-ask's payload. The report names its plan.
+  the regime plan this report runs, which the regime job records in its
+  result when it asks; an answer recorded under another regime plan, or with
+  none recorded — a phase C4 job's result names the global plan alone — is
+  counted apart by the regime plan it was recorded under, or as unknown, and
+  never scored by a rule registered after it. The regime plan has stood
+  apart from the global plan since plan version 2 (M4), so reviewing the
+  rule sets aside regime agreement alone. A flip rate counts only the
+  re-asks sampled under the global plan this report runs, in the stratum
+  they were sampled in, which the planner records in the re-ask's payload.
+  The report names both plans.
 
 A figure over nothing is "not measured", never 0 (``jev_stats``), and the text
 formatter prints it so.
@@ -203,6 +214,8 @@ PROBE_SET_NAME = "probe.connectivity"
 FORWARD_FIELDS: tuple[str, ...] = (
     "plan_version",
     "plan_hash",
+    "regime_plan_version",
+    "regime_plan_hash",
     "signal",
     "symbol",
     "since",
@@ -238,7 +251,8 @@ OUTCOMES = ("live_measured", "live_abstain", "live_invalid", "late", "absent")
 #: The re-ask strata, in the order the plan samples them; never pooled.
 STRATA = ("uniform", "low_margin")
 
-#: How an answer whose job recorded no plan is counted in ``not_scored``.
+#: How an answer whose job recorded no regime plan — a phase C4 job, whose
+#: result named the global plan alone — is counted in ``not_scored``.
 UNKNOWN_PLAN = "unknown"
 
 #: The exit codes: a command that ran, one the harness refused, a usage error.
@@ -399,12 +413,15 @@ def build_forward(
         row for row in answered if row.get("subject_id") != row["session"].isoformat()
     ]
     plan = jev_prereg.plan_hash()
+    regime_plan = jev_prereg.regime_plan_hash()
     by_model: dict[str, list[Mapping[str, Any]]] = {}
     for row in live_measured:
         by_model.setdefault(str(row["model"]), []).append(row)
     return {
         "plan_version": jev_prereg.PLAN_VERSION,
         "plan_hash": plan,
+        "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+        "regime_plan_hash": regime_plan,
         "signal": jev_clock.regime_signal(question_set, REGIME_QUESTION),
         "symbol": symbol,
         "since": sessions[0].isoformat() if sessions else None,
@@ -419,7 +436,7 @@ def build_forward(
         },
         "replayed": count(len(replayed), len(answered)),
         "models": {
-            model: _model_figures(question_set, rows, jobs, plan)
+            model: _model_figures(question_set, rows, jobs, regime_plan)
             for model, rows in sorted(by_model.items())
         },
         "flip_rates": {
@@ -459,18 +476,19 @@ def _model_figures(
     question_set: jev_questions.QuestionSet,
     measured: Sequence[Mapping[str, Any]],
     jobs: Mapping[str, Mapping[str, Any]],
-    plan: str,
+    regime_plan: str,
 ) -> dict[str, Any]:
     """
     One model's live measured sessions: the regimes' shares, and agreement
-    with the baseline rule over the answers first recorded under ``plan``,
-    the others counted by the plan they were recorded under.
+    with the baseline rule over the answers first recorded under
+    ``regime_plan``, the others counted by the regime plan they were recorded
+    under.
     """
     scored = []
     not_scored: dict[str, int] = {}
     for row in measured:
-        recorded_under = _answer_plan(question_set, row, jobs)
-        if recorded_under == plan:
+        recorded_under = _answer_regime_plan(question_set, row, jobs)
+        if recorded_under == regime_plan:
             scored.append(row)
         else:
             label = recorded_under or UNKNOWN_PLAN
@@ -485,16 +503,18 @@ def _model_figures(
     }
 
 
-def _answer_plan(
+def _answer_regime_plan(
     question_set: jev_questions.QuestionSet,
     row: Mapping[str, Any],
     jobs: Mapping[str, Mapping[str, Any]],
 ) -> str | None:
     """
-    The plan in force when a session's answer was first recorded: the plan
-    the regime job that asked it wrote in its result. A replayed session's
-    answer was asked about another session, whose job is the one that asked.
-    ``None`` when no such job, or no plan in it, is on record.
+    The regime plan in force when a session's answer was first recorded: the
+    regime plan the regime job that asked it wrote in its result. A replayed
+    session's answer was asked about another session, whose job is the one
+    that asked. ``None`` when no such job, or no regime plan in it, is on
+    record — a phase C4 job's result names the global plan alone, and the
+    global plan's hash is never read as a regime plan's.
     """
     try:
         asked_about = date.fromisoformat(str(row.get("subject_id")))
@@ -502,7 +522,7 @@ def _answer_plan(
         return None
     job = jobs.get(jev_clock.regime_job_key(question_set, asked_about)) or {}
     result = job.get("result") or {}
-    recorded = result.get("plan_hash") if isinstance(result, Mapping) else None
+    recorded = result.get("regime_plan_hash") if isinstance(result, Mapping) else None
     return recorded if isinstance(recorded, str) else None
 
 
@@ -800,6 +820,8 @@ async def status_report(conn: asyncpg.Connection) -> dict[str, Any]:
         "today": await jev_repo.status_summary(conn),
         "plan_version": jev_prereg.PLAN_VERSION,
         "plan_hash": jev_prereg.plan_hash(),
+        "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+        "regime_plan_hash": jev_prereg.regime_plan_hash(),
     }
 
 
@@ -1482,20 +1504,21 @@ def build_evaluation(
         )
         at_threshold = _figure(right_at, n_at)
 
-    # The flip rates: each canonical answer of a scored item beside its
-    # re-ask, counted only in the stratum and under the global plan its
-    # re-ask was sampled in; the near-threshold rate from either stratum, by
-    # the canonical margin, once a threshold is chosen.
-    canonical = {
-        i.answer["request_id"]
-        for i in scored
-        if i.answer is not None and i.answer["request_status"] == "ok"
-    }
+    # The flip rates: every canonical answer to the question under the model
+    # beside its re-ask, labelled or not (plan version 2, M2:
+    # ``jev_prereg.FLIP_PAIRS``) — a flip uses no label, and an armed threshold
+    # would act on the population, so the population's flips are the ones
+    # that bear on it. Each pair counted only in the stratum and under the
+    # global plan its re-ask was sampled in; the near-threshold rate from
+    # either stratum, by the canonical margin, once a threshold is chosen.
+    # Version 1 counted a pair only when its canonical request answered a
+    # scored item, so thirty uniform pairs took some six hundred labels.
+    assert jev_prereg.FLIP_PAIRS == (
+        "every_canonical_request_of_the_question_under_the_pin"
+    )
     plan = jev_prereg.plan_hash()
     strata: dict[str, list[Mapping[str, Any]]] = {name: [] for name in STRATA}
     for pair in ledger.pairs:
-        if pair["canonical_request_id"] not in canonical:
-            continue
         job = ledger.reasks.get(reask_job_key(pair["canonical_request_id"])) or {}
         payload = job.get("payload") or {}
         stratum = payload.get("stratum") if isinstance(payload, Mapping) else None
@@ -2250,7 +2273,8 @@ def format_count(name: str, value: Mapping[str, Any], of: str = "sessions") -> s
 def format_forward(report: Mapping[str, Any]) -> str:
     lines = [
         f"{report['signal']} for {report['symbol']}",
-        f"plan v{report['plan_version']} {report['plan_hash'][:12]}",
+        f"plan v{report['plan_version']} {report['plan_hash'][:12]}; regime plan "
+        f"v{report['regime_plan_version']} {report['regime_plan_hash'][:12]}",
         f"sessions: {report['sessions']} ({said(report['since'])} to "
         f"{said(report['until'])}), cutoffs passed",
         f"live measured {report['live_measured']}, abstain {report['live_abstain']}, "
@@ -2268,24 +2292,26 @@ def format_forward(report: Mapping[str, Any]) -> str:
         )
         for option, value in figures["answer_shares"].items():
             lines.append(format_count(f"  share {option}", value))
+        rule = f"the regime plan v{report['regime_plan_version']} baseline rule"
         lines.append(
             format_count(
-                f"  agrees with the plan v{report['plan_version']} baseline rule",
+                f"  agrees with {rule}",
                 figures["baseline_agreement_sessions"],
             )
         )
         lines.append(
             format_figure(
-                f"  agrees with the plan v{report['plan_version']} baseline rule, "
-                "distinct states",
+                f"  agrees with {rule}, distinct states",
                 figures["baseline_agreement_states"],
             )
         )
         for plan, sessions in figures["not_scored"].items():
-            lines.append(
-                f"  not scored: {sessions} sessions answered under plan "
-                f"{plan[:12]}, not this one"
+            under = (
+                "no regime plan recorded"
+                if plan == UNKNOWN_PLAN
+                else f"regime plan {plan[:12]}, not this one"
             )
+            lines.append(f"  not scored: {sessions} sessions answered under {under}")
     for model, strata in report["flip_rates"].items():
         for stratum in STRATA:
             value = strata[stratum]
@@ -2345,7 +2371,10 @@ def format_status(report: Mapping[str, Any]) -> str:
         f"validity {said(today['validity_rate'])} over {today['answers']} answers; "
         f"latency p50 {said(latency['p50'])} ms over {latency['n']}"
     )
-    lines.append(f"plan v{report['plan_version']} {report['plan_hash'][:12]}")
+    lines.append(
+        f"plan v{report['plan_version']} {report['plan_hash'][:12]}; regime plan "
+        f"v{report['regime_plan_version']} {report['regime_plan_hash'][:12]}"
+    )
     return "\n".join(lines)
 
 
@@ -2363,10 +2392,16 @@ def _interval(low: Any, high: Any, label: str) -> str:
 
 
 def _level(value: Any) -> str | None:
-    """A level a row recorded, as printed — 95%, 99.5% — or ``None``."""
+    """
+    A level a row recorded, as printed — 95%, 99.5%, 99.9375% — or ``None``:
+    exactly, as the decimal it was written as, since the gate's level from plan
+    version 2, 0.999375, rounded to one place would print as a level nobody
+    registered.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return f"{value:.1%}".replace(".0%", "%")
+    digits = format((Decimal(repr(float(value))) * 100).normalize(), "f")
+    return f"{digits}%"
 
 
 def _beaten(e: Mapping[str, Any], column: str, name: str, gate: float | None) -> str:

@@ -130,9 +130,10 @@ async def collect(
     recorded to replay. See the module docstring for every outcome.
 
     ``payload`` is ``{"session": "YYYY-MM-DD", "set": "decision.regime",
-    "version": 1}``. The result holds labels, counts, ids and the analysis
-    plan in force — its version and hash, which the forward report scores the
-    answer under — never a state or a price.
+    "version": 1}``. The result holds labels, counts, ids and the plans in
+    force — the global plan's version and hash, and the regime plan's, which
+    the forward report scores the answer's agreement under (plan version 2,
+    M4) — never a state or a price.
     """
     session = _session(payload)
     question_set = jev_questions.REGISTRY.get(REGIME_SET_NAME)
@@ -144,13 +145,16 @@ async def collect(
         )
     signal = jev_clock.regime_signal(question_set, REGIME_QUESTION)
     symbol = jev_clock.sleeve_symbol(REFERENCE_SLEEVES)
-    # The analysis plan in force as the session is asked: the forward report
-    # scores an answer only under the plan it was first recorded under.
+    # The plans in force as the session is asked: the forward report scores
+    # an answer's agreement only under the regime plan it was first recorded
+    # under, and the global plan names the analysis it sits beside.
     result: dict[str, Any] = {
         "session": session.isoformat(),
         "signal": signal,
         "plan_version": jev_prereg.PLAN_VERSION,
         "plan_hash": jev_prereg.plan_hash(),
+        "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+        "regime_plan_hash": jev_prereg.regime_plan_hash(),
     }
 
     version = payload.get("version")

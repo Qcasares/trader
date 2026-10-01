@@ -66,7 +66,7 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "threshold_target": 0.80,
         "coverage_at_threshold": 0.55,
         # 114 of the 120 test items at the threshold right: a one-sided lower
-        # bound of 0.871 at the gate level, above the plan's 0.80.
+        # bound of 0.843 at the gate level, 0.999375, above the plan's 0.80.
         "n_at_threshold": 120,
         "accuracy_at_threshold": 0.95,
         "accuracy_wilson_low": 0.83,
@@ -74,12 +74,14 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "majority_baseline_accuracy": 0.40,
         "keyword_baseline_accuracy": 0.55,
         # Of the items only one of the two got right, Jev got 90 of 100 against
-        # the majority label and 60 of 90 against the keyword rule: each
-        # beaten by the exact one-sided sign test at the gate level.
+        # the majority label and 70 of 90 against the keyword rule: each
+        # beaten by the exact one-sided sign test at the gate level. Plan
+        # version 1's 60 of 90 no longer is: its chance, about 1 in 970, is
+        # above the 1 in 1,600 the level of version 2 claims.
         "vs_majority_jev_right_only": 90,
         "vs_majority_baseline_right_only": 10,
-        "vs_keyword_jev_right_only": 60,
-        "vs_keyword_baseline_right_only": 30,
+        "vs_keyword_jev_right_only": 70,
+        "vs_keyword_baseline_right_only": 20,
         "flip_rate": 0.02,
         "flip_rate_n": jev_prereg.MIN_FLIP_PAIRS,
         "flip_rate_near_threshold": 0.08,
@@ -107,13 +109,14 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
     "training": ({"possibly_in_training": True}, []),
     "threshold": ({"threshold_outcome": "none_found", "threshold": None}, []),
     # 102 of 120 right at the threshold on the test split: 0.85, whose
-    # one-sided lower bound at the gate level, 0.748, falls short of 0.80.
+    # one-sided lower bound at the gate level, 0.717, falls short of 0.80.
     "held_out": ({"accuracy_at_threshold": 0.85}, []),
     "majority": ({"majority_baseline_accuracy": 0.82}, []),
-    # Seven of seven discordant items Jev's way, which the bootstrap called a
-    # win: its exact chance, 1 in 128, is above the gate's 1 in 200.
+    # Ten of ten discordant items Jev's way: its exact chance, 1 in 1,024,
+    # would have beaten plan version 1's gate of 1 in 200, and is above
+    # version 2's 1 in 1,600, which the family and the looks spend.
     "keyword": (
-        {"vs_keyword_jev_right_only": 7, "vs_keyword_baseline_right_only": 0},
+        {"vs_keyword_jev_right_only": 10, "vs_keyword_baseline_right_only": 0},
         [],
     ),
     "uniform_flips": ({"flip_rate": jev_prereg.MAX_FLIP_RATE + 0.01}, []),
@@ -244,11 +247,13 @@ class TestUsable:
     @pytest.mark.parametrize(
         ("question_set", "key", "right", "tested", "borne_out"),
         [
-            ("research.catalogue", "asset_class", 30, 30, True),
-            ("research.catalogue", "asset_class", 29, 30, False),
+            ("research.catalogue", "asset_class", 42, 42, True),
+            ("research.catalogue", "asset_class", 41, 41, False),
+            ("research.catalogue", "asset_class", 51, 52, True),
             ("research.catalogue", "asset_class", 114, 120, True),
-            ("guardrail.card", "performance_claim", 70, 70, True),
-            ("guardrail.card", "performance_claim", 66, 70, False),
+            ("guardrail.card", "performance_claim", 94, 94, True),
+            ("guardrail.card", "performance_claim", 93, 94, False),
+            ("guardrail.card", "performance_claim", 112, 113, True),
         ],
     )
     def test_the_held_out_bound_is_the_searchs_own_rule(
@@ -258,8 +263,9 @@ class TestUsable:
         The test split is held to the rule the development split's search
         applied: the statistic's one-sided Wilson lower bound at the gate level,
         on at least ``MIN_COVERED`` items, against the plan's target — 0.80
-        for the research lane, which 30 of 30 meets and 29 of 30 does not, and
-        0.90 for a guardrail's covered precision.
+        for the research lane, which 42 of 42 meets at plan version 2's level
+        and 41 of 41 does not, and 0.90 for a guardrail's covered precision,
+        which takes 94 of 94 (docs/09, section 3.6).
         """
         target = jev_prereg.SET_TARGETS[(question_set, key)]["at_least"]
         bound = jev_stats.wilson(right, tested, jev_prereg.GATE_CI, one_sided=True)
@@ -281,17 +287,19 @@ class TestUsable:
     def test_a_baseline_is_beaten_by_the_exact_sign_test_alone(self) -> None:
         """
         The paired difference's bootstrap interval is reported and gates
-        nothing: a bound above 0 beside 7 of 7 discordant items does not beat
-        the baseline, and a bound below 0 beside 60 of 90 does not stop it.
-        The exact test at the gate level decides — 8 of 8 is the fewest that
-        can.
+        nothing: a bound above 0 beside 10 of 10 discordant items does not
+        beat the baseline, and a bound below 0 beside 70 of 90 does not stop
+        it. The exact test at the gate level decides — 11 of 11 is the fewest
+        that can at plan version 2's 0.999375, and 14 with one the other way
+        (docs/09, section 3.6).
         """
         for low, counts, beaten in (
-            (0.30, (7, 0), False),
+            (0.30, (10, 0), False),
             (0.005, (5, 0), False),
-            (-0.20, (60, 30), True),
-            (None, (8, 0), True),
-            (0.30, (7, 1), False),
+            (-0.20, (70, 20), True),
+            (None, (11, 0), True),
+            (0.30, (13, 1), False),
+            (0.30, (14, 1), True),
         ):
             row = _usable_row(
                 vs_keyword_diff_low=low,

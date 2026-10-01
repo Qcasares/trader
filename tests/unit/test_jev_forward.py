@@ -73,10 +73,14 @@ SIGNAL = "decision.regime@1:regime"
 SYMBOL = "equities=SPY;bonds=IEF;commodities=GSG"
 PAYLOAD = {"session": SESSION.isoformat(), "set": "decision.regime", "version": 1}
 
-#: What every result the job completes with says of the analysis plan.
+#: What every result the job completes with says of the plans in force: the
+#: global plan's, and from plan version 2 the regime plan's, which the forward
+#: report scores the answer's agreement under (M4).
 PLAN_IN_FORCE = {
     "plan_version": jev_prereg.PLAN_VERSION,
     "plan_hash": jev_prereg.plan_hash(),
+    "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+    "regime_plan_hash": jev_prereg.regime_plan_hash(),
 }
 
 
@@ -798,9 +802,11 @@ class TestTheResultNamesThePlanInForce:
     """
     docs/08: after the first regime answer, a change of plan is recorded as a
     change of plan, and what was analysed under the old plan stays under it.
-    The forward report can keep to that only if each answer says which plan
-    was in force when it was asked, so every result the job completes with
-    names it (``jev_eval._answer_plan`` reads it back).
+    The forward report can keep to that only if each answer says which plans
+    were in force when it was asked, so every result the job completes with
+    names them: the global plan, and from plan version 2 the regime plan
+    apart, whose rule and sleeves the report scores agreement by
+    (``jev_eval._answer_regime_plan`` reads it back).
     """
 
     async def test_an_answer_names_the_plan_it_was_asked_under(self, rig: Rig) -> None:
@@ -810,17 +816,28 @@ class TestTheResultNamesThePlanInForce:
             jev_prereg.plan_hash(),
         )
 
+    async def test_the_result_names_both_plans(self, rig: Rig) -> None:
+        """
+        M4: the regime plan's version and hash beside the global plan's, each
+        its own, so a review of the regime's rule sets aside regime agreement
+        alone and every other figure stays under the global plan.
+        """
+        result = await _collect(rig)
+        assert {key: result[key] for key in PLAN_IN_FORCE} == PLAN_IN_FORCE
+        assert result["regime_plan_hash"] != result["plan_hash"]
+
     async def test_every_completion_names_it(self, rig: Rig) -> None:
         rig.signal_recorded = True
-        assert (await _collect(rig))["plan_hash"] == jev_prereg.plan_hash()
+        recorded = await _collect(rig)
+        assert {key: recorded[key] for key in PLAN_IN_FORCE} == PLAN_IN_FORCE
         superseded = await _collect(rig, {**PAYLOAD, "version": 2})
-        assert superseded["plan_hash"] == jev_prereg.plan_hash()
+        assert {key: superseded[key] for key in PLAN_IN_FORCE} == PLAN_IN_FORCE
 
 
 async def test_the_result_holds_no_state_and_no_price(rig: Rig) -> None:
     """
     The job's result, which the queue stores as JSON, is labels, counts and
-    ids, and the plan in force: nothing that was sent, and no price.
+    ids, and the plans in force: nothing that was sent, and no price.
     """
     result = await _collect(rig)
     assert json.loads(json.dumps(result)) == result
@@ -829,6 +846,8 @@ async def test_the_result_holds_no_state_and_no_price(rig: Rig) -> None:
         "signal",
         "plan_version",
         "plan_hash",
+        "regime_plan_version",
+        "regime_plan_hash",
         "status",
         "value",
         "backfilled",

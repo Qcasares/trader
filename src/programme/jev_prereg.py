@@ -11,18 +11,53 @@ An analysis chosen after the data is a search, and a search finds something:
 the split that flatters, the threshold that clears, the baseline Jev happens to
 beat. So every choice the harness and the forward report will make — how items
 are split into development and test, how large each must be, which confidence
-levels are reported and which gate, how many flips are too many, which
-requests are re-asked, and the rule Jev's regime is compared with — is data
-here, hashed by :func:`plan_hash` and pinned beside it by
-:data:`GOLDEN_PLAN_HASH`. ``tests/unit/test_jev_prereg.py`` holds both to
-``RELEASED_PLAN_HASHES``, an append-only history kept in the test, as the
-question sets' words are held. Editing a number here fails the build, and so
-does re-recording the golden to match, which is the edit a failing hash test
-invites: a released plan is history, and a change is a new
-:data:`PLAN_VERSION` with its hash appended, not a corrected old plan.
+levels are reported and which gate, how many looks the gate's level is spent
+over, how many flips are too many, which requests are re-asked, and the rule
+Jev's regime is compared with — is data here, hashed by :func:`plan_hash` and
+:func:`regime_plan_hash` and pinned beside them by :data:`GOLDEN_PLAN_HASH`
+and :data:`GOLDEN_REGIME_PLAN_HASH`. ``tests/unit/test_jev_prereg.py`` holds
+each to an append-only history kept in the test, ``RELEASED_PLAN_HASHES`` and
+``RELEASED_REGIME_PLAN_HASHES``, as the question sets' words are held. Editing
+a number here fails the build, and so does re-recording the golden to match,
+which is the edit a failing hash test invites: a released plan is history,
+and a change is a new :data:`PLAN_VERSION` (or :data:`REGIME_PLAN_VERSION`)
+with its hash appended, not a corrected old plan.
 
-The regime's baseline, and the sleeves: the agent's defaults
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Version 2, released while the ledger held no answer (phase D1)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Version 1 was phase C4's. Version 2 is phase D's first pull request, released
+before any Jev area was first switched on, so it set aside nothing: an answer
+is scored only under the plans in force when it was recorded
+(``jev_eval.build_evaluation``), and none was recorded under version 1. It
+changes, as docs/09 section 3.2 registers:
+
+* **R1, floors by statistic** (:data:`STATISTIC_FLOORS`), where version 1 held
+  a target per lane: covered accuracy at least 0.80, and covered precision of
+  the acting class at least 0.90, each met by its one-sided Wilson lower bound
+  at :data:`GATE_CI`. A question with an acting class is measured by that
+  class's covered precision, any other by its covered accuracy, and a set
+  plan may raise a floor, never lower it. So any lane — findings and ops
+  among them — arrives through a set plan alone, and no floor lives in a test,
+  outside the hash.
+* **R2, a family of 20** (:data:`GATE_FAMILY`), where version 1's 10 was
+  nearly full.
+* **M1, a 50/50 split** (:data:`DEV_SPLIT_TENTHS`), where version 1's was
+  30/70.
+* **M2, flips over the population** (:data:`FLIP_PAIRS`): every canonical
+  request of the question under the pin, labelled or not, where version 1
+  counted only those that answered a scored item.
+* **M3, looks counted** (:data:`MAX_LOOKS`): at most four looks at the
+  held-out items of one set, version and question, under any model, the
+  identity the family counts (:data:`LOOKS_COUNTED_BY`), so a new pin
+  restores none. :data:`GATE_CI` is spent across the family and the looks,
+  1 − 0.05 / (20 × 4).
+* **M4, the regime's plan apart** (:func:`regime_plan`), so that a review of
+  the regime's rule sets aside regime agreement alone.
+* **M5, re-asks not compared count against the flip limits**
+  (:data:`FLIPS_NOT_COMPARED`), in the worst case.
+
+The regime's baseline, and the sleeves: the agent's defaults, in a plan apart
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 :data:`REGIME_BASELINE_RULE` is the code rule phase G's baseline twin will run
 beside a Jev-driven allocator, and the forward report compares Jev's recorded
 regimes with it now. It reads the equities sleeve only, on purpose: every other
@@ -32,29 +67,38 @@ GSG for commodities, as ``src/data/reference.py`` holds them for the worker —
 says which instruments a regime series describes. **Both are the defaults the
 agent that built phase C4 chose, not choices the operator has reviewed.**
 
+From plan version 2 the two are a plan of their own, the regime plan
+(:func:`regime_plan`, versioned by :data:`REGIME_PLAN_VERSION`), and the
+global plan holds neither: inside the global plan, the operator's review of
+the rule would have been a new global plan, setting aside every lane's
+answers to change the regime's.
+
 How either changes:
 
 * **Before the first regime answer exists** — the decisions area is seeded off,
   so nothing is asked until an operator switches it on — a change is a new
-  :data:`PLAN_VERSION` with its hash appended to the released list, and costs
-  nothing: no answer was analysed under the old plan. A changed sleeve also
-  means changing ``src/data/reference.py`` and the test that holds the two
-  equal, and starts a new signal series, since a signal's ``symbol`` names the
-  instruments (``jev_clock.sleeve_symbol``).
-* **After it** — the same bump, recorded as a change of plan: the regime job
-  writes the plan in force into its result as it asks, and the planner into
-  each re-ask's payload, so the forward report scores agreement only over the
-  answers first recorded under the plan it runs, counts the rest apart by the
-  plan they were recorded under, and counts a flip pair only under the plan
-  that sampled it (``jev_eval``); no answer is scored by a rule registered
-  after it, and the old rule is never rewritten to match.
+  :data:`REGIME_PLAN_VERSION` with its hash appended to the released list, and
+  costs nothing: no answer was analysed under the old plan. A changed sleeve
+  also means changing ``src/data/reference.py`` and the test that holds the
+  two equal, and starts a new signal series, since a signal's ``symbol``
+  names the instruments (``jev_clock.sleeve_symbol``).
+* **After it** — the same bump, which sets aside regime agreement alone: the
+  regime job writes the regime plan in force into its result as it asks
+  (``jev_forward``), so the forward report scores agreement only over the
+  answers first recorded under the regime plan it runs and counts the rest
+  apart by the regime plan they were recorded under (``jev_eval``); no
+  answer is scored by a rule registered after it, and the old rule is never
+  rewritten to match. A flip pair still counts under the global plan its
+  re-ask's payload names.
 
-What the plan holds, and what it does not
+What the plans hold, and what they do not
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The global plan: the split, the size floors, the margin grid a threshold is
-searched on, each lane's target, the confidence levels, the bootstrap, the
-calibration bins, the flip limits, the re-ask sample, the "too few to say"
-floor and the regime rule. Nothing here is consumed by anything that acts.
+searched on, the statistics' floors, the confidence levels and the looks they
+are spent over, the bootstrap, the calibration bins, the flip limits and how
+their pairs are counted, the re-ask sample and the "too few to say" floor. The
+regime plan: the sleeves and the baseline rule. Nothing here is consumed by
+anything that acts.
 
 The set plans (phases C7 and C8)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -62,11 +106,11 @@ Each question set the research and guardrail lanes ask has a plan of its own
 (:func:`set_plan`), registered with the set and golden-hashed beside it
 (:data:`GOLDEN_SET_PLAN_HASHES`), with an append-only released history in the
 test, as the global plan has: per question, the class whose answer acts, the
-target its statistic must meet — a lane's target raised, never lowered — and
-the keyword baseline Jev is measured against, a pure, deterministic function of
-the text whose rules are data hashed into the plan. ``decision.regime`` is the
-global plan's ``regime`` section, and the connectivity probe measures the
-vendor, not a set, so neither has one.
+target its statistic must meet — its statistic's floor raised, never lowered —
+and the keyword baseline Jev is measured against, a pure, deterministic
+function of the text whose rules are data hashed into the plan.
+``decision.regime`` is the regime plan's, and the connectivity probe measures
+the vendor, not a set, so neither has one.
 
 A plan is in force for the answers recorded under it, and for no others. So
 every ``jev_ask`` job is planned with the set plan's version and hash, and the
@@ -82,8 +126,9 @@ after the answers cannot be applied to them: a changed plan is a new
 :data:`SET_PLAN_VERSIONS` entry, with its hash appended, and the answers
 recorded under the old one stay scored under the old one.
 
-The global plan is unchanged by them: :data:`PLAN_VERSION` and
-:data:`GOLDEN_PLAN_HASH` are as phase C4 released them.
+A set plan names no global constant, so no set plan's hash moved with
+version 2; what moved is the plans in force a job records, whose global half
+is version 2's.
 """
 
 from __future__ import annotations
@@ -97,13 +142,14 @@ from datetime import timedelta
 from types import MappingProxyType
 from typing import Any, Literal
 
-#: Bumped whenever anything below changes; ``RELEASED_PLAN_HASHES`` in the test
-#: gains the new hash, and keeps every old one.
-PLAN_VERSION = 1
+#: Bumped whenever anything in the global plan changes; ``RELEASED_PLAN_HASHES``
+#: in the test gains the new hash, and keeps every old one. Version 2 is phase
+#: D1's (see the module docstring); version 1's hash stays released.
+PLAN_VERSION = 2
 
 #: What :func:`plan_hash` returns for :data:`PLAN_VERSION`. Not part of the plan
 #: it pins, which could not hash itself.
-GOLDEN_PLAN_HASH = "f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf7caf"
+GOLDEN_PLAN_HASH = "5d3a7fbbdb804440e70e077c75f9c997454786a84024d5ef58afabcab8365844"
 
 # ---------------------------------------------------------------------------
 # Items: the split and the sizes
@@ -111,9 +157,13 @@ GOLDEN_PLAN_HASH = "f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf
 
 #: An item is in the development split when the first eight hex digits of
 #: ``sha256(f"{subject_type}:{subject_id}")``, read as an integer, are below
-#: this many tenths of the way round ``% 10``: three in ten. By content, so an
-#: item's split never depends on when it was labelled or answered.
-DEV_SPLIT_TENTHS = 3
+#: this many tenths of the way round ``% 10``: five in ten (M1). By content, so
+#: an item's split never depends on when it was labelled or answered. The
+#: test split is held to the same bar the development split's search applied
+#: (``jev_calibration.usable``, ``held_out``), so the development share binds
+#: as hard as the test share does: version 1's three in ten needed 40% more
+#: labels wherever a covered count bound.
+DEV_SPLIT_TENTHS = 5
 
 #: The fewest test items an evaluation may gate on, development items a
 #: threshold may be searched on, and items a threshold must still cover.
@@ -124,22 +174,28 @@ MIN_COVERED = 30
 #: The thresholds searched: margins from 0.00 to 0.98 in steps of 0.02.
 MARGIN_GRID: tuple[float, ...] = tuple(round(step * 0.02, 2) for step in range(50))
 
-#: What each lane must reach before a threshold is chosen for it: the Wilson
-#: lower bound of the statistic, one-sided at :data:`GATE_CI`, never its point
-#: estimate, since 24 of the 30 covered items a threshold needs is 0.80 with a
-#: lower bound of 0.57. A set's own plan may raise a target, never lower it.
-LANE_TARGETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
+#: (R1) What a question's statistic must reach before a threshold is chosen
+#: for it, by statistic: the Wilson lower bound of the statistic, one-sided at
+#: :data:`GATE_CI`, never its point estimate, since 24 of the 30 covered items a
+#: threshold needs is 0.80 with a lower bound far below it. A question with an
+#: acting class — the answer that would act, a guardrail's ``true`` — is
+#: measured by that class's covered precision, and any other by its covered
+#: accuracy. A set's own plan may raise its statistic's floor, never lower it
+#: (``tests/unit/test_jev_prereg.py::TestTheTargets``). Version 1 held a target
+#: per lane, research and guardrail, so a findings or an ops set could arrive
+#: only with a floor kept in a test, outside the hash.
+STATISTIC_FLOORS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
     {
-        "research": MappingProxyType(
+        "covered_accuracy": MappingProxyType(
             {
-                "statistic": "covered_accuracy",
+                "measures": "a question with no acting class",
                 "at_least": 0.80,
                 "bound": "wilson_lower_at_gate_ci",
             }
         ),
-        "guardrail": MappingProxyType(
+        "covered_precision_of_the_acting_class": MappingProxyType(
             {
-                "statistic": "covered_precision_of_the_acting_class",
+                "measures": "a question with an acting class",
                 "at_least": 0.90,
                 "bound": "wilson_lower_at_gate_ci",
             }
@@ -148,19 +204,52 @@ LANE_TARGETS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
 )
 
 # ---------------------------------------------------------------------------
-# Uncertainty
+# Uncertainty, and the looks it is spent over
 # ---------------------------------------------------------------------------
 
 #: Every reported interval: two-sided, 95%.
 REPORT_CI = 0.95
 
-#: A gate's bound: one-sided, 99.5%, Bonferroni over a family of up to
-#: :data:`GATE_FAMILY` set-and-question pairs; a larger family is a new plan.
-#: A pair a set plan adds moves no hash of this plan, so the count of the
-#: pairs the set plans gate is held to the family by a test instead
-#: (``tests/unit/test_jev_prereg.py::TestTheGateFamily``).
-GATE_CI = 0.995
-GATE_FAMILY = 10
+#: (R2) The family a gate's level is Bonferroni over: up to this many gated
+#: set-and-question pairs. A pair a set plan adds moves no hash of this plan,
+#: so the count of the pairs the set plans gate is held to the family by a
+#: test instead (``tests/unit/test_jev_prereg.py::TestTheGateFamily``); a
+#: larger family is a new plan. Version 1's ten held nine pairs once phase D's
+#: sets were planned, so a set's next version would have forced a new plan
+#: just when it cost every lane's history.
+GATE_FAMILY = 20
+
+#: (M3) How many looks at the held-out items one set, version and question may
+#: spend: evaluations recorded on the test split or on every item. A dry look
+#: at them is refused (``jev_eval.execute``, which ``--split test`` and
+#: ``--split all`` need ``--record`` to pass), and ``jev_calibration.usable``
+#: refuses an evaluation with this many looks before it. Labelling until a dry
+#: run passes and recording that one is optional stopping, which breaks the
+#: error rate the gate's level claims.
+MAX_LOOKS = 4
+
+#: What a look is counted by: the set, its version and the question — the
+#: identity a pair of the gate's family is — and never the model, so a look
+#: under one pin is one of the same four under every other, and a new pin
+#: restores no look the level never paid for.
+LOOKS_COUNTED_BY: tuple[str, ...] = (
+    "question_set",
+    "question_set_version",
+    "question_key",
+)
+
+#: The splits a look reads the held-out items of: the test split, and every
+#: item, which holds it. The development split is the search's own, and a
+#: look at it is no look.
+LOOKED_AT_SPLITS: tuple[str, ...] = ("test", "all")
+
+#: A gate's bound: one-sided, Bonferroni over the family and the looks,
+#: 1 − (1 − :data:`REPORT_CI`) / (:data:`GATE_FAMILY` × :data:`MAX_LOOKS`) =
+#: 1 − 0.05 / 80 = 0.999375. Written as a literal, and held to that formula by
+#: ``tests/unit/test_jev_prereg.py::TestTheGateFamily``. At it, the exact
+#: sign test needs eleven discordant items all one way, where version 1's
+#: 0.995 needed eight.
+GATE_CI = 0.999375
 
 #: The bootstrap, and its seed: the first sixteen hex digits of the dataset's
 #: sha256, read as an integer, so a figure recomputes from its dataset.
@@ -178,12 +267,32 @@ TOO_FEW_PER_CLASS = 10
 # ---------------------------------------------------------------------------
 
 #: The flip rates a usable evaluation may show, each on at least
-#: :data:`MIN_FLIP_PAIRS` pairs; near a threshold means a canonical margin
-#: within :data:`NEAR_THRESHOLD` of it.
+#: :data:`MIN_FLIP_PAIRS` compared pairs; near a threshold means a canonical
+#: margin within :data:`NEAR_THRESHOLD` of it.
 MAX_FLIP_RATE = 0.05
 MAX_FLIP_RATE_NEAR_THRESHOLD = 0.10
 MIN_FLIP_PAIRS = 30
 NEAR_THRESHOLD = 0.10
+
+#: (M2) Which pairs a flip rate counts: every canonical request of the
+#: question under the pin, labelled or not, each sampled under the plan in
+#: force and counted in the stratum it was sampled in
+#: (``jev_eval.build_evaluation``). A flip uses no label, and an armed
+#: threshold acts on the population, so the population's flips are the ones
+#: that matter. Version 1 counted a pair only when its canonical request
+#: answered a scored item, so thirty uniform pairs needed about six hundred
+#: labelled test items.
+FLIP_PAIRS = "every_canonical_request_of_the_question_under_the_pin"
+
+#: (M5) How a flip limit reads a re-ask that could not be compared — the
+#: re-ask, or its canonical answer, not valid, failed or refused before it was
+#: sent: as a flip, in the worst case. A rate is within its limit only if
+#: (flipped + not compared) / (compared + not compared) is, on at least
+#: :data:`MIN_FLIP_PAIRS` compared pairs (``jev_calibration.usable``). A
+#: re-ask that ties or is refused whole is itself unstable, and the rule can
+#: only refuse; version 1 read the compared pairs alone (docs/08 open item
+#: 68).
+FLIPS_NOT_COMPARED = "counted_as_flipped_in_the_worst_case"
 
 #: The re-ask sample. A canonical request is in the uniform stratum when the
 #: first eight hex digits of its request hash, as an integer, are divisible by
@@ -206,8 +315,20 @@ REASK_AFTER = timedelta(hours=24)
 ReaskStratum = Literal["uniform", "low_margin"]
 
 # ---------------------------------------------------------------------------
-# The regime's baseline: a rule, frozen before the first answer
+# The regime plan: the baseline rule and the sleeves, frozen before the first
+# answer, in a plan of their own (M4)
 # ---------------------------------------------------------------------------
+
+#: Bumped whenever the regime plan changes — the rule or the sleeves;
+#: ``RELEASED_REGIME_PLAN_HASHES`` in the test gains the new hash, and keeps
+#: every old one. A bump sets aside regime agreement alone: the global plan,
+#: and every other lane's answers, are untouched by it.
+REGIME_PLAN_VERSION = 1
+
+#: What :func:`regime_plan_hash` returns for :data:`REGIME_PLAN_VERSION`.
+GOLDEN_REGIME_PLAN_HASH = (
+    "2833a4c00d1a6b0adab46c6d6bf0e3544deae6dc1a964598a088162fc1b6af74"
+)
 
 #: Which instrument stands for each sleeve. ``src/data/reference.py`` holds the
 #: worker's copy, and ``tests/unit/test_jev_prereg.py`` holds the two equal.
@@ -340,7 +461,7 @@ def reask_sample(
 
 
 def global_plan() -> dict[str, Any]:
-    """The whole plan, as data: what :func:`plan_hash` hashes."""
+    """The whole global plan, as data: what :func:`plan_hash` hashes."""
     return _as_data(
         {
             "version": PLAN_VERSION,
@@ -352,7 +473,7 @@ def global_plan() -> dict[str, Any]:
                 "too_few_per_class": TOO_FEW_PER_CLASS,
             },
             "threshold": {"statistic": "margin", "grid": MARGIN_GRID},
-            "lane_targets": LANE_TARGETS,
+            "statistic_floors": STATISTIC_FLOORS,
             "uncertainty": {
                 "report_ci": REPORT_CI,
                 "report_sides": 2,
@@ -363,11 +484,18 @@ def global_plan() -> dict[str, Any]:
                 "bootstrap_seed": BOOTSTRAP_SEED_RULE,
                 "calibration_bins": CALIBRATION_BINS,
             },
+            "looks": {
+                "max": MAX_LOOKS,
+                "counted_by": LOOKS_COUNTED_BY,
+                "splits": LOOKED_AT_SPLITS,
+            },
             "flips": {
                 "max_rate": MAX_FLIP_RATE,
                 "max_rate_near_threshold": MAX_FLIP_RATE_NEAR_THRESHOLD,
                 "min_pairs": MIN_FLIP_PAIRS,
                 "near_threshold": NEAR_THRESHOLD,
+                "pairs": FLIP_PAIRS,
+                "not_compared": FLIPS_NOT_COMPARED,
             },
             "reasks": {
                 "uniform_modulus": REASK_UNIFORM_MODULUS,
@@ -376,7 +504,6 @@ def global_plan() -> dict[str, Any]:
                 "after_hours": REASK_AFTER.total_seconds() / 3600,
                 "order": ["uniform", "low_margin"],
             },
-            "regime": {"sleeves": REGIME_SLEEVES, "baseline": REGIME_BASELINE_RULE},
         }
     )
 
@@ -384,12 +511,41 @@ def global_plan() -> dict[str, Any]:
 def plan_hash() -> str:
     """
     sha256 of :func:`global_plan` as compact JSON with its mappings' keys
-    sorted: a mapping's order means nothing here, and a sequence's — the rule's
-    lines, the strata's order — is kept, since it is part of what the plan
-    says.
+    sorted: a mapping's order means nothing here, and a sequence's — the
+    strata's order, the identity a look is counted by — is kept, since it is
+    part of what the plan says.
     """
+    return _sha256_of(global_plan())
+
+
+def regime_plan() -> dict[str, Any]:
+    """
+    The regime plan, as data: what :func:`regime_plan_hash` hashes. The
+    sleeves and the baseline rule, apart from the global plan since version 2
+    (M4), so that changing either sets aside regime agreement alone.
+    """
+    return _as_data(
+        {
+            "version": REGIME_PLAN_VERSION,
+            "sleeves": REGIME_SLEEVES,
+            "baseline": REGIME_BASELINE_RULE,
+        }
+    )
+
+
+def regime_plan_hash() -> str:
+    """
+    sha256 of :func:`regime_plan`, hashed as :func:`plan_hash` hashes the
+    global plan: the rule's lines keep their order, since the first that holds
+    wins.
+    """
+    return _sha256_of(regime_plan())
+
+
+def _sha256_of(data: Any) -> str:
+    """sha256 of ``data`` as compact JSON with its mappings' keys sorted."""
     text = json.dumps(
-        global_plan(),
+        data,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -444,10 +600,11 @@ GOLDEN_SET_PLAN_HASHES: Mapping[tuple[str, int], str] = MappingProxyType(
 
 #: Per question: the class whose answer would act, ``None`` where no answer
 #: acts, and the target the statistic must meet before a threshold is chosen,
-#: read as its lane's is (:data:`LANE_TARGETS`) — a Wilson lower bound at the
-#: gate level — and never below its lane's. A guardrail's answer acts on its
-#: ``true`` (a text quarantined, a card refused), so its precision is what is
-#: measured; a research answer is a suggestion, measured by its accuracy.
+#: read as its statistic's floor is (:data:`STATISTIC_FLOORS`) — a Wilson
+#: lower bound at the gate level — and never below it. A guardrail's answer
+#: acts on its ``true`` (a text quarantined, a card refused), so its precision
+#: is what is measured; a research answer is a suggestion, measured by its
+#: accuracy.
 SET_TARGETS: Mapping[tuple[str, str], Mapping[str, Any]] = MappingProxyType(
     {
         ("guardrail.injection", "addressed_to_ai"): MappingProxyType(
@@ -775,10 +932,7 @@ def set_plan_hash(name: str, version: int) -> str | None:
     plan = set_plan(name, version)
     if plan is None:
         return None
-    text = json.dumps(
-        plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    )
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return _sha256_of(plan)
 
 
 def plans_in_force(name: str, version: int) -> dict[str, Any] | None:
@@ -808,16 +962,21 @@ __all__ = [
     "CALIBRATION_BINS",
     "CODE_SCREEN_BASELINE",
     "DEV_SPLIT_TENTHS",
+    "FLIPS_NOT_COMPARED",
+    "FLIP_PAIRS",
     "GATE_CI",
     "GATE_FAMILY",
     "GOLDEN_PLAN_HASH",
+    "GOLDEN_REGIME_PLAN_HASH",
     "GOLDEN_SET_PLAN_HASHES",
     "KEYWORD_FALLBACK",
     "KEYWORD_MATCHER",
-    "LANE_TARGETS",
+    "LOOKED_AT_SPLITS",
+    "LOOKS_COUNTED_BY",
     "MARGIN_GRID",
     "MAX_FLIP_RATE",
     "MAX_FLIP_RATE_NEAR_THRESHOLD",
+    "MAX_LOOKS",
     "MECHANISM_KEYWORDS",
     "MIN_COVERED",
     "MIN_DEV_ITEMS",
@@ -831,10 +990,12 @@ __all__ = [
     "REASK_LOW_MARGIN",
     "REASK_UNIFORM_MODULUS",
     "REGIME_BASELINE_RULE",
+    "REGIME_PLAN_VERSION",
     "REGIME_SLEEVES",
     "REPORT_CI",
     "SET_PLAN_VERSIONS",
     "SET_TARGETS",
+    "STATISTIC_FLOORS",
     "TOO_FEW_PER_CLASS",
     "ReaskStratum",
     "global_plan",
@@ -846,6 +1007,8 @@ __all__ = [
     "reask_sample",
     "reask_stratum",
     "regime_baseline",
+    "regime_plan",
+    "regime_plan_hash",
     "set_plan",
     "set_plan_hash",
     "split_of",

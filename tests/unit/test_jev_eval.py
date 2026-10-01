@@ -73,6 +73,7 @@ EVAL = ROOT / "src" / "programme" / "jev_eval.py"
 SYMBOL = jev_clock.sleeve_symbol()
 MODEL = "jev-1.13.0"
 PLAN = jev_prereg.plan_hash()
+REGIME_PLAN = jev_prereg.regime_plan_hash()
 
 #: The forward report's fields, in order. Adding one is an edit here, where a
 #: reviewer reads what it is; a return, a P&L or a hit rate is refused below
@@ -80,6 +81,8 @@ PLAN = jev_prereg.plan_hash()
 PINNED_FIELDS = (
     "plan_version",
     "plan_hash",
+    "regime_plan_version",
+    "regime_plan_hash",
     "signal",
     "symbol",
     "since",
@@ -167,11 +170,17 @@ def _signal(
     }
 
 
-def _asked(session: date, plan: str | None = PLAN) -> tuple[str, dict[str, Any]]:
-    """A regime job that asked about ``session`` and recorded ``plan``."""
-    result: dict[str, Any] = {"status": "measured"}
-    if plan is not None:
-        result["plan_hash"] = plan
+def _asked(
+    session: date, regime_plan: str | None = REGIME_PLAN
+) -> tuple[str, dict[str, Any]]:
+    """
+    A regime job that asked about ``session`` and recorded ``regime_plan``,
+    beside the global plan, as the shipped forward job does from plan version
+    2; ``None`` for a phase C4 job, whose result named the global plan alone.
+    """
+    result: dict[str, Any] = {"status": "measured", "plan_hash": PLAN}
+    if regime_plan is not None:
+        result["regime_plan_hash"] = regime_plan
     return (
         jev_clock.regime_job_key(DECISION_REGIME, session),
         {"status": "succeeded", "error": None, "result": result},
@@ -329,6 +338,8 @@ class TestTheFieldListIsPinned:
         report = _populated()
         assert report["plan_version"] == jev_prereg.PLAN_VERSION
         assert report["plan_hash"] == jev_prereg.plan_hash()
+        assert report["regime_plan_version"] == jev_prereg.REGIME_PLAN_VERSION
+        assert report["regime_plan_hash"] == jev_prereg.regime_plan_hash()
         assert report["signal"] == "decision.regime@1:regime"
         assert report["symbol"] == "equities=SPY;bonds=IEF;commodities=GSG"
 
@@ -575,8 +586,10 @@ class TestAnAnswerIsScoredUnderThePlanThatRegisteredIt:
     """
     docs/08: after the first regime answer, a change of plan is recorded as
     one — what was analysed under the old plan stays under it. The regime job
-    records the plan in force when it asks, and agreement is scored only over
-    answers first recorded under the plan the report runs.
+    records the plans in force when it asks, and agreement is scored only
+    over answers first recorded under the regime plan the report runs: from
+    plan version 2 the rule and the sleeves are a plan of their own (M4), so
+    the hashes below are the regime plan's.
     """
 
     def test_an_answer_recorded_under_another_plan_is_not_scored(self) -> None:
@@ -621,7 +634,76 @@ class TestAnAnswerIsScoredUnderThePlanThatRegisteredIt:
         text = jev_eval.format_forward(
             _build([_signal(first, "risk_on")], jobs=dict([_asked(first, "e" * 64)]))
         )
-        assert "not scored: 1 sessions answered under plan eeeeeeeeeeee" in text
+        assert (
+            "not scored: 1 sessions answered under regime plan eeeeeeeeeeee, not "
+            "this one" in text
+        )
+        unknown = jev_eval.format_forward(
+            _build([_signal(first, "risk_on")], jobs=dict([_asked(first, None)]))
+        )
+        assert "not scored: 1 sessions answered under no regime plan recorded" in (
+            unknown
+        )
+
+
+class TestTheRegimeReport:
+    """
+    M4: the forward report scores agreement under the regime plan alone. A
+    job whose result names this regime plan is scored whatever global plan
+    it names beside it, one naming another regime plan is counted apart by
+    it, and a phase C4 job's result, which names the global plan alone, is
+    "plan unknown" — its global hash is never read as a regime plan's.
+    """
+
+    def test_agreement_is_scored_under_the_regime_plan(self) -> None:
+        first, second, third, *_ = SESSIONS
+        under_another_global_plan = (
+            jev_clock.regime_job_key(DECISION_REGIME, first),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": "1" * 64, "regime_plan_hash": REGIME_PLAN},
+            },
+        )
+        under_another_regime_plan = (
+            jev_clock.regime_job_key(DECISION_REGIME, second),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": PLAN, "regime_plan_hash": "2" * 64},
+            },
+        )
+        phase_c4 = (
+            jev_clock.regime_job_key(DECISION_REGIME, third),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": REGIME_PLAN},
+            },
+        )
+        report = _build(
+            [
+                _signal(first, "risk_on", state=RISING),
+                _signal(second, "risk_off", state=FALLING),
+                _signal(third, "neutral", state=SIDEWAYS),
+            ],
+            jobs=dict([under_another_global_plan, under_another_regime_plan, phase_c4]),
+        )
+        figures = _model(report)
+        assert figures["baseline_agreement_sessions"]["n"] == 1
+        assert figures["baseline_agreement_sessions"]["k"] == 1
+        assert figures["not_scored"] == {"2" * 64: 1, jev_eval.UNKNOWN_PLAN: 1}
+
+    def test_the_text_names_the_regime_plan_its_rule_is(self) -> None:
+        text = jev_eval.format_forward(_populated())
+        assert (
+            f"regime plan v{jev_prereg.REGIME_PLAN_VERSION} "
+            f"{jev_prereg.regime_plan_hash()[:12]}" in text
+        )
+        assert (
+            f"agrees with the regime plan v{jev_prereg.REGIME_PLAN_VERSION} "
+            "baseline rule" in text
+        )
 
 
 class TestTheFlipRates:
@@ -772,8 +854,10 @@ class TestNothingMeasuredIsNotZero:
                     "validity_rate": None,
                     "latency_ms": {"p50": None, "n": 0},
                 },
-                "plan_version": 1,
+                "plan_version": jev_prereg.PLAN_VERSION,
                 "plan_hash": jev_prereg.plan_hash(),
+                "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+                "regime_plan_hash": jev_prereg.regime_plan_hash(),
             }
         )
         assert "model not measured" in text
@@ -1503,15 +1587,17 @@ class TestPossiblyInTraining:
 
 def _threshold_book(acting: bool = False) -> tuple[_Book, list[str], list[str]]:
     """
-    120 development items, right above a margin of 0.5 and a coin below it,
-    and 40 test items: enough for a threshold to be chosen.
+    160 development items, right above a margin of 0.5 and a coin below it,
+    and 40 test items: enough for a threshold to be chosen — 100 right above
+    the coin, since at plan version 2's gate level a covered precision of
+    0.90 needs 94 covered items all right, and a covered accuracy of 0.80 42.
     """
     book = _Book(SCREEN, "addressed_to_ai") if acting else _Book()
-    dev, test = _texts_in("dev", 120), _texts_in("test", 40)
+    dev, test = _texts_in("dev", 160), _texts_in("test", 40)
     yes, no = ("true", "false") if acting else ("equities", "bonds")
     for i, text in enumerate(dev):
         book.label(text, yes)
-        if i < 60:
+        if i < 100:
             book.answer(text, yes, margin=0.9)
         else:
             book.answer(text, yes if i % 2 else no, margin=0.2)
@@ -1819,15 +1905,6 @@ class TestTheFlips:
         assert evaluation.flip_rate_near_threshold_n is None
         assert evaluation.flip_rate_near_threshold_not_compared is None
 
-    def test_a_pair_of_an_unscored_item_is_not_counted(self) -> None:
-        book = _Book()
-        book.label(_title(0), "equities")
-        book.answer(_title(0), "equities")
-        book.answer(_title(9), "equities")  # answered, and labelled by nobody
-        self._paired(book, _title(9), "uniform", flipped=True)
-        evaluation = book.evaluate()
-        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (None, 0)
-
     def test_near_the_threshold_from_either_stratum(self) -> None:
         book, _, test = _threshold_book()
         self._paired(book, test[0], "uniform", flipped=True, margin=0.25)
@@ -1879,6 +1956,79 @@ class TestTheFlips:
             for beyond in (exact - further, exact + further):
                 if 0 <= beyond <= 1:
                     assert not jev_eval.near_threshold(float(beyond), threshold)
+
+
+class TestTheFlipsCountThePopulation:
+    """
+    Plan version 2, M2 (docs/09, section 3.2): a flip rate counts every
+    canonical answer to the question under the model that was asked again —
+    labelled or not, in either split — since a flip uses no label and an
+    armed threshold would act on every answer. Version 1 counted a pair only
+    when its canonical answer scored a labelled item, so thirty uniform pairs
+    needed some six hundred labelled test items. The plan that sampled a
+    re-ask, and its stratum, still decide whether and where it counts.
+    """
+
+    def _paired(self, book: _Book, text: str, stratum: str, **kwargs: Any) -> None:
+        TestTheFlips()._paired(book, text, stratum, **kwargs)
+
+    def test_a_pair_of_an_unlabelled_subject_counts(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.answer(_title(9), "equities")  # answered, and labelled by nobody
+        self._paired(book, _title(9), "uniform", flipped=True)
+        evaluation = book.evaluate()
+        assert jev_prereg.FLIP_PAIRS == (
+            "every_canonical_request_of_the_question_under_the_pin"
+        )
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (1.0, 1)
+        assert evaluation.n == 1
+
+    def test_a_pair_of_the_other_split_counts_on_the_test_split(self) -> None:
+        """The population is every answer, so a test-split evaluation counts
+        the development split's pairs too, and its own labels decide nothing
+        about them."""
+        book = _Book()
+        dev = _texts_in("dev", 1)[0]
+        test = _texts_in("test", 1)[0]
+        for text in (dev, test):
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        self._paired(book, dev, "uniform", flipped=True)
+        self._paired(book, test, "low_margin", flipped=False)
+        evaluation = book.evaluate("test")
+        assert evaluation.n == 1
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (1.0, 1)
+        assert (
+            evaluation.flip_rate_low_margin,
+            evaluation.flip_rate_low_margin_n,
+        ) == (0.0, 1)
+
+    def test_flip_pairs_may_outnumber_the_scored_items(self) -> None:
+        """Three pairs beside one scored item: a count above ``n``, which
+        migration 0015 frees from ``n`` (``jev_evaluations_flip_counts_are_
+        counts``)."""
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        for i in (7, 8, 9):
+            book.answer(_title(i), "equities")
+            self._paired(book, _title(i), "uniform", flipped=i == 7)
+        evaluation = book.evaluate()
+        assert evaluation.n == 1
+        assert evaluation.flip_rate_n == 3 > evaluation.n
+        assert evaluation.flip_rate == pytest.approx(1 / 3)
+
+    def test_a_pair_sampled_under_another_plan_still_does_not_count(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.answer(_title(9), "equities")
+        self._paired(book, _title(9), "uniform", flipped=True, plan="0" * 64)
+        evaluation = book.evaluate()
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (None, 0)
+        assert evaluation.flip_rate_not_compared == 0
 
 
 class TestLabellerAgreement:
@@ -2403,11 +2553,14 @@ class TestWhatTheTextSays:
     @pytest.mark.parametrize(
         ("counts", "said_of_it"),
         [
-            ((1, 0), "too few for the exact one-sided sign test at 99.5% to say"),
-            ((7, 0), "too few for the exact one-sided sign test at 99.5% to say"),
-            ((8, 0), "p = 0.00391: beats it"),
+            ((1, 0), "too few for the exact one-sided sign test at 99.9375% to say"),
+            ((10, 0), "too few for the exact one-sided sign test at 99.9375% to say"),
+            ((11, 0), "p = 0.000488: beats it"),
             ((30, 20), "p = 0.101: does not beat it"),
-            ((60, 30), ": beats it"),
+            # Version 1's level beat it; version 2's, spent over the looks,
+            # does not.
+            ((60, 30), "p = 0.00103: does not beat it"),
+            ((70, 20), ": beats it"),
             ((None, None), "not measured whether Jev is the better of the two"),
         ],
     )
@@ -2435,7 +2588,7 @@ class TestWhatTheTextSays:
         assert line.endswith(said_of_it), line
         assert "(bootstrap 95%: 0.010 to 0.500)" in line
         beaten = "beats it" in line.replace("does not beat it", "")
-        assert beaten is (counts in ((8, 0), (60, 30)))
+        assert beaten is (counts in ((11, 0), (70, 20)))
 
     def test_the_reviewers_comparisons_are_too_few_to_say(self) -> None:
         """
@@ -2509,12 +2662,16 @@ class TestWhatTheTextSays:
         assert "Wilson 90%" in other and "bootstrap 90%" in other
         assert "Wilson 95%" not in other and "bootstrap 95%" not in other
         assert "one-sided Wilson lower bound at 99%" in other
-        assert "99.5%" not in other
+        assert "99.9375%" not in other and "99.5%" not in other
+        own = jev_eval.format_evaluation(row)
+        assert "one-sided Wilson lower bound at 99.9375%" in own, (
+            "the plan's level is printed exactly as written, never rounded"
+        )
         unrecorded = jev_eval.format_evaluation(
             {**row, "ci_level": None, "gate_ci_level": None}
         )
         assert "Wilson, level not recorded" in unrecorded
-        assert "95%" not in unrecorded and "99.5%" not in unrecorded
+        assert "95%" not in unrecorded and "99.9375%" not in unrecorded
 
     def test_the_report_is_in_the_order_read_and_never_by_a_figure(
         self,
@@ -2616,59 +2773,64 @@ def _reasked_near(book: _Book, texts: list[str], margin: float) -> None:
 
 def _catalogue_threshold(confident_right: bool) -> _Book:
     """
-    120 development items: 40 answered right by 0.9 and 80 wrong by 0.4, so
-    the threshold is chosen at 0.42, where 40 of 40 are right. 200 test items:
-    30 answered by 0.9, right or wrong as asked, and 170 right by 0.4, below
+    130 development items: 50 answered right by 0.9 and 80 wrong by 0.4, so
+    the threshold is chosen at 0.42, where 50 of 50 are right. 220 test items:
+    50 answered by 0.9, right or wrong as asked, and 170 right by 0.4, below
     it; 35 of the latter re-asked, near the threshold, none flipped. Every
-    item dated after the model was first observed.
+    item dated after the model was first observed. Fifty, not plan version
+    1's thirty and forty, because at version 2's gate level a covered
+    accuracy of 0.80 needs 42 covered items all right, on the development
+    split and on the test split alike.
     """
     book = _Book()
     options = [o for o in ASSET_OPTIONS if o != "insufficient_evidence"]
-    for i, text in enumerate(_texts_in("dev", 120)):
+    for i, text in enumerate(_texts_in("dev", 130)):
         label = options[i % len(options)]
         book.label(text, label)
         wrong = options[(i + 1) % len(options)]
-        book.answer(text, label if i < 40 else wrong, margin=0.9 if i < 40 else 0.4)
-    test = _texts_in("test", 200)
+        book.answer(text, label if i < 50 else wrong, margin=0.9 if i < 50 else 0.4)
+    test = _texts_in("test", 220)
     for i, text in enumerate(test):
         label = options[i % len(options)]
         book.label(text, label)
-        if i < 30:
+        if i < 50:
             chosen = label if confident_right else options[(i + 1) % len(options)]
             book.answer(text, chosen, margin=0.9)
         else:
             book.answer(text, label, margin=0.4)
-    _reasked_near(book, test[30:65], 0.4)
+    _reasked_near(book, test[50:85], 0.4)
     return book
 
 
 def _card_threshold(confident_right: bool) -> _Book:
     """
-    The card check, whose acting class is ``true``. 130 development titles:
-    80 claims answered ``true`` by 0.9, right; 20 answered ``true`` by 0.1,
-    wrong; 30 answered ``false``; so the threshold is chosen at 0.12. 280 test
-    titles: 150 claims answered ``true`` by 0.1, below it; 60 answered
-    ``false``, right; and 70 answered ``true`` by 0.9, right or wrong as
-    asked — 70 being enough for 70 of 70 to meet the guardrail's 0.90 by its
-    lower bound. 40 of the narrow ``true`` re-asked, near the threshold.
+    The card check, whose acting class is ``true``. 150 development titles:
+    100 claims answered ``true`` by 0.9, right; 20 answered ``true`` by 0.1,
+    wrong; 30 answered ``false``; so the threshold is chosen at 0.12. 360 test
+    titles: 200 claims answered ``true`` by 0.1, below it; 60 answered
+    ``false``, right; and 100 answered ``true`` by 0.9, right or wrong as
+    asked — 100 being enough for 100 of 100 to meet the guardrail's 0.90 by
+    its lower bound at plan version 2's gate level, which needs 94, where
+    version 1's needed 60. 40 of the narrow ``true`` re-asked, near the
+    threshold.
     """
     book = _Book(CARD, "performance_claim")
     words = "Invented Fictional Card Pattern"
-    dev = _subjects_in("dev", 130, "hypothesis_title", words)
+    dev = _subjects_in("dev", 150, "hypothesis_title", words)
     for i, text in enumerate(dev):
-        label = "true" if i < 80 else "false"
+        label = "true" if i < 100 else "false"
         book.label(text, label)
         book.answer(
             text,
-            "false" if i >= 100 else "true",
-            margin=0.9 if i < 80 else 0.1 if i < 100 else 0.8,
+            "false" if i >= 120 else "true",
+            margin=0.9 if i < 100 else 0.1 if i < 120 else 0.8,
         )
-    test = _subjects_in("test", 280, "hypothesis_title", words, start=100_000)
+    test = _subjects_in("test", 360, "hypothesis_title", words, start=100_000)
     for i, text in enumerate(test):
-        if i < 150:
+        if i < 200:
             book.label(text, "true")
             book.answer(text, "true", margin=0.1)
-        elif i < 210:
+        elif i < 260:
             book.label(text, "false")
             book.answer(text, "false", margin=0.8)
         else:

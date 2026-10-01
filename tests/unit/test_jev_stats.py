@@ -474,14 +474,14 @@ class TestTheThreshold:
         ``false`` answers, right or wrong, are not what acts.
         """
         dev = (
-            [_dev("true", "true", 0.95)] * 40
-            + [_dev("true", "false", 0.95)] * 40
+            [_dev("true", "true", 0.95)] * 50
+            + [_dev("true", "false", 0.95)] * 50
             + [_dev("false", "true", 0.1)] * 30
         )
         choice = _search(dev, acting_class="true")
         assert choice.outcome == "chosen"
         assert choice.threshold == 0.12
-        assert (choice.covered, choice.correct) == (40, 40)
+        assert (choice.covered, choice.correct) == (50, 50)
         assert _search(dev).outcome == "none_found"
 
     def test_it_reads_the_dev_items_it_is_given_and_nothing_else(self) -> None:
@@ -625,22 +625,35 @@ class TestTheSignTest:
                 continue
             assert sign_test(better, worse) == float(_tail(better, worse))
 
-    @pytest.mark.parametrize("discordant", [1, 3, 5, 6, 7])
-    def test_every_split_of_fewer_than_eight_is_too_few_at_the_gate(
+    @pytest.mark.parametrize("discordant", [1, 3, 5, 6, 7, 8, 9, 10])
+    def test_every_split_of_fewer_than_eleven_is_too_few_at_the_gate(
         self, discordant: int
     ) -> None:
-        """The reviewers' cases: n = 1 to 7, and 5, 6 or 7 of 200, all one way."""
+        """
+        The reviewers' cases — n = 1 to 7, and 5, 6 or 7 of 200, all one way —
+        and, at plan version 2's level, 0.999375, eight to ten as well: all of
+        them one way is a chance of 1 in 1,024 at ten, above the 1 in 1,600
+        the level claims (docs/09, section 3.6).
+        """
         level = jev_prereg.GATE_CI
         assert not sign_test_can_decide(discordant, level)
         assert not sign_test_beats(discordant, 0, level)
 
-    def test_eight_of_eight_beats_at_the_gate_and_seven_of_eight_does_not(
+    def test_eleven_of_eleven_beats_at_the_gate_and_ten_of_eleven_does_not(
         self,
     ) -> None:
+        """
+        Plan version 2's level: eleven discordant items all Jev's way is the
+        fewest that can beat a baseline, and with one the other way it takes
+        fourteen. At version 1's 0.995 eight of eight did.
+        """
         level = jev_prereg.GATE_CI
-        assert sign_test_can_decide(8, level)
-        assert sign_test_beats(8, 0, level)
-        assert not sign_test_beats(7, 1, level)
+        assert sign_test_can_decide(11, level)
+        assert sign_test_beats(11, 0, level)
+        assert not sign_test_beats(10, 1, level)
+        assert not sign_test_beats(13, 1, level)
+        assert sign_test_beats(14, 1, level)
+        assert sign_test_beats(8, 0, 0.995) and not sign_test_beats(8, 0, level)
 
     def test_beating_is_the_clopper_pearson_bound_above_one_half(self) -> None:
         """
