@@ -3116,10 +3116,11 @@ def look_problem(arguments: argparse.Namespace) -> str | None:
     recorded: it is no look, and a row of it would be one ``usable`` could
     not read as one.
 
-    It decides from the command :func:`_command` names, which refuses
-    anything but a command the harness runs, and refuses a split that is
-    not one of :data:`EVALUATE_SPLITS`, so arguments no parser made fail
-    closed rather than past the rule (D1's review, D1RP-1).
+    It decides from the command :func:`_command` names, which raises
+    :class:`Refused` for anything but a command the harness runs, and gives a
+    problem for a split that is not one of :data:`EVALUATE_SPLITS`, so
+    arguments no parser made fail closed rather than past the rule (D1's
+    review, D1RP-1).
     """
     command = _command(arguments)
     if command not in EVALUATE_COMMANDS:

@@ -2022,6 +2022,14 @@ _HANDLER_ROOT = [("src.programme.jev_jobs", "handle")]
                     "return await conn.fetch('SELECT json_agg(f) FROM findings f')",
                 ),
                 (
+                    "jsonb_agg-of-the-row",
+                    "return await conn.fetch('SELECT jsonb_agg(h) FROM hypotheses h')",
+                ),
+                (
+                    "a-row-built-of-every-column",
+                    "return await conn.fetch('SELECT ROW(f.*) FROM findings f')",
+                ),
+                (
                     "the-row-expanded",
                     "return await conn.fetch('SELECT (f).* FROM findings f')",
                 ),
