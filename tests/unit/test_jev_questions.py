@@ -82,6 +82,7 @@ from typing_extensions import TypedDict
 
 from src.programme import jev_catalogue
 from src.programme import jev_questions as jq
+from src.programme.jev_hash import state_hash
 from src.programme.jev_questions import QuestionSet
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -158,7 +159,9 @@ GOOD_CHOICE = {"red": "It is red.", "blue": "It is blue.", "unclear": "It is unc
 #: Every registered set, exactly: its version, lane, provenance and state
 #: model. Phase B's probe and regime; phase C7's injection screen and
 #: catalogue, asked about web text; phase C8's two sets asked about the titles
-#: the programme's own model writes.
+#: the programme's own model writes; and phase D2's two findings sets, asked
+#: about the titles of the findings its panel raises (docs/09, section 2.6:
+#: six sets at phase C's end, eight after D2).
 REGISTERED: dict[str, tuple[int, str, str, type[BaseModel]]] = {
     "probe.connectivity": (1, "probe", "internal", jq.ProbeState),
     "decision.regime": (1, "decision", "internal", jq.RegimeState),
@@ -166,15 +169,18 @@ REGISTERED: dict[str, tuple[int, str, str, type[BaseModel]]] = {
     "research.catalogue": (1, "research", "web", jq.WebExcerptState),
     "research.hypothesis": (1, "research", "model", jq.HypothesisTitleState),
     "guardrail.card": (1, "guardrail", "model", jq.HypothesisTitleState),
+    "findings.owner": (1, "findings", "model", jq.FindingTitleState),
+    "findings.severity": (1, "findings", "model", jq.FindingTitleState),
 }
 
 
 class TestTheRegistry:
-    def test_the_registry_is_exactly_the_six_sets(self) -> None:
+    def test_the_registry_is_exactly_the_eight_sets(self) -> None:
         """
         An exact pin, both ways: a set added, removed, moved to another lane
         or provenance, or given another state is a reviewer's edit here, with
-        its words, its golden and its released rows beside it.
+        its words, its golden and its released rows beside it. Six sets at
+        phase C's end; phase D2 adds the two findings sets.
         """
         assert {
             name: (qs.version, qs.lane, qs.provenance, qs.state_model)
@@ -186,6 +192,8 @@ class TestTheRegistry:
         assert jq.RESEARCH_CATALOGUE is jq.get("research.catalogue")
         assert jq.RESEARCH_HYPOTHESIS is jq.get("research.hypothesis")
         assert jq.GUARDRAIL_CARD is jq.get("guardrail.card")
+        assert jq.FINDINGS_OWNER is jq.get("findings.owner")
+        assert jq.FINDINGS_SEVERITY is jq.get("findings.severity")
         assert not any(qs.internal_detail for qs in jq.REGISTRY.values())
 
     def test_the_registered_screen_is_the_screen(self) -> None:
@@ -248,6 +256,85 @@ class TestTheRegistry:
         escape = jq.RESEARCH_CATALOGUE.escape_options["asset_class"]
         assert options[-1] == escape
         assert list(web_sources.HEADING_LABELS.values()) == options[:-1]
+
+    def test_the_owning_role_options_are_the_twelve_roles(self) -> None:
+        """
+        docs/08's Lanes row: the twelve roles and "unclear". In
+        ``roles.ROLES``' order, then the escape (docs/09, section 2.5), so an
+        owner is suggested from exactly the panel that raises findings, the
+        programme director included, and a role added to or removed from the
+        panel is a change to the set's words, which its golden then refuses.
+        """
+        from src.programme import roles
+
+        question = dict(jq.FINDINGS_OWNER.questions)["owning_role"]
+        options = list(question["criteria"])
+        assert options == [role.key for role in roles.ROLES] + ["unclear"]
+        assert jq.FINDINGS_OWNER.escape_options == {"owning_role": "unclear"}
+        assert list(jq.OWNING_ROLE_CRITERIA) == options
+        assert dict(question["criteria"]) == dict(jq.OWNING_ROLE_CRITERIA)
+
+    def test_the_severity_options_are_the_findings_severities(self) -> None:
+        """
+        The panel's four levels in ``roles.SEVERITIES``' order, then the
+        escape, so a suggested level means what a recorded one means.
+        """
+        from src.programme import roles
+
+        question = dict(jq.FINDINGS_SEVERITY.questions)["severity"]
+        options = list(question["criteria"])
+        assert options == [*roles.SEVERITIES, "insufficient_evidence"]
+        assert jq.FINDINGS_SEVERITY.escape_options == {
+            "severity": "insufficient_evidence"
+        }
+        assert dict(question["criteria"]) == dict(jq.SEVERITY_CRITERIA)
+
+    def test_the_title_cap_is_proposed_findings(self) -> None:
+        """
+        200: ``roles.ProposedFinding.title``'s ``max_length``, the longest
+        title the panel's model may raise a finding under, so every title it
+        writes fits the state and none is ever cut.
+        """
+        from src.programme import roles
+
+        metadata = roles.ProposedFinding.model_fields["title"].metadata
+        limits = [m.max_length for m in metadata if getattr(m, "max_length", None)]
+        assert limits == [jq.FINDING_TITLE_MAX_CHARS] == [200]
+
+    @pytest.mark.parametrize("name", ["findings.owner", "findings.severity"])
+    def test_a_findings_set_speaks_to_areas_never_to_authority(
+        self, name: str
+    ) -> None:
+        """
+        docs/09, section 2.5: each option says what kind of defect falls in
+        an area, or how serious it reads, and no word speaks to who may veto,
+        block or close a finding, since words about authority would invite an
+        answer about authority. And the state is the title alone: neither the
+        raiser nor the recorded severity, which the baseline reads and an
+        answer could otherwise echo.
+        """
+        words = {
+            word
+            for text in _prose(jq.get(name))
+            for word in re.findall(r"[a-z]+", text.lower())
+        }
+        authority = {
+            "veto",
+            "vetoes",
+            "block",
+            "blocks",
+            "blocking",
+            "close",
+            "closes",
+            "closed",
+            "closing",
+            "authority",
+            "overrule",
+            "dismiss",
+            "withdraw",
+        }
+        assert words & authority == set()
+        assert set(jq.get(name).state_model.model_fields) == {"title"}
 
     def test_an_unknown_name_is_a_key_error_naming_the_known_ones(self) -> None:
         with pytest.raises(KeyError, match="decision.regime"):
@@ -461,6 +548,13 @@ RELEASED_PACK_HASHES: dict[tuple[str, int], str] = {
     ("guardrail.card", 1): (
         "3f98bbc1511995b4ba35563f271a3d043eb4db43e23912d035785605e0ebd455"
     ),
+    # Phase D2: the hashes docs/09 section 2.6 computed from these words.
+    ("findings.owner", 1): (
+        "7e97f8b11d80494d5ecb978bc04240226229993d2f73617b1fccdf7ea4437c8c"
+    ),
+    ("findings.severity", 1): (
+        "a9cae8cdafff291715982ea74dc3fe05f3e0da1ba8ffdd03cc428df585e830e0"
+    ),
 }
 
 
@@ -490,6 +584,12 @@ RELEASED_QUESTION_HASHES: dict[tuple[str, int], str] = {
     ),
     ("guardrail.card", 1): (
         "47c322e70d5b3f5cdb69bb6547150c54d2d99197fb922e785917e7f11b42c130"
+    ),
+    ("findings.owner", 1): (
+        "2989fecdce44b1ff9bd1c216b5eb1f33bbc76fc15427403e83defac412239ff3"
+    ),
+    ("findings.severity", 1): (
+        "0504d4817b84e44db3fc268f4d64bfd0d4d0e4ec62856f84595ccd9bab08db9e"
     ),
 }
 
@@ -1585,7 +1685,11 @@ class TestTextIsRecordedAsItsWriters:
     def test_text_nobody_has_said_who_writes_is_refused(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _with_subject(monkeypatch, _Titled, "finding_title", "title")
+        """
+        An invented kind of text, an operator's note: until phase D2 this was
+        ``finding_title``, which D2 gave a writer, the programme's model.
+        """
+        _with_subject(monkeypatch, _Titled, "operator_note", "title")
         problem = jq.registration_problem(_one_noul(state_model=_Titled), {})
         assert problem is not None and "names nobody" in problem, problem
 
@@ -1593,6 +1697,7 @@ class TestTextIsRecordedAsItsWriters:
         assert dict(jq.TEXT_SUBJECT_PROVENANCE) == {
             "web_excerpt": "web",
             "hypothesis_title": "model",
+            "finding_title": "model",
         }
         assert set(jq.TEXT_SUBJECT_PROVENANCE) <= set(jev_catalogue.SUBJECT_TYPES)
         assert set(jq.TEXT_SUBJECT_PROVENANCE.values()) <= set(
@@ -1690,11 +1795,171 @@ class TestTheHypothesisTitle:
             assert sent == {"title": "Carry in Invented Bonds"}
 
 
+class TestTheFindingTitle:
+    """
+    The one state a findings set is asked about (phase D2): the title of a
+    finding the programme's model raised, 1 to 200 characters, and nothing
+    else of the finding — not its detail, its remediation, its raiser or its
+    recorded severity. Its subject is the title's address, and it is recorded
+    as ``model``.
+    """
+
+    def test_the_cap_is_200_characters(self) -> None:
+        assert jq.FINDING_TITLE_MAX_CHARS == 200
+
+    @pytest.mark.parametrize("title", ["x", "x" * 200, "€" * 200])
+    def test_a_title_within_the_cap_is_a_state(self, title: str) -> None:
+        assert jq.FindingTitleState(title=title).title == title
+
+    @pytest.mark.parametrize(
+        "title",
+        ["", "x" * 201, "€" * 201, 3, None, b"x"],
+        ids=["empty", "one-over", "one-over-beyond-ascii", "a-number", "null", "bytes"],
+    )
+    def test_anything_else_is_refused(self, title: Any) -> None:
+        with pytest.raises(ValidationError):
+            jq.FindingTitleState(title=title)
+
+    @pytest.mark.parametrize(
+        "field", ["detail_md", "remediation", "raised_by", "severity", "close_note"]
+    )
+    def test_it_is_closed_and_frozen(self, field: str) -> None:
+        with pytest.raises(ValidationError):
+            jq.FindingTitleState(title="x", **{field: "more"})
+        state = jq.FindingTitleState(title="x")
+        with pytest.raises(ValidationError):
+            state.title = "y"  # type: ignore[misc]
+
+    def test_its_subject_is_the_titles_address_and_its_writer_the_model(
+        self,
+    ) -> None:
+        assert jq.STATE_SUBJECT[jq.FindingTitleState] == "finding_title"
+        assert jq.TEXT_SUBJECT_FIELD[jq.FindingTitleState] == "title"
+        assert jq.TEXT_SUBJECT_PROVENANCE["finding_title"] == "model"
+        assert "finding_title" in jev_catalogue.SUBJECT_TYPES
+        assert jq.FindingTitleState not in jq.STATE_ADDRESSED
+
+    def test_a_title_is_not_detail(self) -> None:
+        """
+        A finding goes as its title alone without the detail switch (docs/08,
+        fact 7's defaults): the findings sets declare no ``internal_detail``,
+        and the dump sends the title and nothing else.
+        """
+        for question_set in (jq.FINDINGS_OWNER, jq.FINDINGS_SEVERITY):
+            assert question_set.internal_detail is False
+            sent = question_set.dump_state(
+                jq.FindingTitleState(title="Stale invented closes in the panel")
+            )
+            assert sent == {"title": "Stale invented closes in the panel"}
+            assert not jq._model_carries_text(
+                question_set.state_model, set(), exempt=("title",)
+            )
+
+    def test_a_hypothesis_title_is_not_a_finding_title(self) -> None:
+        """
+        One text, two subjects: the same words as a hypothesis's title and as
+        a finding's are asked about under different subject types, each by its
+        own sets, so no answer to one is read as the other's.
+        """
+        with pytest.raises(TypeError):
+            jq.FINDINGS_OWNER.dump_state(jq.HypothesisTitleState(title="x"))
+        with pytest.raises(TypeError):
+            jq.GUARDRAIL_CARD.dump_state(jq.FindingTitleState(title="x"))
+
+
+class TestTheSubjectsSentAsOneState:
+    """
+    D2's review (D2RS-1, D2RT-1). The road holds a vendor's content block by
+    the hash of the state sent, across every set and subject (``jev_lane``,
+    step 4), and a hypothesis's title and a finding's holding the same words
+    are sent as one state, ``{"title": …}``. The planner's reads and
+    ``suggestions`` hold a block by subject, so each reads the subject types
+    sent as the same state through ``jev_questions.same_state_subjects``,
+    held here to the hash of what each registered set sends.
+    """
+
+    def test_the_two_titles_are_one_state_and_an_excerpt_another(self) -> None:
+        titles = ("hypothesis_title", "finding_title")
+        assert jq.same_state_subjects("hypothesis_title") == titles
+        assert jq.same_state_subjects("finding_title") == titles
+        assert jq.same_state_subjects("web_excerpt") == ("web_excerpt",)
+
+    @pytest.mark.parametrize("subject_type", ["probe", "session", "not_a_subject"])
+    def test_a_subject_that_is_not_text_is_held_by_no_block(
+        self, subject_type: str
+    ) -> None:
+        """The road holds an enumerated state by no block (open item 36)."""
+        assert jq.same_state_subjects(subject_type) == ()
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "x",
+            "Invented Fills Assumed at Prices No Venue Gave",
+            "€" * jq.FINDING_TITLE_MAX_CHARS,
+            'An "invented" back\\slash, a tab\tand a line\nbreak',
+        ],
+        ids=["one-character", "a-title", "at-the-smallest-cap", "escaped"],
+    )
+    def test_it_is_the_roads_own_identity(self, text: str) -> None:
+        """
+        For every pair of registered sets asking about text, what each sends
+        about the same words has one state hash exactly when each subject is
+        among the other's same-state subjects: the identity the road holds a
+        block by, read from what is sent rather than from the tables.
+        """
+        asking = [
+            question_set
+            for question_set in jq.REGISTRY.values()
+            if question_set.state_model in jq.TEXT_SUBJECT_FIELD
+        ]
+        assert {jq.STATE_SUBJECT[q.state_model] for q in asking} == set(
+            jq.TEXT_SUBJECT_PROVENANCE
+        ), "a text subject no registered set asks about would go unchecked"
+        sent = {
+            question_set.name: question_set.dump_state(
+                question_set.state_model(
+                    **{jq.TEXT_SUBJECT_FIELD[question_set.state_model]: text}
+                )
+            )
+            for question_set in asking
+        }
+        for one, other in itertools.product(asking, repeat=2):
+            same = state_hash(sent[one.name]) == state_hash(sent[other.name])
+            shared = jq.STATE_SUBJECT[other.state_model] in jq.same_state_subjects(
+                jq.STATE_SUBJECT[one.state_model]
+            )
+            assert same == shared, (one.name, other.name)
+
+    def test_only_a_text_sent_alone_under_one_field_shares_a_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A test-only model sending its text alone as ``title`` is sent as the
+        titles are, so it joins them; one sending a ``title`` beside other
+        fields is another state for the same words, so it shares with nothing
+        but itself, and no title's block is read as its own.
+        """
+        _with_subject(monkeypatch, _Titled, "test_titled", "title")
+        _with_subject(monkeypatch, _Labelled, "test_labelled", "title")
+        titles = ("hypothesis_title", "finding_title", "test_titled")
+        for subject_type in titles:
+            assert jq.same_state_subjects(subject_type) == titles, subject_type
+        assert jq.same_state_subjects("test_labelled") == ("test_labelled",)
+        alone = _Titled(title="Invented").model_dump(mode="json")
+        beside = _Labelled(title="Invented", kind="idea", urgent=False).model_dump(
+            mode="json"
+        )
+        assert state_hash(alone) == state_hash({"title": "Invented"})
+        assert state_hash(beside) != state_hash(alone)
+
+
 #: Each text state model and the constant its length cap is read from, as the
 #: module's source writes it.
 TEXT_CAPS: dict[type[BaseModel], str] = {
     jq.WebExcerptState: "EXCERPT_MAX_CHARS",
     jq.HypothesisTitleState: "TITLE_MAX_CHARS",
+    jq.FindingTitleState: "FINDING_TITLE_MAX_CHARS",
 }
 
 

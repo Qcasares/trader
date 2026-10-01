@@ -5,8 +5,9 @@ Every query the Jev ledger answers: what the lanes write, and what the control
 plane will read; for the forward clock, its planner and the harness, what the
 queue says about their jobs, since a job's error is the durable record of why
 a session went unmeasured; and, from phases C7 and C8, what the planner is to
-ask each set about — stored web content and the programme's hypothesis titles
-— read beside the ledger's answers and the queue's jobs.
+ask each set about — stored web content and the programme's hypothesis titles,
+and from phase D2 the titles of the findings its panel raises — read beside
+the ledger's answers and the queue's jobs.
 
 No SDK and no model client, so ``src/api`` may import it. It reads and writes
 rows and knows nothing about how an answer was obtained: ``jev_client``, which
@@ -40,6 +41,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -570,6 +572,35 @@ async def get_hypothesis_title(
     return dict(row) if row is not None else None
 
 
+#: The columns of a finding the Jev side reads, and the only ones: never its
+#: detail, its remediation or its close note (docs/09, section 5.1).
+FINDING_TITLE_COLUMNS = ("ref", "title", "origin", "opened_at")
+
+
+async def get_finding_title(
+    conn: asyncpg.Connection, ref: str
+) -> dict[str, Any] | None:
+    """
+    One finding's title, by its ref: ``ref``, ``title``, ``origin`` and
+    ``opened_at`` (:data:`FINDING_TITLE_COLUMNS`), and nothing else, or
+    ``None``.
+
+    The findings sets' read (phase D2). ``repo.list_findings`` reads
+    ``SELECT *``, which would hand the Jev side a finding's detail, its
+    remediation and its close note; this names its columns, so none of them
+    can reach a Jev job. Who raised the finding and how severe it was recorded
+    are not read either: the findings sets' baseline reads them, in the
+    harness alone (:func:`finding_records`), and an answer could otherwise
+    echo them.
+    ``tests/unit/test_jev_table_boundaries.py::test_the_jev_side_never_reads_detail``
+    walks every Jev root for a read of any detail column.
+    """
+    row = await conn.fetchrow(
+        "SELECT ref, title, origin, opened_at FROM findings WHERE ref = $1", ref
+    )
+    return dict(row) if row is not None else None
+
+
 async def earliest_quarantined(
     conn: asyncpg.Connection, content_sha256s: Sequence[str]
 ) -> dict[str, int]:
@@ -705,10 +736,14 @@ async def content_blocked(conn: asyncpg.Connection, state_hash: str) -> bool:
 
     Matched by the state hash, across every set and lane, so text the vendor
     blocked for one question is not sent again for another. The lane asks it
-    only about text, a web excerpt or a hypothesis title: an enumerated state
-    has nothing in it a content filter could object to. An unverified
-    precaution, resting on one third-party report; for text, holding is the
-    safe direction.
+    only about text, a web excerpt, a hypothesis title or a finding title: an
+    enumerated state has nothing in it a content filter could object to. A
+    hypothesis's title and a finding's holding the same words are one state,
+    ``{"title": …}``, so a block about either holds both; the planner's reads
+    and :func:`ask_outcomes` hold a block by subject, and read it across the
+    subjects sent as one state (``jev_questions.same_state_subjects``) to hold
+    exactly this. An unverified precaution, resting on one third-party report;
+    for text, holding is the safe direction.
     """
     return bool(
         await conn.fetchval(
@@ -1226,7 +1261,8 @@ async def pending_asks(conn: asyncpg.Connection, sets: Sequence[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Reads for the planner: what each set is to be asked about (phases C7, C8)
+# Reads for the planner: what each set is to be asked about (phases C7, C8,
+# and from D2 the findings sets)
 # ---------------------------------------------------------------------------
 #
 # Each returns at most ``limit`` subjects, never one whose ``jev_ask`` job for
@@ -1329,13 +1365,45 @@ def _unanswered(subject_type: str, subject: str) -> str:
     """
 
 
+#: A subject type as it may be written into SQL: one of the catalogue's
+#: names, never text from a row.
+_SUBJECT_TYPE_NAME = re.compile(r"[a-z][a-z_]*")
+
+
+def _same_state_subjects(subject_type: str) -> tuple[str, ...]:
+    """
+    ``jev_questions.same_state_subjects``, each checked to be a subject type's
+    name before any is written into a statement.
+    """
+    types = jev_questions.same_state_subjects(subject_type)
+    for name in types:
+        if _SUBJECT_TYPE_NAME.fullmatch(name) is None:
+            raise ValueError(f"{name!r} is not a subject type's name")
+    return types
+
+
 def _blocked(subject_type: str, subject: str) -> str:
-    """A vendor content block on record for the subject, from any set."""
+    """
+    A vendor content block on record for the subject's state, from any set:
+    recorded about this subject, or about one of another type sent as the very
+    same state (``jev_questions.same_state_subjects``), since the road holds a
+    block by the hash of the state sent, across every set and subject
+    (``jev_lane``, step 4). A hypothesis's title and a finding's holding the
+    same words are one state, ``{"title": …}``, so a block about either holds
+    both; an excerpt of the same words is another state, held by neither.
+    The first cut matched the block's own subject type alone, and so planned,
+    every UTC day, a findings ask the road refused for good (D2's review).
+    ``FALSE`` for a subject that is not text, which no block holds.
+    """
+    types = _same_state_subjects(subject_type)
+    if not types:
+        return "FALSE"
+    listed = ", ".join(f"'{name}'" for name in types)
     return f"""
         EXISTS (
             SELECT 1 FROM jev_requests b
             WHERE b.error_kind = 'content_block'
-              AND b.subject_type = '{subject_type}' AND b.subject_id = {subject}
+              AND b.subject_type IN ({listed}) AND b.subject_id = {subject}
         )
     """
 
@@ -1491,7 +1559,9 @@ async def hypotheses_to_ask(
     operator's text would be a subject of its own, docs/08 open item 28) of
     one to ``jev_questions.TITLE_MAX_CHARS`` characters, the handler's own
     limits. Never a title with a content block on record, which the road
-    refuses for good; and, for the set at its registered version under
+    refuses for good — recorded about it, or from phase D2 about a finding's
+    title holding the same words, which is sent as the same state
+    (:func:`_blocked`); and, for the set at its registered version under
     ``model``, never a title answered ``ok`` or retired by ``max_failed``
     failed calls (see the section's comment).
     """
@@ -1528,6 +1598,85 @@ async def hypotheses_to_ask(
         suffix,
         _page(limit),
         jev_questions.TITLE_MAX_CHARS,
+    )
+    return [dict(row) for row in rows]
+
+
+#: A finding title's content address in SQL: what ``jev_hash.text_sha256``
+#: gives the text, as :func:`hypotheses_to_ask` computes a hypothesis title's.
+#: The reads that choose or measure a finding title — :func:`findings_to_ask`,
+#: :func:`item_dates`, :func:`subject_texts`, :func:`finding_records` and
+#: :func:`subjects_to_label` — take the findings its set plan names
+#: (``jev_prereg.FINDINGS_POPULATION``): those the programme's model wrote,
+#: whatever their status, with a title of one to
+#: ``jev_questions.FINDING_TITLE_MAX_CHARS`` characters. :func:`open_findings`,
+#: ``suggestions``' read, takes every open finding's title whoever wrote it
+#: and however long, to address it and say how its asks came out, and prints
+#: none (D2's review, D2RT-3: this said every read took the population).
+_FINDING_ADDRESS = "encode(sha256(convert_to(f.title, 'UTF8')), 'hex')"
+
+
+async def findings_to_ask(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+    max_failed: int = MAX_FAILED_CALLS,
+) -> list[dict[str, Any]]:
+    """
+    The finding titles ``question_set``, a findings set, is to be asked about
+    on ``day`` (phase D2): at most ``limit``, newest first by ``opened_at``
+    then ``ref``, each title once, by its content address (``subject_id``,
+    computed in SQL as :func:`hypotheses_to_ask` computes a title's), with the
+    newest finding holding it (``ref``).
+
+    Only titles of findings the programme's own model wrote (``origin =
+    'model'``), of one to ``jev_questions.FINDING_TITLE_MAX_CHARS``
+    characters, whatever the finding's status — the population its set plan
+    names (``jev_prereg.FINDINGS_POPULATION``) — never an operator's, Jev's,
+    or one raised before migration 0015 named its writer. Never a title with
+    a content block on record, which the road refuses for good: recorded
+    about it, or about a hypothesis's title holding the same words, which is
+    sent as the same state, ``{"title": …}`` (:func:`_blocked`; the first
+    cut read the first alone, D2's review); and, for the set at its
+    registered version under ``model``, never a title answered ``ok`` or
+    retired by ``max_failed`` failed calls, nor one whose job is waiting or
+    was planned today (see the section's comment). Reads the title, its
+    writer, when it was opened and its ref, and nothing else of a finding.
+    """
+    prefix, suffix = _key_around(
+        question_set.name, question_set.version, "finding_title", day
+    )
+    rows = await conn.fetch(
+        f"""
+        WITH titles AS (
+            SELECT DISTINCT ON (subject_id) subject_id, ref, opened_at
+            FROM (
+                SELECT f.ref, f.opened_at, {_FINDING_ADDRESS} AS subject_id
+                FROM findings f
+                WHERE f.origin = 'model'
+                  AND char_length(f.title) BETWEEN 1 AND $8
+            ) written
+            ORDER BY subject_id, opened_at DESC, ref DESC
+        )
+        SELECT t.ref, t.subject_id
+        FROM titles t
+        WHERE NOT {_blocked("finding_title", "t.subject_id")}
+          AND {_unanswered("finding_title", "t.subject_id")}
+          AND {_not_waiting("t.subject_id")}
+        ORDER BY t.opened_at DESC, t.ref DESC
+        LIMIT $7
+        """,
+        question_set.name,
+        question_set.version,
+        model,
+        max_failed,
+        prefix,
+        suffix,
+        _page(limit),
+        jev_questions.FINDING_TITLE_MAX_CHARS,
     )
     return [dict(row) for row in rows]
 
@@ -1811,13 +1960,17 @@ async def item_dates(
     Per subject, when its text existed by: a web excerpt's earliest
     ``published_at`` among the documents holding it, ``None`` when any of them
     has none, since an unknown date could be the earliest; a hypothesis
-    title's earliest ``created_at`` among the hypotheses holding it. ``None``
-    for a subject of any other type, or one nothing holds: unknown, which the
-    harness reads as possibly in the model's training data.
+    title's earliest ``created_at`` among the hypotheses holding it; and, from
+    phase D2, a finding title's earliest ``opened_at`` among the findings of
+    its population holding it — those the programme's model raised, within
+    the cap (``jev_prereg.FINDINGS_POPULATION``). ``None`` for a subject of
+    any other type, or one nothing holds: unknown, which the harness reads as
+    possibly in the model's training data.
     """
     dates: dict[Subject, datetime | None] = dict.fromkeys(subjects)
     excerpts = [i for t, i in subjects if t == "web_excerpt"]
     titles = [i for t, i in subjects if t == "hypothesis_title"]
+    findings = [i for t, i in subjects if t == "finding_title"]
     if excerpts:
         rows = await conn.fetch(
             "SELECT content_sha256 AS subject_id, CASE WHEN "
@@ -1835,6 +1988,16 @@ async def item_dates(
             titles,
         )
         dates.update({("hypothesis_title", r["subject_id"]): r["dated"] for r in rows})
+    if findings:
+        rows = await conn.fetch(
+            f"SELECT {_FINDING_ADDRESS} AS subject_id, MIN(f.opened_at) AS dated "
+            "FROM findings f WHERE f.origin = 'model' "
+            "AND char_length(f.title) BETWEEN 1 AND $2 "
+            f"AND {_FINDING_ADDRESS} = ANY($1::text[]) GROUP BY 1",
+            findings,
+            jev_questions.FINDING_TITLE_MAX_CHARS,
+        )
+        dates.update({("finding_title", r["subject_id"]): r["dated"] for r in rows})
     return dates
 
 
@@ -1843,12 +2006,16 @@ async def subject_texts(
 ) -> dict[Subject, str]:
     """
     The text of each subject that is stored: a web excerpt as the earliest
-    document holding it stores it, a title as a hypothesis holds it. What the
-    keyword baselines read; a subject nothing holds is not in the result.
+    document holding it stores it, a title as a hypothesis holds it, and, from
+    phase D2, a finding title as a finding of its population holds it — one
+    the programme's model raised, within the cap. What the keyword baselines
+    read, and what a label's subject must be; a subject nothing holds is not
+    in the result, so a title only an operator's finding holds is no subject.
     """
     texts: dict[Subject, str] = {}
     excerpts = [i for t, i in subjects if t == "web_excerpt"]
     titles = [i for t, i in subjects if t == "hypothesis_title"]
+    findings = [i for t, i in subjects if t == "finding_title"]
     if excerpts:
         rows = await conn.fetch(
             "SELECT DISTINCT ON (content_sha256) content_sha256 AS subject_id, "
@@ -1867,7 +2034,176 @@ async def subject_texts(
             titles,
         )
         texts.update({("hypothesis_title", r["subject_id"]): r["title"] for r in rows})
+    if findings:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (subject_id) subject_id, title FROM ("
+            f" SELECT {_FINDING_ADDRESS} AS subject_id, f.title, f.opened_at, f.ref"
+            " FROM findings f WHERE f.origin = 'model'"
+            " AND char_length(f.title) BETWEEN 1 AND $2) held "
+            "WHERE subject_id = ANY($1::text[]) "
+            "ORDER BY subject_id, opened_at, ref",
+            findings,
+            jev_questions.FINDING_TITLE_MAX_CHARS,
+        )
+        texts.update({("finding_title", r["subject_id"]): r["title"] for r in rows})
     return texts
+
+
+#: What the findings sets' baseline reads of a finding (docs/09, section 3.4,
+#: ``findings.recorded``), and the order the earliest finding holding a title
+#: is found by: who raised it and the severity it was recorded at, of the one
+#: opened first, the lower ref first on a tie.
+FINDING_RECORD_COLUMNS = ("raised_by", "severity")
+FINDING_RECORD_ORDER = ("opened_at", "ref")
+
+
+async def finding_records(
+    conn: asyncpg.Connection, subjects: Sequence[Subject]
+) -> dict[Subject, dict[str, Any]]:
+    """
+    Per finding-title subject, ``raised_by`` and ``severity``
+    (:data:`FINDING_RECORD_COLUMNS`) of the earliest finding of its population
+    holding the title — one the programme's model raised, within the cap —
+    by ``opened_at`` then ``ref`` (:data:`FINDING_RECORD_ORDER`): what the
+    ``findings.recorded`` baseline answers with (docs/09, section 3.4). A
+    subject of any other type, or one no such finding holds, is not in the
+    result.
+
+    The harness's alone. No Jev job reads either value — a finding's title is
+    read by ``get_finding_title``, which names neither — so no answer can
+    echo what the baseline it is compared with says; and neither is ever
+    exported to a labeller (:func:`subjects_to_label`).
+    ``tests/unit/test_jev_table_boundaries.py::
+    test_the_ask_side_never_reads_what_the_findings_baseline_reads``.
+    """
+    findings = [i for t, i in subjects if t == "finding_title"]
+    if not findings:
+        return {}
+    rows = await conn.fetch(
+        "SELECT DISTINCT ON (subject_id) subject_id, raised_by, severity FROM ("
+        f" SELECT {_FINDING_ADDRESS} AS subject_id, f.raised_by, f.severity,"
+        " f.opened_at, f.ref FROM findings f WHERE f.origin = 'model'"
+        " AND char_length(f.title) BETWEEN 1 AND $2) held "
+        "WHERE subject_id = ANY($1::text[]) "
+        "ORDER BY subject_id, opened_at, ref",
+        findings,
+        jev_questions.FINDING_TITLE_MAX_CHARS,
+    )
+    return {
+        ("finding_title", row["subject_id"]): {
+            "raised_by": row["raised_by"],
+            "severity": row["severity"],
+        }
+        for row in rows
+    }
+
+
+async def open_findings(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """
+    Every open finding's ref, title and writer, oldest first by ``opened_at``
+    then ``ref``: what the harness's ``suggestions`` reports each findings
+    set's asks against (docs/09, section 9.3). The title is read to compute
+    its content address and is never printed; who raised the finding, its
+    severity and its detail are not read at all.
+    """
+    rows = await conn.fetch(
+        "SELECT ref, title, origin FROM findings WHERE status = 'open' "
+        "ORDER BY opened_at, ref"
+    )
+    return [dict(row) for row in rows]
+
+
+async def jev_findings_raised(conn: asyncpg.Connection) -> int:
+    """How many findings Jev's answers raised, of any status: a count, never a ref."""
+    count = await conn.fetchval("SELECT COUNT(*) FROM findings WHERE origin = 'jev'")
+    return int(count or 0)
+
+
+async def ask_outcomes(
+    conn: asyncpg.Connection,
+    *,
+    question_set: QuestionSet,
+    model: str,
+    subject_type: str,
+    subject_ids: Sequence[str],
+    max_failed: int = MAX_FAILED_CALLS,
+) -> dict[str, dict[str, Any]]:
+    """
+    How the asks of ``question_set``, at its registered version under
+    ``model``, about each of ``subject_ids`` came out, by the rules the
+    planner's reads apply (see the section's comment): ``answered`` — an
+    ``ok`` row outside the probe lane is on record — with ``valid`` whether
+    every answer it holds was valid; ``failed_calls``, the responses refused
+    whole and the calls that failed, and ``retired``, whether they have reached
+    ``max_failed``; ``blocked``, a vendor content block on record for the
+    subject's state from any set, recorded about the subject or about one of
+    another type sent as the same state (``jev_questions.same_state_subjects``),
+    as the road holds it (:func:`_blocked`; D2's review); and ``waiting``, a
+    ``jev_ask`` job of the set about it queued or running. Statuses alone: no
+    option, probability or margin is read, so nothing built from this can
+    show an answer.
+    """
+    if not subject_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT s.subject_id,
+               EXISTS (
+                   SELECT 1 FROM jev_requests r
+                   WHERE r.question_set = $1 AND r.question_set_version = $2
+                     AND r.model_requested = $3 AND r.subject_type = $4
+                     AND r.subject_id = s.subject_id
+                     AND r.status = 'ok' AND r.lane <> 'probe'
+               ) AS answered,
+               COALESCE((
+                   SELECT bool_and(a.valid)
+                   FROM jev_requests r JOIN jev_answers a ON a.request_id = r.id
+                   WHERE r.question_set = $1 AND r.question_set_version = $2
+                     AND r.model_requested = $3 AND r.subject_type = $4
+                     AND r.subject_id = s.subject_id
+                     AND r.status = 'ok' AND r.lane <> 'probe'
+               ), FALSE) AS valid,
+               (
+                   SELECT COUNT(*) FROM jev_requests f
+                   WHERE f.question_set = $1 AND f.question_set_version = $2
+                     AND f.model_requested = $3 AND f.subject_type = $4
+                     AND f.subject_id = s.subject_id
+                     AND f.status IN ('invalid', 'error') AND f.lane <> 'probe'
+               ) AS failed_calls,
+               EXISTS (
+                   SELECT 1 FROM jev_requests b
+                   WHERE b.error_kind = 'content_block'
+                     AND b.subject_type = ANY($6::text[])
+                     AND b.subject_id = s.subject_id
+               ) AS blocked,
+               EXISTS (
+                   SELECT 1 FROM jobs j
+                   WHERE j.kind = 'jev_ask'
+                     AND j.payload->>'set' = $1
+                     AND j.payload->>'version' = $2::int::text
+                     AND j.payload->>'subject_id' = s.subject_id
+                     AND j.status IN ('queued', 'running')
+               ) AS waiting
+        FROM unnest($5::text[]) AS s(subject_id)
+        """,
+        question_set.name,
+        question_set.version,
+        model,
+        subject_type,
+        list(subject_ids),
+        list(_same_state_subjects(subject_type)),
+    )
+    return {
+        row["subject_id"]: {
+            "answered": row["answered"],
+            "valid": row["valid"],
+            "failed_calls": int(row["failed_calls"]),
+            "retired": int(row["failed_calls"]) >= max_failed,
+            "blocked": row["blocked"],
+            "waiting": row["waiting"],
+        }
+        for row in rows
+    }
 
 
 async def subjects_to_label(
@@ -1876,10 +2212,15 @@ async def subjects_to_label(
     """
     Every subject of ``subject_type`` a labeller could be asked to label, by
     its address, with its text: all stored web content, each once with its
-    earliest document's excerpt, quarantined or not; or each title of a
+    earliest document's excerpt, quarantined or not; each title of a
     hypothesis the programme's model wrote within
-    ``jev_questions.TITLE_MAX_CHARS``, the titles the sets ask about. In
-    address order.
+    ``jev_questions.TITLE_MAX_CHARS``, the titles the sets ask about; or, from
+    phase D2, each title of a finding the programme's model raised within
+    ``jev_questions.FINDING_TITLE_MAX_CHARS``, whatever its status — the
+    findings sets' population. In address order. A finding's title is all of
+    it a labeller is shown: never who raised it, its severity, its status,
+    its candidate or its detail, which the baseline reads or a labeller would
+    copy (docs/09, section 3.5).
 
     Nothing about any answer is read, and neither is whether or why content
     is quarantined: a quarantine may have been an answer — the injection
@@ -1902,6 +2243,15 @@ async def subjects_to_label(
             " AND char_length(h.title) BETWEEN 1 AND $1) held "
             "ORDER BY subject_id, created_at, ref",
             jev_questions.TITLE_MAX_CHARS,
+        )
+    elif subject_type == "finding_title":
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (subject_id) subject_id, title AS text FROM ("
+            f" SELECT {_FINDING_ADDRESS} AS subject_id, f.title, f.opened_at, f.ref"
+            " FROM findings f WHERE f.origin = 'model'"
+            " AND char_length(f.title) BETWEEN 1 AND $1) held "
+            "ORDER BY subject_id, opened_at, ref",
+            jev_questions.FINDING_TITLE_MAX_CHARS,
         )
     else:
         raise ValueError(f"{subject_type!r} is not a subject a labeller is shown")

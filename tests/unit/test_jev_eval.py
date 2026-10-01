@@ -42,6 +42,7 @@ import io
 import json
 import math
 import random
+import re
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -1167,6 +1168,9 @@ class _Book:
         self.texts: dict[tuple[str, str], str] = {}
         self.pairs: list[dict[str, Any]] = []
         self.reasks: dict[str, dict[str, Any]] = {}
+        #: Who raised each finding title's earliest finding and at what
+        #: severity (phase D2's ``jev_repo.finding_records``).
+        self.records: dict[tuple[str, str], dict[str, Any]] = {}
         self._ids = iter(range(1, 1_000_000))
         self.plans = (
             jev_prereg.plans_in_force(question_set.name, question_set.version) or {}
@@ -1266,7 +1270,16 @@ class _Book:
             texts=dict(self.texts),
             pairs=list(self.pairs),
             reasks=dict(self.reasks),
+            records=dict(self.records),
         )
+
+    def record(
+        self, text: str, *, raised_by: str = "execution", severity: str = "high"
+    ) -> tuple[str, str]:
+        """The finding of the population holding ``text`` first, as read."""
+        subject = self.subject(text)
+        self.records[subject] = {"raised_by": raised_by, "severity": severity}
+        return subject
 
     def evaluate(
         self, split: str = "all", labelled_by: str = LABELLER, model: str = MODEL
@@ -1279,6 +1292,970 @@ class _Book:
             split=split,  # type: ignore[arg-type]
             ledger=self.ledger(),
         )
+
+
+OWNER = jev_questions.FINDINGS_OWNER
+SEVERITY = jev_questions.FINDINGS_SEVERITY
+
+#: The day ``jev-1.13.0`` was first observed, and a moment on it, which an
+#: item dated then may predate.
+FIRST_SEEN = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+ON_THE_DAY = datetime.combine(FIRST_SEEN, time(18), UTC)
+
+
+def _findings_book(question_set: Any = None) -> _Book:
+    """A book for a findings set: its question, asked about finding titles."""
+    question_set = question_set or OWNER
+    (key,) = dict(question_set.questions)
+    return _Book(question_set, key)
+
+
+def _finding_titles(count: int, words: str = "Invented Finding") -> list[str]:
+    return [f"{words} {i}" for i in range(count)]
+
+
+class TestTheNewSubjects:
+    """
+    docs/09, section 3.7 (D2): a finding's title is a subject a label may be
+    of, dated, read and chosen by the findings sets' population.
+    """
+
+    def test_question_problem_admits_finding_title_and_job_error(self) -> None:
+        """
+        Both findings sets' questions may be evaluated, and the subjects a
+        label may be of are exactly those of the registered sets with ground
+        truth: phase D3's job error joins them when ``ops.job_error`` is
+        registered, and this fails until it does.
+        """
+        assert jev_eval.question_problem(OWNER, "owning_role") is None
+        assert jev_eval.question_problem(SEVERITY, "severity") is None
+        assert "finding_title" in jev_eval.LABELLED_SUBJECTS
+        measured = {
+            jev_questions.STATE_SUBJECT[question_set.state_model]
+            for name, question_set in jev_questions.REGISTRY.items()
+            if name not in jev_eval.NO_GROUND_TRUTH and name != jev_eval.PROBE_SET_NAME
+        }
+        assert set(jev_eval.LABELLED_SUBJECTS) == measured
+        problem = jev_eval.question_problem(
+            jev_questions.REGISTRY[jev_eval.PROBE_SET_NAME], "about_the_sun"
+        )
+        assert problem is not None and "a finding title" in problem
+
+    def test_dates_texts_and_populations(self) -> None:
+        """
+        An item is dated by when its finding was raised, so a findings set's
+        evaluation searches a threshold only where every item it reads was
+        raised after the model was first observed; an item no finding of the
+        population holds has no text, and the baseline cannot answer it.
+        """
+        book = _findings_book()
+        titles = _finding_titles(4)
+        for title in titles:
+            book.label(title, "execution")
+            book.answer(title, "execution")
+            book.record(title)
+        assert book.evaluate().possibly_in_training is False
+        for dated in (ON_THE_DAY, None):
+            book.dates[book.subject(titles[0])] = dated
+            assert book.evaluate().possibly_in_training is True, dated
+        del book.texts[book.subject(titles[1])]
+        with pytest.raises(jev_eval.Refused, match="is not stored"):
+            book.evaluate()
+
+    async def test_the_export_reads_the_population_of_finding_titles(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        titles = _finding_titles(3, "Invented Unfilled Stop")
+        rows = [
+            {"subject_type": "finding_title", "subject_id": text_sha256(t), "text": t}
+            for t in titles
+        ]
+        asked: list[dict[str, Any]] = []
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            asked.append(kwargs)
+            return rows
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        for question_set in (OWNER, SEVERITY):
+            (key,) = dict(question_set.questions)
+            text = await jev_eval.export_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=question_set,
+                question_key=key,
+                sample=None,
+                include_quarantined=False,
+            )
+            lines = list(csv.reader(io.StringIO(text)))
+            assert tuple(lines[0]) == jev_eval.EXPORT_COLUMNS
+            assert sorted(line[2] for line in lines[1:]) == sorted(titles)
+        assert asked == [{"subject_type": "finding_title"}] * 2
+
+
+class TestTheRecordedBaseline:
+    """
+    docs/09, section 3.4: the findings sets' baseline is ``findings.recorded``
+    — who raised the earliest model-written finding holding the title, or the
+    severity it was recorded at — answered from the record, never the text.
+    """
+
+    def test_owner_and_severity_compare_with_raised_by_and_severity(self) -> None:
+        for question_set, reads, recorded, label in (
+            (OWNER, "raised_by", ("execution", "platform"), "execution"),
+            (SEVERITY, "severity", ("high", "low"), "high"),
+        ):
+            book = _findings_book(question_set)
+            titles = _finding_titles(4, f"Invented {reads}")
+            for n, title in enumerate(titles):
+                book.label(title, label)
+                book.answer(title, label)
+                value = recorded[0] if n < 3 else recorded[1]
+                book.record(title, **{reads: value})
+            evaluation = book.evaluate()
+            assert evaluation.keyword_baseline_accuracy == pytest.approx(3 / 4)
+            assert evaluation.keyword_baseline_ref == (
+                f"findings.recorded, reading {reads} of the earliest "
+                "model-written finding holding the title"
+            )
+            assert evaluation.per_class[label]["keyword"] == {
+                "predicted": 3,
+                "correct": 3,
+                "precision": 1.0,
+                "recall": pytest.approx(3 / 4),
+            }
+            assert (
+                evaluation.vs_keyword_jev_right_only,
+                evaluation.vs_keyword_baseline_right_only,
+            ) == (1, 0)
+
+    def test_the_other_value_is_never_read(self) -> None:
+        """The owner set reads who raised it, never the severity; and back."""
+        book = _findings_book(OWNER)
+        title = "Invented Finding Read One Way"
+        book.label(title, "execution")
+        book.answer(title, "execution")
+        book.record(title, raised_by="execution", severity="execution")
+        assert book.evaluate().keyword_baseline_accuracy == 1.0
+        book.records[book.subject(title)] = {
+            "raised_by": "platform",
+            "severity": "execution",
+        }
+        assert book.evaluate().keyword_baseline_accuracy == 0.0
+
+    def test_the_baseline_never_reads_the_text(self) -> None:
+        book = _findings_book(SEVERITY)
+        title = "Invented Finding Whose Words Say Critical"
+        book.label(title, "low")
+        book.answer(title, "low")
+        book.record(title, severity="low")
+        before = book.evaluate().keyword_baseline_accuracy
+        book.texts[book.subject(title)] = "critical critical critical"
+        assert book.evaluate().keyword_baseline_accuracy == before == 1.0
+
+    def test_an_item_with_no_record_is_refused(self) -> None:
+        book = _findings_book()
+        title = "Invented Finding Nobody Raised"
+        book.label(title, "execution")
+        book.answer(title, "execution")
+        with pytest.raises(jev_eval.Refused, match="recorded baseline cannot answer"):
+            book.evaluate()
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"reads": "detail_md"},
+            {"origin": "operator"},
+            {"order": ["ref", "opened_at"]},
+        ],
+        ids=["reads-another-column", "another-writer", "another-order"],
+    )
+    def test_a_plan_registering_another_rule_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, changed: dict[str, Any]
+    ) -> None:
+        """
+        The harness reads raised_by or severity of the earliest model-written
+        finding by opened_at then ref; a plan naming any other rule measures
+        against nothing the harness reads, and is refused rather than run.
+        """
+        real = jev_prereg.set_plan
+
+        def moved(name: str, version: int) -> dict[str, Any] | None:
+            plan = real(name, version)
+            if plan is None or name != OWNER.name:
+                return plan
+            question = dict(plan["questions"]["owning_role"])
+            question["keyword_baseline"] = {**question["keyword_baseline"], **changed}
+            return {**plan, "questions": {"owning_role": question}}
+
+        monkeypatch.setattr(jev_prereg, "set_plan", moved)
+        with pytest.raises(jev_eval.Refused, match="does not read"):
+            jev_eval.keyword_baseline(OWNER, "owning_role", records={})
+
+    def test_the_rule_the_harness_reads_is_the_plans(self) -> None:
+        """What finding_records reads and orders by is what the plans name."""
+        for question_set in (OWNER, SEVERITY):
+            plan = jev_prereg.set_plan(question_set.name, question_set.version)
+            assert plan is not None
+            (question,) = plan["questions"].values()
+            baseline = question["keyword_baseline"]
+            assert baseline["rule"] == "findings.recorded"
+            assert baseline["reads"] in jev_repo.FINDING_RECORD_COLUMNS
+            assert tuple(baseline["order"]) == jev_repo.FINDING_RECORD_ORDER
+            assert baseline["origin"] == "model"
+            assert baseline["exported_to_labellers"] is False
+
+
+class TestTheExportStaysBlind:
+    """
+    docs/09, section 3.5: a findings set's export shows the subject, its
+    address and the title, and withholds who raised the finding, its
+    severity, its status, its candidate and every answer.
+    """
+
+    async def test_no_raiser_severity_status_or_raw_error_is_exported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        title = "Invented Finding With Much Beside It"
+        rows = [
+            {
+                "subject_type": "finding_title",
+                "subject_id": text_sha256(title),
+                "text": title,
+                # A repository that handed over more than it reads: none of it
+                # may reach the file.
+                "raised_by": "adversarial_review",
+                "severity": "critical",
+                "status": "acknowledged",
+                "candidate_id": "c-0001",
+                "detail_md": "CANARY detail",
+            }
+        ]
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return rows
+
+        async def no_records(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the export read what the baseline reads")
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        monkeypatch.setattr(jev_repo, "finding_records", no_records)
+        for question_set in (OWNER, SEVERITY):
+            (key,) = dict(question_set.questions)
+            text = await jev_eval.export_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=question_set,
+                question_key=key,
+                sample=None,
+                include_quarantined=True,
+            )
+            lines = list(csv.reader(io.StringIO(text)))
+            assert lines == [
+                list(jev_eval.EXPORT_COLUMNS),
+                ["finding_title", text_sha256(title), title],
+            ]
+            withheld = ("adversarial_review", "critical", "acknowledged", "c-0001")
+            for value in (*withheld, "CANARY"):
+                assert value not in text, value
+
+    def test_the_population_read_names_no_withheld_column(self) -> None:
+        """
+        By its source: the read a findings export is chosen from names the
+        title, its address and the order it is chosen in, and none of who
+        raised it, its severity, its status, its candidate or its detail.
+        """
+        source = inspect.getsource(jev_repo.subjects_to_label)
+        branch = source.split('subject_type == "finding_title"', 1)[1]
+        branch = branch.split("else:", 1)[0]
+        for column in (
+            "raised_by",
+            "severity",
+            "status",
+            "candidate_id",
+            "detail_md",
+            "remediation",
+            "close_note",
+            "*",
+        ):
+            assert column not in branch, column
+
+
+#: What a flag read asks, and the switches as a dark deployment seeds them.
+FLAG_QUERY = "SELECT value FROM system_flags WHERE key = $1"
+
+
+def _flags(**overrides: str | None) -> dict[str, str]:
+    rows: dict[str, str | None] = {
+        flags.PROGRAMME_ENABLED: "true",
+        flags.JEV_ENABLED: "true",
+        f"{flags.JEV_AREA_PREFIX}findings": "true",
+        f"{flags.JEV_AREA_PREFIX}research": "false",
+        f"{flags.JEV_AREA_PREFIX}guardrails": "false",
+        flags.JEV_MODEL: json.dumps(MODEL),
+        flags.JEV_DAILY_REQUEST_BUDGET: "500",
+        flags.JEV_MAX_STATE_TOKENS: "8000",
+    }
+    rows.update(overrides)
+    return {key: value for key, value in rows.items() if value is not None}
+
+
+class _FlagConn:
+    """Answers the switches' one query, and refuses any other statement."""
+
+    def __init__(self, rows: dict[str, str]) -> None:
+        self.rows = rows
+
+    async def fetchrow(self, query: str, *args: object) -> dict[str, str] | None:
+        assert query == FLAG_QUERY, f"a read the test did not fake: {query!r}"
+        (key,) = args
+        return {"value": self.rows[key]} if key in self.rows else None
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"the harness used the connection itself: {name}")
+
+
+#: An invented finding title, with a marker no output may show.
+CANARY = "CANARY-5e1d"
+FINDING_TITLE = f"Invented Fills Assumed at Prices No Venue Gave {CANARY}"
+TODAY = date(2026, 10, 1)
+
+
+class _Findings:
+    """The findings sets' reads and the ledger's holds, faked."""
+
+    def __init__(self) -> None:
+        self.to_ask: list[dict[str, Any]] = [
+            {"ref": "F-0042", "subject_id": text_sha256(FINDING_TITLE)}
+        ]
+        self.rows: dict[str, dict[str, Any] | None] = {
+            "F-0042": {
+                "ref": "F-0042",
+                "title": FINDING_TITLE,
+                "origin": "model",
+                "opened_at": AFTER,
+            }
+        }
+        self.reads: list[dict[str, Any]] = []
+        self.auth_held = False
+        self.refused = False
+        self.spent = 0
+        self.spent_everywhere: int | None = None
+        self.waiting = 0
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def findings_to_ask(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            self.reads.append(kwargs)
+            return self.to_ask[: kwargs["limit"]]
+
+        async def get_finding_title(conn: Any, ref: str) -> dict[str, Any] | None:
+            return self.rows.get(ref)
+
+        async def auth_failed_today(conn: Any) -> bool:
+            return self.auth_held
+
+        async def set_refused(conn: Any, **kwargs: Any) -> bool:
+            return self.refused
+
+        async def requests_today(conn: Any, lane: str | None = None) -> int:
+            if lane is None and self.spent_everywhere is not None:
+                return self.spent_everywhere
+            return self.spent
+
+        async def pending_asks(conn: Any, sets: Any) -> int:
+            return self.waiting
+
+        async def answered(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("preview read an answer")
+
+        for name, fake in {
+            "findings_to_ask": findings_to_ask,
+            "get_finding_title": get_finding_title,
+            "auth_failed_today": auth_failed_today,
+            "set_refused": set_refused,
+            "requests_today": requests_today,
+            "pending_asks": pending_asks,
+            "answers_for_subjects": answered,
+            "answers_for": answered,
+            "probe_pairs": answered,
+            "screen_flag": answered,
+            "finding_records": answered,
+        }.items():
+            monkeypatch.setattr(jev_repo, name, fake)
+
+
+@pytest.fixture
+def findings_rig(monkeypatch: pytest.MonkeyPatch) -> _Findings:
+    rig = _Findings()
+    rig.install(monkeypatch)
+    return rig
+
+
+async def _preview(
+    rows: dict[str, str] | None = None, *, name: str = "findings.owner", limit: int = 10
+) -> dict[str, Any]:
+    return await jev_eval.preview_report(
+        _FlagConn(_flags() if rows is None else rows),  # type: ignore[arg-type]
+        question_set=jev_questions.REGISTRY[name],
+        limit=limit,
+        day=TODAY,
+    )
+
+
+class TestPreview:
+    """
+    docs/09, section 9.3 (D2): what a title set would be asked about and
+    the exact state that would be sent, the switches it needs, and nothing
+    enqueued or answered.
+    """
+
+    async def test_it_prints_exactly_what_would_leave(
+        self, findings_rig: _Findings
+    ) -> None:
+        report = await _preview()
+        assert report["subjects"] == [
+            {
+                "subject_type": "finding_title",
+                "subject_id": text_sha256(FINDING_TITLE),
+                "source_id": "F-0042",
+                "state": {"title": FINDING_TITLE},
+                "not_sent_because": None,
+            }
+        ]
+        assert report["switches"] == {
+            flags.PROGRAMME_ENABLED: True,
+            flags.JEV_ENABLED: True,
+            f"{flags.JEV_AREA_PREFIX}findings": True,
+        }
+        assert (report["pin"], report["plans_in_force"]) == (MODEL, True)
+        assert report["would_plan"] is True and report["not_planned_because"] == []
+        assert report["calls_left_today"] == jev_catalogue.lane_budget(500, "findings")
+        assert findings_rig.reads == [
+            {
+                "question_set": jev_questions.FINDINGS_OWNER,
+                "model": MODEL,
+                "limit": 10,
+                "day": TODAY,
+            }
+        ]
+        text = jev_eval.format_preview(report)
+        assert f'would send: {{"title": "{FINDING_TITLE}"}}' in text
+        assert "jev_area_findings on" in text
+
+    @pytest.mark.parametrize(
+        ("row", "why"),
+        [
+            (None, "the row is no longer stored"),
+            (
+                {"title": "Another Invented Title", "origin": "model"},
+                "the row no longer holds the text planned",
+            ),
+            (
+                {"title": FINDING_TITLE, "origin": "operator"},
+                "written by 'operator', not by the programme's model",
+            ),
+        ],
+        ids=["gone", "another-text", "an-operators"],
+    )
+    async def test_what_the_handler_would_not_send_is_said_and_not_quoted(
+        self, findings_rig: _Findings, row: dict[str, Any] | None, why: str
+    ) -> None:
+        findings_rig.rows["F-0042"] = (
+            None if row is None else {"ref": "F-0042", "opened_at": AFTER, **row}
+        )
+        (subject,) = (await _preview())["subjects"]
+        assert (subject["state"], subject["not_sent_because"]) == (None, why)
+        assert CANARY not in json.dumps(subject["not_sent_because"])
+
+    async def test_a_title_over_its_cap_is_refused_by_the_cap(
+        self, findings_rig: _Findings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(jev_questions, "FINDING_TITLE_MAX_CHARS", 30)
+        (subject,) = (await _preview())["subjects"]
+        assert subject["state"] is None
+        assert subject["not_sent_because"] == (
+            f"{len(FINDING_TITLE)} characters, over the 30 its state carries"
+        )
+
+    @pytest.mark.parametrize(
+        ("rows", "reason"),
+        [
+            (
+                _flags(**{f"{flags.JEV_AREA_PREFIX}findings": "false"}),
+                "jev_area_findings is off",
+            ),
+            (_flags(**{flags.PROGRAMME_ENABLED: None}), "programme_enabled is off"),
+            (_flags(**{flags.JEV_ENABLED: '"true"'}), "jev_enabled is off"),
+            (_flags(**{flags.JEV_MODEL: json.dumps("jev-latest")}), "no usable pin"),
+        ],
+        ids=["the-area", "the-programme", "jev-not-json-true", "an-alias"],
+    )
+    async def test_every_switch_it_needs_is_read_and_named(
+        self,
+        findings_rig: _Findings,
+        rows: dict[str, str],
+        reason: str,
+    ) -> None:
+        report = await _preview(rows)
+        assert report["would_plan"] is False
+        assert any(reason in why for why in report["not_planned_because"])
+        if "pin" in reason:
+            assert report["subjects"] == [], "no subject is read without a pin"
+
+    async def test_the_holds_and_the_share_are_named(
+        self, findings_rig: _Findings
+    ) -> None:
+        findings_rig.auth_held = True
+        findings_rig.refused = True
+        findings_rig.spent = 49
+        findings_rig.waiting = 1
+        report = await _preview()
+        assert report["calls_left_today"] == 0
+        assert report["not_planned_because"] == [
+            "held: authentication failure today",
+            "held: refused at this version under the pin",
+            "the findings lane has no call left today",
+        ]
+
+    @pytest.mark.parametrize(
+        ("limit", "read", "why"),
+        [
+            (
+                "0",
+                0,
+                "the state limit is 0; every request is refused until "
+                "jev_max_state_tokens is a positive integer",
+            ),
+            (
+                None,
+                0,
+                "the state limit is 0; every request is refused until "
+                "jev_max_state_tokens is a positive integer",
+            ),
+            ("1", 1, "over the 1 allowed by jev_max_state_tokens"),
+        ],
+        ids=["zero-makes-no-calls", "unreadable-reads-as-zero", "under-the-state"],
+    )
+    async def test_a_state_the_road_refuses_for_its_size_is_not_shown_as_sent(
+        self,
+        findings_rig: _Findings,
+        limit: str | None,
+        read: int,
+        why: str,
+    ) -> None:
+        """
+        D2's review (D2RW-1): the road refuses a request over the state limit
+        before any call, recording a ``refused_limits`` row, and a limit of 0,
+        or a row it cannot read, refuses every request; the first cut never
+        read the limit and printed "would send" for each. The planner does not
+        read it, so the set is still planned; what would be sent is nothing,
+        and why is said, quoting no text.
+        """
+        report = await _preview(_flags(**{flags.JEV_MAX_STATE_TOKENS: limit}))
+        (subject,) = report["subjects"]
+        assert subject["state"] is None, "a state the road refuses shown as sent"
+        assert subject["not_sent_because"].startswith(
+            "over the size limits, so the road would refuse it before any call: "
+        )
+        assert why in subject["not_sent_because"]
+        assert CANARY not in subject["not_sent_because"]
+        assert report["would_plan"] is True, report["not_planned_because"]
+        assert report["state_limit"] == read
+        text = jev_eval.format_preview(report)
+        assert "would send:" not in text and "would send nothing: over the" in text
+        assert f"state limit: {read} estimated tokens" in text
+
+    async def test_a_spent_day_is_named_for_each_subject(
+        self, findings_rig: _Findings
+    ) -> None:
+        """
+        The road refuses every ask once the day's budget is spent, whatever a
+        lane's share has left, as when the budget is lowered after the day's
+        calls: so does preview, and the planner, which reads the share alone,
+        still plans.
+        """
+        findings_rig.spent_everywhere = 500
+        report = await _preview()
+        (subject,) = report["subjects"]
+        assert (subject["state"], subject["not_sent_because"]) == (
+            None,
+            "the road would refuse it before any call: no call is left in the "
+            "day's request budget, 500 of 500 made today",
+        )
+        assert report["would_plan"] is True, report["not_planned_because"]
+        assert report["spent_today"] == 500 and report["budget"] == 500
+        findings_rig.spent_everywhere = 499
+        (subject,) = (await _preview())["subjects"]
+        assert subject["state"] == {"title": FINDING_TITLE}
+
+    async def test_a_set_with_no_plan_in_force_is_planned_nothing_and_says_so(
+        self, findings_rig: _Findings, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        D2's review (D2RT-2): the planner plans nothing for a set with no
+        analysis plan in force, and preview's reason for it was held by no
+        case; without it preview printed "would plan: yes" for such a set.
+        """
+        monkeypatch.setattr(jev_prereg, "plans_in_force", lambda name, version: None)
+        report = await _preview()
+        assert report["plans_in_force"] is False
+        assert report["would_plan"] is False
+        assert report["not_planned_because"] == [
+            "findings.owner v1 has no analysis plan in force"
+        ]
+        assert report["subjects"] == [] and findings_rig.reads == []
+        assert (
+            "would plan: no — findings.owner v1 has no analysis plan in force"
+            in jev_eval.format_preview(report)
+        )
+
+    async def test_the_limit_is_the_planners_cap(self, findings_rig: _Findings) -> None:
+        from src.programme import jev_plan
+
+        for name, question_set in jev_questions.REGISTRY.items():
+            subject = jev_questions.STATE_SUBJECT[question_set.state_model]
+            if subject in jev_eval.PREVIEWED_SUBJECTS:
+                assert jev_plan.ASKS_PER_PASS[name] == jev_eval.PREVIEW_LIMIT, name
+        findings_rig.to_ask = [
+            {"ref": f"F-{n:04d}", "subject_id": f"{n:064x}"} for n in range(30)
+        ]
+        assert len((await _preview(limit=3))["subjects"]) == 3
+
+    @pytest.mark.parametrize("name", ["guardrail.injection", "research.catalogue"])
+    async def test_a_web_set_is_refused(
+        self, findings_rig: _Findings, name: str
+    ) -> None:
+        """Its subjects are chosen by the screen's own answers."""
+        with pytest.raises(jev_eval.Refused, match="screen's own answers"):
+            await _preview(name=name)
+
+    def test_the_command_reads_in_a_read_only_snapshot(
+        self,
+        findings_rig: _Findings,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        record: dict[str, Any] = {}
+
+        class Conn(_FlagConn):
+            def transaction(self, **kwargs: Any) -> _Transaction:
+                return _Transaction(record, kwargs)
+
+            async def close(self) -> None:
+                record["closed"] = True
+
+        async def connect(dsn: str) -> Conn:
+            return Conn(_flags())
+
+        async def database_now(conn: Any) -> datetime:
+            return datetime(2026, 10, 1, 3, tzinfo=UTC)
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://reader@db/trader")
+        monkeypatch.setattr(jev_eval.asyncpg, "connect", connect)
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
+        argv = ["preview", "--set", "findings.severity", "--json"]
+        assert jev_eval.main(argv) == jev_eval.EXIT_OK
+        assert record == {
+            "transaction": {"isolation": "repeatable_read", "readonly": True},
+            "closed": True,
+        }
+        printed = json.loads(capsys.readouterr().out)
+        assert printed["set"] == "findings.severity" and printed["day"] == "2026-10-01"
+        assert findings_rig.reads[0]["day"] == TODAY
+
+
+class _Outcomes:
+    """The suggestions reads, faked: open findings and how each ask came out."""
+
+    def __init__(self) -> None:
+        self.open: list[dict[str, Any]] = []
+        self.outcomes: dict[str, dict[str, dict[str, Any]]] = {}
+        self.jev = 0
+        self.auth_held = False
+        self.refused: set[str] = set()
+        self.refusals_read: list[dict[str, Any]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def open_findings(conn: Any) -> list[dict[str, Any]]:
+            return list(self.open)
+
+        async def jev_findings_raised(conn: Any) -> int:
+            return self.jev
+
+        async def ask_outcomes(conn: Any, **kwargs: Any) -> dict[str, Any]:
+            return self.outcomes.get(kwargs["question_set"].name, {})
+
+        async def auth_failed_today(conn: Any) -> bool:
+            return self.auth_held
+
+        async def set_refused(conn: Any, **kwargs: Any) -> bool:
+            self.refusals_read.append(kwargs)
+            return kwargs["question_set"] in self.refused
+
+        async def answered(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("suggestions read an answer")
+
+        for name, fake in {
+            "open_findings": open_findings,
+            "jev_findings_raised": jev_findings_raised,
+            "ask_outcomes": ask_outcomes,
+            "auth_failed_today": auth_failed_today,
+            "set_refused": set_refused,
+            "answers_for_subjects": answered,
+            "answers_for": answered,
+            "probe_pairs": answered,
+            "finding_records": answered,
+            "get_request": answered,
+        }.items():
+            monkeypatch.setattr(jev_repo, name, fake)
+
+
+def _outcome(**overrides: Any) -> dict[str, Any]:
+    outcome = {
+        "answered": False,
+        "valid": False,
+        "failed_calls": 0,
+        "retired": False,
+        "blocked": False,
+        "waiting": False,
+    }
+    outcome.update(overrides)
+    return outcome
+
+
+@pytest.fixture
+def outcomes_rig(monkeypatch: pytest.MonkeyPatch) -> _Outcomes:
+    rig = _Outcomes()
+    rig.install(monkeypatch)
+    return rig
+
+
+class TestSuggestions:
+    """
+    docs/09, section 9.3 (D-HMB-04): how each findings set's ask came out,
+    as a status, by the finding's ref; never an argmax, a probability, a chip
+    or a Jev finding's ref, since a reader may later label the set.
+    """
+
+    def _register(self, rig: _Outcomes) -> None:
+        titles = {
+            "F-0001": f"Invented Model Finding {CANARY}",
+            "F-0002": f"Invented Operator Finding {CANARY}",
+            "F-0003": f"Invented Finding Before Origins {CANARY}",
+            "J-0004": f"Invented Jev Finding {CANARY}",
+        }
+        origins = {"F-0001": "model", "F-0002": "operator", "F-0003": "unknown"}
+        rig.open = [
+            {"ref": ref, "title": title, "origin": origins.get(ref, "jev")}
+            for ref, title in titles.items()
+        ]
+        rig.jev = 3
+        address = text_sha256(titles["F-0001"])
+        rig.outcomes = {
+            "findings.owner": {address: _outcome(answered=True, valid=True)},
+            "findings.severity": {address: _outcome(answered=True, valid=False)},
+        }
+
+    async def test_ids_labels_and_numbers_only(self, outcomes_rig: _Outcomes) -> None:
+        self._register(outcomes_rig)
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_flags())  # type: ignore[arg-type]
+        )
+        assert report["findings"] == [
+            {
+                "ref": "F-0001",
+                "asks": {"findings.owner": "answered", "findings.severity": "invalid"},
+            },
+            {
+                "ref": "F-0002",
+                "asks": dict.fromkeys(
+                    ("findings.owner", "findings.severity"),
+                    "not asked: written by an operator",
+                ),
+            },
+            {
+                "ref": "F-0003",
+                "asks": dict.fromkeys(
+                    ("findings.owner", "findings.severity"),
+                    "not asked: written before migration 0015 named its writer",
+                ),
+            },
+        ]
+        assert (report["open_findings"], report["jev_findings_raised"]) == (3, 3)
+        text = jev_eval.format_suggestions(report)
+        for shown in (text, json.dumps(report)):
+            assert CANARY not in shown and "Invented" not in shown
+        assert "findings Jev raised: 3 (counted, never named)" in text
+
+    async def test_no_answer_no_probability_no_chip_and_no_jev_ref(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        """
+        The Jev finding's ref is named nowhere; the statuses are fixed
+        phrases, none of them an option of either set; and neither the read
+        behind them nor the command reads an option, a probability or a chip.
+        """
+        self._register(outcomes_rig)
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_flags())  # type: ignore[arg-type]
+        )
+        shown = json.dumps(report) + jev_eval.format_suggestions(report)
+        assert "J-0004" not in shown
+        options = {
+            option
+            for name in ("findings.owner", "findings.severity")
+            for _, question in jev_questions.REGISTRY[name].questions
+            for option in question["criteria"]
+        }
+        statuses = {
+            status for row in report["findings"] for status in row["asks"].values()
+        }
+        for status in statuses:
+            assert not set(re.findall(r"[a-z_]+", status)) & options, status
+        # The read as shipped, from the module's file: the rig replaced it.
+        shipped = (ROOT / "src" / "programme" / "jev_repo.py").read_text("utf-8")
+        body = shipped.split("async def ask_outcomes(", 1)[1]
+        body = body.split("\nasync def ", 1)[0].split('"""', 2)[2]
+        assert "FROM jev_requests" in body
+        for column in ("argmax", "noul", "probabilities", "choice", "margin", "score"):
+            assert column not in body, column
+        for function in (jev_eval.suggestions_report, jev_eval.ask_status):
+            body = inspect.getsource(function).split('"""')[2]
+            assert "chip" not in body and "argmax" not in body
+
+    @pytest.mark.parametrize(
+        ("origin", "title", "outcome", "status"),
+        [
+            ("model", "T", _outcome(answered=True, valid=True), "answered"),
+            ("model", "T", _outcome(answered=True), "invalid"),
+            (
+                "model",
+                "T",
+                _outcome(blocked=True, failed_calls=1),
+                "held: a vendor content block, so never sent again",
+            ),
+            (
+                "model",
+                "T",
+                _outcome(failed_calls=3, retired=True),
+                "retired: 3 failed calls",
+            ),
+            (
+                "model",
+                "T",
+                _outcome(waiting=True, failed_calls=1),
+                "waiting: a job is queued or running",
+            ),
+            (
+                "model",
+                "T",
+                _outcome(failed_calls=2),
+                "not answered yet: 2 failed calls",
+            ),
+            ("model", "T", _outcome(), "not asked yet"),
+            (
+                "model",
+                "T",
+                None,
+                "unknown: no usable pin, so how the ask came out is not read",
+            ),
+            ("model", "", _outcome(), "not asked: no title"),
+            ("model", "x" * 201, _outcome(), "not asked: over the 200-character cap"),
+            ("operator", "T", _outcome(), "not asked: written by an operator"),
+        ],
+        ids=[
+            "answered",
+            "invalid",
+            "blocked",
+            "retired",
+            "waiting",
+            "failed",
+            "not-yet",
+            "no-pin",
+            "no-title",
+            "over-the-cap",
+            "an-operators",
+        ],
+    )
+    def test_each_status(
+        self,
+        origin: str,
+        title: str,
+        outcome: dict[str, Any] | None,
+        status: str,
+    ) -> None:
+        assert jev_eval.ask_status(origin, title, outcome) == status
+
+    async def test_each_hold_is_read_for_its_own_set_and_named(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        """
+        D2's review (D2RT-2): the holds that decide whether a findings set is
+        asked, each read as the road reads it — a 422 for the set, its
+        version and the pin, and an authentication failure today — were held
+        by no case, and suggestions forced to say "no" for every 422 passed.
+        """
+        self._register(outcomes_rig)
+        outcomes_rig.refused = {"findings.severity"}
+        outcomes_rig.auth_held = True
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_flags())  # type: ignore[arg-type]
+        )
+        assert report["holds"] == {
+            "authentication_failure_today": True,
+            "findings.owner refused under the pin": False,
+            "findings.severity refused under the pin": True,
+        }
+        assert outcomes_rig.refusals_read == [
+            {"question_set": name, "version": 1, "model": MODEL}
+            for name in ("findings.owner", "findings.severity")
+        ]
+        text = jev_eval.format_suggestions(report)
+        assert "findings.severity refused under the pin: yes" in text
+        assert "findings.owner refused under the pin: no" in text
+        assert "authentication failure today: yes" in text
+
+    @pytest.mark.parametrize(
+        "pin",
+        [None, json.dumps("jev-latest"), "not json"],
+        ids=["no-row", "an-alias", "unreadable"],
+    )
+    async def test_with_no_pin_nothing_is_read_and_nothing_is_said_of_it(
+        self,
+        outcomes_rig: _Outcomes,
+        monkeypatch: pytest.MonkeyPatch,
+        pin: str | None,
+    ) -> None:
+        """
+        D2's review (D2RW-2): with no pin the ledger is not read, so how a
+        model-written finding's asks came out is unknown, and it is said to
+        be. The first cut printed "not asked", which the ledger may contradict:
+        here both sets answered F-0001 under the pin before it went. What the
+        rows alone decide — an operator's finding, or one raised before 0015
+        named its writer, is never asked — is still said.
+        """
+        self._register(outcomes_rig)
+
+        async def no_outcomes(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an outcome was read with no pin")
+
+        monkeypatch.setattr(jev_repo, "ask_outcomes", no_outcomes)
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_flags(**{flags.JEV_MODEL: pin}))  # type: ignore[arg-type]
+        )
+        assert report["pin"] is None
+        statuses = {row["ref"]: row["asks"] for row in report["findings"]}
+        sets = ("findings.owner", "findings.severity")
+        assert statuses == {
+            "F-0001": dict.fromkeys(
+                sets, "unknown: no usable pin, so how the ask came out is not read"
+            ),
+            "F-0002": dict.fromkeys(sets, "not asked: written by an operator"),
+            "F-0003": dict.fromkeys(
+                sets, "not asked: written before migration 0015 named its writer"
+            ),
+        }
+        text = jev_eval.format_suggestions(report)
+        assert "pin: none usable, so how each ask came out is not read" in text
+        assert "not asked: no usable pin" not in text
 
 
 class TestTheEvaluationIsTheTable:
@@ -1753,6 +2730,59 @@ class TestTheBaselines:
         assert evaluation.keyword_baseline_ref.startswith(
             "claims.find_performance_claim"
         )
+
+    @staticmethod
+    def _catalogue_falling_back(
+        monkeypatch: pytest.MonkeyPatch, fallback: str | None
+    ) -> None:
+        """The catalogue's plans, each keyword rule's fallback moved, or gone."""
+        real = jev_prereg.set_plan
+
+        def moved(name: str, version: int) -> dict[str, Any] | None:
+            plan = real(name, version)
+            if plan is None or name != CATALOGUE.name:
+                return plan
+            questions = {}
+            for key, question in plan["questions"].items():
+                baseline = dict(question["keyword_baseline"])
+                if fallback is None:
+                    del baseline["fallback"]
+                else:
+                    baseline["fallback"] = fallback
+                questions[key] = {**question, "keyword_baseline": baseline}
+            return {**plan, "questions": questions}
+
+        monkeypatch.setattr(jev_prereg, "set_plan", moved)
+
+    @pytest.mark.parametrize(
+        "fallback", ["other_mechanism", jev_prereg.KEYWORD_FALLBACK, "neither"]
+    )
+    def test_a_keyword_rule_falls_back_as_its_plan_registered(
+        self, monkeypatch: pytest.MonkeyPatch, fallback: str
+    ) -> None:
+        """
+        D2's review (D2RW-3): from phase D a plan records the label its keyword
+        rule gives text no keyword names (``"fallback"``), and the baseline is
+        the rule the plan names, as the plan holds it. The first cut fell back
+        to ``KEYWORD_FALLBACK`` whatever the plan said, so a plan registering
+        another would have been scored by a rule it never registered.
+        """
+        self._catalogue_falling_back(monkeypatch, fallback)
+        guess, _ = jev_eval.keyword_baseline(CATALOGUE, "mechanism")
+        nothing = "Invented Words No Keyword Names"
+        assert guess(("web_excerpt", text_sha256(nothing)), nothing) == fallback
+        named = "Invented Momentum in Pretend Shares"
+        assert guess(("web_excerpt", text_sha256(named)), named) == (
+            "trend_or_momentum"
+        )
+
+    def test_a_keyword_plan_naming_no_fallback_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rule the plan does not complete is measured against nothing."""
+        self._catalogue_falling_back(monkeypatch, None)
+        with pytest.raises(jev_eval.Refused, match="no fallback"):
+            jev_eval.keyword_baseline(CATALOGUE, "mechanism")
 
 
 class TestTheBrierScore:
@@ -2378,6 +3408,8 @@ class TestLooks:
                 + ["--from-version", "0", "--to-version", "1"],
                 _evaluate_argv("dev"),
                 _evaluate_argv("test", "--record"),
+                ["preview", "--set", "findings.owner"],
+                ["suggestions"],
             )
         }
         assert made == set(jev_eval.COMMANDS)
@@ -3417,7 +4449,23 @@ class TestTheCommandsThatWrite:
                 [],
             ),
             "report": (["report"], []),
+            # Phase D2's two read surfaces, each read in the snapshot too.
+            "preview": (["preview", "--set", "findings.owner"], []),
+            "suggestions": (["suggestions"], []),
         }
+        _Findings().install(monkeypatch)
+        _Outcomes().install(monkeypatch)
+        preview, suggestions = jev_eval.preview_report, jev_eval.suggestions_report
+
+        async def previewed(conn: Any, **kwargs: Any) -> dict[str, Any]:
+            return await preview(_FlagConn(_flags()), **kwargs)  # type: ignore[arg-type]
+
+        async def suggested(conn: Any) -> dict[str, Any]:
+            return await suggestions(_FlagConn(_flags()))  # type: ignore[arg-type]
+
+        monkeypatch.setattr(jev_eval, "preview_report", previewed)
+        monkeypatch.setattr(jev_eval, "suggestions_report", suggested)
+        assert set(jev_eval.WRITING_COMMANDS) | {"preview", "suggestions"} <= set(cases)
         for command, (argv, writes) in cases.items():
             record = self._run(monkeypatch)
             monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)

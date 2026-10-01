@@ -56,14 +56,18 @@ Each with the area it needs, what it enqueues, when, and under which key:
   date}`` (``jev_repo.ask_job_key``), at most :data:`ASKS_PER_PASS` of a set
   a pass: the injection screen (25) and the card check (10) behind
   guardrails, the catalogue (25) and the hypothesis categories (10) behind
-  research. The payload names the set, its version, the subject, the row its
+  research, and from phase D2 the two findings sets (10 each) behind the
+  findings area, from the findings lane's share. The payload names the set,
+  its version, the subject, the row its
   text is read from and the analysis plans in force, which the handler asks
   under and no others, never the text; a set with no plan is planned nothing.
   The subjects are ``jev_repo``'s reads: stored content the screen has not
   answered, and first its repairs, content still in use that a vendor
   content block or the screen's own ``true`` is on record for; content the
   screen cleared, for the catalogue, and never any other; model-written
-  hypothesis titles within their cap, newest first. Each read leaves out a
+  hypothesis titles within their cap, newest first; and the titles of
+  model-written findings within theirs, of any status, newest first
+  (``jev_repo.findings_to_ask``). Each read leaves out a
   subject whose job is waiting or was planned today, and retires one after
   three failed calls — but for the screen's repairs, returned until their
   content is quarantined whatever its answers and failed calls; the day in
@@ -155,15 +159,19 @@ ASK_PRIORITY = 0
 ASK_ATTEMPTS = 3
 
 #: Every set a ``jev_ask`` job asks, with the most one pass may plan of it
-#: (design C7 and C8). Each is planned behind its own lane's area, within its
-#: lane's share: the injection screen and the card check the guardrails',
-#: the catalogue and the hypothesis categories the research area's.
+#: (design C7 and C8; docs/09 section 5.2 for phase D2's). Each is planned
+#: behind its own lane's area, within its lane's share: the injection screen
+#: and the card check the guardrails', the catalogue and the hypothesis
+#: categories the research area's, and the findings sets the findings area's,
+#: from the findings lane's share.
 ASKS_PER_PASS: Mapping[str, int] = MappingProxyType(
     {
         "guardrail.injection": 25,
         "guardrail.card": 10,
         "research.catalogue": 25,
         "research.hypothesis": 10,
+        "findings.owner": 10,
+        "findings.severity": 10,
     }
 )
 
@@ -172,6 +180,9 @@ CATALOGUE_SET_NAME = "research.catalogue"
 
 #: The two sets asked about a hypothesis's title.
 TITLE_SET_NAMES = ("guardrail.card", "research.hypothesis")
+
+#: The two sets asked about a finding's title (phase D2).
+FINDING_SET_NAMES = ("findings.owner", "findings.severity")
 
 #: The forward clock's job: above the probe and every research ask, since a
 #: session missed is missed for good; and with the queue's backoff, 20
@@ -414,7 +425,8 @@ async def _plan_asks(
     ``jev_repo.ask_job_key``. What each set is asked about is ``jev_repo``'s
     to read: :func:`jev_repo.documents_to_screen`,
     :func:`jev_repo.documents_to_describe` — content the screen cleared, and
-    nothing else — and :func:`jev_repo.hypotheses_to_ask`.
+    nothing else — :func:`jev_repo.hypotheses_to_ask` and, from phase D2,
+    :func:`jev_repo.findings_to_ask`.
 
     A set declaring ``internal_detail`` is planned only while
     ``jev_send_internal_detail`` is on (:func:`_detail_allows`).
@@ -464,7 +476,8 @@ async def _ask_subjects(
 ) -> list[tuple[str, object, bool]]:
     """
     What ``question_set`` is to be asked about: each subject's address, the
-    row its text is read from, and whether its ask can make a call. Only the
+    row its text is read from — a document by its id, a hypothesis or a
+    finding by its ref — and whether its ask can make a call. Only the
     screen's repairs cannot: its ask about content a block is on record for,
     which the road refuses for the block before any call and whose follow-up
     quarantines the content, and about content the screen itself flagged,
@@ -498,6 +511,11 @@ async def _ask_subjects(
         return [(row["content_sha256"], row["document_id"], True) for row in rows]
     if question_set.name in TITLE_SET_NAMES:
         rows = await jev_repo.hypotheses_to_ask(
+            conn, question_set=question_set, model=model, limit=limit, day=day
+        )
+        return [(row["subject_id"], row["ref"], True) for row in rows]
+    if question_set.name in FINDING_SET_NAMES:
+        rows = await jev_repo.findings_to_ask(
             conn, question_set=question_set, model=model, limit=limit, day=day
         )
         return [(row["subject_id"], row["ref"], True) for row in rows]
@@ -648,6 +666,7 @@ __all__ = [
     "ASK_ATTEMPTS",
     "ASK_PRIORITY",
     "CATALOGUE_SET_NAME",
+    "FINDING_SET_NAMES",
     "INGEST_AREA",
     "INGEST_ATTEMPTS",
     "INGEST_PRIORITY",

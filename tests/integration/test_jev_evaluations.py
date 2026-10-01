@@ -4,7 +4,7 @@ test_jev_evaluations.py
 Phase C9 on PostgreSQL: migration 0014, which says what an evaluation of Jev
 measured and what no row of one may say, and the harness that writes one.
 
-Three parts:
+Four parts:
 
 * **The schema.** Every rule in 0014 is a CHECK, so none of it can be proved
   without the database that enforces it. Each case starts from a row that
@@ -31,6 +31,15 @@ Three parts:
   transaction PostgreSQL itself refuses to write in; labels are exported
   blind, imported whole or not at all, and copied by the words the lane
   recorded.
+* **End to end, the findings sets** (phase D2; docs/09, section 13). A
+  ledger of its own: the loop asks both findings sets about every title the
+  programme's model raised and nothing about an operator's, and the next
+  day's re-asks are run; synthetic labels of five titles are imported and
+  each set's evaluation recorded through ``jev_eval.main``; each row equals
+  its recomputation, the ``findings.recorded`` baseline reads who raised the
+  earliest finding holding a title and at what severity, and the flip rates
+  count the population's pairs, six of them of titles nobody labelled, so a
+  flip count exceeds ``n`` (plan version 2, M2).
 
 Runs on databases of its own, derived from ``TEST_DATABASE_URL`` as
 ``test_jev_schema.py``'s are: the ledger refuses DELETE and TRUNCATE, so rows
@@ -67,6 +76,7 @@ import asyncpg  # noqa: E402
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import flags as flag_repo  # noqa: E402
 from src.programme import (  # noqa: E402
+    flags,
     jev_calibration,
     jev_catalogue,
     jev_client,
@@ -2335,3 +2345,445 @@ class TestTheCommandsOnPostgres:
         assert "0 labels copied to v1; 2 items labelled there already" in (
             capsys.readouterr().out
         )
+
+
+# ---------------------------------------------------------------------------
+# End to end: the findings sets (phase D2)
+# ---------------------------------------------------------------------------
+
+OWNER = jev_questions.FINDINGS_OWNER
+SEVERITY = jev_questions.FINDINGS_SEVERITY
+
+#: The switches the findings ledger is written under: the programme, Jev and
+#: the findings area, and no other area, so nothing but the findings sets,
+#: the daily probe and the re-asks is planned.
+FINDINGS_ON: dict[str, Any] = {
+    flags.PROGRAMME_ENABLED: True,
+    flags.JEV_ENABLED: True,
+    f"{flags.JEV_AREA_PREFIX}findings": True,
+}
+
+#: Titles of findings the programme's model raised, invented: five a person
+#: labels, and six nobody labels, which the flip rates read and nothing else
+#: does (plan version 2, M2).
+FT1 = "Invented Fills Booked at Prices No Pretend Venue Quoted"
+FT2 = "A Made-Up Gap Between Fictional Ledgers and Marks"
+FT3 = "Imaginary Survivorship in a Pretend Share Universe"
+FT4 = "An Invented Heartbeat Read as Stale Too Early"
+FT5 = "Fictional Overfitting Across a Made-Up Parameter Grid"
+LABELLED_FINDINGS = (FT1, FT2, FT3, FT4, FT5)
+UNLABELLED_FINDINGS = tuple(
+    f"An Unlabelled Invented Finding About Pretend {noun}"
+    for noun in ("Costs", "Calendars", "Quotes", "Margins", "Splits", "Fees")
+)
+
+#: Each finding as the model raised it: (title, raised by, severity). FT1 is
+#: raised twice, the second time by another role at another severity, so
+#: the recorded baseline is seen to read the earliest.
+RAISED: tuple[tuple[str, str, str], ...] = (
+    (FT1, "independent_risk", "high"),
+    (FT2, "operations", "medium"),
+    (FT3, "quant_research", "critical"),
+    (FT4, "platform", "low"),
+    (FT5, "independent_validation", "high"),
+    *((title, "data_engineering", "medium") for title in UNLABELLED_FINDINGS),
+    (FT1, "execution", "low"),
+)
+
+#: Two operators' findings, raised before any of the model's: one under a
+#: title of its own, which no findings set asks about, and one holding FT3's
+#: title by another role at another severity, which the recorded baseline
+#: must not read, since its population is the model's findings.
+OPERATORS_FINDING = "An Operator's Invented Finding About Pretend Rebates"
+OPERATORS_RAISED: tuple[tuple[str, str, str], ...] = (
+    (OPERATORS_FINDING, "operations", "high"),
+    (FT3, "compliance", "low"),
+)
+
+#: What the vendor answers about each title, by question, and by how much:
+#: FT4's owner the escape, FT5's owner a tie, which is no valid answer, and
+#: FT5's severity the escape. Every unlabelled title's severity leads by
+#: 0.08, in the re-ask sample's low-margin stratum.
+FINDING_ANSWERS: dict[tuple[str, str], tuple[str, str]] = {
+    (FT1, "owning_role"): ("independent_risk", CLEAR),
+    (FT2, "owning_role"): ("execution", CLOSE),
+    (FT3, "owning_role"): ("quant_research", CLEAR),
+    (FT4, "owning_role"): ("unclear", CLEAR),
+    (FT5, "owning_role"): ("independent_validation", TIED),
+    (FT1, "severity"): ("high", CLEAR),
+    (FT2, "severity"): ("medium", CLEAR),
+    (FT3, "severity"): ("high", CLOSE),
+    (FT4, "severity"): ("low", CLEAR),
+    (FT5, "severity"): ("insufficient_evidence", CLEAR),
+    **{
+        (title, "owning_role"): ("data_engineering", CLEAR)
+        for title in UNLABELLED_FINDINGS
+    },
+    **{(title, "severity"): ("medium", CLOSE) for title in UNLABELLED_FINDINGS},
+}
+
+#: Asked the same question again, which only a re-ask does, the vendor moves
+#: on these alone: a labelled title's owner and an unlabelled title's
+#: severity.
+FINDING_MOVES: dict[tuple[str, str], str] = {
+    (FT2, "owning_role"): "operations",
+    (UNLABELLED_FINDINGS[0], "severity"): "high",
+}
+
+#: The person's labels. They differ from the raiser on FT4 and from the
+#: severity recorded on FT5, so the recorded baseline is not the labeller's
+#: echo.
+FINDING_LABELS: tuple[tuple[Any, str, str, str], ...] = (
+    (OWNER, "owning_role", FT1, "independent_risk"),
+    (OWNER, "owning_role", FT2, "operations"),
+    (OWNER, "owning_role", FT3, "quant_research"),
+    (OWNER, "owning_role", FT4, "operations"),
+    (OWNER, "owning_role", FT5, "independent_validation"),
+    (SEVERITY, "severity", FT1, "high"),
+    (SEVERITY, "severity", FT2, "medium"),
+    (SEVERITY, "severity", FT3, "critical"),
+    (SEVERITY, "severity", FT4, "low"),
+    (SEVERITY, "severity", FT5, "medium"),
+)
+
+#: The evaluations the findings ledger is recorded with.
+FINDINGS_RECORDED: tuple[tuple[Any, str, str, str], ...] = (
+    (OWNER, "owning_role", TESTER, "all"),
+    (SEVERITY, "severity", TESTER, "all"),
+)
+
+
+class _ScriptedFindings:
+    """
+    ``jev_client.ask``, answering a finding's title as
+    :data:`FINDING_ANSWERS` and :data:`FINDING_MOVES` script it, and the
+    connectivity probe 0.99. A title it has no script for fails the job that
+    asked, which the tests below would see.
+    """
+
+    def __init__(self) -> None:
+        self.asked: dict[tuple[str, str], int] = {}
+
+    async def ask(self, **kwargs: Any) -> jev_client.JevCall:
+        title = research._text_of(kwargs["state"]) or ""
+        answers: dict[str, Any] = {}
+        for key, question in kwargs["questions"].items():
+            if question["type"] == "noul":
+                assert key == "about_the_sun", key
+                answers[key] = {"type": "noul", "noul": 0.99}
+                continue
+            asked_before = self.asked.get((title, key), 0)
+            self.asked[(title, key)] = asked_before + 1
+            top, lead = FINDING_ANSWERS[(title, key)]
+            if asked_before:
+                top = FINDING_MOVES.get((title, key), top)
+            answers[key] = _choice(list(question["criteria"]), top, lead)
+        body = json.dumps({"model": kwargs["model"], "answers": answers, "usage": {}})
+        return jev_client.JevCall(
+            http_status=200,
+            raw_body=body,
+            request_id="req_findings_evaluation",
+            latency_ms=50,
+            error_class=None,
+            error_kind=None,
+            input_tokens=None,
+            output_tokens=None,
+            wire_body=body.encode("utf-8"),
+        )
+
+
+async def _write_the_findings_ledger(mp: pytest.MonkeyPatch, dsn: str) -> None:
+    """
+    A database of its own, migrated, the findings of :data:`OPERATORS_RAISED`
+    raised as operators' and then every finding of :data:`RAISED` as the
+    model's, then written by the programme's loop as shipped against the
+    scripted vendor:
+    each model-written title asked about by both findings sets; then, on the
+    UTC day after each day an answer was recorded on, the re-asks the planner
+    samples, each run by its job.
+    """
+    await research._drop(dsn)
+    admin = await asyncpg.connect(TEST_DSN)
+    try:
+        await admin.execute(f'CREATE DATABASE "{research._name(dsn)}"')
+    finally:
+        await admin.close()
+    await migrations.migrate(dsn)
+    mp.setattr(jev_client, "ask", _ScriptedFindings().ask)
+    conn = await asyncpg.connect(dsn)
+    try:
+        for key, value in FINDINGS_ON.items():
+            await flag_repo.set_flag(conn, key, value, "test")
+        for title, raised_by, severity in OPERATORS_RAISED:
+            await repo.raise_finding(
+                conn, None, raised_by, severity, title, origin="operator"
+            )
+        for title, raised_by, severity in RAISED:
+            await repo.raise_finding(
+                conn, None, raised_by, severity, title, origin="model"
+            )
+        await research._loop(mp, dsn)
+        days = await conn.fetch(
+            "SELECT DISTINCT (available_at AT TIME ZONE 'UTC')::date AS day "
+            "FROM jev_requests WHERE status = 'ok' AND lane <> 'probe' ORDER BY day"
+        )
+        planned: list[str] = []
+        for row in days:
+            after = datetime.combine(row["day"] + timedelta(days=1), time(0, 10), UTC)
+            planned += await research._plan_and_drain(conn, dsn, after)
+        assert any(key.startswith("jev_reask:") for key in planned), planned
+    finally:
+        await conn.close()
+
+
+@pytest.fixture(scope="module")
+def findings_ledger(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """
+    The findings ledger the shipped jobs wrote, labelled and evaluated through
+    ``jev_eval.main`` as an operator would: :data:`FINDING_LABELS` imported,
+    and each of :data:`FINDINGS_RECORDED` recorded under :data:`COMMIT`.
+    Written once for the module and dropped after it.
+    """
+    dsn = research._derived("jev_evaluations_findings")
+    files = tmp_path_factory.mktemp("finding_labels")
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            asyncio.run(_write_the_findings_ledger(mp, dsn))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("DATABASE_URL", dsn)
+            mp.delenv("GIT_COMMIT", raising=False)
+            path = files / "tester.csv"
+            path.write_text(_labels_file(FINDING_LABELS), encoding="utf-8")
+            argv = ["labels", "import", "--file", str(path), "--as", TESTER]
+            assert jev_eval.main(argv) == jev_eval.EXIT_OK
+            for question_set, key, labelled_by, split in FINDINGS_RECORDED:
+                argv = ["evaluate", "--set", question_set.name, "--key", key]
+                argv += ["--labelled-by", labelled_by, "--split", split]
+                argv += ["--record", "--commit", COMMIT]
+                assert jev_eval.main(argv) == jev_eval.EXIT_OK
+        yield dsn
+    finally:
+        asyncio.run(research._drop(dsn))
+
+
+@pytest.fixture
+async def findings_written(
+    findings_ledger: str,
+) -> AsyncIterator[asyncpg.Connection]:
+    connection = await asyncpg.connect(findings_ledger)
+    try:
+        yield connection
+    finally:
+        await connection.close()
+
+
+class TestTheFindingsSetsEndToEnd:
+    async def test_each_model_written_title_is_asked_once_by_each_set(
+        self, findings_written: asyncpg.Connection
+    ) -> None:
+        """
+        Eleven model-written titles — FT1's two findings one title — each
+        asked once by each findings set, every job succeeding with the
+        request it recorded and the plans in force; the title only an
+        operator's finding holds asked about by nothing.
+        """
+        titles = (*LABELLED_FINDINGS, *UNLABELLED_FINDINGS)
+        jobs = await findings_written.fetch(
+            "SELECT status, error, payload, result FROM jobs WHERE kind = 'jev_ask'"
+        )
+        assert len(jobs) == 2 * len(titles)
+        for job in jobs:
+            assert job["status"] == "succeeded", job["error"]
+            payload, result = json.loads(job["payload"]), json.loads(job["result"])
+            assert isinstance(result["request_id"], int)
+            assert result["replayed"] is False
+            assert {key: result[key] for key in jev_eval.PLAN_KEYS} == (
+                jev_prereg.plans_in_force(payload["set"], payload["version"])
+            )
+        asked = await findings_written.fetch(
+            "SELECT question_set, subject_type, subject_id FROM jev_requests "
+            "WHERE lane = 'findings'"
+        )
+        assert sorted(tuple(row) for row in asked) == sorted(
+            (question_set.name, "finding_title", text_sha256(title))
+            for question_set in (OWNER, SEVERITY)
+            for title in titles
+        )
+        assert not await findings_written.fetchval(
+            "SELECT COUNT(*) FROM jev_requests WHERE subject_id = $1",
+            text_sha256(OPERATORS_FINDING),
+        )
+
+    @pytest.mark.parametrize("entry", FINDINGS_RECORDED, ids=_recorded_id)
+    async def test_the_row_recorded_is_its_recomputation(
+        self,
+        findings_written: asyncpg.Connection,
+        entry: tuple[Any, str, str, str],
+    ) -> None:
+        """
+        ``evaluate --record`` wrote a row; ``evaluate`` reads the same ledger
+        again and computes it again, every column equal, the recorded
+        baseline's included; and nothing was set apart as answered under
+        other plans or plans unknown.
+        """
+        question_set, key, labelled_by, split = entry
+        stored = await _stored(findings_written, question_set, key, labelled_by, split)
+        recomputed = await jev_eval.evaluate(
+            findings_written,
+            question_set=question_set,
+            question_key=key,
+            labelled_by=labelled_by,
+            model=PIN,
+            split=split,  # type: ignore[arg-type]
+        )
+        assert stored["code_commit"] == COMMIT
+        assert {
+            column: stored[column] for column in jev_repo.EVALUATION_COLUMNS
+        } == dataclasses.replace(recomputed, code_commit=COMMIT).row()
+        assert (stored["n_other_plans"], stored["n_plan_unknown"]) == (0, 0)
+        assert stored["analysis_plan_hash"] == jev_calibration.analysis_plan_hash(
+            question_set.name, question_set.version
+        )
+        assert stored["threshold"] is None
+
+    async def test_the_owner_against_a_person(
+        self, findings_written: asyncpg.Connection
+    ) -> None:
+        """
+        Five titles labelled. FT4's answer was the escape and FT5's a tie; of
+        the four valid answers two agree with the person. The recorded
+        baseline answers with who raised the earliest model-written finding
+        holding each title — FT1's first raiser, not its second, and FT3's
+        model raiser, not the operator who raised it earlier — and is right on
+        four of five, wrong only where the person and the raiser differ; Jev
+        is right on no item the baseline missed.
+        """
+        row = await _stored(findings_written, OWNER, "owning_role", TESTER, "all")
+        assert (
+            row["n"],
+            row["n_valid"],
+            row["n_escape"],
+            row["n_invalid"],
+            row["n_not_asked"],
+            row["n_distinct_states"],
+        ) == (5, 4, 1, 1, 0, 5)
+        assert (row["accuracy"], row["accuracy_all_items"]) == (2 / 4, 2 / 5)
+        assert row["n_per_class"] == {
+            "independent_risk": 1,
+            "operations": 2,
+            "quant_research": 1,
+            "independent_validation": 1,
+        }
+        assert row["majority_baseline_accuracy"] == 2 / 5
+        assert row["keyword_baseline_ref"] == (
+            "findings.recorded, reading raised_by of the earliest model-written "
+            "finding holding the title"
+        )
+        assert row["keyword_baseline_accuracy"] == 4 / 5
+        assert (
+            row["vs_keyword_jev_right_only"],
+            row["vs_keyword_baseline_right_only"],
+        ) == (0, 2)
+        assert (row["labeller_agreement"], row["labeller_agreement_n"]) == (None, 0)
+
+    async def test_the_severity_against_a_person(
+        self, findings_written: asyncpg.Connection
+    ) -> None:
+        """
+        Five titles labelled, every answer valid, FT5's the escape; three
+        agree with the person. The recorded baseline reads the severity the
+        earliest model-written finding holding each title was raised at —
+        FT1's ``high``, not its second finding's ``low``, and FT3's
+        ``critical``, not the operator's ``low`` — and is right on four.
+        """
+        row = await _stored(findings_written, SEVERITY, "severity", TESTER, "all")
+        assert (
+            row["n"],
+            row["n_valid"],
+            row["n_escape"],
+            row["n_invalid"],
+            row["n_not_asked"],
+        ) == (5, 5, 1, 0, 0)
+        assert (row["accuracy"], row["accuracy_all_items"]) == (3 / 5, 3 / 5)
+        assert row["majority_baseline_accuracy"] == 2 / 5
+        assert row["keyword_baseline_ref"] == (
+            "findings.recorded, reading severity of the earliest model-written "
+            "finding holding the title"
+        )
+        assert row["keyword_baseline_accuracy"] == 4 / 5
+        assert (
+            row["vs_keyword_jev_right_only"],
+            row["vs_keyword_baseline_right_only"],
+        ) == (0, 1)
+
+    async def test_a_title_is_dated_by_its_earliest_finding(
+        self, findings_written: asyncpg.Connection
+    ) -> None:
+        """
+        A finding title's date is the earliest ``opened_at`` of the
+        model-written findings holding it, so whether the evaluation is an
+        upper bound depends on when they were raised, against when the pin
+        was first observed; the model raised every finding here after the
+        operators raised theirs, on the same day.
+        """
+        first = await findings_written.fetchval(
+            "SELECT MIN(opened_at) FROM findings WHERE origin = 'model'"
+        )
+        first_observed = jev_catalogue.MODEL_FIRST_OBSERVED[PIN]
+        for question_set, key in ((OWNER, "owning_role"), (SEVERITY, "severity")):
+            row = await _stored(findings_written, question_set, key, TESTER, "all")
+            assert row["possibly_in_training"] is (
+                first.astimezone(UTC).date() <= first_observed
+            )
+
+    async def test_the_flips_are_the_populations(
+        self, findings_written: asyncpg.Connection
+    ) -> None:
+        """
+        Plan version 2's M2: a flip rate counts every canonical answer to the
+        question under the pin beside its re-ask, labelled or not. The
+        planner samples the day's canonical answers on the next UTC day —
+        FT2's owner, FT3's severity and every unlabelled title's severity led
+        by 0.08, in the low-margin stratum unless their hash drew them into
+        the uniform one — and the vendor moves on FT2's owner and the first
+        unlabelled title's severity alone. What each evaluation counts,
+        stratum by stratum, is what the re-ask jobs found, read from their own
+        results; the severity's pairs, most of them of titles nobody labelled,
+        outnumber its labelled items, which only M2 allows.
+        """
+        labelled = {text_sha256(title) for title in LABELLED_FINDINGS}
+        jobs = await findings_written.fetch(
+            "SELECT status, error, payload, result FROM jobs WHERE kind = 'jev_reask'"
+        )
+        for question_set, key in ((OWNER, "owning_role"), (SEVERITY, "severity")):
+            found = {stratum: [0, 0] for stratum in jev_eval.STRATA}
+            apart = dict.fromkeys(jev_eval.STRATA, 0)
+            unlabelled = 0
+            for job in jobs:
+                assert job["status"] == "succeeded", job["error"]
+                payload, result = json.loads(job["payload"]), json.loads(job["result"])
+                asked = await jev_repo.get_request(
+                    findings_written, payload["request_id"]
+                )
+                assert asked is not None
+                if asked["question_set"] != question_set.name:
+                    continue
+                moved = result["flipped"][key]
+                if moved is None:
+                    apart[payload["stratum"]] += 1
+                    continue
+                found[payload["stratum"]][0] += moved
+                found[payload["stratum"]][1] += 1
+                unlabelled += asked["subject_id"] not in labelled
+            assert sum(k for k, _ in found.values()) == 1, "one move per set"
+            row = await _stored(findings_written, question_set, key, TESTER, "all")
+            for stratum, rate, pairs in (
+                ("uniform", "flip_rate", "flip_rate_n"),
+                ("low_margin", "flip_rate_low_margin", "flip_rate_low_margin_n"),
+            ):
+                k, n = found[stratum]
+                assert (row[rate], row[pairs]) == (jev_stats.proportion(k, n), n)
+                assert row[f"{rate}_not_compared"] == apart[stratum]
+            if question_set is SEVERITY:
+                assert unlabelled == len(UNLABELLED_FINDINGS), "a pair was left out"
+                assert row["flip_rate_n"] + row["flip_rate_low_margin_n"] > row["n"]

@@ -1959,15 +1959,17 @@ TODAY = date(2026, 9, 28)
 
 
 def _about(asked: Any, text: str, /, **overrides: Any) -> dict[str, Any]:
-    """A request's fields for the set ``asked`` about ``text``."""
-    web = asked.state_model is jev_questions.WebExcerptState
+    """
+    A request's fields for the set ``asked`` about ``text``: a web excerpt, a
+    hypothesis's title or, from phase D2, a finding's, as its state says.
+    """
     return {
         "question_set": asked.name,
         "question_set_version": asked.version,
         "pack_hash": asked.pack_hash,
         "lane": asked.lane,
         "provenance": asked.provenance,
-        "subject_type": "web_excerpt" if web else "hypothesis_title",
+        "subject_type": jev_questions.STATE_SUBJECT[asked.state_model],
         "subject_id": text_sha256(text),
         **overrides,
     }
@@ -2025,8 +2027,7 @@ async def _ask_job(
     A ``jev_ask`` job as the planner enqueues one, under its key: of the set's
     registered version, or of ``version``.
     """
-    web = question_set.state_model is jev_questions.WebExcerptState
-    subject_type = "web_excerpt" if web else "hypothesis_title"
+    subject_type = jev_questions.STATE_SUBJECT[question_set.state_model]
     version = question_set.version if version is None else version
     return await _job(
         conn,
@@ -2721,6 +2722,29 @@ class TestHypothesesToAsk:
         await _asked(conn, SCREEN, title, "error", **_failed("content_block"))
         assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
 
+    @pytest.mark.parametrize(
+        "asked",
+        [jev_questions.FINDINGS_OWNER, jev_questions.FINDINGS_SEVERITY],
+        ids=lambda question_set: question_set.name,
+    )
+    async def test_a_block_on_a_finding_title_holding_the_same_text_holds_it_too(
+        self, conn: asyncpg.Connection, asked: Any
+    ) -> None:
+        """
+        D2's review (D2RS-1): a finding's title is sent as ``{"title": …}``,
+        the very state a hypothesis's title is sent as, and the road holds a
+        block by that state's hash, so it refuses the title for good whichever
+        of the two recorded the block. Planned anyway, it was refused every UTC
+        day and never retired, since a refusal writes no row.
+        """
+        title = "Invented Words Raised as a Finding Too"
+        await _hypothesis(conn, title)
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (HYPOTHESIS, jev_questions.GUARDRAIL_CARD):
+            assert await _titles(conn, question_set=question_set) == [], (
+                question_set.name
+            )
+
     async def test_another_sets_answer_leaves_the_title_for_this_one(
         self, conn: asyncpg.Connection
     ) -> None:
@@ -2729,6 +2753,363 @@ class TestHypothesesToAsk:
         await _asked(conn, jev_questions.GUARDRAIL_CARD, title)
         assert _subjects(await _titles(conn), "subject_id") == [text_sha256(title)]
         assert await _titles(conn, question_set=jev_questions.GUARDRAIL_CARD) == []
+
+
+# ---------------------------------------------------------------------------
+# What the findings sets are asked about (phase D2)
+# ---------------------------------------------------------------------------
+
+OWNER = jev_questions.FINDINGS_OWNER
+SEVERITY = jev_questions.FINDINGS_SEVERITY
+
+#: When the findings below are raised, unless a test says otherwise.
+RAISED = datetime(2026, 9, 27, 12, tzinfo=UTC)
+
+
+async def _finding(
+    conn: asyncpg.Connection,
+    title: str,
+    *,
+    origin: str = "model",
+    at: datetime | None = None,
+    ref: str | None = None,
+    status: str = "open",
+    severity: str = "high",
+    raised_by: str = "independent_risk",
+    detail: str = "",
+    remediation: str = "",
+    close_note: str = "",
+) -> str:
+    """
+    A finding raised at ``at`` by ``origin``; returns its ref. A finding
+    ``'unknown'`` wrote is one raised before migration 0015 named its writer,
+    which the migration's trigger refuses on a new row: it is written with the
+    trigger switched off, DDL inside the test's own transaction, which goes
+    back with it. A finding past ``open`` was closed by an operator, as only
+    one may close it.
+    """
+    ref = ref or f"F-{uuid.uuid4().hex[:8]}"
+    closed = status != "open"
+    if origin == "unknown":
+        await conn.execute(
+            "ALTER TABLE findings DISABLE TRIGGER trg_findings_origin_is_known"
+        )
+    try:
+        await conn.execute(
+            """
+            INSERT INTO findings (
+                id, ref, raised_by, severity, title, detail_md, remediation,
+                status, opened_at, closed_at, closed_by, close_note, origin
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            """,
+            uuid.uuid4(),
+            ref,
+            raised_by,
+            severity,
+            title,
+            detail,
+            remediation,
+            status,
+            at or RAISED,
+            (at or RAISED) + timedelta(hours=1) if closed else None,
+            "operator:tester" if closed else None,
+            close_note,
+            origin,
+        )
+    finally:
+        if origin == "unknown":
+            await conn.execute(
+                "ALTER TABLE findings ENABLE TRIGGER trg_findings_origin_is_known"
+            )
+    return ref
+
+
+async def _jev_finding(conn: asyncpg.Connection, title: str) -> str:
+    """A finding Jev raised, lawful in every respect, holding ``title``."""
+    from tests.integration.test_jev_schema import _insert
+    from tests.integration.test_phase_d_schema import _jev_finding_row
+
+    row = await _jev_finding_row(conn, title=title)
+    await _insert(conn, "findings", row)
+    return row["ref"]
+
+
+async def _to_ask(conn: asyncpg.Connection, **kwargs: Any) -> list[dict[str, Any]]:
+    arguments = {"question_set": OWNER, "model": MODEL, "limit": 10, "day": TODAY}
+    return await jev_repo.findings_to_ask(conn, **{**arguments, **kwargs})
+
+
+class TestTheFindingTitleRead:
+    """
+    ``jev_repo.get_finding_title``, the findings sets' read (docs/09, section
+    5.1): a finding's ref, title, origin and when it was opened, and none of
+    its detail, remediation or close note, nor who raised it or the severity
+    it was recorded at.
+    """
+
+    async def test_it_returns_the_four_columns_and_nothing_else(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        at = datetime(2026, 9, 3, 8, tzinfo=UTC)
+        ref = await _finding(
+            conn,
+            "Invented Fills at Prices No Venue Gave",
+            at=at,
+            status="withdrawn",
+            severity="critical",
+            detail="A detail no Jev job reads",
+            remediation="A remediation no Jev job reads",
+            close_note="A close note no Jev job reads",
+        )
+        assert await jev_repo.get_finding_title(conn, ref) == {
+            "ref": ref,
+            "title": "Invented Fills at Prices No Venue Gave",
+            "origin": "model",
+            "opened_at": at,
+        }
+
+    @pytest.mark.parametrize("origin", ["operator", "unknown"])
+    async def test_it_reads_the_writer_as_stored(
+        self, conn: asyncpg.Connection, origin: str
+    ) -> None:
+        """The admission refuses what the programme's model did not write."""
+        ref = await _finding(
+            conn, "An Invented Finding Nobody Asks About", origin=origin
+        )
+        row = await jev_repo.get_finding_title(conn, ref)
+        assert row is not None and row["origin"] == origin
+
+    async def test_a_jevs_finding_is_read_as_jevs(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        ref = await _jev_finding(conn, "An Invented Finding Jev Raised")
+        row = await jev_repo.get_finding_title(conn, ref)
+        assert row is not None and row["origin"] == "jev"
+
+    async def test_an_unknown_ref_is_none(self, conn: asyncpg.Connection) -> None:
+        assert await jev_repo.get_finding_title(conn, "F-nobody") is None
+
+
+class TestFindingsToAsk:
+    """
+    ``jev_repo.findings_to_ask``, each filter held by a case only it refuses:
+    titles of findings the programme's model raised, of any status, within
+    1 to 200 characters, by content address, newest first, each once with the
+    newest finding holding it; never one blocked, answered, retired or
+    waiting.
+    """
+
+    async def test_model_written_titles_newest_first_by_their_address(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        older = await _finding(
+            conn, "Invented Slippage Never Charged", at=datetime(2026, 9, 1, tzinfo=UTC)
+        )
+        newer = await _finding(
+            conn, "Invented Borrow Never Located", at=datetime(2026, 9, 2, tzinfo=UTC)
+        )
+        assert await _to_ask(conn) == [
+            {"ref": newer, "subject_id": text_sha256("Invented Borrow Never Located")},
+            {
+                "ref": older,
+                "subject_id": text_sha256("Invented Slippage Never Charged"),
+            },
+        ]
+
+    @pytest.mark.parametrize("origin", ["operator", "unknown", "jev"])
+    async def test_only_the_programmes_models_findings(
+        self, conn: asyncpg.Connection, origin: str
+    ) -> None:
+        """
+        An operator's finding, Jev's, and one raised before migration 0015
+        named its writer are never asked about, each refused by the writer's
+        filter alone: the same title raised by the model is.
+        """
+        title = f"An Invented Finding Written by {origin}"
+        if origin == "jev":
+            await _jev_finding(conn, title)
+        else:
+            await _finding(conn, title, origin=origin)
+        assert await _to_ask(conn) == []
+        model = await _finding(conn, title, at=datetime(2026, 9, 1, tzinfo=UTC))
+        assert await _to_ask(conn) == [
+            {"ref": model, "subject_id": text_sha256(title)}
+        ]
+
+    @pytest.mark.parametrize("status", ["open", "remediated", "accepted", "withdrawn"])
+    async def test_whatever_its_status(
+        self, conn: asyncpg.Connection, status: str
+    ) -> None:
+        """The population is every model-written finding, closed ones too."""
+        ref = await _finding(conn, f"An Invented Finding Now {status}", status=status)
+        assert [row["ref"] for row in await _to_ask(conn)] == [ref]
+
+    async def test_the_address_is_the_one_the_lane_computes(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """SQL's sha256 of the UTF-8 title is ``jev_hash.text_sha256``, beyond ASCII."""
+        title = "Été ✓ 日本 fills, an invented finding"
+        await _finding(conn, title)
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_a_title_over_its_cap_or_empty_is_not_asked_about(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        at_cap = "A" * jev_questions.FINDING_TITLE_MAX_CHARS
+        await _finding(conn, at_cap)
+        await _finding(conn, "B" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1))
+        await _finding(conn, "C" * jev_questions.TITLE_MAX_CHARS)
+        await _finding(conn, "")
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(at_cap)]
+
+    async def test_the_cap_counts_characters_not_bytes(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """200 characters of three bytes each is 600 bytes, and within the cap."""
+        title = "日" * jev_questions.FINDING_TITLE_MAX_CHARS
+        await _finding(conn, title)
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_one_title_held_by_two_findings_is_one_subject(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Stale Marks on an Invented Book"
+        await _finding(conn, title, at=datetime(2026, 9, 1, tzinfo=UTC))
+        newest = await _finding(conn, title, at=datetime(2026, 9, 3, tzinfo=UTC))
+        assert await _to_ask(conn) == [
+            {"ref": newest, "subject_id": text_sha256(title)}
+        ]
+
+    async def test_a_tie_in_time_is_broken_by_the_newest_ref(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        tag = uuid.uuid4().hex[:6]
+        first = await _finding(conn, "Invented Tie One", ref=f"F-{tag}-1")
+        second = await _finding(conn, "Invented Tie Two", ref=f"F-{tag}-2")
+        assert [row["ref"] for row in await _to_ask(conn)] == [second, first]
+        title = "Invented Tie Held Twice"
+        await _finding(
+            conn, title, ref=f"F-{tag}-3", at=datetime(2026, 9, 1, tzinfo=UTC)
+        )
+        held = await _finding(
+            conn, title, ref=f"F-{tag}-4", at=datetime(2026, 9, 1, tzinfo=UTC)
+        )
+        assert {"ref": held, "subject_id": text_sha256(title)} in await _to_ask(conn)
+
+    async def test_at_most_the_limit_the_newest(self, conn: asyncpg.Connection) -> None:
+        refs = [
+            await _finding(
+                conn, f"Invented Finding {n}", at=datetime(2026, 9, n, tzinfo=UTC)
+            )
+            for n in range(1, 6)
+        ]
+        assert [row["ref"] for row in await _to_ask(conn, limit=3)] == refs[::-1][:3]
+
+    async def test_answered_retired_blocked_or_waiting_titles_are_left_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        answered, failing, blocked, waiting, plain = (
+            f"Invented Finding Title {n}" for n in range(5)
+        )
+        for title in (answered, failing, blocked, waiting, plain):
+            await _finding(conn, title)
+        await _asked(conn, OWNER, answered)
+        for _ in range(3):
+            await _asked(conn, OWNER, failing, "error", **_failed("server"))
+        await _asked(conn, SEVERITY, blocked, "error", **_failed("content_block"))
+        await _ask_job(conn, OWNER, text_sha256(waiting))
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(plain)]
+
+    async def test_two_failed_calls_do_not_retire_a_title(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding Failed Twice"
+        await _finding(conn, title)
+        for _ in range(2):
+            await _asked(conn, OWNER, title, "error", **_failed("server"))
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_a_job_planned_today_and_finished_leaves_it_out_until_tomorrow(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding Asked This Morning"
+        await _finding(conn, title)
+        await _ask_job(conn, OWNER, text_sha256(title), status="failed")
+        assert await _to_ask(conn) == []
+        tomorrow = TODAY + timedelta(days=1)
+        assert _subjects(await _to_ask(conn, day=tomorrow), "subject_id") == [
+            text_sha256(title)
+        ]
+
+    async def test_a_job_of_another_version_leaves_nothing_out(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding of Another Version"
+        await _finding(conn, title)
+        await _ask_job(conn, OWNER, text_sha256(title), version=OWNER.version + 1)
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+
+    @pytest.mark.parametrize(
+        "asked",
+        [jev_questions.GUARDRAIL_CARD, HYPOTHESIS],
+        ids=lambda question_set: question_set.name,
+    )
+    async def test_a_block_on_a_hypothesis_title_holding_the_same_text_holds_it_too(
+        self, conn: asyncpg.Connection, asked: Any
+    ) -> None:
+        """
+        D2's review (D2RS-1, D2RT-1), inverting the first cut's case, which
+        held the read to the subject type alone. A hypothesis's title and a
+        finding's holding the same words are sent as one state, ``{"title":
+        …}``, and the road holds a block by that state's hash: it refused the
+        finding's title for good while this read went on returning it, so the
+        planner queued both sets' asks every UTC day, each refused, none ever
+        retired, since a refusal writes no row.
+        """
+        title = "Invented Words Held by a Hypothesis Too"
+        await _finding(conn, title)
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (OWNER, SEVERITY):
+            assert await _to_ask(conn, question_set=question_set) == [], (
+                question_set.name
+            )
+
+    async def test_a_block_on_an_excerpt_holding_the_same_text_is_not_this_ones(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        An excerpt is sent as ``{"excerpt": …}``, another state for the same
+        words, which the road does not hold for a title's block nor a title's
+        for its: only the subjects sent as the same state are read together.
+        """
+        title = "Invented Words Stored as an Excerpt Too"
+        await _finding(conn, title)
+        await _asked(conn, SCREEN, title, "error", **_failed("content_block"))
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+
+    async def test_another_sets_answer_leaves_the_title_for_this_one(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding the Severity Set Answered"
+        await _finding(conn, title)
+        await _asked(conn, SEVERITY, title)
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
+        assert await _to_ask(conn, question_set=SEVERITY) == []
+
+    async def test_an_answer_under_another_pin_leaves_it_for_this_one(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding Answered by Another Model"
+        await _finding(conn, title)
+        await _asked(
+            conn,
+            OWNER,
+            title,
+            model_requested="jev-1.14.0",
+            model_answered="jev-1.14.0",
+        )
+        assert _subjects(await _to_ask(conn), "subject_id") == [text_sha256(title)]
 
 
 # ---------------------------------------------------------------------------
@@ -3012,6 +3393,373 @@ class TestTheTextsAHarnessReads:
     ) -> None:
         with pytest.raises(ValueError):
             await jev_repo.subjects_to_label(conn, subject_type="session")
+
+
+class TestTheFindingTitlesAHarnessReads:
+    """
+    Phase D2 (docs/09, section 3.7): a finding title's date, text, labelling
+    population and recorded values, each over the findings sets' population —
+    findings the programme's model raised, of any status, with a title of 1 to
+    200 characters — and each filter held by a case only it refuses.
+    """
+
+    async def test_a_title_is_as_old_as_its_earliest_model_written_finding(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "Invented Finding Raised Twice"
+        early = datetime(2026, 9, 27, tzinfo=UTC)
+        await _finding(conn, title, at=early + timedelta(days=3))
+        await _finding(conn, title, at=early, status="withdrawn")
+        await _finding(conn, title, at=early - timedelta(days=30), origin="operator")
+        await _finding(conn, title, at=early - timedelta(days=60), origin="unknown")
+        subject = _subject(title, "finding_title")
+        assert await jev_repo.item_dates(conn, [subject]) == {subject: early}
+
+    async def test_a_title_outside_the_population_is_undated(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        operator = "An Operator's Invented Finding"
+        await _finding(conn, operator, origin="operator")
+        subjects = [_subject(operator, "finding_title")]
+        assert await jev_repo.item_dates(conn, subjects) == dict.fromkeys(subjects)
+
+    @pytest.mark.parametrize(
+        "title",
+        ["O" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1), ""],
+        ids=["one-over-the-cap", "empty"],
+    )
+    async def test_a_model_title_outside_the_cap_is_undated(
+        self, conn: asyncpg.Connection, title: str
+    ) -> None:
+        """
+        D2's review (D2RT-2): the cap on the dates read was held by no case,
+        and a cap of twice 200 passed every test. A labelled item must be in
+        ``subject_texts`` too, so it moved no figure yet; a date is still the
+        population's or none.
+        """
+        await _finding(conn, title)
+        subjects = [_subject(title, "finding_title")]
+        assert await jev_repo.item_dates(conn, subjects) == dict.fromkeys(subjects)
+
+    async def test_the_text_is_the_populations(self, conn: asyncpg.Connection) -> None:
+        """
+        A title only an operator's finding, or one raised before migration
+        0015 named its writer, holds is no subject: no label of it is stored.
+        """
+        modelled = "Invented Finding the Model Raised"
+        operator = "Invented Finding Only an Operator Raised"
+        unknown = "Invented Finding Raised Before Origins"
+        long = "L" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1)
+        await _finding(conn, modelled, status="accepted")
+        await _finding(conn, operator, origin="operator")
+        await _finding(conn, unknown, origin="unknown")
+        await _finding(conn, long)
+        subjects = [
+            _subject(title, "finding_title")
+            for title in (modelled, operator, unknown, long)
+        ]
+        assert await jev_repo.subject_texts(conn, subjects) == {
+            _subject(modelled, "finding_title"): modelled
+        }
+
+    async def test_what_a_labeller_could_be_shown(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        Each model-written title within the cap once, whatever its finding's
+        status, and nothing else of it: no raiser, severity, status or
+        detail, which the population read never names.
+        """
+        held = "Invented Finding Held Twice"
+        closed = "Invented Finding Since Remediated"
+        await _finding(conn, held, raised_by="execution", severity="critical")
+        await _finding(conn, held, raised_by="platform", severity="low")
+        await _finding(conn, closed, status="remediated", detail="CANARY detail")
+        await _finding(conn, "An Operator's Finding", origin="operator")
+        await _finding(conn, "M" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1))
+        await _finding(conn, "")
+        shown = await jev_repo.subjects_to_label(conn, subject_type="finding_title")
+        assert shown == sorted(
+            [
+                {
+                    "subject_type": "finding_title",
+                    "subject_id": text_sha256(title),
+                    "text": title,
+                }
+                for title in (held, closed)
+            ],
+            key=lambda row: row["subject_id"],
+        )
+
+    async def test_the_recorded_values_are_the_earliest_findings(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        ``findings.recorded`` reads who raised the earliest model-written
+        finding holding the title, by when it was opened and then its ref, and
+        the severity it was recorded at; an operator's, Jev's or an older
+        unnamed writer's finding of the same words is not the population's.
+        """
+        title = "Invented Finding Recorded Three Times"
+        early = datetime(2026, 9, 27, tzinfo=UTC)
+        tag = uuid.uuid4().hex[:6]
+        await _finding(
+            conn,
+            title,
+            at=early,
+            ref=f"F-{tag}-2",
+            raised_by="platform",
+            severity="low",
+        )
+        await _finding(
+            conn,
+            title,
+            at=early,
+            ref=f"F-{tag}-1",
+            raised_by="execution",
+            severity="critical",
+        )
+        await _finding(
+            conn,
+            title,
+            at=early + timedelta(days=1),
+            raised_by="compliance",
+            severity="medium",
+        )
+        await _finding(
+            conn,
+            title,
+            at=early - timedelta(days=9),
+            origin="operator",
+            raised_by="operations",
+            severity="high",
+        )
+        await _finding(
+            conn,
+            title,
+            at=early - timedelta(days=19),
+            origin="unknown",
+            raised_by="quant_research",
+            severity="high",
+        )
+        subject = _subject(title, "finding_title")
+        other = _subject("Invented Finding Nobody Raised", "finding_title")
+        assert await jev_repo.finding_records(
+            conn, [subject, other, _subject(title, "hypothesis_title")]
+        ) == {subject: {"raised_by": "execution", "severity": "critical"}}
+
+    async def test_a_record_over_the_cap_is_no_records(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        title = "R" * (jev_questions.FINDING_TITLE_MAX_CHARS + 1)
+        await _finding(conn, title)
+        subject = _subject(title, "finding_title")
+        assert await jev_repo.finding_records(conn, [subject]) == {}
+        assert await jev_repo.finding_records(conn, []) == {}
+
+
+def _owner(valid: bool = True) -> Answer:
+    """A ``findings.owner`` answer: a valid choice, or a tie, measuring nothing."""
+    if valid:
+        return Answer(
+            "owning_role",
+            "choice",
+            choice="execution",
+            probabilities={"execution": 0.6, "platform": 0.3, "unclear": 0.1},
+            confidence=0.4,
+            argmax="execution",
+            margin=0.3,
+        )
+    return Answer(
+        "owning_role",
+        "choice",
+        choice="execution",
+        probabilities={"execution": 0.45, "platform": 0.45, "unclear": 0.1},
+        confidence=0.4,
+        margin=0.0,
+        valid=False,
+        invalid_reason="tie",
+    )
+
+
+async def _outcomes(
+    conn: asyncpg.Connection, *titles: str, **kwargs: Any
+) -> dict[str, dict[str, Any]]:
+    arguments = {
+        "question_set": OWNER,
+        "model": MODEL,
+        "subject_type": "finding_title",
+        "subject_ids": [text_sha256(title) for title in titles],
+    }
+    found = await jev_repo.ask_outcomes(conn, **{**arguments, **kwargs})
+    return {title: found[text_sha256(title)] for title in titles}
+
+
+def _nothing(**overrides: Any) -> dict[str, Any]:
+    outcome = {
+        "answered": False,
+        "valid": False,
+        "failed_calls": 0,
+        "retired": False,
+        "blocked": False,
+        "waiting": False,
+    }
+    outcome.update(overrides)
+    return outcome
+
+
+class TestWhatSuggestionsReads:
+    """
+    Phase D2's ``suggestions`` reads (docs/09, section 9.3): the open
+    findings, Jev's counted, and how each findings set's asks came out — each
+    filter held by a case only it refuses, and no option, probability or
+    margin read.
+    """
+
+    async def test_the_open_findings_oldest_first_with_three_columns(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        tag = uuid.uuid4().hex[:6]
+        later = await _finding(
+            conn,
+            "Invented Open Finding",
+            ref=f"F-{tag}-2",
+            at=RAISED + timedelta(days=1),
+        )
+        earlier = await _finding(
+            conn, "Invented Operator Finding", ref=f"F-{tag}-1", origin="operator"
+        )
+        tie = await _finding(conn, "Invented Tie", ref=f"F-{tag}-0")
+        await _finding(conn, "Invented Closed Finding", status="remediated")
+        found = await jev_repo.open_findings(conn)
+        assert [row["ref"] for row in found] == [tie, earlier, later]
+        assert found[1] == {
+            "ref": earlier,
+            "title": "Invented Operator Finding",
+            "origin": "operator",
+        }
+
+    async def test_jevs_findings_are_counted(self, conn: asyncpg.Connection) -> None:
+        before = await jev_repo.jev_findings_raised(conn)
+        await _jev_finding(conn, "An Invented Finding Jev Raised")
+        await _finding(conn, "An Invented Finding the Model Raised")
+        assert await jev_repo.jev_findings_raised(conn) == before + 1
+
+    async def test_an_answer_on_record_and_whether_it_was_valid(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        valid, tied, unasked = (f"Invented Finding Asked {n}" for n in range(3))
+        await _asked(conn, OWNER, valid, answers=(_owner(),))
+        await _asked(conn, OWNER, tied, answers=(_owner(valid=False),))
+        assert await _outcomes(conn, valid, tied, unasked) == {
+            valid: _nothing(answered=True, valid=True),
+            tied: _nothing(answered=True),
+            unasked: _nothing(),
+        }
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"lane": "probe"},
+            {"question_set": "findings.severity"},
+            {"question_set_version": 2},
+            {"model_requested": "jev-1.14.0", "model_answered": "jev-1.14.0"},
+            {"subject_type": "hypothesis_title"},
+        ],
+        ids=["a-probe", "another-set", "another-version", "another-pin", "a-title"],
+    )
+    async def test_an_answer_of_another_ask_is_not_this_ones(
+        self, conn: asyncpg.Connection, overrides: dict[str, Any]
+    ) -> None:
+        title = "Invented Finding Answered Elsewhere"
+        await _asked(conn, OWNER, title, answers=(_owner(),), **overrides)
+        assert await _outcomes(conn, title) == {title: _nothing()}
+
+    async def test_failed_calls_retire_at_three_and_a_probes_count_for_nothing(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        twice = "Invented Finding Failed Twice"
+        thrice = "Invented Finding Failed Thrice"
+        for _ in range(2):
+            await _asked(conn, OWNER, twice, "error", **_failed("server"))
+        await _asked(conn, OWNER, twice, "error", lane="probe", **_failed("server"))
+        for _ in range(2):
+            await _asked(conn, OWNER, thrice, "error", **_failed("server"))
+        await _asked(conn, OWNER, thrice, "invalid", answers=())
+        assert await _outcomes(conn, twice, thrice) == {
+            twice: _nothing(failed_calls=2),
+            thrice: _nothing(failed_calls=3, retired=True),
+        }
+
+    async def test_a_block_from_any_set_and_a_job_waiting(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        blocked, waiting, finished = (f"Invented Finding Held {n}" for n in range(3))
+        await _asked(conn, SEVERITY, blocked, "error", **_failed("content_block"))
+        await _ask_job(conn, OWNER, text_sha256(waiting), status="running")
+        await _ask_job(conn, OWNER, text_sha256(finished), status="succeeded")
+        await _ask_job(conn, OWNER, text_sha256(finished), version=OWNER.version + 1)
+        found = await _outcomes(conn, blocked, waiting, finished)
+        assert found[blocked] == _nothing(blocked=True, failed_calls=0)
+        assert found[waiting] == _nothing(waiting=True)
+        assert found[finished] == _nothing()
+        assert await jev_repo.ask_outcomes(
+            conn,
+            question_set=OWNER,
+            model=MODEL,
+            subject_type="finding_title",
+            subject_ids=[],
+        ) == {}
+
+    @pytest.mark.parametrize(
+        ("asked", "held"),
+        [
+            (jev_questions.GUARDRAIL_CARD, True),
+            (HYPOTHESIS, True),
+            (SCREEN, False),
+        ],
+        ids=["the-card-on-a-title", "a-category-on-a-title", "the-screen-on-text"],
+    )
+    async def test_a_block_holds_what_the_road_holds(
+        self, conn: asyncpg.Connection, asked: Any, held: bool
+    ) -> None:
+        """
+        D2's review (D2RS-1, D2RT-1): the road holds a block by the hash of
+        the state sent, so a block about a hypothesis's title holding the
+        finding's words holds the finding, and ``suggestions`` says so, where
+        the first cut printed "not asked yet"; a block about an excerpt of the
+        same words, another state, holds nothing here. The first cut's filter
+        on the block's subject type was held by no case.
+        """
+        title = "Invented Finding Whose Words Were Blocked Elsewhere"
+        await _asked(conn, asked, title, "error", **_failed("content_block"))
+        for question_set in (OWNER, SEVERITY):
+            found = await _outcomes(conn, title, question_set=question_set)
+            assert found == {title: _nothing(blocked=held)}, question_set.name
+
+    async def test_no_block_holds_a_subject_that_is_not_text(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        The road holds an enumerated state by no block (open item 36), so
+        neither does this read, whatever is on record under its address.
+        """
+        session = "2026-09-25"
+        await _record(
+            conn,
+            "error",
+            subject_type="session",
+            subject_id=session,
+            **_failed("content_block"),
+        )
+        found = await jev_repo.ask_outcomes(
+            conn,
+            question_set=jev_questions.get("decision.regime"),
+            model=MODEL,
+            subject_type="session",
+            subject_ids=[session],
+        )
+        assert found[session]["blocked"] is False
 
 
 class TestTheJobsAboutASubject:

@@ -27,9 +27,11 @@ be refused again.
 The ``jev_ask`` job
 ~~~~~~~~~~~~~~~~~~~
 :func:`run_ask` asks one of the sets in :data:`ASKABLE` about one subject, once:
-a stored web excerpt (``guardrail.injection``, ``research.catalogue``) or a
+a stored web excerpt (``guardrail.injection``, ``research.catalogue``), a
 hypothesis title the programme's own model wrote (``research.hypothesis``,
-``guardrail.card``). Its payload names the subject, the row it was read from
+``guardrail.card``), or, from phase D2, the title of a finding the
+programme's model raised (``findings.owner``, ``findings.severity``). Its
+payload names the subject, the row it was read from
 and the analysis plans it was planned under (:data:`PLAN_KEYS`), never its
 text, and the handler reads the text again from that row. In order; the first
 that applies decides:
@@ -67,7 +69,13 @@ its own, docs/08 open item 28), and only a title within
 built, so the refusal is the cap's and never pydantic's. The row is read by
 column list (``jev_repo.get_hypothesis_title``: its ref, title, origin and
 creation time, and nothing else), never through ``repo.get_hypothesis``,
-whose ``SELECT *`` would hand this side the card (docs/09, D-SAFE-2).
+whose ``SELECT *`` would hand this side the card (docs/09, D-SAFE-2). For a
+finding (phase D2) the same, by its own cap: only one the programme's model
+wrote — never an operator's, Jev's, or one raised before migration 0015 named
+its writer — and only a title within ``jev_questions.FINDING_TITLE_MAX_CHARS``,
+read by column list (``jev_repo.get_finding_title``: its ref, title, origin
+and when it was opened), never its detail, remediation, close note, raiser or
+recorded severity.
 
 Step 6: pydantic's ``ValidationError`` quotes the input it refused, so it is
 replaced by an error naming the document's id or the hypothesis's ref and
@@ -116,7 +124,9 @@ any web set                 a content block, this call's or     the content is
                             one on record                       quarantined
 ``research.catalogue``,     anything else                       none: recorded,
 ``research.hypothesis``,                                        and acted on by
-``guardrail.card``                                              nothing
+``guardrail.card``,                                             nothing
+``findings.owner``,
+``findings.severity``
 ==========================  ==================================  =================
 
 The injection screen's quarantine says what it was, and that it is not
@@ -141,7 +151,10 @@ flagged content still in use, and ``jev_plan`` re-asks no flagged text. No
 title is ever quarantined: quarantine is a web document's, and a blocked title
 is held by the road alone. Nothing that writes ``hypotheses``, ``candidates`` or
 ``findings`` is reachable from here: a card check's answer is recorded and
-acts on nothing (``tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing``).
+acts on nothing, and so is a findings set's — a suggested owner or severity
+is in the ledger alone, never written to a finding, and the chips phase E
+shows are computed from the ledger at read time (``jev_chips``)
+(``tests/unit/test_jev_jobs.py::TestTheCardCheckChangesNothing``).
 
 Re-asks measure the noise
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -517,6 +530,73 @@ def _created_at(row: Mapping[str, Any]) -> datetime:
     return value if isinstance(value, datetime) else datetime.fromisoformat(value)
 
 
+# ---------------------------------------------------------------------------
+# Finding titles (phase D2)
+# ---------------------------------------------------------------------------
+
+
+async def _load_finding(
+    conn: asyncpg.Connection, source_id: object
+) -> Mapping[str, Any] | None:
+    """
+    The finding a findings set asks about, by its ref: its ref, title, origin
+    and when it was opened, and nothing else (``jev_repo.get_finding_title``).
+    Never ``repo.list_findings``, whose ``SELECT *`` would hand this side the
+    finding's detail, its remediation and its close note (docs/09, section
+    5.1), nor anything that reads who raised it or its recorded severity,
+    which the baseline compares an answer with.
+    """
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise JobFailedError(
+            f"a finding title's row is a finding, named by its ref; got "
+            f"{type(source_id).__name__}",
+            retry=False,
+        )
+    return await jev_repo.get_finding_title(conn, source_id)
+
+
+async def _admit_finding(conn: asyncpg.Connection, row: Mapping[str, Any]) -> None:
+    """
+    Only a title the programme's own model wrote, within the cap. An
+    operator's finding, a Jev finding and one raised before migration 0015
+    named its writer (``'unknown'``) are never sent (docs/08 open item 76).
+    The cap is read here, from ``FINDING_TITLE_MAX_CHARS``, before any state is
+    built: the state's own limit would refuse an overlong title too, but as
+    pydantic's error, and the refusal is to be the cap's.
+    """
+    what = _finding(row)
+    if row["origin"] != "model":
+        raise JobFailedError(
+            f"{what} was written by {row['origin']!r}, not by the programme's "
+            "model; only a model-written finding's title is sent; nothing was "
+            "asked",
+            retry=False,
+        )
+    title = row["title"]
+    if isinstance(title, str) and len(title) > jev_questions.FINDING_TITLE_MAX_CHARS:
+        raise JobFailedError(
+            f"{what}'s title is {len(title)} characters, over the "
+            f"{jev_questions.FINDING_TITLE_MAX_CHARS} a finding-title state "
+            "carries; a title is not sent over its cap, and never cut; nothing "
+            "was asked",
+            retry=False,
+        )
+
+
+def _finding(row: Mapping[str, Any]) -> str:
+    return f"finding {row['ref']}"
+
+
+def _finding_state(row: Mapping[str, Any]) -> BaseModel:
+    return jev_questions.FindingTitleState(title=row["title"])
+
+
+def _opened_at(row: Mapping[str, Any]) -> datetime:
+    """When the finding was raised: the instant its title describes."""
+    value = row["opened_at"]
+    return value if isinstance(value, datetime) else datetime.fromisoformat(value)
+
+
 _EXCERPT = {
     "subject_type": "web_excerpt",
     "load": _load_document,
@@ -537,16 +617,30 @@ _TITLE = {
     "what": _hypothesis,
 }
 
+_FINDING = {
+    "subject_type": "finding_title",
+    "load": _load_finding,
+    "text": lambda row: row["title"],
+    "admit": _admit_finding,
+    "build": _finding_state,
+    "as_of": _opened_at,
+    "what": _finding,
+}
+
 #: Every set a ``jev_ask`` job asks, by name, and how. Exactly the registered
-#: sets asked about text: the web sets and the two title sets
-#: (``tests/unit/test_jev_jobs.py``). The title sets have no follow-up: a
-#: hypothesis, a candidate or a finding is changed by nothing Jev answers.
+#: sets asked about text: the web sets, the two title sets and, from phase D2,
+#: the two findings sets (``tests/unit/test_jev_jobs.py``). Neither the title
+#: sets nor the findings sets have a follow-up: a hypothesis, a candidate or a
+#: finding is changed by nothing Jev answers, and a suggested owner or
+#: severity is recorded in the ledger alone (docs/09, section 6.1).
 ASKABLE: Mapping[str, Askable] = MappingProxyType(
     {
         jev_questions.SCREEN_SET_NAME: Askable(**_EXCERPT, follow_up=_screen_follow_up),
         "research.catalogue": Askable(**_EXCERPT, follow_up=_excerpt_follow_up),
         "research.hypothesis": Askable(**_TITLE, follow_up=None),
         "guardrail.card": Askable(**_TITLE, follow_up=None),
+        "findings.owner": Askable(**_FINDING, follow_up=None),
+        "findings.severity": Askable(**_FINDING, follow_up=None),
     }
 )
 

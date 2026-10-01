@@ -1074,6 +1074,45 @@ def _reachable_road_calls(tree: ast.Module, handler: str) -> list[ast.Call]:
     return list(calls.values())
 
 
+#: The excerpt the counted run of ``jev_ask`` asks the screen about. Invented.
+_EXCERPT = "Quiet Momentum in Invented Mid-Cap Shares"
+
+#: The text each counted ``jev_ask`` run asks about, by the subject its set's
+#: state describes, and the row it is read from. Invented, as every title is.
+_TEXTS = {
+    "web_excerpt": (_EXCERPT, 7),
+    "hypothesis_title": ("Invented Carry in Fictional Bond Futures", "H-0007"),
+    "finding_title": ("Invented Fills Assumed at Prices No Venue Gave", "F-0042"),
+}
+
+
+def _askable() -> tuple[str, ...]:
+    from src.programme import jev_jobs
+
+    return tuple(jev_jobs.ASKABLE)
+
+
+#: Every set a ``jev_ask`` job asks, read from ``jev_jobs.ASKABLE`` itself.
+_ASKABLE = _askable()
+
+
+def _ask_payload(name: str) -> dict[str, Any]:
+    """A ``jev_ask`` payload for ``name``, as the planner writes one."""
+    from src.programme import jev_jobs, jev_questions
+
+    version = jev_questions.REGISTRY[name].version
+    subject_type = jev_jobs.ASKABLE[name].subject_type
+    text, source_id = _TEXTS[subject_type]
+    return {
+        "set": name,
+        "version": version,
+        "subject_type": subject_type,
+        "subject_id": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "source_id": source_id,
+        **(jev_prereg.plans_in_force(name, version) or {}),
+    }
+
+
 class TestEveryJevHandlerMakesAtMostOneCall:
     """
     One call an attempt, which is what the shutdown grace covers, and none
@@ -1167,59 +1206,90 @@ class TestEveryJevHandlerMakesAtMostOneCall:
         sized for one call (``JEV_SHUTDOWN_GRACE_SECONDS``), and a job that
         asked twice is two answers with an equal claim to be right.
         """
-        from src.programme import jev_client, jev_lane
-
-        outcomes = [
-            (status, kind_)
-            for status in typing.get_args(jev_lane.AskStatus)
-            for kind_ in (jev_client.ERROR_KINDS if status == "error" else (None,))
-        ]
-        handler = JEV_HANDLERS[kind]
         _prepare_handler(monkeypatch, kind)
-        for status, error_kind in outcomes:
-            asked: list[dict[str, Any]] = []
+        await _count_calls(monkeypatch, kind, _PAYLOADS[kind])
 
-            async def ask(
-                conn: Any,
-                *,
-                _status: str = status,
-                _kind: str | None = error_kind,
-                _asked: list[dict[str, Any]] = asked,
-                **kwargs: Any,
-            ) -> jev_lane.AskResult:
-                _asked.append(kwargs)
-                return jev_lane.AskResult(
-                    _status,  # type: ignore[arg-type]
-                    request_row_id=None
-                    if _status in jev_lane.UNRECORDED_STATUSES
-                    else 7,
-                    error_kind=_kind,
-                )
-
-            async def probe(conn: Any, *args: Any, _asked=asked, **kwargs: Any) -> Any:
-                _asked.append({"run_probe": args})
-                raise AssertionError("the probe was run from another kind's handler")
-
-            async def client_ask(*args: Any, _asked=asked, **kwargs: Any) -> Any:
-                _asked.append({"client": kwargs})
-                raise AssertionError("the client was called around the road")
-
-            monkeypatch.setattr(jev_lane, "ask", ask)
-            if kind != "jev_probe":
-                monkeypatch.setattr(jev_lane, "run_probe", probe)
-            monkeypatch.setattr(jev_client, "ask", client_ask)
-            try:
-                await handler(_Conn(_all_on()), dict(_PAYLOADS[kind]), "ts-key")
-            except JobFailedError:
-                assert ROAD_CALLS[kind], f"{kind} calls nothing and must run to its end"
-            assert len(asked) == ROAD_CALLS[kind], (kind, status, error_kind, asked)
+    @pytest.mark.parametrize("name", sorted(_ASKABLE))
+    async def test_every_askable_set_makes_at_most_one_call(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """
+        docs/09, section 13 (D2 to D4): the ``jev_ask`` handler counted for
+        every set it asks, not only the screen the run above asks — each
+        reading its own row, admitting it and building its own state before
+        the road — through every outcome the road can return. From phase D2
+        that includes the two findings sets, whose follow-up is none.
+        """
+        _prepare_handler(monkeypatch, "jev_ask")
+        await _count_calls(monkeypatch, "jev_ask", _ask_payload(name))
 
     def test_every_handler_has_a_counted_run(self) -> None:
         assert set(_PAYLOADS) == set(JEV_HANDLERS)
 
+    def test_every_askable_set_has_a_counted_run(self) -> None:
+        """Every set ``ASKABLE`` names, each asked about its own subject."""
+        from src.programme import jev_jobs
 
-#: The excerpt the counted run of ``jev_ask`` asks the screen about. Invented.
-_EXCERPT = "Quiet Momentum in Invented Mid-Cap Shares"
+        assert set(_ASKABLE) == set(jev_jobs.ASKABLE)
+        for name in _ASKABLE:
+            subject_type = _ask_payload(name)["subject_type"]
+            assert subject_type == jev_jobs.ASKABLE[name].subject_type
+            assert subject_type in _TEXTS
+
+
+async def _count_calls(
+    monkeypatch: pytest.MonkeyPatch, kind: str, payload: dict[str, Any]
+) -> None:
+    """
+    Run ``kind``'s handler on ``payload`` once for every outcome the road can
+    return, with every error kind, and count the asks each run makes: never
+    more than ``ROAD_CALLS[kind]``, and a job that calls nothing must run to
+    its end, so that none is not a count of a handler that stopped early.
+    """
+    from src.programme import jev_client, jev_lane
+
+    outcomes = [
+        (status, kind_)
+        for status in typing.get_args(jev_lane.AskStatus)
+        for kind_ in (jev_client.ERROR_KINDS if status == "error" else (None,))
+    ]
+    handler = JEV_HANDLERS[kind]
+    for status, error_kind in outcomes:
+        asked: list[dict[str, Any]] = []
+
+        async def ask(
+            conn: Any,
+            *,
+            _status: str = status,
+            _kind: str | None = error_kind,
+            _asked: list[dict[str, Any]] = asked,
+            **kwargs: Any,
+        ) -> jev_lane.AskResult:
+            _asked.append(kwargs)
+            return jev_lane.AskResult(
+                _status,  # type: ignore[arg-type]
+                request_row_id=None if _status in jev_lane.UNRECORDED_STATUSES else 7,
+                error_kind=_kind,
+            )
+
+        async def probe(conn: Any, *args: Any, _asked=asked, **kwargs: Any) -> Any:
+            _asked.append({"run_probe": args})
+            raise AssertionError("the probe was run from another kind's handler")
+
+        async def client_ask(*args: Any, _asked=asked, **kwargs: Any) -> Any:
+            _asked.append({"client": kwargs})
+            raise AssertionError("the client was called around the road")
+
+        monkeypatch.setattr(jev_lane, "ask", ask)
+        if kind != "jev_probe":
+            monkeypatch.setattr(jev_lane, "run_probe", probe)
+        monkeypatch.setattr(jev_client, "ask", client_ask)
+        try:
+            await handler(_Conn(_all_on()), dict(payload), "ts-key")
+        except JobFailedError:
+            assert ROAD_CALLS[kind], f"{kind} calls nothing and must run to its end"
+        assert len(asked) == ROAD_CALLS[kind], (kind, status, error_kind, asked)
+
 
 #: Each Jev kind's payload for the counted run above.
 _PAYLOADS: dict[str, dict[str, Any]] = {
@@ -1382,6 +1452,26 @@ def _prepare_handler(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
         async def answered(conn: Any, request_id: int) -> dict[str, Any]:
             return {"id": request_id, "model_answered": "jev-1.13.0"}
 
+        # And a hypothesis and a finding the programme's own model wrote, by
+        # column list, for the sets asked about their titles.
+        async def hypothesis(conn: Any, ref: str) -> dict[str, Any]:
+            return {
+                "ref": ref,
+                "title": _TEXTS["hypothesis_title"][0],
+                "origin": "model",
+                "created_at": datetime(2026, 9, 27, 12, tzinfo=UTC),
+            }
+
+        async def finding(conn: Any, ref: str) -> dict[str, Any]:
+            return {
+                "ref": ref,
+                "title": _TEXTS["finding_title"][0],
+                "origin": "model",
+                "opened_at": datetime(2026, 9, 28, 9, tzinfo=UTC),
+            }
+
+        monkeypatch.setattr(jev_repo, "get_hypothesis_title", hypothesis)
+        monkeypatch.setattr(jev_repo, "get_finding_title", finding)
         monkeypatch.setattr(jev_repo, "get_document", document)
         monkeypatch.setattr(jev_repo, "content_quarantined", not_quarantined)
         monkeypatch.setattr(jev_repo, "screen_flag", not_flagged)

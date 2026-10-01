@@ -712,6 +712,16 @@ class TestTheClockThroughTheLoop:
         first_key = jev_clock.regime_job_key(DECISION_REGIME, session)
         assert first_key in planned
         assert jev_clock.reference_job_key(session) in planned
+        # From today's collection to its cutoff the planner plans today's
+        # session too, due at once and, on these bars, in the same state, so
+        # the drain asked about it first and this session replayed its answer:
+        # the test failed ten minutes of every session. It is about the two
+        # sessions it names, so any other regime job waits a day.
+        await conn.execute(
+            "UPDATE jobs SET scheduled_for = NOW() + interval '1 day' "
+            "WHERE kind = 'jev_regime' AND dedupe_key <> $1",
+            first_key,
+        )
         await _due(conn, first_key)
         mark = await conn.fetchval("SELECT COALESCE(MAX(id), 0) FROM jev_requests")
 
