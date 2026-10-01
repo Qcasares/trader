@@ -44,6 +44,7 @@ come from publishes no licence. Skipped unless ``TEST_DATABASE_URL`` is set.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import csv
 import dataclasses
@@ -2028,6 +2029,53 @@ class TestTheCommandsOnPostgres:
         assert "add --record" in capsys.readouterr().err
         dev = [*argv, "--split", "dev", "--record", "--commit", COMMIT]
         assert await _run(dev, ledger.dsn) == jev_eval.EXIT_REFUSED
+        assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            pytest.param({"command": None}, id="no-command"),
+            pytest.param({"command": "Evaluate"}, id="mis-cased"),
+            pytest.param({"command": "evaluate "}, id="padded"),
+            pytest.param(
+                {"command": "labels", "labels_command": "evaluate"},
+                id="labels-with-a-subcommand-it-has-none-of",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("record", [False, True])
+    async def test_arguments_no_parser_made_read_nothing(
+        self,
+        ledger: SimpleNamespace,
+        written: asyncpg.Connection,
+        capsys: pytest.CaptureFixture[str],
+        named: dict[str, Any],
+        record: bool,
+    ) -> None:
+        """
+        D1's review (D1RP-1), on the ledger it found it with: a caller handing
+        ``execute`` arguments whose command is not one the harness runs once
+        had the held-out evaluation computed and printed, its look recorded
+        nowhere. Each is refused, nothing is printed, and nothing is written.
+        """
+        before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
+        arguments = argparse.Namespace(
+            **{
+                "question_set": CATALOGUE.name,
+                "key": "asset_class",
+                "labelled_by": TESTER,
+                "split": "test",
+                "model": None,
+                "record": record,
+                "commit": COMMIT,
+                "json": True,
+                **named,
+            }
+        )
+        assert await jev_eval.execute(arguments, ledger.dsn) == jev_eval.EXIT_REFUSED
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "nothing was read" in captured.err
         assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
 
     @pytest.mark.parametrize(

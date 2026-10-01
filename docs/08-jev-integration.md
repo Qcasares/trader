@@ -4075,14 +4075,23 @@ items, so each is a look and is taken only with `--record`; `dev` reads the
 development split's items alone — no label, answer or date of a test item —
 and is never recorded. The rule is `jev_eval.look_problem`, applied in
 `jev_eval.execute`, which `main` and every caller of the commands reach,
-before any connection is made. `jev_calibration.usable` gains the `looks`
+before any connection is made, and it fails closed: it decides from the
+command `jev_eval._command` names, which refuses anything but one of
+`jev_eval.COMMANDS`, and it refuses a split that is not `dev`, `test` or
+`all`, while `_read` dispatches on each command by name with no default. The
+first cut held the rule to the literal `"evaluate"` and sent every reading
+command it did not know to the evaluation, so a caller handing `execute`
+arguments no parser makes — a command of `None`, mis-cased or padded, or
+`labels` with no such subcommand — printed a held-out evaluation and recorded
+no look (D1's review). `jev_calibration.usable` gains the `looks`
 reason: an evaluation with `MAX_LOOKS` recorded looks of its set, version and
 question before it, on the test split or every item, under any model, is
 refused. `report` prints the looks each identity has spent.
 `tests/unit/test_jev_eval.py::TestLooks`,
 `tests/unit/test_jev_calibration.py::TestUsable` and
 `::TestTheFlipLimitsReadTheWorstCase`; on PostgreSQL, a dry look at the test
-split refused before anything is read.
+split, and arguments no parser made, refused before anything is read
+(`tests/integration/test_jev_evaluations.py::TestTheCommandsOnPostgres`).
 
 **Migration 0015** (the scope's 2d) is described under the schema above, and
 `tests/integration/test_phase_d_schema.py` holds it: every rule and every

@@ -32,6 +32,7 @@ shipped planner, forward job, re-ask job and daily probe wrote on PostgreSQL.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import csv
 import dataclasses
@@ -2263,6 +2264,92 @@ class TestLooks:
         code = await jev_eval.execute(arguments, "postgresql://reader@db/trader")
         assert (code == jev_eval.EXIT_REFUSED) is refused
         assert (reached == []) is refused
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            pytest.param({"command": None}, id="no-command"),
+            pytest.param({"command": "Evaluate"}, id="mis-cased"),
+            pytest.param({"command": "evaluate "}, id="padded"),
+            pytest.param({"command": "evaluate --record"}, id="the-record-spelled"),
+            pytest.param({"command": "dev"}, id="a-split-as-a-command"),
+            pytest.param(
+                {"command": "labels", "labels_command": "evaluate"},
+                id="labels-with-a-subcommand-it-has-none-of",
+            ),
+            pytest.param(
+                {"command": "labels", "labels_command": None}, id="labels-alone"
+            ),
+            pytest.param(
+                {"command": "evaluate", "split": "TEST"}, id="a-split-mis-cased"
+            ),
+            pytest.param({"command": "evaluate", "split": None}, id="no-split"),
+            pytest.param(
+                {"command": "evaluate", "split": "test "}, id="a-split-padded"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("record", [False, True])
+    async def test_execute_refuses_whatever_it_does_not_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        named: dict[str, Any],
+        record: bool,
+    ) -> None:
+        """
+        D1's review (D1RP-1): ``execute`` is the enforcement point every caller
+        reaches, so it fails closed on arguments ``_parser`` would never make.
+        The first cut held the look rule to the literal ``"evaluate"`` while
+        ``_read`` sent every command it did not know to the evaluation, so a
+        caller handing ``execute`` a command of ``None``, mis-cased or padded,
+        or ``labels`` with no such subcommand, printed a held-out evaluation
+        with no look recorded. A split nobody parsed is refused before the
+        ledger too, rather than by the evaluation once connected.
+        """
+        connected = self._connect(monkeypatch)
+        given: dict[str, Any] = {
+            "question_set": "research.catalogue",
+            "key": "asset_class",
+            "labelled_by": LABELLER,
+            "split": "test",
+            "model": None,
+            "record": record,
+            "commit": "c" * 40,
+            "json": True,
+            **named,
+        }
+        arguments = argparse.Namespace(**given)
+        code = await jev_eval.execute(arguments, "postgresql://reader@db/trader")
+        assert code == jev_eval.EXIT_REFUSED
+        assert connected == []
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "nothing was read" in captured.err
+
+    def test_every_command_the_parser_makes_is_one_the_harness_runs(self) -> None:
+        """
+        The commands ``_command`` admits are exactly the ones ``_parser`` can
+        produce, so the fail-closed rule refuses nothing ``main`` can parse.
+        """
+        parser = jev_eval._parser()
+        made = {
+            jev_eval._command(parser.parse_args(argv))
+            for argv in (
+                ["status"],
+                ["forward"],
+                ["forward-audit"],
+                ["report"],
+                ["labels", "export", "--set", "s", "--key", "k", "--blind"],
+                ["labels", "import", "--file", "f", "--as", "operator:q"],
+                ["labels", "copy", "--set", "s", "--key", "k"]
+                + ["--from-version", "0", "--to-version", "1"],
+                _evaluate_argv("dev"),
+                _evaluate_argv("test", "--record"),
+            )
+        }
+        assert made == set(jev_eval.COMMANDS)
+        assert set(jev_eval.WRITING_COMMANDS) < set(jev_eval.COMMANDS)
 
     def test_the_rule_reads_the_plans_splits(self) -> None:
         """

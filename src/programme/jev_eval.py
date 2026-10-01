@@ -2796,6 +2796,24 @@ def format_report(report: Mapping[str, Any]) -> str:
 #: ``jev_repo`` alone; every other command reads, in one read-only snapshot.
 WRITING_COMMANDS = ("labels import", "labels copy", "evaluate --record")
 
+#: Every command the harness runs, as :func:`_command` names it: the ones
+#: that read and the three that write. Anything else is refused before any
+#: connection, so arguments ``_parser`` would never make run nothing, an
+#: evaluation least of all (D1's review, D1RP-1).
+#: ``tests/unit/test_jev_eval.py::TestLooks`` holds it to what the parser makes.
+COMMANDS = (
+    "status",
+    "forward",
+    "forward-audit",
+    "report",
+    "labels export",
+    "evaluate",
+    *WRITING_COMMANDS,
+)
+
+#: The two commands that evaluate: a dry run, and a look recorded.
+EVALUATE_COMMANDS = ("evaluate", "evaluate --record")
+
 
 def _positive(value: str) -> int:
     number = int(value)
@@ -2909,11 +2927,27 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _command(arguments: argparse.Namespace) -> str:
-    if arguments.command == "labels":
-        return f"labels {arguments.labels_command}"
-    if arguments.command == "evaluate" and arguments.record:
-        return "evaluate --record"
-    return str(arguments.command)
+    """
+    The command ``arguments`` name, as the harness runs it: one of
+    :data:`COMMANDS`, or :class:`Refused`. Read before any connection, by
+    :func:`look_problem` and by ``_run``, and nothing dispatches on anything
+    else: a command of ``None``, mis-cased or padded, or ``labels`` with a
+    subcommand it has none of, once fell through ``_read`` to the evaluation
+    and printed a held-out one with no look recorded (D1's review, D1RP-1).
+    """
+    command = getattr(arguments, "command", None)
+    if command == "labels":
+        name = f"labels {getattr(arguments, 'labels_command', None)}"
+    elif command == "evaluate":
+        record = getattr(arguments, "record", False)
+        name = "evaluate --record" if record else "evaluate"
+    else:
+        name = str(command)
+    # The parser's own name for it heads the name the harness runs it by, so
+    # neither of the derived names is taken as a command on its own.
+    if name not in COMMANDS or name.partition(" ")[0] != command:
+        raise Refused(f"the harness runs no command {name!r}; nothing was read")
+    return name
 
 
 def _dumped(value: Any) -> str:
@@ -2923,7 +2957,11 @@ def _dumped(value: Any) -> str:
 async def _read(
     conn: asyncpg.Connection, arguments: argparse.Namespace, command: str
 ) -> str:
-    """A command that reads, inside the caller's read-only snapshot."""
+    """
+    A command that reads, inside the caller's read-only snapshot, named by
+    :func:`_command`. Each command has its branch, and anything else is
+    refused: no command reaches the evaluation by default.
+    """
     now = await jev_clock.database_now(conn)
     report: Any
     if command == "status":
@@ -2946,10 +2984,12 @@ async def _read(
             sample=arguments.sample,
             include_quarantined=arguments.include_quarantined,
         )
-    else:
+    elif command == "evaluate":
         evaluation = await _evaluate(conn, arguments)
         report = evaluation.row()
         text = format_evaluation(report)
+    else:
+        raise Refused(f"no reading command {command!r}; nothing was read")
     return _dumped(report) if getattr(arguments, "json", False) else text
 
 
@@ -2998,6 +3038,8 @@ async def _write(
             f"{done['copied']} labels copied to v{arguments.to_version}; "
             f"{done['already_labelled']} items labelled there already kept theirs"
         )
+    if command != "evaluate --record":
+        raise Refused(f"no writing command {command!r}; nothing was written")
     evaluation = dataclasses.replace(
         await _evaluate(conn, arguments), code_commit=commit
     )
@@ -3054,10 +3096,22 @@ def look_problem(arguments: argparse.Namespace) -> str | None:
     is optional stopping. So each needs ``--record``. ``--split dev`` reads
     the search's own items and no test item, so it is never recorded: it is
     no look, and a row of it would be one ``usable`` could not read as one.
+
+    It decides from the command :func:`_command` names, which refuses
+    anything but a command the harness runs, and refuses a split that is
+    not one of :data:`EVALUATE_SPLITS`, so arguments no parser made fail
+    closed rather than past the rule (D1's review, D1RP-1).
     """
-    if getattr(arguments, "command", None) != "evaluate":
+    command = _command(arguments)
+    if command not in EVALUATE_COMMANDS:
         return None
-    split, record = arguments.split, bool(arguments.record)
+    split = getattr(arguments, "split", None)
+    record = command == "evaluate --record"
+    if split not in EVALUATE_SPLITS:
+        return (
+            f"--split takes {', '.join(EVALUATE_SPLITS)}, not {split!r}, and has "
+            "no default; nothing was read"
+        )
     if split in jev_prereg.LOOKED_AT_SPLITS and not record:
         return (
             f"--split {split} reads the held-out test items, a look the gate's "
@@ -3082,7 +3136,9 @@ async def execute(arguments: argparse.Namespace, dsn: str) -> int:
 
     Every command the harness runs comes through here, ``main`` included, so
     the rule on looks is held here (:func:`look_problem`), before any
-    connection is made: ``tests/unit/test_jev_eval.py::TestLooks``, and on
+    connection is made, and fails closed: arguments naming a command or a
+    split the harness does not run are refused the same way, never read as
+    an evaluation. ``tests/unit/test_jev_eval.py::TestLooks``, and on
     PostgreSQL ``tests/integration/test_jev_evaluations.py::
     TestTheCommandsOnPostgres``.
     """
