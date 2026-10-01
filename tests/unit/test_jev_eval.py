@@ -33,11 +33,16 @@ shipped planner, forward job, re-ask job and daily probe wrote on PostgreSQL.
 from __future__ import annotations
 
 import ast
+import csv
+import dataclasses
 import hashlib
+import inspect
+import io
 import json
 import math
+import random
 from collections.abc import Mapping
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +52,19 @@ import pytest
 from src.core import calendar
 from src.core.panel import PricePanel
 from src.data.reference import REFERENCE_SLEEVES, REFERENCE_SYMBOLS
-from src.programme import jev_clock, jev_eval, jev_prereg, jev_repo
+from src.programme import (
+    flags,
+    jev_calibration,
+    jev_catalogue,
+    jev_clock,
+    jev_eval,
+    jev_prereg,
+    jev_questions,
+    jev_repo,
+    jev_stats,
+    web_sources,
+)
+from src.programme.jev_hash import text_sha256
 from src.programme.jev_questions import DECISION_REGIME, RegimeState, SleeveState
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1004,3 +1021,1534 @@ class TestTheCommandLine:
                 if node.value.isupper() and node.value.endswith(("_KEY", "_URL")):
                     read.add(node.value)
         assert read == {"environ", "DATABASE_URL"}
+
+
+# ---------------------------------------------------------------------------
+# Phase C9: evaluations against labels
+# ---------------------------------------------------------------------------
+#
+# ``build_evaluation`` is pure, so every definition of design section 10.1 is
+# held here on rows built by hand; ``tests/integration/test_jev_evaluations.py``
+# runs the whole of it on a ledger the shipped jobs wrote, and holds the row
+# recorded to the recomputation. Every title here is invented.
+
+CATALOGUE = jev_questions.RESEARCH_CATALOGUE
+SCREEN = jev_questions.GUARDRAIL_INJECTION
+CARD = jev_questions.GUARDRAIL_CARD
+LABELLER = "operator:quentin"
+IN_FORCE = jev_prereg.plans_in_force(CATALOGUE.name, CATALOGUE.version) or {}
+AFTER = datetime(2026, 10, 2, 9, tzinfo=UTC)
+ASSET_OPTIONS = list(dict(CATALOGUE.questions)["asset_class"]["criteria"])
+
+
+def _title(i: int, words: str = "Invented Fictional Pattern") -> str:
+    return f"{words} {i}"
+
+
+def _split(text: str, subject_type: str = "web_excerpt") -> str:
+    return jev_prereg.split_of(subject_type, text_sha256(text))
+
+
+def _texts_in(
+    split: str, count: int, words: str = "Invented Fictional Pattern"
+) -> list[str]:
+    """``count`` invented titles whose content falls in ``split``."""
+    found, i = [], 0
+    while len(found) < count:
+        text = _title(i, words)
+        if _split(text) == split:
+            found.append(text)
+        i += 1
+    return found
+
+
+class _Book:
+    """A synthetic ledger for one question, item by item."""
+
+    def __init__(self, question_set: Any = CATALOGUE, key: str = "asset_class") -> None:
+        self.question_set = question_set
+        self.key = key
+        self.subject_type = jev_questions.STATE_SUBJECT[question_set.state_model]
+        self.labels: list[dict[str, Any]] = []
+        self.answers: dict[tuple[str, str], dict[str, Any]] = {}
+        self.jobs: list[dict[str, Any]] = []
+        self.dates: dict[tuple[str, str], datetime | None] = {}
+        self.texts: dict[tuple[str, str], str] = {}
+        self.pairs: list[dict[str, Any]] = []
+        self.reasks: dict[str, dict[str, Any]] = {}
+        self._ids = iter(range(1, 1_000_000))
+        self.plans = (
+            jev_prereg.plans_in_force(question_set.name, question_set.version) or {}
+        )
+
+    def subject(self, text: str) -> tuple[str, str]:
+        return (self.subject_type, text_sha256(text))
+
+    def label(
+        self, text: str, label: str, labelled_by: str = LABELLER
+    ) -> tuple[str, str]:
+        subject = self.subject(text)
+        self.labels.append(
+            {
+                "id": next(self._ids),
+                "subject_type": subject[0],
+                "subject_id": subject[1],
+                "label": label,
+                "labelled_by": labelled_by,
+                "note": None,
+            }
+        )
+        self.texts[subject] = text
+        self.dates.setdefault(subject, AFTER)
+        return subject
+
+    def answer(
+        self,
+        text: str,
+        argmax: str | None,
+        *,
+        valid: bool = True,
+        margin: float = 0.6,
+        status: str = "ok",
+        plans: Mapping[str, Any] | None | str = "in force",
+        noul: float | None = None,
+    ) -> dict[str, Any]:
+        """
+        The answer the item is scored by, recorded by a job whose result names
+        it under ``plans`` — the plans in force by default, ``None`` for no
+        job at all.
+        """
+        subject = self.subject(text)
+        request_id = next(self._ids)
+        question = dict(self.question_set.questions)[self.key]
+        probabilities = None
+        if question["type"] == "noul" and noul is None and argmax is not None:
+            noul = (1 + margin) / 2 if argmax == "true" else (1 - margin) / 2
+        if question["type"] == "choice":
+            options = list(question["criteria"])
+            top = argmax if argmax is not None else options[0]
+            second = next(o for o in options if o != top)
+            probabilities = dict.fromkeys(options, 0.0)
+            probabilities[top] = round(0.5 + margin / 2, 6)
+            probabilities[second] = round(0.5 - margin / 2, 6)
+        answer = {
+            "request_id": request_id,
+            "request_status": status,
+            "state_hash": f"state-{request_id}",
+            "answer_id": next(self._ids),
+            "valid": valid,
+            "argmax": argmax,
+            "margin": margin if valid else None,
+            "probabilities": probabilities,
+            "noul": noul,
+        }
+        self.answers[subject] = answer
+        chosen = self.plans if plans == "in force" else plans
+        if chosen is not None:
+            self.jobs.append(
+                {
+                    "payload": self._payload(subject, chosen),
+                    "result": {"request_id": request_id, "replayed": False, **chosen},
+                    "attempts": 1,
+                }
+            )
+        return answer
+
+    def _payload(
+        self, subject: tuple[str, str], plans: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "set": self.question_set.name,
+            "version": self.question_set.version,
+            "subject_type": subject[0],
+            "subject_id": subject[1],
+            "source_id": 1,
+            **plans,
+        }
+
+    def ledger(self) -> jev_eval.Ledger:
+        return jev_eval.Ledger(
+            labels=list(self.labels),
+            answers=dict(self.answers),
+            jobs=list(self.jobs),
+            dates=dict(self.dates),
+            texts=dict(self.texts),
+            pairs=list(self.pairs),
+            reasks=dict(self.reasks),
+        )
+
+    def evaluate(
+        self, split: str = "all", labelled_by: str = LABELLER, model: str = MODEL
+    ) -> jev_eval.Evaluation:
+        return jev_eval.build_evaluation(
+            question_set=self.question_set,
+            question_key=self.key,
+            labelled_by=labelled_by,
+            model=model,
+            split=split,  # type: ignore[arg-type]
+            ledger=self.ledger(),
+        )
+
+
+class TestTheEvaluationIsTheTable:
+    def test_its_fields_are_the_columns_a_writer_gives(self) -> None:
+        names = tuple(f.name for f in dataclasses.fields(jev_eval.Evaluation))
+        assert names == jev_repo.EVALUATION_COLUMNS
+
+    def test_the_plan_keys_are_the_jobs(self) -> None:
+        """A copy, since the harness may not load jev_jobs: held equal here."""
+        from src.programme import jev_jobs
+
+        assert jev_eval.PLAN_KEYS == jev_jobs.PLAN_KEYS == tuple(IN_FORCE)
+
+
+class TestWhatAnEvaluationCounts:
+    def test_valid_escape_invalid_and_not_asked(self) -> None:
+        book = _Book()
+        right, wrong, escaped, tied, unasked = (_title(i) for i in range(5))
+        for text in (right, wrong, escaped, tied, unasked):
+            book.label(text, "equities")
+        book.answer(right, "equities")
+        book.answer(wrong, "bonds")
+        book.answer(escaped, "insufficient_evidence")
+        book.answer(tied, None, valid=False)
+        evaluation = book.evaluate()
+        assert (evaluation.n, evaluation.n_valid, evaluation.n_escape) == (5, 3, 1)
+        assert (evaluation.n_invalid, evaluation.n_not_asked) == (1, 1)
+        assert evaluation.n_distinct_states == 4
+        # An escape is answered and never right; accuracy is over the valid.
+        assert evaluation.accuracy == pytest.approx(1 / 3)
+        # Over every item, the not valid and the not asked are wrong.
+        assert evaluation.accuracy_all_items == pytest.approx(1 / 5)
+        low, high = jev_stats.wilson(1, 5, jev_prereg.REPORT_CI)
+        assert (
+            evaluation.accuracy_all_items_wilson_low,
+            evaluation.accuracy_all_items_wilson_high,
+        ) == (pytest.approx(low), pytest.approx(high))
+        assert evaluation.n_per_class == {"equities": 5}
+        assert evaluation.ci_level == jev_prereg.REPORT_CI
+
+    def test_nothing_valid_is_not_measured_and_never_zero(self) -> None:
+        book = _Book()
+        for i in range(4):
+            book.label(_title(i), "bonds")
+            book.answer(_title(i), None, valid=False)
+        evaluation = book.evaluate()
+        assert evaluation.n_valid == 0
+        for field in (
+            "accuracy",
+            "accuracy_wilson_low",
+            "accuracy_wilson_high",
+            "brier",
+            "brier_ci_low",
+            "brier_ci_high",
+            "brier_reference",
+            "calibration_bins",
+            "flip_rate",
+            "flip_rate_low_margin",
+            "flip_rate_near_threshold",
+            "labeller_agreement",
+            "labeller_kappa",
+            "threshold",
+        ):
+            assert getattr(evaluation, field) is None, field
+        # 0 of 4 items right is measured: it is 0, with an interval.
+        assert evaluation.accuracy_all_items == 0.0
+        assert evaluation.accuracy_all_items_wilson_low == 0.0
+        assert evaluation.accuracy_all_items_wilson_high > 0
+        # Counts are counts.
+        assert (evaluation.flip_rate_n, evaluation.labeller_agreement_n) == (0, 0)
+
+    def test_nothing_labelled_writes_nothing_and_says_so(self) -> None:
+        with pytest.raises(jev_eval.Refused, match=jev_eval.NOTHING_LABELLED):
+            _Book().evaluate()
+
+    def test_another_labellers_labels_are_not_this_ones(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities", labelled_by="operator:someone")
+        with pytest.raises(jev_eval.Refused, match="no labelled items"):
+            book.evaluate()
+
+    def test_the_split_chooses_the_items(self) -> None:
+        book = _Book()
+        dev, test = _texts_in("dev", 3), _texts_in("test", 4)
+        for text in dev + test:
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        assert book.evaluate("test").n == 4
+        assert book.evaluate("all").n == 7
+
+
+class TestThePlansAnAnswerWasRecordedUnder:
+    """docs/08, C7+C8: the rule C9 implements, case by case."""
+
+    def _one(self, **answer: Any) -> tuple[_Book, str]:
+        book = _Book()
+        text = _title(0)
+        book.label(text, "equities")
+        book.answer(text, "equities", **answer)
+        return book, text
+
+    def test_the_job_whose_result_names_the_answer(self) -> None:
+        book, _ = self._one()
+        evaluation = book.evaluate()
+        assert (evaluation.n, evaluation.n_other_plans, evaluation.n_plan_unknown) == (
+            1,
+            0,
+            0,
+        )
+
+    def test_an_answer_under_other_plans_is_set_apart(self) -> None:
+        other = dict(IN_FORCE, set_plan_version=2, set_plan_hash="0" * 64)
+        book, text = self._one(plans=other)
+        book.label(_title(1), "bonds")
+        book.answer(_title(1), "bonds")
+        evaluation = book.evaluate()
+        assert (evaluation.n, evaluation.n_other_plans) == (1, 1)
+        assert evaluation.accuracy == 1.0, "the other plan's answer is not scored"
+
+    def test_an_answer_no_job_names_is_unknown_and_never_scored(self) -> None:
+        book, _ = self._one(plans=None)
+        with pytest.raises(jev_eval.Refused, match="1 under plans unknown"):
+            book.evaluate()
+
+    def test_a_replay_never_dates_an_answer(self) -> None:
+        """
+        The job that recorded the answer named it under the plans in force; a
+        later job planned under other plans replayed it, and names it too, as
+        replayed. The answer was recorded under the first job's plans, and is
+        scored under them.
+        """
+        book, text = self._one()
+        answer = book.answers[book.subject(text)]
+        other = dict(IN_FORCE, plan_version=2, plan_hash="1" * 64)
+        book.jobs.append(
+            {
+                "payload": book._payload(book.subject(text), other),
+                "result": {
+                    "request_id": answer["request_id"],
+                    "replayed": True,
+                    **other,
+                },
+                "attempts": 1,
+            }
+        )
+        evaluation = book.evaluate()
+        assert (evaluation.n, evaluation.n_other_plans, evaluation.n_plan_unknown) == (
+            1,
+            0,
+            0,
+        )
+
+    def test_a_replay_alone_names_no_recording(self) -> None:
+        """
+        With no job naming the answer as recorded, a replaying job's result
+        is no record of it; the payloads of the jobs about the subject decide.
+        """
+        book, text = self._one(plans=None)
+        answer = book.answers[book.subject(text)]
+        other = dict(IN_FORCE, plan_version=2, plan_hash="1" * 64)
+        book.jobs.append(
+            {
+                "payload": book._payload(book.subject(text), other),
+                "result": {
+                    "request_id": answer["request_id"],
+                    "replayed": True,
+                    **other,
+                },
+                "attempts": 1,
+            }
+        )
+        book.label(_title(1), "bonds")
+        book.answer(_title(1), "bonds")
+        evaluation = book.evaluate()
+        # The replaying job's payload is the only one, so the answer is read
+        # as recorded under its plans — other plans — and set apart.
+        assert evaluation.n_other_plans == 1
+
+    def test_the_payloads_name_the_plans_when_they_agree(self) -> None:
+        """A lease that expired after the ask: no result, two agreeing payloads."""
+        book, text = self._one(plans=None)
+        for _ in range(2):
+            book.jobs.append(
+                {
+                    "payload": book._payload(book.subject(text), IN_FORCE),
+                    "result": None,
+                    "attempts": 1,
+                }
+            )
+        assert book.evaluate().n == 1
+
+    def test_payloads_that_disagree_are_unknown(self) -> None:
+        book, text = self._one(plans=None)
+        other = dict(IN_FORCE, set_plan_version=2, set_plan_hash="0" * 64)
+        for plans in (IN_FORCE, other):
+            book.jobs.append(
+                {
+                    "payload": book._payload(book.subject(text), plans),
+                    "result": None,
+                    "attempts": 1,
+                }
+            )
+        with pytest.raises(jev_eval.Refused, match="1 under plans unknown"):
+            book.evaluate()
+
+    def test_a_job_never_claimed_asked_nothing(self) -> None:
+        book, text = self._one(plans=None)
+        other = dict(IN_FORCE, set_plan_version=2, set_plan_hash="0" * 64)
+        book.jobs.append(
+            {
+                "payload": book._payload(book.subject(text), IN_FORCE),
+                "result": None,
+                "attempts": 1,
+            }
+        )
+        book.jobs.append(
+            {
+                "payload": book._payload(book.subject(text), other),
+                "result": None,
+                "attempts": 0,
+            }
+        )
+        assert book.evaluate().n == 1
+
+    def test_a_result_naming_another_request_is_not_this_answers(self) -> None:
+        book, text = self._one(plans=None)
+        book.jobs.append(
+            {
+                "payload": book._payload(book.subject(text), IN_FORCE),
+                "result": {"request_id": -5, "replayed": False, **IN_FORCE},
+                "attempts": 1,
+            }
+        )
+        # Not named by a result, so the payloads decide: the one agrees.
+        assert book.evaluate().n == 1
+
+    def test_an_item_never_asked_is_scored_as_not_asked(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        evaluation = book.evaluate()
+        assert (evaluation.n, evaluation.n_not_asked) == (1, 1)
+
+
+class TestPossiblyInTraining:
+    def test_it_is_computed_from_the_dates(self) -> None:
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+        on_the_day = datetime.combine(first, time(23, 59), UTC)
+        after = datetime.combine(first + timedelta(days=1), time(0), UTC)
+        assert jev_eval.possibly_in_training(MODEL, [after]) is False
+        assert jev_eval.possibly_in_training(MODEL, [after, on_the_day]) is True
+        assert jev_eval.possibly_in_training(MODEL, [after, None]) is True
+        assert jev_eval.possibly_in_training("jev-9.9.9", [after]) is True
+
+    def test_an_evaluation_on_undated_items_is_an_upper_bound(self) -> None:
+        """The README's titles are undated, so its grouping is an upper bound."""
+        book = _Book()
+        subject = book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.dates[subject] = None
+        evaluation = book.evaluate()
+        assert evaluation.possibly_in_training is True
+        assert evaluation.threshold_outcome == "not_attempted"
+        assert evaluation.threshold is None
+
+    def test_dated_after_the_first_observation_it_is_not(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        assert book.evaluate().possibly_in_training is False
+
+    def test_no_threshold_is_searched_on_an_upper_bound(self) -> None:
+        """
+        Items enough for a threshold, and one test item undated: the search is
+        not attempted, rather than a threshold chosen that the schema would
+        then refuse to record.
+        """
+        book, _, test = _threshold_book()
+        assert book.evaluate("test").threshold_outcome == "chosen"
+        book.dates[book.subject(test[0])] = None
+        evaluation = book.evaluate("test")
+        assert evaluation.possibly_in_training is True
+        assert (evaluation.threshold_outcome, evaluation.threshold) == (
+            "not_attempted",
+            None,
+        )
+        assert evaluation.flip_rate_near_threshold_n is None
+
+
+def _threshold_book(acting: bool = False) -> tuple[_Book, list[str], list[str]]:
+    """
+    120 development items, right above a margin of 0.5 and a coin below it,
+    and 40 test items: enough for a threshold to be chosen.
+    """
+    book = _Book(SCREEN, "addressed_to_ai") if acting else _Book()
+    dev, test = _texts_in("dev", 120), _texts_in("test", 40)
+    yes, no = ("true", "false") if acting else ("equities", "bonds")
+    for i, text in enumerate(dev):
+        book.label(text, yes)
+        if i < 60:
+            book.answer(text, yes, margin=0.9)
+        else:
+            book.answer(text, yes if i % 2 else no, margin=0.2)
+    for i, text in enumerate(test):
+        book.label(text, yes if i % 4 else no)
+        book.answer(text, yes, margin=0.9 if i % 3 else 0.1)
+    return book, dev, test
+
+
+class TestTheThreshold:
+    def test_chosen_on_the_dev_split_and_measured_on_the_test_split(self) -> None:
+        book, _, test = _threshold_book()
+        evaluation = book.evaluate("test")
+        assert evaluation.threshold_outcome == "chosen"
+        assert evaluation.threshold == 0.22
+        assert evaluation.threshold_statistic == "covered_accuracy"
+        assert evaluation.threshold_target == 0.80
+        covered = [i for i in range(40) if i % 3]
+        assert evaluation.coverage_at_threshold == pytest.approx(len(covered) / 40)
+        assert evaluation.n_at_threshold == len(covered)
+        right = sum(1 for i in covered if i % 4)
+        assert evaluation.accuracy_at_threshold == pytest.approx(right / len(covered))
+        assert evaluation.threshold_dataset_sha256 is not None
+
+    def test_the_threshold_depends_only_on_the_dev_split(self) -> None:
+        """
+        Permuting the test split's labels — and its answers' margins — moves
+        what is measured at the threshold and never the threshold.
+        """
+        book, _, test = _threshold_book()
+        before = book.evaluate("test")
+        permuted = [row for row in book.labels]
+        test_rows = [
+            row
+            for row in permuted
+            if row["subject_id"] in {text_sha256(t) for t in test}
+        ]
+        labels = [row["label"] for row in test_rows]
+        random.Random(8).shuffle(labels)
+        flipped = ["bonds" if label == "equities" else "equities" for label in labels]
+        for row, label in zip(test_rows, flipped, strict=True):
+            row["label"] = label
+        for text in test:
+            book.answers[book.subject(text)]["margin"] = 0.05
+        after = book.evaluate("test")
+        assert (after.threshold_outcome, after.threshold) == (
+            before.threshold_outcome,
+            before.threshold,
+        )
+        assert after.threshold_dataset_sha256 == before.threshold_dataset_sha256
+        assert after.accuracy_at_threshold != before.accuracy_at_threshold
+
+    def test_a_guardrail_is_measured_by_the_precision_of_true(self) -> None:
+        book, _, _ = _threshold_book(acting=True)
+        evaluation = book.evaluate("test")
+        assert evaluation.threshold_outcome == "chosen"
+        assert evaluation.threshold_statistic == "covered_precision_of_the_acting_class"
+        assert evaluation.threshold_target == 0.90
+
+    def test_too_few_dev_items_is_not_attempted(self) -> None:
+        book = _Book()
+        for text in _texts_in("dev", 10):
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        evaluation = book.evaluate()
+        assert evaluation.threshold_outcome == "not_attempted"
+        assert evaluation.coverage_at_threshold is None
+
+
+class TestTheBaselines:
+    def test_both_answer_every_item_and_jev_is_compared_on_the_same(self) -> None:
+        book = _Book()
+        texts = [
+            "Invented Bond Ladder Timing",
+            "Invented Treasury Curve Drift",
+            "Invented Momentum in Pretend Shares",
+            "Invented Mystery Pattern",
+        ]
+        for text, label in zip(
+            texts, ("bonds", "bonds", "equities", "equities"), strict=True
+        ):
+            book.label(text, label)
+        book.answer(texts[0], "bonds")
+        book.answer(texts[1], "equities")
+        evaluation = book.evaluate()
+        # Majority: two of each, the tie broken by the question's own order.
+        assert ASSET_OPTIONS.index("equities") < ASSET_OPTIONS.index("bonds")
+        assert evaluation.majority_baseline_accuracy == 0.5
+        # Keywords: bond and treasury are bonds; shares are equities; the
+        # mystery is insufficient_evidence, never right.
+        assert evaluation.keyword_baseline_accuracy == 0.75
+        assert evaluation.accuracy_all_items == 0.25
+        assert evaluation.vs_keyword_diff == pytest.approx(0.25 - 0.75)
+        assert evaluation.vs_majority_diff == pytest.approx(0.25 - 0.5)
+        for name in ("majority", "keyword"):
+            low = getattr(evaluation, f"vs_{name}_diff_low")
+            point = getattr(evaluation, f"vs_{name}_diff")
+            high = getattr(evaluation, f"vs_{name}_diff_high")
+            assert low <= point <= high
+        assert evaluation.keyword_baseline_ref == (
+            "jev_prereg.keyword_label keywords/v1, reading excerpt"
+        )
+
+    def test_the_injection_baseline_is_the_code_screen_the_plan_hashed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book = _Book(SCREEN, "addressed_to_ai")
+        book.label("Invented Calm Title", "false")
+        book.answer("Invented Calm Title", "false", noul=0.1)
+        assert book.evaluate().keyword_baseline_ref.startswith(
+            "web_sources.code_screen v1, rules 95cc9a98bff7"
+        )
+        monkeypatch.setattr(web_sources, "code_screen_sha256", lambda: "0" * 64)
+        with pytest.raises(jev_eval.Refused, match="not the one the plan registered"):
+            book.evaluate()
+
+    def test_the_card_baseline_is_the_claims_check(self) -> None:
+        book = _Book(CARD, "performance_claim")
+        book.label("An Invented Sharpe of 3.1 in Made-Up Shares", "true")
+        book.label("Invented Seasonality in Pretend Grain", "false")
+        evaluation = book.evaluate()
+        assert evaluation.keyword_baseline_accuracy == 1.0
+        assert evaluation.keyword_baseline_ref.startswith(
+            "claims.find_performance_claim"
+        )
+
+
+class TestTheBrierScore:
+    def test_a_choices_score_beside_its_climatology(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.label(_title(1), "bonds")
+        first = book.answer(_title(0), "equities", margin=0.6)
+        second = book.answer(_title(1), "equities", margin=0.6)
+        evaluation = book.evaluate()
+        expected = jev_stats.brier_choice(
+            [first["probabilities"], second["probabilities"]], ["equities", "bonds"]
+        )
+        assert evaluation.brier == pytest.approx(expected)
+        assert evaluation.brier_ci_low <= evaluation.brier <= evaluation.brier_ci_high
+        climate = dict.fromkeys(ASSET_OPTIONS, 0.0) | {"equities": 0.5, "bonds": 0.5}
+        assert evaluation.brier_reference == pytest.approx(
+            jev_stats.brier_choice([climate, climate], ["equities", "bonds"])
+        )
+        assert [b["n"] for b in evaluation.calibration_bins] == [2]
+
+    def test_a_nouls_score(self) -> None:
+        book = _Book(SCREEN, "addressed_to_ai")
+        book.label(_title(0), "true")
+        book.label(_title(1), "false")
+        book.answer(_title(0), "true", noul=0.9, margin=0.8)
+        book.answer(_title(1), "true", noul=0.7, margin=0.4)
+        evaluation = book.evaluate()
+        assert evaluation.brier == pytest.approx(((0.9 - 1) ** 2 + 0.7**2) / 2)
+        assert evaluation.brier_reference == pytest.approx(0.25)
+
+
+class TestTheFlips:
+    def _paired(
+        self,
+        book: _Book,
+        text: str,
+        stratum: str,
+        *,
+        flipped: bool,
+        plan: str = PLAN,
+        margin: float = 0.6,
+    ) -> None:
+        answer = book.answers[book.subject(text)]
+        book.pairs.append(
+            {
+                "canonical_request_id": answer["request_id"],
+                "canonical_valid": True,
+                "canonical_argmax": answer["argmax"],
+                "canonical_margin": margin,
+                "probe_valid": True,
+                "probe_argmax": "bonds" if flipped else answer["argmax"],
+                "lag_seconds": 36 * 3600.0,
+            }
+        )
+        book.reasks[jev_eval.reask_job_key(answer["request_id"])] = {
+            "payload": {
+                "request_id": answer["request_id"],
+                "stratum": stratum,
+                "plan_hash": plan,
+            }
+        }
+
+    def test_each_stratum_apart_and_only_under_the_plan_in_force(self) -> None:
+        book = _Book()
+        texts = [_title(i) for i in range(5)]
+        for text in texts:
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        self._paired(book, texts[0], "uniform", flipped=True)
+        self._paired(book, texts[1], "uniform", flipped=False)
+        self._paired(book, texts[2], "low_margin", flipped=True)
+        self._paired(book, texts[3], "uniform", flipped=True, plan="0" * 64)
+        evaluation = book.evaluate()
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (0.5, 2)
+        assert (evaluation.flip_rate_low_margin, evaluation.flip_rate_low_margin_n) == (
+            1.0,
+            1,
+        )
+        assert evaluation.flip_median_lag_hours == 36.0
+        # No threshold, so nothing is near one.
+        assert evaluation.flip_rate_near_threshold is None
+        assert evaluation.flip_rate_near_threshold_n is None
+
+    def test_a_pair_of_an_unscored_item_is_not_counted(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.answer(_title(9), "equities")  # answered, and labelled by nobody
+        self._paired(book, _title(9), "uniform", flipped=True)
+        evaluation = book.evaluate()
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (None, 0)
+
+    def test_near_the_threshold_from_either_stratum(self) -> None:
+        book, _, test = _threshold_book()
+        self._paired(book, test[0], "uniform", flipped=True, margin=0.25)
+        self._paired(book, test[1], "low_margin", flipped=False, margin=0.15)
+        self._paired(book, test[2], "uniform", flipped=False, margin=0.9)
+        evaluation = book.evaluate("test")
+        assert evaluation.threshold == 0.22
+        assert (
+            evaluation.flip_rate_near_threshold,
+            evaluation.flip_rate_near_threshold_n,
+        ) == (
+            0.5,
+            2,
+        )
+
+
+class TestLabellerAgreement:
+    def test_another_labeller_is_compared_once_per_item(self) -> None:
+        book = _Book()
+        for i in range(4):
+            book.label(_title(i), "equities")
+            book.answer(_title(i), "equities")
+        book.label(_title(0), "equities", labelled_by="operator:reviewer")
+        book.label(_title(1), "bonds", labelled_by="operator:reviewer")
+        book.label(_title(1), "equities", labelled_by="operator:third")
+        evaluation = book.evaluate()
+        assert evaluation.labeller_agreement_n == 2
+        assert evaluation.labeller_agreement == 0.5
+        assert evaluation.labeller_kappa is not None
+
+    def test_a_datasets_versions_are_one_labeller(self) -> None:
+        """A page read again is the same source, never a second opinion."""
+        book = _Book()
+        first, second = (
+            "source:pwb-readme@aaaaaaaaaaaa",
+            "source:pwb-readme@bbbbbbbbbbbb",
+        )
+        book.label(_title(0), "equities", labelled_by=first)
+        book.answer(_title(0), "equities")
+        book.label(_title(0), "equities", labelled_by=second)
+        evaluation = book.evaluate(labelled_by=first)
+        assert (evaluation.labeller_agreement, evaluation.labeller_agreement_n) == (
+            None,
+            0,
+        )
+        assert jev_eval.labeller_identity(first) == jev_eval.labeller_identity(second)
+
+
+class TestTheHashes:
+    def test_the_dataset_is_its_labels_and_never_its_answers(self) -> None:
+        book = _Book()
+        for i in range(3):
+            book.label(_title(i), "equities")
+            book.answer(_title(i), "equities")
+        before = book.evaluate()
+        book.labels.reverse()
+        for text in (_title(i) for i in range(3)):
+            book.answer(text, "bonds")
+        after = book.evaluate()
+        assert after.dataset_sha256 == before.dataset_sha256
+        assert after.answers_sha256 != before.answers_sha256
+        assert before.dataset_sha256 == jev_eval.dataset_sha256(
+            [(*book.subject(_title(i)), "equities") for i in range(3)]
+        )
+
+    def test_the_hashes_are_reproducible(self) -> None:
+        book = _Book()
+        for i in range(3):
+            book.label(_title(i), "equities")
+            book.answer(_title(i), "equities")
+        first, second = book.evaluate(), book.evaluate()
+        assert first == second
+        assert (
+            first.answers_sha256
+            == hashlib.sha256(
+                "\n".join(
+                    sorted(str(a["answer_id"]) for a in book.answers.values())
+                ).encode()
+            ).hexdigest()
+        )
+
+
+class TestWhatEvaluateRefuses:
+    def test_the_regime_has_no_ground_truth(self) -> None:
+        assert (
+            jev_eval.question_problem(DECISION_REGIME, "regime")
+            == (jev_eval.NO_GROUND_TRUTH["decision.regime"])
+        )
+        with pytest.raises(jev_eval.Refused, match="forward"):
+            jev_eval.build_evaluation(
+                question_set=DECISION_REGIME,
+                question_key="regime",
+                labelled_by=LABELLER,
+                model=MODEL,
+                split="test",
+                ledger=_Book().ledger(),
+            )
+
+    @pytest.mark.parametrize(
+        ("name", "key"),
+        [
+            ("probe.connectivity", "about_the_sun"),
+            ("research.catalogue", "rebalance_horizon"),
+        ],
+    )
+    def test_a_question_with_no_plan_or_no_text_is_refused(
+        self, name: str, key: str
+    ) -> None:
+        assert jev_eval.question_problem(jev_questions.REGISTRY[name], key) is not None
+
+    def test_every_planned_question_may_be_evaluated(self) -> None:
+        for (name, version), _ in jev_prereg.SET_PLAN_VERSIONS.items():
+            question_set = jev_questions.REGISTRY[name]
+            for key in jev_prereg.set_plan(name, version)["questions"]:
+                assert jev_eval.question_problem(question_set, key) is None
+
+    async def test_a_labeller_or_a_model_nobody_may_name(self) -> None:
+        for labelled_by, model in (("jev:research", MODEL), (LABELLER, "jev-latest")):
+            with pytest.raises(jev_eval.Refused):
+                await jev_eval.evaluate(
+                    object(),  # type: ignore[arg-type]
+                    question_set=CATALOGUE,
+                    question_key="asset_class",
+                    labelled_by=labelled_by,
+                    model=model,
+                    split="test",
+                )
+
+
+def _git(status: str | None, head: str | None = "a" * 40) -> Any:
+    def git(arguments: Any) -> str | None:
+        return status if arguments[0] == "status" else head
+
+    return git
+
+
+class TestTheCommitARecordNames:
+    def test_named_by_the_flag_then_the_environment_then_git(self) -> None:
+        commit = "0123456789abcdef0123456789abcdef01234567"
+        assert jev_eval.resolve_commit(commit, {}, _git(None)) == commit
+        assert (
+            jev_eval.resolve_commit(None, {"GIT_COMMIT": commit}, _git(None)) == commit
+        )
+        assert jev_eval.resolve_commit(None, {}, _git("")) == "a" * 40
+
+    @pytest.mark.parametrize(
+        ("given", "environ", "git"),
+        [
+            ("abc123", {}, _git("")),
+            ("A" * 40, {}, _git("")),
+            (None, {"GIT_COMMIT": "not-a-commit"}, _git("")),
+            (None, {}, _git(" M src/programme/jev_eval.py\n")),
+            (None, {}, _git("?? notes.txt\n")),
+            (None, {}, _git(None)),
+            (None, {}, _git("", head=None)),
+            (None, {}, _git("", head="deadbeef")),
+        ],
+    )
+    def test_a_dirty_or_absent_commit_refuses(
+        self, given: str | None, environ: dict[str, str], git: Any
+    ) -> None:
+        with pytest.raises(jev_eval.Refused):
+            jev_eval.resolve_commit(given, environ, git)
+
+    def test_record_refuses_before_reading_the_ledger(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        connected = []
+
+        async def connect(dsn: str) -> Any:
+            connected.append(dsn)
+            raise AssertionError("connected")
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://reader@db/trader")
+        monkeypatch.delenv("GIT_COMMIT", raising=False)
+        monkeypatch.setattr(jev_eval.asyncpg, "connect", connect)
+        monkeypatch.setattr(jev_eval, "_git", _git(" M dirty.py\n"))
+        code = jev_eval.main(
+            [
+                "evaluate",
+                "--set",
+                "research.catalogue",
+                "--key",
+                "asset_class",
+                "--labelled-by",
+                LABELLER,
+                "--record",
+            ]
+        )
+        assert code == jev_eval.EXIT_REFUSED
+        assert connected == []
+        assert "uncommitted" in capsys.readouterr().err
+
+
+class TestTheBlindExport:
+    async def test_no_answer_column_and_the_sample_by_address(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        texts = [_title(i) for i in range(6)]
+        rows = [
+            {"subject_type": "web_excerpt", "subject_id": text_sha256(t), "text": t}
+            for t in texts
+        ]
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            assert kwargs == {
+                "subject_type": "web_excerpt",
+                "include_quarantined": False,
+            }
+            return list(reversed(rows))
+
+        async def no_answers(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the export read an answer")
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        for name in ("answers_for_subjects", "probe_pairs", "ask_jobs_about"):
+            monkeypatch.setattr(jev_repo, name, no_answers)
+        text = await jev_eval.export_labels(
+            object(),  # type: ignore[arg-type]
+            question_set=CATALOGUE,
+            question_key="asset_class",
+            sample=3,
+            include_quarantined=False,
+        )
+        lines = list(csv.reader(io.StringIO(text)))
+        assert tuple(lines[0]) == jev_eval.EXPORT_COLUMNS
+        assert all(len(line) == 3 for line in lines)
+        chosen = sorted(rows, key=lambda r: r["subject_id"])[:3]
+        assert lines[1:] == [
+            ["web_excerpt", r["subject_id"], r["text"]] for r in chosen
+        ]
+
+    def test_the_export_function_reads_no_answer(self) -> None:
+        """By its source: nothing in it names an answer, a request or a job."""
+        source = inspect.getsource(jev_eval.export_labels)
+        for word in ("answer", "request", "probe", "job"):
+            assert word not in source.split('"""')[2], word
+
+    async def test_the_regime_is_not_exported(self) -> None:
+        with pytest.raises(jev_eval.Refused):
+            await jev_eval.export_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=DECISION_REGIME,
+                question_key="regime",
+                sample=None,
+                include_quarantined=False,
+            )
+
+    def test_blind_is_required(self) -> None:
+        assert (
+            jev_eval.main(
+                [
+                    "labels",
+                    "export",
+                    "--set",
+                    "research.catalogue",
+                    "--key",
+                    "asset_class",
+                ]
+            )
+            == jev_eval.EXIT_USAGE
+        )
+
+
+def _labels_file(*rows: dict[str, str], extra: tuple[str, ...] = ()) -> bytes:
+    columns = [*jev_eval.IMPORT_COLUMNS, *extra]
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=columns, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return out.getvalue().encode("utf-8")
+
+
+def _row(text: str = "Invented Bond Timing", **overrides: str) -> dict[str, str]:
+    row = {
+        "question_set": "research.catalogue",
+        "question_set_version": str(CATALOGUE.version),
+        "question_key": "asset_class",
+        "subject_type": "web_excerpt",
+        "subject_id": text_sha256(text),
+        "label": "bonds",
+    }
+    row.update(overrides)
+    return row
+
+
+class TestTheLabelsAnImportTakes:
+    def test_a_clean_file_has_no_problems(self) -> None:
+        rows = jev_eval.parse_labels(
+            _labels_file(_row(), _row("Other", label="equities"))
+        )
+        assert jev_eval.label_problems(rows) == []
+
+    @pytest.mark.parametrize(
+        ("overrides", "problem"),
+        [
+            ({"question_set": "research.nothing"}, "no set named"),
+            ({"question_set_version": "2"}, "registered at v1"),
+            ({"question_key": "rebalance_horizon"}, "asks no"),
+            ({"subject_type": "hypothesis_title"}, "is asked about a 'web_excerpt'"),
+            ({"subject_id": "abc"}, "named by its sha256"),
+            ({"label": "insufficient_evidence"}, "escape"),
+            ({"label": "Bonds"}, "is not one of"),
+            ({"label": " bonds"}, "is not one of"),
+            (
+                {"question_set": "decision.regime", "question_key": "regime"},
+                "no ground truth",
+            ),
+        ],
+    )
+    def test_each_bad_row_is_refused_by_its_line(
+        self, overrides: dict[str, str], problem: str
+    ) -> None:
+        rows = jev_eval.parse_labels(_labels_file(_row(), _row(**overrides)))
+        (found,) = jev_eval.label_problems(rows)
+        assert found.startswith("line 3: ")
+        assert problem in found
+
+    def test_a_noul_takes_true_and_false(self) -> None:
+        row = _row(
+            question_set="guardrail.injection",
+            question_key="addressed_to_ai",
+            label="true",
+        )
+        assert jev_eval.label_problems(jev_eval.parse_labels(_labels_file(row))) == []
+        bad = dict(row, label="yes")
+        assert jev_eval.label_problems(jev_eval.parse_labels(_labels_file(bad)))
+
+    def test_an_item_labelled_twice_in_one_file_is_refused(self) -> None:
+        rows = jev_eval.parse_labels(_labels_file(_row(), _row(label="equities")))
+        (found,) = jev_eval.label_problems(rows)
+        assert "twice" in found
+
+    def test_a_text_column_must_be_the_subjects_text(self) -> None:
+        good = dict(_row(), text="Invented Bond Timing")
+        bad = dict(_row("Another Text"), text="Not The Text It Names")
+        rows = jev_eval.parse_labels(_labels_file(good, bad, extra=("text",)))
+        (found,) = jev_eval.label_problems(rows)
+        assert found.startswith("line 3: ") and "not the text" in found
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            b"",
+            b"question_set,subject_id\n",
+            _labels_file(_row(), extra=("answer",)),
+            b"question_set,question_set_version,question_key,subject_type,"
+            b"subject_id,label,label\n",
+            b"\xff\xfe not utf-8",
+        ],
+    )
+    def test_a_file_of_another_shape_is_refused_whole(self, data: bytes) -> None:
+        with pytest.raises(jev_eval.Refused):
+            jev_eval.parse_labels(data)
+
+    def test_a_row_of_the_wrong_length_is_refused(self) -> None:
+        data = _labels_file(_row()) + b"research.catalogue,1,asset_class\n"
+        with pytest.raises(jev_eval.Refused, match="line 3"):
+            jev_eval.parse_labels(data)
+
+    def test_the_labeller_a_source_is_recorded_as(self) -> None:
+        data = _labels_file(_row())
+        sha12 = hashlib.sha256(data).hexdigest()[:12]
+        assert jev_eval.source_labeller("held-out-2026", data) == (
+            f"source:held-out-2026@{sha12}"
+        )
+        for name in ("Held Out", "pwb-readme", "", "-x"):
+            with pytest.raises(jev_eval.Refused):
+                jev_eval.source_labeller(name, data)
+
+    @pytest.mark.parametrize(
+        "operator", ["operator:Quentin", "quentin", "operator:", "operator:a b"]
+    )
+    def test_a_person_labels_under_one_spelling(self, operator: str) -> None:
+        assert (
+            jev_eval.main(["labels", "import", "--file", "x.csv", "--as", operator])
+            == jev_eval.EXIT_USAGE
+        )
+
+    def test_a_labeller_must_be_named_one_way(self) -> None:
+        assert jev_eval.main(["labels", "import", "--file", "x.csv"]) == 2
+        assert (
+            jev_eval.main(
+                [
+                    "labels",
+                    "import",
+                    "--file",
+                    "x.csv",
+                    "--as",
+                    "operator:q",
+                    "--source",
+                    "d",
+                ]
+            )
+            == 2
+        )
+
+
+class TestTheQuarantineCounts:
+    def test_counted_by_what_made_them_in_the_designs_words(self) -> None:
+        counts = jev_eval.quarantine_counts(
+            {
+                "a": "code-screen v1: role_play",
+                "b": "code-screen v1: hidden_text",
+                "c": (
+                    "jev guardrail.injection v1: addressed_to_ai p=0.87 (request 4, "
+                    "jev-1.13.0); not calibrated"
+                ),
+                "d": "vendor content block on 9 (a 403 whose body is not JSON; ...)",
+                "e": "addressed to an AI",
+            }
+        )
+        assert counts == {
+            "by the code screen v1": 2,
+            "by Jev's screen (not calibrated)": 1,
+            "by vendor content blocks": 1,
+            "for another reason": 1,
+        }
+        assert not any("injection" in phrase for phrase in counts)
+
+    def test_none_is_counted_as_zero_by_each_screen(self) -> None:
+        assert set(jev_eval.quarantine_counts({}).values()) == {0}
+
+
+def _recorded(evaluation: jev_eval.Evaluation, **overrides: Any) -> dict[str, Any]:
+    return {**evaluation.row(), "id": 1, "created_at": AFTER, **overrides}
+
+
+class TestWhatTheTextSays:
+    def _evaluation(self) -> jev_eval.Evaluation:
+        book = _Book()
+        for i in range(3):
+            book.label(_title(i), "equities")
+        book.answer(_title(0), None, valid=False)
+        return book.evaluate()
+
+    def test_the_formatter_never_prints_0_for_none(self) -> None:
+        text = jev_eval.format_evaluation(self._evaluation().row())
+        assert "accuracy: not measured (n = 0 valid answers)" in text
+        assert "Brier: not measured" in text
+        assert "flips, uniform: not measured (n = 0 pairs)" in text
+        assert "flips, near the threshold: not measured (no threshold chosen)" in text
+        assert "equities: too few to say (n = 3)" in text
+        assert "labeller agreement: not measured" in text
+        assert "median lag of a uniform re-ask: not measured" in text
+        # Every measurement unmeasured, and no number is printed for one.
+        row = self._evaluation().row()
+        nothing = {
+            name: None
+            for name, value in row.items()
+            if isinstance(value, float) or name in ("per_class", "calibration_bins")
+        }
+        text = jev_eval.format_evaluation({**row, **nothing})
+        assert "0.000" not in text and "0.0 " not in text, text
+        assert text.count("not measured") >= 8
+
+    def test_a_genuine_zero_is_printed_as_zero(self) -> None:
+        text = jev_eval.format_evaluation(self._evaluation().row())
+        assert "0 of 3 = 0.000" in text
+
+    def test_a_class_nothing_chose_has_no_precision(self) -> None:
+        """Recall 0 of 12 is measured; a precision over no choice is not."""
+        book = _Book()
+        for i in range(12):
+            book.label(_title(i), "equities")
+            book.answer(_title(i), "bonds")
+        text = jev_eval.format_evaluation(book.evaluate().row())
+        assert "equities: n 12, recall 0 of 12 = 0.000" in text
+        assert "precision not measured (predicted 0)" in text
+
+    def test_an_upper_bound_says_so_on_every_figure(self) -> None:
+        book = _Book()
+        subject = book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.dates[subject] = None
+        text = jev_eval.format_evaluation(book.evaluate().row())
+        assert text.splitlines()[1].startswith("UPPER BOUND")
+        assert "agreed with operator:quentin on 1 of 1 answered items" in text
+        accuracy_lines = [line for line in text.splitlines() if "accuracy" in line]
+        assert all("an upper bound" in line for line in accuracy_lines[:3])
+        assert "Jev is" not in text
+
+    def test_the_readme_is_never_ground_truth(self) -> None:
+        book = _Book()
+        readme = "source:pwb-readme@0123456789ab"
+        book.label(_title(0), "equities", labelled_by=readme)
+        book.answer(_title(0), "equities")
+        text = jev_eval.format_evaluation(book.evaluate(labelled_by=readme).row())
+        assert "the README's own grouping, never ground truth" in text
+
+    def test_beats_only_on_a_lower_bound_above_zero(self) -> None:
+        evaluation = self._evaluation()
+        text = jev_eval.format_evaluation(
+            {**evaluation.row(), "vs_majority_diff": 0.3, "vs_majority_diff_low": 0.0}
+        )
+        assert "does not beat it" in text
+        text = jev_eval.format_evaluation(
+            {
+                **evaluation.row(),
+                "vs_majority_diff": 0.3,
+                "vs_majority_diff_low": 0.01,
+                "vs_majority_diff_high": 0.5,
+            }
+        )
+        assert "beats it" in text.replace("does not beat it", "")
+
+    def test_the_report_is_in_the_order_read_and_never_by_a_figure(
+        self,
+    ) -> None:
+        evaluation = self._evaluation()
+        entries = [
+            {
+                "evaluation": _recorded(evaluation, accuracy=a, question_key=k),
+                "usable": False,
+                "usable_threshold": None,
+                "not_usable_because": ["training"],
+            }
+            for a, k in ((None, "asset_class"), (0.9, "mechanism"), (0.1, "zzz"))
+        ]
+        report = {"pin": MODEL, "evaluations": entries, "quarantined_content": {}}
+        text = jev_eval.format_report(report)
+        positions = [
+            text.index(f"v1 {k},") for k in ("asset_class", "mechanism", "zzz")
+        ]
+        assert positions == sorted(positions)
+        assert "not usable as a calibration: " in text
+        assert jev_calibration.REASONS["training"] in text
+
+
+class TestTheReportReadsTheCalibration:
+    async def test_each_evaluation_with_whether_it_is_usable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        book = _Book()
+        (text,) = _texts_in("test", 1)
+        book.label(text, "equities")
+        book.answer(text, "equities")
+        row = _recorded(book.evaluate("test"))
+        # An earlier version's evaluation on the same test set.
+        earlier = {**row, "id": 0, "question_set_version": 0}
+
+        async def latest(conn: Any) -> list[dict[str, Any]]:
+            return [row]
+
+        async def every(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            assert kwargs == {"question_set": CATALOGUE.name}
+            return [row, earlier]
+
+        async def pin(conn: Any) -> str:
+            return MODEL
+
+        async def reasons(conn: Any) -> dict[str, str]:
+            return {"c": "code-screen v1: role_play"}
+
+        monkeypatch.setattr(jev_repo, "latest_evaluations", latest)
+        monkeypatch.setattr(jev_repo, "evaluations_for", every)
+        monkeypatch.setattr(jev_repo, "quarantine_reasons", reasons)
+        monkeypatch.setattr(flags, "jev_model", pin)
+        report = await jev_eval.evaluations_report(object())  # type: ignore[arg-type]
+        (entry,) = report["evaluations"]
+        assert entry["usable"] is False
+        reasons = entry["not_usable_because"]
+        assert "split" not in reasons, "this one is on the test split"
+        assert {"size", "reused_test_set"} <= set(reasons)
+        assert report["quarantined_content"]["by the code screen v1"] == 1
+
+
+class TestTheCommandsThatWrite:
+    def _run(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        record: dict[str, Any] = {"writes": []}
+
+        async def connect(dsn: str) -> _Conn:
+            return _Conn(record)
+
+        async def database_now(conn: Any) -> datetime:
+            return AFTER
+
+        def writer(name: str) -> Any:
+            async def write(conn: Any, **kwargs: Any) -> int:
+                record["writes"].append(name)
+                return 1
+
+            return write
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://reader@db/trader")
+        monkeypatch.setattr(jev_eval.asyncpg, "connect", connect)
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
+        for name in ("record_label", "record_evaluation"):
+            monkeypatch.setattr(jev_repo, name, writer(name))
+        return record
+
+    def test_three_commands_write_and_the_rest_only_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """
+        ``labels import``, ``labels copy`` and ``evaluate --record`` each run
+        in a transaction of their own that may write; every other command in
+        a read-only one. Each is driven through ``main``, with the ledger's
+        reads answered by fakes, and the transaction it opened read back.
+        """
+        assert jev_eval.WRITING_COMMANDS == (
+            "labels import",
+            "labels copy",
+            "evaluate --record",
+        )
+        labels = tmp_path / "labels.csv"
+        labels.write_bytes(_labels_file(_row()))
+        book = _Book()
+        book.label("Invented Bond Timing", "bonds")
+        book.answer("Invented Bond Timing", "bonds")
+
+        async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
+            return {s: "Invented Bond Timing" for s in subjects}
+
+        async def labels_for(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            if kwargs["version"] == 0:
+                return [dict(book.labels[0])]
+            return []
+
+        async def recorded_questions(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [CATALOGUE.as_request_questions()]
+
+        async def read_ledger(conn: Any, **kwargs: Any) -> jev_eval.Ledger:
+            return book.ledger()
+
+        async def pin(conn: Any) -> str:
+            return MODEL
+
+        async def empty(conn: Any, *args: Any, **kwargs: Any) -> Any:
+            return []
+
+        async def reasons(conn: Any) -> dict[str, str]:
+            return {}
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        cases = {
+            "labels import": (
+                ["labels", "import", "--file", str(labels), "--as", "operator:q"],
+                ["record_label"],
+            ),
+            "labels copy": (
+                [
+                    "labels",
+                    "copy",
+                    "--set",
+                    "research.catalogue",
+                    "--key",
+                    "asset_class",
+                    "--from-version",
+                    "0",
+                    "--to-version",
+                    "1",
+                ],
+                ["record_label"],
+            ),
+            "evaluate --record": (
+                [
+                    "evaluate",
+                    "--set",
+                    "research.catalogue",
+                    "--key",
+                    "asset_class",
+                    "--labelled-by",
+                    LABELLER,
+                    "--record",
+                    "--commit",
+                    "c" * 40,
+                ],
+                ["record_evaluation"],
+            ),
+            "evaluate": (
+                [
+                    "evaluate",
+                    "--set",
+                    "research.catalogue",
+                    "--key",
+                    "asset_class",
+                    "--labelled-by",
+                    LABELLER,
+                ],
+                [],
+            ),
+            "labels export": (
+                [
+                    "labels",
+                    "export",
+                    "--set",
+                    "research.catalogue",
+                    "--key",
+                    "asset_class",
+                    "--blind",
+                ],
+                [],
+            ),
+            "report": (["report"], []),
+        }
+        for command, (argv, writes) in cases.items():
+            record = self._run(monkeypatch)
+            monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)
+            monkeypatch.setattr(jev_repo, "labels_for", labels_for)
+            monkeypatch.setattr(jev_repo, "recorded_questions", recorded_questions)
+            monkeypatch.setattr(jev_repo, "latest_evaluations", empty)
+            monkeypatch.setattr(jev_repo, "quarantine_reasons", reasons)
+            monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+            monkeypatch.setattr(jev_eval, "read_ledger", read_ledger)
+            monkeypatch.setattr(flags, "jev_model", pin)
+            assert jev_eval.main(argv) == jev_eval.EXIT_OK, command
+            assert record["writes"] == writes, command
+            assert record["closed"] is True, command
+            if command in jev_eval.WRITING_COMMANDS:
+                assert record["transaction"] == {"isolation": "repeatable_read"}
+            else:
+                assert record["transaction"] == {
+                    "isolation": "repeatable_read",
+                    "readonly": True,
+                }, command
+
+    def test_the_variables_it_reads(self) -> None:
+        """
+        ``DATABASE_URL``, and ``GIT_COMMIT`` for ``evaluate --record`` alone:
+        no key, no model setting.
+        """
+        tree = ast.parse(EVAL.read_text(encoding="utf-8"))
+        named = set()
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute | ast.Name)
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.isupper()
+            ):
+                named.add(node.args[0].value)
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.slice, ast.Constant)
+                and isinstance(node.slice.value, str)
+                and node.slice.value.isupper()
+            ):
+                named.add(node.slice.value)
+        assert named == {"DATABASE_URL", "GIT_COMMIT"}
+
+    def test_commit_without_record_is_a_usage_error(self) -> None:
+        argv = [
+            "evaluate",
+            "--set",
+            "research.catalogue",
+            "--key",
+            "asset_class",
+            "--labelled-by",
+            LABELLER,
+            "--commit",
+            "c" * 40,
+        ]
+        assert jev_eval.main(argv) == jev_eval.EXIT_USAGE
+
+
+class TestImportAndCopyRefuse:
+    async def test_a_revised_label_refuses_the_whole_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        written: list[Any] = []
+
+        async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
+            return {s: "x" for s in subjects}
+
+        async def labels_for(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "subject_type": "web_excerpt",
+                    "subject_id": text_sha256("Invented Bond Timing"),
+                    "label": "equities",
+                }
+            ]
+
+        async def record_label(conn: Any, **kwargs: Any) -> int:
+            written.append(kwargs)
+            return 1
+
+        monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)
+        monkeypatch.setattr(jev_repo, "labels_for", labels_for)
+        monkeypatch.setattr(jev_repo, "record_label", record_label)
+        rows = jev_eval.parse_labels(_labels_file(_row(), _row("Fresh")))
+        with pytest.raises(jev_eval.Refused, match="never revised"):
+            await jev_eval.import_labels(
+                object(),  # type: ignore[arg-type]
+                rows=rows,
+                labelled_by="operator:q",
+            )
+        assert written == []
+
+    async def test_an_unstored_subject_refuses_the_whole_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
+            return {}
+
+        monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)
+        rows = jev_eval.parse_labels(_labels_file(_row()))
+        with pytest.raises(jev_eval.Refused, match="no stored web_excerpt"):
+            await jev_eval.import_labels(
+                object(),  # type: ignore[arg-type]
+                rows=rows,
+                labelled_by="operator:q",
+            )
+
+    @pytest.mark.parametrize(
+        ("from_version", "to_version", "recorded", "match"),
+        [
+            (0, 2, None, "registered version"),
+            (1, 1, None, "its own already"),
+            (0, 1, [], "on record nowhere"),
+            (0, 1, "reworded", "not those of"),
+        ],
+    )
+    async def test_copy_refuses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        from_version: int,
+        to_version: int,
+        recorded: Any,
+        match: str,
+    ) -> None:
+        async def recorded_questions(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            if recorded == "reworded":
+                words = CATALOGUE.as_request_questions()
+                criteria = dict(words["asset_class"]["criteria"])
+                criteria["equities"] = "Shares, described otherwise."
+                words["asset_class"]["criteria"] = criteria
+                return [words]
+            return recorded or []
+
+        monkeypatch.setattr(jev_repo, "recorded_questions", recorded_questions)
+        with pytest.raises(jev_eval.Refused, match=match):
+            await jev_eval.copy_labels(
+                object(),  # type: ignore[arg-type]
+                question_set=CATALOGUE,
+                question_key="asset_class",
+                from_version=from_version,
+                to_version=to_version,
+            )
