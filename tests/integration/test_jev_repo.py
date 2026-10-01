@@ -2604,6 +2604,40 @@ async def _hypothesis(
     return ref
 
 
+class TestTheTitleRead:
+    """
+    ``jev_repo.get_hypothesis_title``, the title sets' read (docs/09,
+    D-SAFE-2): a hypothesis's ref, title, origin and creation time, and none of
+    its card, its rationale or anything else stored beside them.
+    """
+
+    async def test_it_returns_the_four_columns_and_nothing_else(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        ref = f"H-{uuid.uuid4().hex[:8]}"
+        at = datetime(2026, 9, 3, 8, tzinfo=UTC)
+        await conn.execute(
+            "INSERT INTO hypotheses (id, ref, title, owner, origin, created_at, "
+            "card, decision_rationale) "
+            "VALUES ($1, $2, $3, 'programme', 'model', $4, $5::jsonb, $6)",
+            uuid.uuid4(),
+            ref,
+            "Invented Value in Bonds",
+            at,
+            json.dumps({"mechanism": "A card no Jev job reads"}),
+            "A rationale no Jev job reads",
+        )
+        assert await jev_repo.get_hypothesis_title(conn, ref) == {
+            "ref": ref,
+            "title": "Invented Value in Bonds",
+            "origin": "model",
+            "created_at": at,
+        }
+
+    async def test_an_unknown_ref_is_none(self, conn: asyncpg.Connection) -> None:
+        assert await jev_repo.get_hypothesis_title(conn, "H-nobody") is None
+
+
 class TestHypothesesToAsk:
     async def test_model_written_titles_newest_first_by_their_address(
         self, conn: asyncpg.Connection

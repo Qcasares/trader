@@ -545,6 +545,31 @@ async def get_document(
     return dict(row) if row is not None else None
 
 
+#: The columns of a hypothesis the Jev side reads, and the only ones.
+HYPOTHESIS_TITLE_COLUMNS = ("ref", "title", "origin", "created_at")
+
+
+async def get_hypothesis_title(
+    conn: asyncpg.Connection, ref: str
+) -> dict[str, Any] | None:
+    """
+    One hypothesis's title, by its ref: ``ref``, ``title``, ``origin`` and
+    ``created_at`` (:data:`HYPOTHESIS_TITLE_COLUMNS`), and nothing else, or
+    ``None``.
+
+    The title sets' read (docs/09, D-SAFE-2). ``repo.get_hypothesis`` reads
+    ``SELECT *``, which would hand the Jev side the card, the decision's
+    rationale and every column a later migration adds; this names its columns,
+    so none of them can reach a Jev job.
+    ``tests/unit/test_jev_table_boundaries.py::test_the_jev_side_never_reads_detail``
+    walks every Jev root for a read of any other.
+    """
+    row = await conn.fetchrow(
+        "SELECT ref, title, origin, created_at FROM hypotheses WHERE ref = $1", ref
+    )
+    return dict(row) if row is not None else None
+
+
 async def earliest_quarantined(
     conn: asyncpg.Connection, content_sha256s: Sequence[str]
 ) -> dict[str, int]:
