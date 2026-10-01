@@ -1573,3 +1573,123 @@ def test_shutdown_waits_for_a_jev_call_and_not_for_the_kill() -> None:
     (kill_after,) = re.findall(r"--kill-after=(\d+)", workflow)
     (grace,) = re.findall(r"stop_grace_period:\s*(\d+)s", compose)
     assert one_call < JEV_SHUTDOWN_GRACE_SECONDS < min(int(kill_after), int(grace))
+
+
+# ---------------------------------------------------------------------------
+# The programme changes no job it did not claim (phase D1)
+# ---------------------------------------------------------------------------
+
+#: Every function of the queue that changes a job's row.
+JOB_CHANGERS = frozenset(
+    {"enqueue", "claim", "extend_lease", "complete", "fail", "requeue_expired"}
+)
+
+#: The only state-changing queue calls in ``src/programme`` (docs/09, M6): the
+#: loop's claim, completion, failure and lease of the jobs it claimed, and the
+#: two producers' enqueue. Never ``requeue_expired``, which returns another
+#: process's lapsed jobs to the queue: the worker's sweep, not the programme's.
+PROGRAMME_JOB_CHANGES = frozenset(
+    {
+        ("src/programme/main.py", "claim"),
+        ("src/programme/main.py", "complete"),
+        ("src/programme/main.py", "fail"),
+        ("src/programme/main.py", "extend_lease"),
+        ("src/programme/jev_plan.py", "enqueue"),
+        ("src/programme/tick.py", "enqueue"),
+    }
+)
+
+
+def _job_changes(relative: str, source: str) -> tuple[set[str], list[str]]:
+    """
+    The queue's state-changing functions ``source`` refers to — called or not,
+    by attribute, by an imported name, or by a literal handed to ``getattr`` —
+    and every reference this scan cannot read: the queue module read by a
+    computed name or as a namespace, and any write of the ``jobs`` table the
+    SQL scanner finds, which goes around the module altogether.
+    """
+    from tests.unit.test_import_boundaries import _table_writes
+
+    tree = ast.parse(source)
+    bound = _modules_bound(relative, tree)
+    found: set[str] = set()
+    unread: list[str] = []
+
+    def the_jobs_module(node: ast.AST) -> bool:
+        return _dotted(node, bound) == JOBS_MODULE
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Attribute, ast.Name)):
+            dotted = _dotted(node, bound)
+            if dotted is not None and dotted.rpartition(".")[0] == JOBS_MODULE:
+                if dotted.rpartition(".")[2] in JOB_CHANGERS:
+                    found.add(dotted.rpartition(".")[2])
+        elif isinstance(node, ast.ImportFrom) and node.module == JOBS_MODULE:
+            found.update(a.name for a in node.names if a.name in JOB_CHANGERS)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "getattr" and len(node.args) >= 2:
+                if the_jobs_module(node.args[0]):
+                    name = node.args[1]
+                    if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                        if name.value in JOB_CHANGERS:
+                            found.add(name.value)
+                    else:
+                        unread.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+            elif node.func.id == "vars" and node.args and the_jobs_module(node.args[0]):
+                unread.append(f"{relative}:{node.lineno}: {ast.unparse(node)}")
+    for write in _table_writes(source, "jobs"):
+        unread.append(f"{relative}:{write.line}: {write.verb} jobs")
+    return found, unread
+
+
+class TestTheProgrammeChangesOnlyTheJobsItClaimed:
+    def test_nothing_in_the_programme_changes_a_job_it_did_not_claim(self) -> None:
+        """
+        docs/09, M6: Jev, and the programme around it, never resumes, retries,
+        cancels or fails a job but its own. The loop's claim takes the kinds of
+        ``JEV_HANDLERS`` alone, and the only state-changing calls of the queue
+        in ``src/programme`` are the loop's, on the job it claimed, and the
+        planner's and the tick's ``enqueue``; never ``requeue_expired``, and no
+        SQL of its own on ``jobs``.
+        """
+        calls: set[tuple[str, str]] = set()
+        unread: list[str] = []
+        for path in sorted((SRC / "programme").rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+            found, opaque = _job_changes(relative, path.read_text("utf-8"))
+            calls |= {(relative, name) for name in found}
+            unread += opaque
+        assert not unread, "\n".join(unread)
+        assert calls == PROGRAMME_JOB_CHANGES
+
+    @pytest.mark.parametrize(
+        ("source", "found", "unread"),
+        [
+            ("await job_repo.requeue_expired(conn)", {"requeue_expired"}, 0),
+            ("await job_repo.fail(conn, job.id, 'e')", {"fail"}, 0),
+            (
+                "from src.db.repos.jobs import complete\n"
+                "await complete(conn, job_id, {})",
+                {"complete"},
+                0,
+            ),
+            ("retry = job_repo.fail", {"fail"}, 0),
+            ("await getattr(job_repo, 'claim')(conn, 'w')", {"claim"}, 0),
+            ("await getattr(job_repo, NAME)(conn)", set(), 1),
+            ("names = vars(job_repo)", set(), 1),
+            ("await conn.execute(\"UPDATE jobs SET status = 'queued'\")", set(), 1),
+            ("await conn.execute('DELETE FROM jobs WHERE id = $1', job_id)", set(), 1),
+            ("await conn.copy_records_to_table('jobs', records=rows)", set(), 1),
+            ("job = await job_repo.get(conn, job_id)", set(), 0),
+            ("lease = job_repo.DEFAULT_LEASE", set(), 0),
+            ("rows = await conn.fetch('SELECT id FROM jobs')", set(), 0),
+            ("job.fail(reason)", set(), 0),
+        ],
+    )
+    def test_the_scan_reads_each_spelling(
+        self, source: str, found: set[str], unread: int
+    ) -> None:
+        prefix = "from src.db.repos import jobs as job_repo\n"
+        changes, opaque = _job_changes("src/programme/x.py", prefix + source)
+        assert changes == found
+        assert len(opaque) == unread, opaque

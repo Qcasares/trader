@@ -68,10 +68,11 @@ import ast
 import inspect
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tests.unit.test_import_boundaries import _assembled, _table_writes
+from tests.unit.test_import_boundaries import _assembled, _synthetic, _table_writes
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
@@ -1090,3 +1091,571 @@ def test_the_caller_scan_reads_each_spelling(
     source: str, origins: list[str | None]
 ) -> None:
     assert [origin for _, origin in _raise_finding_calls(source)] == origins
+
+
+# ---------------------------------------------------------------------------
+# What Jev's code reaches (phase D1, docs/09 section 9.2)
+# ---------------------------------------------------------------------------
+#
+# Two walks over the import graph with ``test_jev_jobs.py``'s ``_Reach``, which
+# follows a reference however it is spelled and reads the code each module it
+# enters runs when imported, and one scan of every programme module's source.
+
+#: Every table whose detail the Jev side never reads, with its detail columns:
+#: a hypothesis's card and the decision's rationale, a finding's detail, its
+#: remediation and its closing note, and an assessment's summary and evidence.
+DETAIL_COLUMNS: dict[str, frozenset[str]] = {
+    "hypotheses": frozenset({"card", "decision_rationale"}),
+    "findings": frozenset({"detail_md", "remediation", "close_note"}),
+    "role_assessments": frozenset({"summary", "evidence"}),
+}
+
+_DETAIL_TABLE = re.compile(
+    r"\b(?:from|join|into|update)\s+(?:only\s+)?(?:\"?\w+\"?\.)?\"?"
+    r"(hypotheses|findings|role_assessments)\"?(?!\w)",
+    re.IGNORECASE,
+)
+_STAR = re.compile(
+    r"(?:\bselect\s+(?:distinct\s+(?:on\s*\([^)]*\)\s*)?)?|,\s*|\breturning\s+)"
+    r"(?:\"?\w+\"?\.)?\*",
+    re.IGNORECASE,
+)
+_RETURNING = re.compile(r"\breturning\b.*$", re.IGNORECASE | re.DOTALL)
+
+
+def _detail_read(statement: str) -> str | None:
+    """
+    What in ``statement`` reads detail from ``hypotheses``, ``findings`` or
+    ``role_assessments``, or ``None``: in a SELECT, ``*`` or a detail column
+    anywhere in it; in a write, the same in its RETURNING. An insert that
+    writes ``detail_md`` and an update that sets ``close_note`` write detail,
+    and read none.
+    """
+    tables = {table.lower() for table in _DETAIL_TABLE.findall(statement)}
+    if not tables:
+        return None
+    words = statement.split(None, 1)
+    if words and words[0].lower() in ("select", "with"):
+        read = statement
+    else:
+        returning = _RETURNING.search(statement)
+        if returning is None:
+            return None
+        read = returning.group(0)
+    if _STAR.search(read):
+        return f"reads * from {sorted(tables)}"
+    columns = sorted(
+        column
+        for table in tables
+        for column in DETAIL_COLUMNS[table]
+        if re.search(rf"\b{column}\b", read, re.IGNORECASE)
+    )
+    return f"reads {columns} from {sorted(tables)}" if columns else None
+
+
+def _reach_from(graph: Any, roots: list[tuple[str, str]]) -> Any:
+    """``_Reach`` started from these definitions rather than whole modules."""
+    from tests.unit.test_jev_jobs import _Reach
+
+    reach = _Reach(graph)
+    for module, name in roots:
+        reach.define(module, name)
+    while reach.pending:
+        where, node = reach.pending.pop()
+        reach.read(where, node)
+    return reach
+
+
+def _spans(nodes: Any) -> list[tuple[int, int]]:
+    return [
+        (node.lineno, getattr(node, "end_lineno", node.lineno))
+        for node in nodes
+        if hasattr(node, "lineno")
+    ]
+
+
+def _detail_reads(graph: Any, roots: list[tuple[str, str]]) -> list[str]:
+    """Every reached definition holding a statement that reads detail."""
+    reach = _reach_from(graph, roots)
+    found: dict[str, None] = {}
+    statements: dict[str, list[tuple[int, str]]] = {}
+    for (module, name), nodes in sorted(reach.reached.items(), key=lambda i: i[0]):
+        if module not in statements:
+            statements[module] = _strings(graph.sources[module])
+        for first, last in _spans(nodes):
+            for line, text in statements[module]:
+                if first <= line <= last and (read := _detail_read(text)):
+                    found[f"{module}.{name} (line {line}): {read}"] = None
+    unread = (f"a load the scan cannot read: {load}" for load in reach.unreadable)
+    found.update(dict.fromkeys(unread))
+    return list(found)
+
+
+def _jev_roots() -> list[tuple[str, str]]:
+    """
+    Every root on the Jev side that acts: each ``JEV_HANDLERS`` handler, each
+    ``ASKABLE`` set's ``load``, ``admit``, ``build`` and ``follow_up``, and the
+    planner. Read from the objects themselves, so a handler or a set added
+    later is a root without anyone remembering to add it.
+    """
+    from src.programme import jev_jobs, jev_plan, main
+
+    roots = {
+        (handler.__module__, handler.__name__)
+        for handler in main.JEV_HANDLERS.values()
+    }
+    for askable in jev_jobs.ASKABLE.values():
+        for part in (askable.load, askable.admit, askable.build, askable.follow_up):
+            if part is not None:
+                roots.add((part.__module__, part.__name__))
+    roots.add((jev_plan.__name__, jev_plan.plan.__name__))
+    return sorted(roots)
+
+
+#: The harness's commands, every one reached through ``execute``, which
+#: ``main`` and every caller reach.
+HARNESS_ROOTS = [
+    ("src.programme.jev_eval", "execute"),
+    ("src.programme.jev_eval", "main"),
+]
+
+
+def test_the_roots_are_every_handler_every_askable_part_and_the_planner() -> None:
+    """Guards the guard: the walks below start where the Jev side acts."""
+    roots = set(_jev_roots())
+    assert {
+        ("src.programme.jev_jobs", "run_ask"),
+        ("src.programme.jev_jobs", "run_reask"),
+        ("src.programme.jev_forward", "collect"),
+        ("src.programme.jev_jobs", "_load_hypothesis"),
+        ("src.programme.jev_jobs", "_screen_follow_up"),
+        ("src.programme.jev_plan", "plan"),
+    } <= roots
+    assert {module for module, _ in roots} <= {
+        "src.programme.main",
+        "src.programme.jev_jobs",
+        "src.programme.jev_forward",
+        "src.programme.jev_plan",
+    }
+
+
+def test_the_jev_side_never_reads_detail() -> None:
+    """
+    docs/09, D-SAFE-2 and D-HMB-16: from every handler, every askable set's
+    load, admission, state and follow-up, the planner and every harness
+    command, no reachable function reads ``*`` from ``hypotheses``,
+    ``findings`` or ``role_assessments``, or names a detail column of them in
+    a SELECT or a RETURNING. At ``23dee2b`` every title ask read the card
+    through ``repo.get_hypothesis``; the title sets now read by column list
+    (``jev_repo.get_hypothesis_title``).
+    """
+    from tests.unit.test_import_boundaries import _real_graph
+
+    offences = _detail_reads(_real_graph(), [*_jev_roots(), *HARNESS_ROOTS])
+    assert not offences, "the Jev side reads detail:\n" + "\n".join(offences)
+
+
+def test_the_detail_walk_reaches_the_reads_it_judges() -> None:
+    """
+    Guards the guard: the walk reaches the Jev side's reads of hypotheses —
+    the title sets' and the planner's — and judges statements on the tables it
+    guards, so a walk that reached nothing could not pass for one that found
+    nothing.
+    """
+    from tests.unit.test_import_boundaries import _real_graph
+
+    graph = _real_graph()
+    reach = _reach_from(graph, [*_jev_roots(), *HARNESS_ROOTS])
+    assert {
+        ("src.programme.jev_repo", "get_hypothesis_title"),
+        ("src.programme.jev_repo", "hypotheses_to_ask"),
+        ("src.programme.jev_eval", "evaluate"),
+    } <= set(reach.reached)
+    judged = [
+        text
+        for _, text in _strings(graph.sources["src.programme.jev_repo"])
+        if _DETAIL_TABLE.search(text)
+    ]
+    assert any("FROM hypotheses" in text for text in judged), judged
+
+
+#: A synthetic ``repo``: the two ``SELECT *`` readers the walk must refuse, a
+#: title read by column list, and writers of detail, which read none.
+_DETAIL_REPO = '''
+async def get_hypothesis(conn, ref):
+    return await conn.fetchrow("SELECT * FROM hypotheses WHERE ref = $1", ref)
+
+async def list_findings(conn, where=""):
+    return await conn.fetch(f"SELECT * FROM findings {where} ORDER BY opened_at")
+
+async def get_hypothesis_title(conn, ref):
+    return await conn.fetchrow(
+        "SELECT ref, title, origin, created_at FROM hypotheses WHERE ref = $1", ref
+    )
+
+async def raise_finding(conn, detail):
+    await conn.execute(
+        "INSERT INTO findings (title, detail_md, remediation) VALUES ($1, $2, $3)",
+        "t", detail, "r",
+    )
+
+async def close_finding(conn, ref, note):
+    await conn.execute("UPDATE findings SET close_note = $2 WHERE ref = $1", ref, note)
+
+async def count_findings(conn):
+    return await conn.fetchval("SELECT COUNT(*) FROM findings")
+'''
+
+
+def _detail_tree(handler: str) -> dict[str, str]:
+    return {
+        "src/__init__.py": "",
+        "src/programme/__init__.py": "",
+        "src/programme/repo.py": _DETAIL_REPO,
+        "src/programme/jev_jobs.py": handler,
+    }
+
+
+_HANDLER_ROOT = [("src.programme.jev_jobs", "handle")]
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    return await repo.get_hypothesis(conn, 'H-1')\n",
+            id="repo.get_hypothesis",
+        ),
+        pytest.param(
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    return await repo.list_findings(conn)\n",
+            id="repo.list_findings",
+        ),
+        pytest.param(
+            "from src.programme.repo import get_hypothesis as load\n"
+            "LOADERS = {'title': load}\n"
+            "async def handle(conn):\n"
+            "    return await LOADERS['title'](conn, 'H-1')\n",
+            id="stored-under-another-name",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetchrow('SELECT card FROM hypotheses')\n",
+            id="a-detail-column-of-its-own",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetch(\n"
+            "        'SELECT f.title, f.remediation FROM findings f '\n"
+            "        'JOIN candidates c ON c.id = f.candidate_id'\n"
+            "    )\n",
+            id="a-detail-column-through-a-join",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetch('SELECT a.* FROM role_assessments a')\n",
+            id="an-alias-star",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetch('SELECT summary FROM role_assessments')\n",
+            id="an-assessments-summary",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    return await conn.fetchrow(\n"
+            "        'UPDATE findings SET status = $1 RETURNING *', 'remediated'\n"
+            "    )\n",
+            id="returning-star",
+        ),
+        pytest.param(
+            "async def handle(conn):\n"
+            "    q = 'SELECT ref, ' + 'decision_rationale FROM hypotheses'\n"
+            "    return await conn.fetch(q)\n",
+            id="assembled-by-plus",
+        ),
+    ],
+)
+def test_the_detail_walk_finds_each_read(handler: str) -> None:
+    graph = _synthetic(_detail_tree(handler))
+    assert _detail_reads(graph, _HANDLER_ROOT), "the walk missed a read of detail"
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        pytest.param(
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    return await repo.get_hypothesis_title(conn, 'H-1')\n",
+            id="the-title-by-column-list",
+        ),
+        pytest.param(
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    await repo.raise_finding(conn, 'code-built words')\n"
+            "    await repo.close_finding(conn, 'F-1', 'a note')\n"
+            "    return await repo.count_findings(conn)\n",
+            id="writes-and-a-count",
+        ),
+        pytest.param(
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    return None\n"
+            "async def elsewhere(conn):\n"
+            "    return await repo.get_hypothesis(conn, 'H-1')\n",
+            id="a-reader-nothing-reached-calls",
+        ),
+    ],
+)
+def test_the_detail_walk_passes_what_reads_no_detail(handler: str) -> None:
+    graph = _synthetic(_detail_tree(handler))
+    assert _detail_reads(graph, _HANDLER_ROOT) == []
+
+
+# ---------------------------------------------------------------------------
+# What Jev's code can write
+# ---------------------------------------------------------------------------
+
+MIGRATIONS = ROOT / "migrations"
+
+#: Every ``(table, writer)`` pair reachable from the Jev side that acts, and
+#: no other (docs/09, section 7): the ledger's writers, the web ingest's, the
+#: one label writer the ingest reaches, and the queue's ``enqueue``. Phase D4
+#: adds one, ``findings`` from ``repo.raise_card_finding``. The writer is the
+#: definition the SQL is in: the ledger's request and answers are written by
+#: ``record_request`` and ``record_answers``, which ``record_exchange`` alone
+#: calls, as one write (the design names ``record_exchange``).
+ALLOWED_WRITES = frozenset(
+    {
+        ("jev_requests", "src.programme.jev_repo.record_request"),
+        ("jev_answers", "src.programme.jev_repo.record_answers"),
+        ("jev_signals", "src.programme.jev_lane.record_signal"),
+        ("web_documents", "src.programme.jev_repo.insert_documents"),
+        ("web_documents", "src.programme.jev_repo.quarantine_content"),
+        ("jev_labels", "src.programme.jev_repo.record_label_once"),
+        ("jobs", "src.db.repos.jobs.enqueue"),
+    }
+)
+
+#: Tables the Jev side never writes, named in the failure so that a reader
+#: sees at once what a new pair would mean.
+NEVER_WRITTEN = (
+    "findings",
+    "hypotheses",
+    "candidates",
+    "programme_decisions",
+    "system_flags",
+)
+
+
+def _schema_tables() -> list[str]:
+    """Every table the migrations create."""
+    names: set[str] = set()
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        names.update(
+            re.findall(
+                r"\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?\"?(\w+)\"?",
+                path.read_text(encoding="utf-8"),
+                re.IGNORECASE,
+            )
+        )
+    return sorted(names)
+
+
+def _writes_reached(
+    graph: Any, roots: list[tuple[str, str]], tables: list[str]
+) -> set[tuple[str, str]]:
+    """
+    Every ``(table, writer)`` pair a reached definition holds, the writer the
+    reached definition: each write of a table the migrations create, and each
+    write whose table the scan cannot read, as ``("unread", writer)``. A load
+    the scan cannot read is a pair of its own.
+    """
+    from tests.unit.test_import_boundaries import UNREAD
+
+    reach = _reach_from(graph, roots)
+    by_module: dict[str, list[tuple[int, str]]] = {}
+    for module, _ in reach.reached:
+        if module in by_module:
+            continue
+        source = graph.sources[module]
+        writes: set[tuple[int, str]] = set()
+        for table in [*tables, "a_table_no_module_names"]:
+            if table != "a_table_no_module_names" and table not in source:
+                continue
+            for write in _table_writes(source, table):
+                writes.add((write.line, UNREAD if write.verb == UNREAD else table))
+        by_module[module] = sorted(writes)
+    pairs: set[tuple[str, str]] = set()
+    for (module, name), nodes in reach.reached.items():
+        for first, last in _spans(nodes):
+            for line, table in by_module[module]:
+                if first <= line <= last:
+                    pairs.add((table, f"{module}.{name}"))
+    pairs |= {("a load the scan cannot read", load) for load in reach.unreadable}
+    return pairs
+
+
+class TestWhatJevCodeCanWrite:
+    """
+    docs/09 section 7 and M6/M7: from every ``JEV_HANDLERS`` handler, every
+    ``ASKABLE`` follow-up and the planner, the reachable ``(table, writer)``
+    pairs are exactly the allow-list. Nothing reachable writes ``findings``,
+    ``hypotheses``, ``candidates``, ``programme_decisions`` or
+    ``system_flags``, and no write of the queue but ``enqueue``.
+    """
+
+    def test_exactly_these_writers(self) -> None:
+        from tests.unit.test_import_boundaries import _real_graph
+
+        pairs = _writes_reached(_real_graph(), _jev_roots(), _schema_tables())
+        beyond = sorted(pairs - ALLOWED_WRITES)
+        missing = sorted(ALLOWED_WRITES - pairs)
+        assert pairs == ALLOWED_WRITES, (
+            f"the Jev side writes beyond its allow-list; never {NEVER_WRITTEN}:\n"
+            + "\n".join(f"{table} <- {writer}" for table, writer in beyond)
+            + "\nexpected but not reached:\n"
+            + "\n".join(f"{table} <- {writer}" for table, writer in missing)
+        )
+
+    def test_the_schema_is_read(self) -> None:
+        """Guards the guard: a walk over no tables would find no writes."""
+        tables = _schema_tables()
+        assert {"findings", "jobs", "jev_requests", "system_flags"} <= set(tables)
+
+    @pytest.mark.parametrize(
+        ("handler", "pair"),
+        [
+            pytest.param(
+                "from src.programme import repo\n"
+                "async def handle(conn):\n"
+                "    await repo.raise_finding(conn, 'x')\n",
+                ("findings", "src.programme.repo.raise_finding"),
+                id="a-finding",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute(\"UPDATE system_flags SET value = 'true'\")\n",
+                ("system_flags", "src.programme.jev_jobs.handle"),
+                id="a-switch",
+            ),
+            pytest.param(
+                "async def handle(conn):\n"
+                "    await conn.execute('UPDATE jobs SET status = $1', 'queued')\n",
+                ("jobs", "src.programme.jev_jobs.handle"),
+                id="a-job",
+            ),
+            pytest.param(
+                "async def handle(conn, table):\n"
+                "    await conn.execute(f'DELETE FROM {table}')\n",
+                ("unread", "src.programme.jev_jobs.handle"),
+                id="a-table-it-cannot-read",
+            ),
+            pytest.param(
+                "from src.programme import repo\n"
+                "WRITE = {'close': repo.close_finding}\n"
+                "async def handle(conn):\n"
+                "    await WRITE['close'](conn, 'F-1', 'n')\n",
+                ("findings", "src.programme.repo.close_finding"),
+                id="stored-under-another-name",
+            ),
+        ],
+    )
+    def test_the_walk_finds_each_writer(
+        self, handler: str, pair: tuple[str, str]
+    ) -> None:
+        graph = _synthetic(_detail_tree(handler))
+        tables = ["findings", "hypotheses", "jobs", "system_flags"]
+        assert pair in _writes_reached(graph, _HANDLER_ROOT, tables)
+
+    def test_the_walk_passes_a_reader(self) -> None:
+        handler = (
+            "from src.programme import repo\n"
+            "async def handle(conn):\n"
+            "    return await repo.get_hypothesis_title(conn, 'H-1')\n"
+        )
+        graph = _synthetic(_detail_tree(handler))
+        tables = ["findings", "hypotheses", "jobs", "system_flags"]
+        assert _writes_reached(graph, _HANDLER_ROOT, tables) == set()
+
+
+# ---------------------------------------------------------------------------
+# No switch is written from the programme
+# ---------------------------------------------------------------------------
+
+#: The functions that write a switch, all in ``src/db/repos/flags.py``.
+SWITCH_WRITERS = frozenset({"set_flag", "engage_kill_switch", "release_kill_switch"})
+
+
+def _switch_writes(source: str) -> list[str]:
+    """
+    Every write of ``system_flags`` in ``source`` (the shared scanner, a
+    string that is the table's name and nothing else included), and every
+    reference to a function that writes a switch: by name, by attribute, or
+    as a literal handed to ``getattr``.
+    """
+    found = [
+        f"line {write.line}: {write.verb} system_flags"
+        for write in _table_writes(source, "system_flags", bare_name=True)
+    ]
+    for node in ast.walk(ast.parse(source)):
+        name = None
+        if isinstance(node, ast.Name):
+            name = node.id
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.alias):
+            name = node.name.rsplit(".", 1)[-1]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            name = node.value
+        if name in SWITCH_WRITERS:
+            found.append(f"line {getattr(node, 'lineno', '?')}: {name}")
+    return found
+
+
+def test_nothing_in_the_programme_writes_a_switch() -> None:
+    """
+    docs/09, M7: Jev, and the programme around it, never touches a switch —
+    the kill switch, the programme's, Jev's own or the arming switch. Every
+    switch is an operator's, written through the API, and 0015 seeds the one
+    D1 adds. Across every module of ``src/programme``.
+    """
+    offenders = [
+        f"{_label(path)} {offence}"
+        for path in _python_files(PROGRAMME)
+        for offence in _switch_writes(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "await conn.execute(\"UPDATE system_flags SET value = 'true' WHERE key = $1\")",
+        "await conn.execute('INSERT INTO system_flags (key, value) VALUES ($1, $2)')",
+        "q = 'DELETE FROM ' + 'system_flags'",
+        "await conn.copy_records_to_table('system_flags', records=rows)",
+        "await flag_repo.set_flag(conn, 'jev_enabled', True, 'x')",
+        "from src.db.repos.flags import engage_kill_switch",
+        "release = flag_repo.release_kill_switch",
+        "await getattr(flag_repo, 'set_flag')(conn, 'k', True, 'x')",
+    ],
+)
+def test_the_switch_scan_finds_each_spelling(source: str) -> None:
+    assert _switch_writes(source), source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "await flags.jev_enabled(conn)",
+        "await conn.fetchrow('SELECT value FROM system_flags WHERE key = $1', k)",
+        '"""The switches are an operator\'s, read through flags."""',
+    ],
+)
+def test_the_switch_scan_ignores_a_read(source: str) -> None:
+    assert _switch_writes(source) == [], source
