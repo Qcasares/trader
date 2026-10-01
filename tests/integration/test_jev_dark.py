@@ -33,6 +33,13 @@ the switches as the migrations seed them:
 * **The research area on its own fetches nothing** (phase C6): with it on and
   the programme or Jev off, or with no key, no page is fetched and no job
   planned.
+* **The findings area asks about model-written findings, and only with the
+  programme and Jev** (phase D2): it joins the matrix, with a model-written
+  finding and an operator's stored before the loop runs; the findings sets
+  ask about the first exactly when the programme, Jev and the findings area
+  are all on, and never about the second. The ops area, the detail switch and
+  the arming switch have no consumer in D2 and plan nothing of their own
+  (:class:`TestTheSwitchesWithNoConsumerYet`).
 
 The client is a fake of ``jev_client.ask`` counting calls, and the fetcher a
 fake of ``web_fetch.fetch`` counting fetches and handing over a synthetic page.
@@ -67,9 +74,11 @@ from src.programme import (  # noqa: E402
     jev_clock,
     jev_prereg,
     jev_repo,
+    repo,
     web_fetch,
 )
 from src.programme import main as programme_main  # noqa: E402
+from src.programme.jev_hash import text_sha256  # noqa: E402
 from src.programme.jev_questions import DECISION_REGIME  # noqa: E402
 from src.programme.main import JEV_HANDLERS, Programme  # noqa: E402
 from tests.fakes import pwb_readme  # noqa: E402
@@ -95,6 +104,14 @@ JEV = flags.JEV_ENABLED
 DECISIONS = f"{flags.JEV_AREA_PREFIX}decisions"
 RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
 GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
+FINDINGS = f"{flags.JEV_AREA_PREFIX}findings"
+OPS = f"{flags.JEV_AREA_PREFIX}ops"
+
+#: The two findings stored before a matrix case runs: one the programme's
+#: model raised, which the findings sets ask about, and an operator's, which
+#: they never do. Invented.
+MODEL_FINDING = "Invented Fills Assumed at Prices No Venue Gave"
+OPERATORS_FINDING = "An Operator's Invented Finding"
 
 
 def _derived(suffix: str) -> str:
@@ -254,6 +271,26 @@ async def _set(conn: asyncpg.Connection, values: dict[str, Any]) -> None:
         await flag_repo.set_flag(conn, key, value, "test")
 
 
+async def _raise_findings(conn: asyncpg.Connection) -> None:
+    """:data:`MODEL_FINDING` and :data:`OPERATORS_FINDING`, as each writer raises it."""
+    await repo.raise_finding(
+        conn, None, "independent_risk", "high", MODEL_FINDING, origin="model"
+    )
+    await repo.raise_finding(
+        conn, None, "operations", "high", OPERATORS_FINDING, origin="operator"
+    )
+
+
+def _finding_asks(on: tuple[str, ...], day: Any) -> set[str]:
+    """The findings sets' asks a lit loop plans about the model's finding."""
+    if FINDINGS not in on:
+        return set()
+    return {
+        jev_repo.ask_job_key(name, 1, "finding_title", text_sha256(MODEL_FINDING), day)
+        for name in ("findings.owner", "findings.severity")
+    }
+
+
 #: A payload each programme kind would accept, so a claim would run it.
 _PAYLOADS: dict[str, dict[str, Any]] = {
     "jev_probe": {},
@@ -321,9 +358,24 @@ class TestSeededItIsDark:
         assert client.calls == [] and fetcher.fetched == []
         assert set((await _jev_rows(conn)).values()) == {0}
 
+    async def test_findings_stored_while_dark_are_asked_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+    ) -> None:
+        """Phase D2: the findings area is seeded off, so a stored finding waits."""
+        dsn, conn = seeded
+        await _raise_findings(conn)
+        await _run_the_loop(monkeypatch, dsn)
+        assert await conn.fetchval("SELECT COUNT(*) FROM jobs") == 0
+        assert client.calls == [] and fetcher.fetched == []
+        assert set((await _jev_rows(conn)).values()) == {0}
+
 
 #: The switches the matrix turns on and off, each alone and in every company.
-SWITCHES = (PROGRAMME, JEV, DECISIONS, RESEARCH, GUARDRAILS)
+SWITCHES = (PROGRAMME, JEV, DECISIONS, RESEARCH, GUARDRAILS, FINDINGS)
 
 
 def _combinations() -> list[tuple[str, ...]]:
@@ -357,8 +409,12 @@ class TestTheSwitchMatrix:
         screened, then, once cleared, described — since only the research
         area stores one and only the guardrails area screens it. Text already
         stored is asked about by each area's own sets alone: the next class.
+        From phase D2 a model-written finding and an operator's are stored
+        first: the findings sets ask about the first's title exactly when the
+        findings area is on with the programme and Jev, and never the second's.
         """
         dsn, conn = seeded
+        await _raise_findings(conn)
         await _set(conn, {switch: switch in on for switch in SWITCHES})
         now = datetime.now(UTC)
 
@@ -404,6 +460,15 @@ class TestTheSwitchMatrix:
                     )
         about_text = [c for c in client.calls if "excerpt" in c["state"]]
         assert len(about_text) == len(asks), "a text was asked about, or not, wrongly"
+        findings = _finding_asks(on, now.astimezone(UTC).date())
+        about_findings = [
+            c for c in client.calls if c["state"].get("title") == MODEL_FINDING
+        ]
+        assert len(about_findings) == len(findings), "a finding asked about wrongly"
+        assert not [
+            c for c in client.calls if c["state"].get("title") == OPERATORS_FINDING
+        ], "an operator's finding was sent"
+        asks |= findings
         assert len(client.calls) == 1 + len(asks)
         clock = set()
         if DECISIONS in on:
@@ -411,6 +476,48 @@ class TestTheSwitchMatrix:
                 clock.add(jev_clock.reference_job_key(session))
                 clock.add(jev_clock.regime_job_key(DECISION_REGIME, session))
         assert keys == probe | clock | ingest | asks
+
+
+class TestTheSwitchesWithNoConsumerYet:
+    """
+    Phase D2: the ops area, the detail switch and the arming switch exist
+    from phase D1 and have no consumer until D3 and D4, so every other switch
+    on, with or without the three, the loop plans and sends exactly the same
+    — the docs/09 section 13 matrix's "the arming switch alone plans
+    nothing", built up from here.
+    """
+
+    async def test_ops_the_detail_switch_and_arming_plan_nothing_of_their_own(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+    ) -> None:
+        dsn, conn = seeded
+        await _raise_findings(conn)
+        await _set(conn, dict.fromkeys(SWITCHES, True))
+        await _run_the_loop(monkeypatch, dsn)
+        planned = {
+            row["dedupe_key"] for row in await conn.fetch("SELECT dedupe_key FROM jobs")
+        }
+        sent = len(client.calls)
+        assert any(key.startswith("jev_ask:findings.") for key in planned)
+
+        await _set(
+            conn,
+            {
+                OPS: True,
+                flags.JEV_SEND_INTERNAL_DETAIL: True,
+                flags.JEV_ARM_CARD_CHECK: True,
+            },
+        )
+        await _run_the_loop(monkeypatch, dsn)
+        again = {
+            row["dedupe_key"] for row in await conn.fetch("SELECT dedupe_key FROM jobs")
+        }
+        assert again == planned, "a switch with no consumer planned something"
+        assert len(client.calls) == sent, "a switch with no consumer sent something"
 
 
 #: Two invented excerpts stored before the areas are set: one the screen
