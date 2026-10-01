@@ -13,9 +13,11 @@ finds something; these tests are what make the choice unrevisable:
   the plan, so re-recording the golden after an edit still fails;
 * every constant of the plan is in the hash, so a number cannot move without
   moving it;
-* the functions of the plan — the split, the re-ask strata, the baseline rule —
-  are checked against copies written here independently, with their numbers as
-  literals, so a changed formula fails even where its constants did not move;
+* the functions of the plan — the split, the re-ask strata, the baseline rule,
+  and from phases C7 and C8 the sets' keyword baselines, the card's claims
+  check among them — are checked against copies written here independently,
+  with their numbers as literals, so a changed formula fails even where its
+  constants did not move;
 * the baseline rule is total over every equities state and never abstains, and
   reads only the regime state's own fields and labels.
 """
@@ -969,6 +971,212 @@ class TestTheKeywordBaselinesAreWhatTheyName:
             theirs = dict(hypothesis["questions"][key]["keyword_baseline"])
             assert (mine.pop("reads"), theirs.pop("reads")) == ("excerpt", "title")
             assert mine == theirs
+
+
+#: The card check's rule, ``claims.find_performance_claim``, written out here
+#: as literals and read by hand, apart from the module: its terms, how far a
+#: term may be from a number, and what a number is. The plan hashes the
+#: module's constants (``jev_prereg.PERFORMANCE_CLAIM_BASELINE``); this copy
+#: holds what the rule does with them, which no hash sees.
+CLAIM_TERMS_AS_WRITTEN = (
+    "sharpe",
+    "sortino",
+    "calmar",
+    "cagr",
+    "return",
+    "returns",
+    "drawdown",
+    "alpha",
+    "profit",
+    "profitable",
+    "pnl",
+    "p&l",
+    "win rate",
+    "hit rate",
+    "annualised",
+    "annualized",
+    "outperform",
+)
+CLAIM_REACH_AS_WRITTEN = 40
+
+
+def _numbers_as_written(text: str) -> list[tuple[int, int]]:
+    """
+    Every number in ``text``, as spans, read left to right without overlap: a
+    run of decimal digits, a minus before it if one is there, one decimal part
+    after a point or a comma if digits follow it, and a percent sign after it
+    if one is there.
+    """
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        start = i
+        if text[i] == "-" and i + 1 < n and text[i + 1].isdecimal():
+            i += 1
+        if not text[i].isdecimal():
+            i = start + 1
+            continue
+        while i < n and text[i].isdecimal():
+            i += 1
+        if i + 1 < n and text[i] in ".," and text[i + 1].isdecimal():
+            i += 1
+            while i < n and text[i].isdecimal():
+                i += 1
+        if i < n and text[i] == "%":
+            i += 1
+        spans.append((start, i))
+    return spans
+
+
+def _claim_as_written(text: str) -> str | None:
+    """
+    The first number whose surroundings — forty characters either side of it,
+    in the lowercased text — hold a term anywhere, a longer word holding one
+    included, as those surroundings of the text as written, stripped; or
+    ``None``. Counted in the lowercased text, which is how the rule counts.
+    """
+    lowered = text.lower()
+    for start, end in _numbers_as_written(lowered):
+        before = max(0, start - CLAIM_REACH_AS_WRITTEN)
+        near = lowered[before : end + CLAIM_REACH_AS_WRITTEN]
+        if any(term in near for term in CLAIM_TERMS_AS_WRITTEN):
+            return text[before : end + CLAIM_REACH_AS_WRITTEN].strip()
+    return None
+
+
+#: What the card baseline decides about each of these invented titles — a
+#: claim found or not — as each plan version of ``guardrail.card`` registered
+#: it, by plan version. A change to what the rule decides is a new plan
+#: version with a row of its own here, and its hash appended to
+#: ``RELEASED_SET_PLAN_HASHES``; re-recording a released row, the edit a
+#: failing test invites, moves the baseline answers were already measured
+#: against.
+CARD_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, bool], ...]] = {
+    1: (
+        ("14% Annualised Returns From Invented Carry", True),
+        ("Invented Carry Returns 14%", True),
+        ("A Sharpe of 1.2 in Fictional Bond Futures", True),
+        ("Drawdowns Under -3% in Made-Up Markets", True),
+        ("Profitability of 2 Invented Signals", True),
+        ("Unprofitable Carry Over 12 Imaginary Pairs", True),
+        ("Alphabet Soup of 7 Invented Factors", True),
+        ("Win Rate Near 60 in Fictional Pairs", True),
+        ("PNL Of 3,5 On Invented Lots", True),
+        ("Return" + "x" * 34 + "12", True),
+        ("Return" + "x" * 35 + "12", False),
+        ("12" + "x" * 34 + "return", True),
+        ("12" + "x" * 35 + "return", False),
+        ("In 1999" + "x" * 45 + " a Sharpe of 2", True),
+        ("Carry in 12 Fictional Markets", False),
+        ("Momentum Over 2026 and Beyond", False),
+        ("Returns Without a Figure", False),
+        ("Invented Value in Mid-Caps", False),
+        ("--Seven Returns--", False),
+    ),
+}
+
+
+class TestTheCardBaselineIsPinnedByWhatItDoes:
+    """
+    C7+C8's review: the card's plan hashed the claims check's terms, reach and
+    number pattern, and nothing held how the check applies them, so a rule
+    that read a term only before its number left the plan's hash golden and
+    every test green, and a card answer recorded under plan version 1 would
+    have been measured against a different baseline still calling itself
+    version 1. The design's rule for every keyword baseline holds here too:
+    tested against a copy written as literals. And its verdicts on invented
+    titles are recorded under the plan version that registered them.
+    """
+
+    def test_the_copy_names_the_constants_the_plan_hashes(self) -> None:
+        plan = jev_prereg.set_plan("guardrail.card", 1)
+        assert plan is not None
+        baseline = plan["questions"]["performance_claim"]["keyword_baseline"]
+        assert tuple(baseline["terms"]) == CLAIM_TERMS_AS_WRITTEN
+        assert baseline["proximity"] == CLAIM_REACH_AS_WRITTEN
+
+    def test_the_check_is_the_copy_written_here(self) -> None:
+        """
+        A seeded corpus of invented titles built to sit on the rule's edges:
+        a term before its number and after it, at the reach and one beyond,
+        inside a longer word, in any case, with numbers negative, decimal by a
+        point or a comma, in percent, run together, and in digits of other
+        scripts, which the rule reads as digits.
+        """
+        from src.programme import claims
+
+        rng = random.Random(29)
+        words = [
+            "Invented",
+            "Carry",
+            "Momentum",
+            "in",
+            "Fictional",
+            "Bond",
+            "Futures",
+            "Imaginary",
+            *CLAIM_TERMS_AS_WRITTEN,
+            "Returnable",
+            "Drawdowns",
+            "Alphabet",
+            "Profitability",
+            "Unprofitable",
+            "Outperformance",
+            "Sharpening",
+            "Hit Rates",
+            "PnL",
+            "İstanbul",
+        ]
+        numbers = [
+            "12",
+            "-3",
+            "0.5",
+            "1,5",
+            "14%",
+            "-2.75%",
+            "2026",
+            "1,234,567",
+            "3-4",
+            "--7",
+            "12%%",
+            "٣٤",
+            "１２",
+        ]
+        fillers = ["x" * width for width in range(30, 45)]
+        found = {"claim": 0, "none": 0}
+        for _ in range(5_000):
+            pieces = [
+                rng.choice(rng.choice((words, words, numbers, fillers)))
+                for _ in range(rng.randint(1, 6))
+            ]
+            title = rng.choice([" ", "-", ", ", ""]).join(pieces)
+            title = rng.choice([title, title.title(), title.upper()])
+            claim = claims.find_performance_claim(title)
+            assert claim == _claim_as_written(title), title
+            found["claim" if claim is not None else "none"] += 1
+        assert min(found.values()) > 500, found
+
+    @pytest.mark.parametrize(
+        ("title", "verdict"),
+        CARD_VERDICTS_AS_REGISTERED[
+            jev_prereg.SET_PLAN_VERSIONS[("guardrail.card", 1)]
+        ],
+    )
+    def test_it_decides_as_its_plan_version_registered(
+        self, title: str, verdict: bool
+    ) -> None:
+        from src.programme import claims
+
+        assert (claims.find_performance_claim(title) is not None) is verdict
+        assert (_claim_as_written(title) is not None) is verdict
+
+    def test_every_card_plan_version_has_its_verdicts(self) -> None:
+        version = jev_prereg.SET_PLAN_VERSIONS[("guardrail.card", 1)]
+        released = {
+            p for (n, v, p) in RELEASED_SET_PLAN_HASHES if n == "guardrail.card"
+        }
+        assert version in CARD_VERDICTS_AS_REGISTERED
+        assert set(CARD_VERDICTS_AS_REGISTERED) == released
 
 
 #: The design's ordered keyword rules (design part C7), written here as

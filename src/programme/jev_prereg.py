@@ -518,7 +518,12 @@ CODE_SCREEN_BASELINE: Mapping[str, Any] = MappingProxyType(
 #: The card check's keyword baseline: ``claims.find_performance_claim`` on the
 #: title, ``true`` when it finds a claim. Its terms, how near a number must be
 #: to one, and what a number is are copied here, and the test holds each to
-#: ``claims``' own, so the plan pins the rule the check is measured against.
+#: ``claims``' own, so the plan's hash moves with any of them. What the rule
+#: does with them is no constant and in no hash: the test holds it to a copy of
+#: the rule written there as literals, and to its verdicts on invented titles
+#: recorded under each plan version, so a change to what it decides fails
+#: until the card's plan version is bumped (``tests/unit/test_jev_prereg.py::
+#: TestTheCardBaselineIsPinnedByWhatItDoes``).
 PERFORMANCE_CLAIM_BASELINE: Mapping[str, Any] = MappingProxyType(
     {
         "rule": "claims.find_performance_claim",

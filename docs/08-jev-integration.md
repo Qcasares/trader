@@ -3029,6 +3029,22 @@ and the test holds the forms of the whole list to a table written there and
 the labels to a copy of the rules written as literals
 (`tests/unit/test_jev_prereg.py::TestTheKeywordRules`).
 
+The card's baseline is held the same way, from this part's review. Its plan
+hashes the claims check's terms, reach and number pattern, and nothing held
+how the check applies them: a rule that read a term only before its number
+left the card's plan hash golden and every suite green, and an answer
+recorded under plan version 1 would have been measured against another
+baseline still calling itself version 1. Now the test holds
+`claims.find_performance_claim` to a copy written there as literals, read by
+hand, over 5,000 seeded invented titles built on the rule's edges — a term
+before and after its number, at the reach and one beyond, inside a longer
+word, in any case, numbers negative, decimal, in percent, run together and in
+other scripts' digits — and to its verdicts on invented titles recorded under
+the plan version that registered them, so a change to what it decides fails
+until the card's plan version is bumped and a row of verdicts added
+(`tests/unit/test_jev_prereg.py::TestTheCardBaselineIsPinnedByWhatItDoes`;
+the reviewer's mutation and five others each fail it).
+
 **The plans an answer was recorded under, however its job ends** (10a). The
 plans in force — the global plan's version and hash and the set's own
 (`jev_prereg.plans_in_force`) — are recorded for every answer twice over. The
