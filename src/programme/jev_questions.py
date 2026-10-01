@@ -89,15 +89,17 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Field,
     PlainSerializer,
     PlainValidator,
     StringConstraints,
+    ValidationError,
     WrapSerializer,
     WrapValidator,
     field_validator,
 )
 
-from src.programme import jev_catalogue, jev_hash
+from src.programme import jev_catalogue, jev_hash, jev_redact
 
 # ---------------------------------------------------------------------------
 # Rules a question set is held to
@@ -338,6 +340,72 @@ class FindingTitleState(BaseModel):
     ]
 
 
+class JobErrorState(BaseModel):
+    """
+    A failed research or ingest job's error, as a skeleton: its kind, and its
+    message reduced by ``jev_redact.skeleton`` to tokens of a closed
+    vocabulary and placeholders, in their order (phase D3).
+
+    Every value is a Literal written in code — a triaged kind, and tokens of
+    ``jev_redact.TOKENS`` — so the state carries no text, and is addressed by
+    its own hash (:data:`STATE_ADDRESSED`, :func:`job_error_subject`) rather
+    than by a text's. The message itself is read by the redactor and by
+    ``jev_chips.code_cause`` alone, and never stored, sent or logged by the
+    Jev side. This system's own records, so it is recorded as ``system`` and
+    sent only while ``jev_send_internal_detail`` is on (docs/09, D-SAFE-1 and
+    D-SAFE-5).
+    """
+
+    model_config = _STATE_CONFIG
+
+    job_kind: Literal[jev_redact.TRIAGED_KINDS]
+    error: Annotated[
+        tuple[Literal[jev_redact.TOKENS], ...],
+        Field(min_length=1, max_length=jev_redact.SKELETON_MAX_TOKENS),
+    ]
+
+
+def job_error_subject(state: JobErrorState) -> str:
+    """
+    A ``job_error`` subject's address: ``jev_hash.state_hash`` of the state
+    as sent, which the lane holds every ask about one to
+    (``jev_lane._check_subject``). One skeleton is one subject, however many
+    jobs failed with it.
+    """
+    return jev_hash.state_hash(state.model_dump(mode="json"))
+
+
+def job_error_text(state: JobErrorState) -> str:
+    """
+    A ``job_error`` subject's text, as the harness exports it and the ops
+    baseline reads it: the kind, a colon and a space, and the tokens joined by
+    single spaces. No token holds a space and no kind holds a colon, so the
+    text names exactly one state, which :func:`job_error_from_text` reads back
+    (``tests/unit/test_jev_questions.py::test_job_error_text_round_trips``).
+    """
+    return f"{state.job_kind}: {' '.join(state.error)}"
+
+
+def job_error_from_text(text: object) -> JobErrorState | None:
+    """
+    The state a ``job_error`` subject's text names, or ``None`` for text that
+    names none: anything but a triaged kind, ``": "`` and tokens of the
+    vocabulary each separated by one space, as :func:`job_error_text` writes
+    them. Exact both ways, so a label's text is read as the one state it was
+    exported from, or refused (docs/09, D-HMB-07). Never raises.
+    """
+    if not isinstance(text, str):
+        return None
+    kind, separator, rest = text.partition(": ")
+    if not separator or not rest:
+        return None
+    try:
+        state = JobErrorState(job_kind=kind, error=tuple(rest.split(" ")))
+    except ValidationError:
+        return None
+    return state if job_error_text(state) == text else None
+
+
 #: The state models a ``web``-provenance set may take, and the only sets that
 #: may take them. Held both ways at registration: web text in any other shape
 #: would reach no screen, and a web state under another provenance would be
@@ -354,6 +422,7 @@ STATE_SUBJECT: Mapping[type[BaseModel], str] = MappingProxyType(
         WebExcerptState: "web_excerpt",
         HypothesisTitleState: "hypothesis_title",
         FindingTitleState: "finding_title",
+        JobErrorState: "job_error",
     }
 )
 
@@ -391,9 +460,13 @@ TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
 #: here that is also text (:data:`TEXT_SUBJECT_FIELD`), one the detail rule
 #: cannot prove text-free with no field exempted, and a set asking about one
 #: under any provenance but the one named, as :data:`TEXT_SUBJECT_PROVENANCE`
-#: does for text. Empty until phase D3 adds the job error's skeleton,
-#: ``{JobErrorState: "system"}`` (docs/09, section 2.1).
-STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType({})
+#: does for text. Phase D3 adds the one such subject, a failed job's error as
+#: a skeleton, recorded as ``system``: this system's own records, computed in
+#: code, which can quote an outsider, and so never ``internal``, which the
+#: phase F loader is to trust (docs/09, sections 2.1 and D-SAFE-5).
+STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType(
+    {JobErrorState: "system"}
+)
 
 
 def _text_sent_alone(model: type[BaseModel]) -> str | None:
@@ -2044,8 +2117,10 @@ __all__ = [
     "SCREEN_SET_NAME",
     "SEVERITY_CRITERIA",
     "SLEEVES",
+    "STATE_ADDRESSED",
     "STATE_SUBJECT",
     "TEXT_SUBJECT_FIELD",
+    "TEXT_FREE_LANES",
     "TEXT_SUBJECT_PROVENANCE",
     "TITLE_MAX_CHARS",
     "TREND_AVERAGE_SESSIONS",
@@ -2056,6 +2131,7 @@ __all__ = [
     "Drawdown",
     "FindingTitleState",
     "HypothesisTitleState",
+    "JobErrorState",
     "Momentum",
     "ProbeState",
     "QuestionSet",
@@ -2065,6 +2141,9 @@ __all__ = [
     "VolatilityQuintile",
     "WebExcerptState",
     "get",
+    "job_error_from_text",
+    "job_error_subject",
+    "job_error_text",
     "question_set_problem",
     "registration_problem",
     "same_state_subjects",

@@ -80,7 +80,7 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic_core import core_schema
 from typing_extensions import TypedDict
 
-from src.programme import jev_catalogue
+from src.programme import jev_catalogue, jev_redact
 from src.programme import jev_questions as jq
 from src.programme.jev_hash import state_hash
 from src.programme.jev_questions import QuestionSet
@@ -3471,8 +3471,19 @@ def skeleton_addressed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestStateAddressedSubjects:
-    def test_no_subject_is_addressed_by_its_state_until_phase_d3(self) -> None:
-        assert dict(jq.STATE_ADDRESSED) == {}
+    def test_the_job_error_is_the_one_subject_addressed_by_its_state(self) -> None:
+        """
+        Phase D3 adds the one such subject, a failed job's error as its
+        skeleton, recorded as ``system`` (docs/09, section 2.1). The mapping
+        was empty until D3, and this test held it so; the stand-in sets below
+        still prove each rule apart from the registered set.
+        """
+        assert dict(jq.STATE_ADDRESSED) == {jq.JobErrorState: "system"}
+        assert jq.STATE_SUBJECT[jq.JobErrorState] == "job_error"
+        assert jq.JobErrorState not in jq.TEXT_SUBJECT_FIELD
+        assert "job_error" not in jq.TEXT_SUBJECT_PROVENANCE
+        assert "job_error" in jev_catalogue.SUBJECT_TYPES
+        assert jq.same_state_subjects("job_error") == ()
 
     def test_a_job_error_subject_must_be_its_state_hash(
         self, skeleton_addressed: None
@@ -3639,3 +3650,158 @@ class TestTheTextFreeLanes:
             "job_kind": "run_backtest",
             "error": ["refused"],
         }
+
+
+# ---------------------------------------------------------------------------
+# Phase D3: a failed job's error, as a skeleton
+# ---------------------------------------------------------------------------
+
+
+def _job_error(*tokens: str, kind: str = "ingest_bars") -> jq.JobErrorState:
+    return jq.JobErrorState(job_kind=kind, error=tokens)
+
+
+class TestTheJobError:
+    """
+    Phase D3's state: a failed research or ingest job's error as the
+    redactor's skeleton — its kind, and tokens of the closed vocabulary — and
+    nothing else of the job. It carries no text, so it is addressed by its
+    own hash and recorded as ``system`` (docs/09, section 2.1).
+    """
+
+    def test_it_holds_a_triaged_kind_and_tokens(self) -> None:
+        state = _job_error("ConnectionRefusedError", "connection", "refused")
+        assert state.job_kind == "ingest_bars"
+        assert state.error == ("ConnectionRefusedError", "connection", "refused")
+        for kind in jev_redact.TRIAGED_KINDS:
+            assert _job_error("timeout", kind=kind).job_kind == kind
+
+    @pytest.mark.parametrize(
+        ("kind", "error"),
+        [
+            ("live_decision", ("timeout",)),
+            ("jev_ask", ("timeout",)),
+            ("Backtest", ("timeout",)),
+            ("ingest_bars", ()),
+            ("ingest_bars", ("Timeout",)),
+            ("ingest_bars", ("sentinel",)),
+            ("ingest_bars", ("timeout refused",)),
+            ("ingest_bars", ["timeout"]),
+            ("ingest_bars", ("timeout",) * (jev_redact.SKELETON_MAX_TOKENS + 1)),
+            ("ingest_bars", "timeout"),
+            (None, ("timeout",)),
+        ],
+        ids=[
+            "a-venue-kind",
+            "a-programme-kind",
+            "a-kind-capitalised",
+            "no-tokens",
+            "a-word-capitalised",
+            "a-word-outside-the-vocabulary",
+            "two-words-as-one",
+            "a-list",
+            "one-over-the-bound",
+            "a-string",
+            "no-kind",
+        ],
+    )
+    def test_anything_else_is_refused(self, kind: Any, error: Any) -> None:
+        with pytest.raises(ValidationError):
+            jq.JobErrorState(job_kind=kind, error=error)
+
+    def test_its_bound_is_the_redactors(self) -> None:
+        bound = jev_redact.SKELETON_MAX_TOKENS
+        assert len(_job_error(*("timeout",) * bound).error) == bound
+        field = jq.JobErrorState.model_fields["error"]
+        assert [m.max_length for m in field.metadata if hasattr(m, "max_length")] == [
+            bound
+        ]
+
+    @pytest.mark.parametrize("field", ["message", "job_id", "error_text", "detail"])
+    def test_it_is_closed_and_frozen(self, field: str) -> None:
+        with pytest.raises(ValidationError):
+            jq.JobErrorState(job_kind="backtest", error=("timeout",), **{field: "x"})
+        state = _job_error("timeout")
+        with pytest.raises(ValidationError):
+            state.job_kind = "walkforward"  # type: ignore[misc]
+
+    def test_it_carries_no_text_with_no_field_exempted(self) -> None:
+        """The detail rule proves it text-free as the ops lane requires."""
+        assert not jq._model_carries_text(jq.JobErrorState, set(), exempt=())
+        assert jq.state_model_problem(jq.JobErrorState, "ops") is None
+
+    def test_its_address_is_the_hash_of_its_state(self) -> None:
+        """
+        A ``job_error`` subject is its whole state, hashed as the lane hashes
+        what is sent (``jev_hash.state_hash``): another token, or another
+        kind, is another subject.
+        """
+        state = _job_error("UniqueViolationError", "duplicate", "key", "[quoted]")
+        dumped = state.model_dump(mode="json")
+        assert dumped == {
+            "job_kind": "ingest_bars",
+            "error": ["UniqueViolationError", "duplicate", "key", "[quoted]"],
+        }
+        assert jq.job_error_subject(state) == state_hash(dumped)
+        other = _job_error("UniqueViolationError", "duplicate", "key")
+        assert jq.job_error_subject(other) != jq.job_error_subject(state)
+        assert jq.job_error_subject(
+            _job_error("timeout", kind="backtest")
+        ) != jq.job_error_subject(_job_error("timeout", kind="walkforward"))
+
+    def test_no_set_asked_about_another_state_takes_it(self) -> None:
+        for question_set in jq.REGISTRY.values():
+            if question_set.state_model is not jq.JobErrorState:
+                with pytest.raises(TypeError):
+                    question_set.dump_state(_job_error("timeout"))
+
+
+def test_job_error_text_round_trips() -> None:
+    """
+    Over the redactor's fuzz, each skeleton taken as a state of each triaged
+    kind: its text reads back as exactly that state. Text that names no state
+    — another kind, a token outside the vocabulary, a space too many or too
+    few, no colon, nothing, a value that is not text — reads as ``None``, so
+    a label's text is read as the one state it was exported from, or refused
+    (docs/09, D-HMB-07).
+    """
+    from tests.unit.test_jev_redact import FUZZ
+
+    seen = 0
+    for value in FUZZ:
+        tokens = jev_redact.skeleton(value)
+        if not tokens:
+            continue
+        for kind in jev_redact.TRIAGED_KINDS:
+            state = jq.JobErrorState(job_kind=kind, error=tokens)
+            text = jq.job_error_text(state)
+            assert jq.job_error_from_text(text) == state, text
+            seen += 1
+    assert seen > 10_000
+    assert jq.job_error_text(_job_error("connection", "refused")) == (
+        "ingest_bars: connection refused"
+    )
+    for text in (
+        "",
+        "ingest_bars",
+        "ingest_bars:",
+        "ingest_bars: ",
+        "ingest_bars:connection",
+        "ingest_bars:  connection",
+        "ingest_bars: connection ",
+        " ingest_bars: connection",
+        "ingest_bars: connection  refused",
+        "ingest_bars: connection\trefused",
+        "ingest_bars: connection\nrefused",
+        "Ingest_bars: connection",
+        "live_decision: connection",
+        "ingest_bars: Connection",
+        "ingest_bars: sentinel",
+        "ingest_bars: ingest_bars: connection",
+        "ingest_bars: " + " ".join(["timeout"] * (jev_redact.SKELETON_MAX_TOKENS + 1)),
+        None,
+        7,
+        b"ingest_bars: connection",
+        ("ingest_bars", ("connection",)),
+    ):
+        assert jq.job_error_from_text(text) is None, text
