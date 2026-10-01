@@ -4616,7 +4616,14 @@ recorded beside what it changed, above, or below as an open item:
 - and, found while fixing the first, the re-ask planner reads no block at
   all, so a re-ask the road refuses unrecorded can be drawn, and the flip
   rates count it neither way; which pairs they should count is the plan's
-  to decide (open item 85).
+  to decide (open item 85);
+- found while running the suites, C4's
+  `tests/integration/test_jev_forward.py::TestTheClockThroughTheLoop::test_planned_claimed_asked_once_and_recorded_once`
+  failed for ten minutes of every session, from today's collection to its
+  cutoff, at D1's base as at D2's: the planner also plans today's session
+  then, due at once and in the test's state, and the drain asked about it
+  first, so the session the test names replayed its answer. The test now
+  holds any other regime job back a day, and passed inside that window.
 
 ### Open items Phase D found
 
