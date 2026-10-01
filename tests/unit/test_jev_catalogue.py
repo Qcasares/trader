@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -132,6 +133,28 @@ class TestTheModelIsPinned:
 
     def test_no_alias_is_a_known_model(self) -> None:
         assert not catalogue.REFUSED_ALIASES & set(catalogue.KNOWN_MODELS)
+
+    def test_every_known_model_has_a_first_observation(self) -> None:
+        """
+        The harness (phase C9) computes ``possibly_in_training`` against the
+        day a model was first observed, since TypeSafe discloses no training
+        cutoff. A model added to the catalogue without saying when it was
+        first seen would have every item judged against nothing, so it must
+        say; and nothing outside the catalogue has a day, which would be a
+        model nobody may call being given a cutoff.
+        """
+        assert set(catalogue.MODEL_FIRST_OBSERVED) == set(catalogue.KNOWN_MODELS)
+        for model, day in catalogue.MODEL_FIRST_OBSERVED.items():
+            assert type(day) is date, (model, day)
+
+    def test_jev_1_13_0_was_first_observed_by_the_key_check(self) -> None:
+        """docs/08: the dispatch-only key check found it answering on 26 September
+        2026, the earliest day this repository has evidence of it."""
+        assert catalogue.MODEL_FIRST_OBSERVED["jev-1.13.0"] == date(2026, 9, 26)
+
+    def test_the_first_observations_cannot_be_changed_at_runtime(self) -> None:
+        with pytest.raises(TypeError):
+            catalogue.MODEL_FIRST_OBSERVED["jev-1.13.0"] = date(2030, 1, 1)  # type: ignore[index]
 
 
 class TestTheBaseUrl:
