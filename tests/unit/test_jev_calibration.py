@@ -150,7 +150,11 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
         {"vs_keyword_jev_right_only": 10, "vs_keyword_baseline_right_only": 0},
         [],
     ),
-    "uniform_flips": ({"flip_rate": jev_prereg.MAX_FLIP_RATE + 0.01}, []),
+    # Four of the sixty uniform re-asks flipped: 0.067, over the 0.05 limit.
+    # A rate the pairs can give, so it is the limit that refuses it; the
+    # first cut moved this case to 0.06 of 60, 3.6 flips, which the count
+    # check refused before the limit was read (D1's review, D1RT-6).
+    "uniform_flips": ({"flip_rate": 4 / 60}, []),
     "near_threshold_flips": (
         {"flip_rate_near_threshold_n": jev_prereg.MIN_FLIP_PAIRS - 1},
         [],
@@ -275,7 +279,9 @@ class TestUsable:
             ),
             ({"flip_rate": None}, "uniform_flips"),
             ({"flip_rate_n": None}, "uniform_flips"),
-            ({"flip_rate_near_threshold": 0.11}, "near_threshold_flips"),
+            # Five of forty near the threshold: 0.125, over the 0.10 limit, a
+            # rate the pairs can give (D1RT-6; 0.11 of 40 is 4.4 flips).
+            ({"flip_rate_near_threshold": 5 / 40}, "near_threshold_flips"),
             ({"n": True}, "size"),
         ],
     )

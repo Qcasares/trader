@@ -3324,26 +3324,49 @@ class TestTheTextFreeLanes:
         assert problem is not None and "internal_detail=True" in problem, problem
         assert jq.registration_problem(_ops_set(), jq.REGISTRY) is None
 
+    @pytest.mark.parametrize("internal_detail", [True, False])
+    @pytest.mark.parametrize("provenance", ["system", "web"])
     def test_dump_state_checks_an_ops_set_whatever_its_internal_detail(
-        self,
+        self, internal_detail: bool, provenance: str
     ) -> None:
         """
-        A set placed by hand, never through registration, declaring its
-        detail, whose dump would carry an undeclared string: refused on its
-        first dump. The same model in a lane that is not text-free dumps,
-        since it declared its detail; the check is the lane's.
+        A set placed by hand, never through registration, whose dump would
+        carry an undeclared string: refused on its first dump by the lane's
+        check, whether or not it declares its detail, and whatever its
+        provenance — one outside this system's own text included, which the
+        detail rule does not read. D1's review (D1RT-1) found only the
+        declaring half tested, the half where the road already reads the
+        detail switch. The same model in a lane that is not text-free dumps
+        when it declared its detail; the check is the lane's.
         """
         carrying = _skeleton_with("_SkeletonWithANote", str)
         state = carrying(job_kind="ingest_bars", other="a message nobody declared")
+        ops = _ops_set(carrying, internal_detail=internal_detail, provenance=provenance)
         with pytest.raises(ValueError, match="TEXT_FREE_LANES"):
-            _ops_set(carrying).dump_state(state)
-        elsewhere = _ops_set(carrying, name="findings.example", lane="findings")
-        assert elsewhere.dump_state(state)["other"] == "a message nobody declared"
+            ops.dump_state(state)
+        if internal_detail:
+            elsewhere = _ops_set(
+                carrying,
+                name="findings.example",
+                lane="findings",
+                provenance=provenance,
+            )
+            assert elsewhere.dump_state(state)["other"] == "a message nobody declared"
 
-    def test_a_title_is_not_exempt_in_a_text_free_lane(self) -> None:
-        state = _Titled(title="A title nobody declared")
+    @pytest.mark.parametrize("internal_detail", [True, False])
+    @pytest.mark.parametrize("provenance", ["system", "web"])
+    def test_a_title_is_not_exempt_in_a_text_free_lane(
+        self, internal_detail: bool, provenance: str
+    ) -> None:
+        """
+        The detail rule exempts a top-level ``title`` for this system's own
+        text; the lane's check exempts nothing, so a title is refused here
+        with or without the declaration, under any provenance (D1RT-1).
+        """
+        state = _Titled(title="A raw error quoting a vendor reply")
+        ops = _ops_set(_Titled, internal_detail=internal_detail, provenance=provenance)
         with pytest.raises(ValueError, match="TEXT_FREE_LANES"):
-            _ops_set(_Titled).dump_state(state)
+            ops.dump_state(state)
 
     def test_a_skeleton_dumps(self) -> None:
         state = _Skeleton(job_kind="run_backtest", error=("refused",))
