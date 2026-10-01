@@ -4329,8 +4329,8 @@ D2 asks two question sets about the title of every finding the programme's
 model raised, behind the findings area, records each answer and changes
 nothing with it; builds the chips phase E may show beside a finding; and gives
 the harness the finding title as a subject, `preview` and `suggestions`. The
-findings area is seeded off, so seeded the shipped loop plans, claims and asks
-nothing new. No answer writes a finding, a hypothesis, a candidate, an
+findings area is seeded off, so the shipped loop, as seeded, plans, claims and
+asks nothing new. No answer writes a finding, a hypothesis, a candidate, an
 assessment, a label or a switch.
 
 **The sets and their words** (the scope's 3, first and second points; design
@@ -4351,10 +4351,10 @@ the registered words they hash as the scope gives: packs
 `2989fecdce44b1ff9bd1c216b5eb1f33bbc76fc15427403e83defac412239ff3` and
 `0504d4817b84e44db3fc268f4d64bfd0d4d0e4ec62856f84595ccd9bab08db9e`. The
 registry is eight sets, and the released pack and question histories gain
-their rows. `tests/unit/test_jev_questions.py::TestTheFindingTitle`,
-`::test_the_title_cap_is_proposed_findings`,
-`::test_the_owning_role_options_are_the_twelve_roles` and
-`::test_the_severity_options_are_the_findings_severities`.
+their rows. `tests/unit/test_jev_questions.py::TestTheFindingTitle`, and
+`::TestTheRegistry`'s `test_the_title_cap_is_proposed_findings`,
+`test_the_owning_role_options_are_the_twelve_roles` and
+`test_the_severity_options_are_the_findings_severities`.
 
 **Their plans** (the scope's 3, third point; design section 3.4). Each set's
 plan holds covered accuracy to the 0.80 floor with no acting class, and
