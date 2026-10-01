@@ -7,7 +7,7 @@ The Jev evaluation harness, from the command line.
     DATABASE_URL=… python -m src.programme.jev_eval forward [--since DATE] [--json]
     DATABASE_URL=… python -m src.programme.jev_eval forward-audit [--since DATE]
     DATABASE_URL=… python -m src.programme.jev_eval evaluate --set S --key K \\
-        --labelled-by L [--split test|all] [--model M] [--record [--commit SHA]]
+        --labelled-by L --split dev|test|all [--model M] [--record [--commit SHA]]
     DATABASE_URL=… python -m src.programme.jev_eval labels export --set S \\
         --key K --blind [--sample N] [--include-quarantined]
     DATABASE_URL=… python -m src.programme.jev_eval labels import --file F \\
@@ -43,12 +43,20 @@ TestTheCommandsOnPostgres``.
 What an evaluation may say (phase C9)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ``evaluate`` measures one question of one registered set, at its registered
-version, against exactly one labeller, for one pinned model, on the held-out
-test split or on every item, by design section 10.1's definitions, binding
-(:func:`evaluate`, :func:`build_evaluation`). It is a dry run that writes
-nothing unless ``--record``, which refuses without a clean 40-hex commit. What
-it refuses outright: ``decision.regime``, which has no ground truth for the
-present regime, its numbers being ``forward``'s; a question with no plan
+version, against exactly one labeller, for one pinned model, by design section
+10.1's definitions, binding (:func:`evaluate`, :func:`build_evaluation`), over
+the split ``--split`` names, which has no default. ``test`` and ``all`` read
+the held-out test items, a look the gate's level is spent on, so from plan
+version 2 each is taken only with ``--record``, which refuses without a clean
+40-hex commit, and ``jev_calibration.usable`` refuses a fifth look of a set,
+version and question under any model (M3). ``dev`` scores the development
+split's items alone — the threshold's search, reading no label or date of a
+test item and scoring none of its answers — and is never recorded; its flip
+rates, which use no label, are the whole population's, as a look's are. The
+rule is held in :func:`execute`, which ``main`` and every caller of the
+harness's commands reach (:func:`look_problem`).
+What it refuses outright: ``decision.regime``, which has no ground truth for
+the present regime, its numbers being ``forward``'s; a question with no plan
 registered before the answers; and nothing labelled, which writes nothing and
 prints "not measured: no labelled items".
 
@@ -79,9 +87,16 @@ prints "not measured: no labelled items".
   test, at the gate level, of the items only one of the two got right, which
   the row records (``jev_stats.sign_test``), and "too few to say" where not
   even every one of them going Jev's way could reach the level.
+* **Flips are the population's** (plan version 2, M2): a flip rate counts
+  every canonical answer to the question under the model that was asked
+  again, labelled or not, in the stratum its re-ask was sampled in and under
+  the plan that sampled it, since a flip uses no label and an armed threshold
+  would act on every answer; so a flip count may exceed ``n``, which migration
+  0015 allows.
 * **Every level is the row's**: each interval at its ``ci_level`` and each
   gate at its ``gate_ci_level``, as recorded, never the plan in force when it
-  is read.
+  is read, and printed as the decimal it was written as (99.9375%, never a
+  rounded 99.9%).
 * **A figure over nothing is "not measured"**, never 0 or 0.00, and nothing is
   sorted by a figure, so an unknown is never sorted as a low.
 
@@ -127,12 +142,16 @@ Each figure is quoted as what it is (docs/08, phase C, design section 10.3):
   after a change of pin they are two judges.
 * **Under the plan that registered them.** Agreement is scored by
   ``jev_prereg.REGIME_BASELINE_RULE`` only over answers first recorded under
-  the plan this report runs, which the regime job records in its result when
-  it asks; an answer recorded under another plan, or with no plan recorded,
-  is counted apart by the plan it was recorded under and never scored by a
-  rule registered after it. A flip rate likewise counts only the re-asks
-  sampled under this plan, in the stratum they were sampled in, which the
-  planner records in the re-ask's payload. The report names its plan.
+  the regime plan this report runs, which the regime job records in its
+  result when it asks; an answer recorded under another regime plan, or with
+  none recorded — a phase C4 job's result names the global plan alone — is
+  counted apart by the regime plan it was recorded under, or as unknown, and
+  never scored by a rule registered after it. The regime plan has stood
+  apart from the global plan since plan version 2 (M4), so reviewing the
+  rule sets aside regime agreement alone. A flip rate counts only the
+  re-asks sampled under the global plan this report runs, in the stratum
+  they were sampled in, which the planner records in the re-ask's payload.
+  The report names both plans.
 
 A figure over nothing is "not measured", never 0 (``jev_stats``), and the text
 formatter prints it so.
@@ -203,6 +222,8 @@ PROBE_SET_NAME = "probe.connectivity"
 FORWARD_FIELDS: tuple[str, ...] = (
     "plan_version",
     "plan_hash",
+    "regime_plan_version",
+    "regime_plan_hash",
     "signal",
     "symbol",
     "since",
@@ -238,7 +259,8 @@ OUTCOMES = ("live_measured", "live_abstain", "live_invalid", "late", "absent")
 #: The re-ask strata, in the order the plan samples them; never pooled.
 STRATA = ("uniform", "low_margin")
 
-#: How an answer whose job recorded no plan is counted in ``not_scored``.
+#: How an answer whose job recorded no regime plan — a phase C4 job, whose
+#: result named the global plan alone — is counted in ``not_scored``.
 UNKNOWN_PLAN = "unknown"
 
 #: The exit codes: a command that ran, one the harness refused, a usage error.
@@ -262,9 +284,27 @@ NO_GROUND_TRUTH: Mapping[str, str] = {
 #: The subjects a label may be of: text, which a person can read and judge.
 TEXT_SUBJECTS = ("web_excerpt", "hypothesis_title")
 
-#: The splits an evaluation may be computed over: the held-out test split,
-#: which a gate reads, or every labelled item.
+#: The splits an evaluation may be recorded over: the held-out test split,
+#: which a gate reads, or every labelled item, which holds it. Each is a look
+#: at the held-out items (``jev_prereg.LOOKED_AT_SPLITS``, which a test holds
+#: equal), so from plan version 2 each is computed only to be recorded
+#: (:func:`look_problem`): a look nobody records is a look ``usable`` cannot
+#: count.
 SPLITS = ("test", "all")
+
+#: The development split: the threshold search's own items. ``evaluate
+#: --split dev`` scores them alone — it reads no label or date of a test item,
+#: and scores none of its answers — and is never recorded (plan version 2,
+#: M3), so an operator can see how the search stands without spending a look.
+#: Its flip rates are the population's (M2), as a look's are: a flip uses no
+#: label, so counting a test item's re-ask among them is no look at it (D1's
+#: review, D1RT-2). Nor can it say whether a look would be an upper bound,
+#: which a held-out item's date decides (docs/08 open item 83).
+DEV_SPLIT = "dev"
+
+#: What ``evaluate --split`` takes. It has no default, so nobody looks at the
+#: test split by accident.
+EVALUATE_SPLITS = (DEV_SPLIT, *SPLITS)
 
 #: What ``evaluate`` prints, and writes nothing, over no labelled item.
 NOTHING_LABELLED = "not measured: no labelled items"
@@ -399,12 +439,15 @@ def build_forward(
         row for row in answered if row.get("subject_id") != row["session"].isoformat()
     ]
     plan = jev_prereg.plan_hash()
+    regime_plan = jev_prereg.regime_plan_hash()
     by_model: dict[str, list[Mapping[str, Any]]] = {}
     for row in live_measured:
         by_model.setdefault(str(row["model"]), []).append(row)
     return {
         "plan_version": jev_prereg.PLAN_VERSION,
         "plan_hash": plan,
+        "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+        "regime_plan_hash": regime_plan,
         "signal": jev_clock.regime_signal(question_set, REGIME_QUESTION),
         "symbol": symbol,
         "since": sessions[0].isoformat() if sessions else None,
@@ -419,7 +462,7 @@ def build_forward(
         },
         "replayed": count(len(replayed), len(answered)),
         "models": {
-            model: _model_figures(question_set, rows, jobs, plan)
+            model: _model_figures(question_set, rows, jobs, regime_plan)
             for model, rows in sorted(by_model.items())
         },
         "flip_rates": {
@@ -459,18 +502,19 @@ def _model_figures(
     question_set: jev_questions.QuestionSet,
     measured: Sequence[Mapping[str, Any]],
     jobs: Mapping[str, Mapping[str, Any]],
-    plan: str,
+    regime_plan: str,
 ) -> dict[str, Any]:
     """
     One model's live measured sessions: the regimes' shares, and agreement
-    with the baseline rule over the answers first recorded under ``plan``,
-    the others counted by the plan they were recorded under.
+    with the baseline rule over the answers first recorded under
+    ``regime_plan``, the others counted by the regime plan they were recorded
+    under.
     """
     scored = []
     not_scored: dict[str, int] = {}
     for row in measured:
-        recorded_under = _answer_plan(question_set, row, jobs)
-        if recorded_under == plan:
+        recorded_under = _answer_regime_plan(question_set, row, jobs)
+        if recorded_under == regime_plan:
             scored.append(row)
         else:
             label = recorded_under or UNKNOWN_PLAN
@@ -485,16 +529,18 @@ def _model_figures(
     }
 
 
-def _answer_plan(
+def _answer_regime_plan(
     question_set: jev_questions.QuestionSet,
     row: Mapping[str, Any],
     jobs: Mapping[str, Mapping[str, Any]],
 ) -> str | None:
     """
-    The plan in force when a session's answer was first recorded: the plan
-    the regime job that asked it wrote in its result. A replayed session's
-    answer was asked about another session, whose job is the one that asked.
-    ``None`` when no such job, or no plan in it, is on record.
+    The regime plan in force when a session's answer was first recorded: the
+    regime plan the regime job that asked it wrote in its result. A replayed
+    session's answer was asked about another session, whose job is the one
+    that asked. ``None`` when no such job, or no regime plan in it, is on
+    record — a phase C4 job's result names the global plan alone, and the
+    global plan's hash is never read as a regime plan's.
     """
     try:
         asked_about = date.fromisoformat(str(row.get("subject_id")))
@@ -502,7 +548,7 @@ def _answer_plan(
         return None
     job = jobs.get(jev_clock.regime_job_key(question_set, asked_about)) or {}
     result = job.get("result") or {}
-    recorded = result.get("plan_hash") if isinstance(result, Mapping) else None
+    recorded = result.get("regime_plan_hash") if isinstance(result, Mapping) else None
     return recorded if isinstance(recorded, str) else None
 
 
@@ -800,6 +846,8 @@ async def status_report(conn: asyncpg.Connection) -> dict[str, Any]:
         "today": await jev_repo.status_summary(conn),
         "plan_version": jev_prereg.PLAN_VERSION,
         "plan_hash": jev_prereg.plan_hash(),
+        "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+        "regime_plan_hash": jev_prereg.regime_plan_hash(),
     }
 
 
@@ -1208,19 +1256,25 @@ def build_evaluation(
     question_key: str,
     labelled_by: str,
     model: str,
-    split: Literal["all", "test"],
+    split: Literal["all", "test", "dev"],
     ledger: Ledger,
 ) -> Evaluation:
     """
     One evaluation from rows already read: pure, so every definition of
     design section 10.1 is tested without a database. See :func:`evaluate`
     for what it is, and the module docstring for the rules it keeps.
+
+    Over :data:`DEV_SPLIT` it scores the development split's items alone —
+    their labels, answers and dates — and so its search, and measures
+    nothing at the threshold, which a recorded look measures on the test
+    split; its flip rates are the population's, as every split's are
+    (``tests/unit/test_jev_eval.py::TestLooks``).
     """
     problem = question_problem(question_set, question_key)
     if problem is not None:
         raise Refused(problem)
-    if split not in SPLITS:
-        raise Refused(f"the split is test or all, not {split!r}")
+    if split not in EVALUATE_SPLITS:
+        raise Refused(f"the split is dev, test or all, not {split!r}")
     name, version = question_set.name, question_set.version
     question = dict(question_set.questions)[question_key]
     options = options_of(question_set, question_key)
@@ -1262,12 +1316,17 @@ def build_evaluation(
                 standing=standing,
             )
         )
-    in_split = [i for i in items if split == "all" or i.split == "test"]
+    if split == DEV_SPLIT:
+        # The search's own items: no label and no date of a test item is read
+        # below, and none of its answers is scored. The flip rates below count
+        # the population, which uses no label, as every split's do.
+        items = [i for i in items if i.split == DEV_SPLIT]
+    in_split = [i for i in items if split == "all" or i.split == split]
     scored = [i for i in in_split if i.standing == "scored"]
     other_plans = sum(1 for i in in_split if i.standing == "other_plans")
     plan_unknown = sum(1 for i in in_split if i.standing == "plan_unknown")
     contested_here = sum(
-        1 for s in contested if split == "all" or jev_prereg.split_of(*s) == "test"
+        1 for s in contested if split == "all" or jev_prereg.split_of(*s) == split
     )
     if not scored:
         apart = ""
@@ -1468,6 +1527,8 @@ def build_evaluation(
         threshold_dataset = dataset_sha256(
             [(*i.subject, i.label) for i in items if i.split == "dev"]
         )
+    if choice.outcome == "chosen" and split != DEV_SPLIT:
+        assert threshold is not None
         tested = [i for i in scored if i.split == "test"]
         covered = [
             i for i in tested if i.valid and float(i.answer["margin"]) >= threshold
@@ -1482,20 +1543,21 @@ def build_evaluation(
         )
         at_threshold = _figure(right_at, n_at)
 
-    # The flip rates: each canonical answer of a scored item beside its
-    # re-ask, counted only in the stratum and under the global plan its
-    # re-ask was sampled in; the near-threshold rate from either stratum, by
-    # the canonical margin, once a threshold is chosen.
-    canonical = {
-        i.answer["request_id"]
-        for i in scored
-        if i.answer is not None and i.answer["request_status"] == "ok"
-    }
+    # The flip rates: every canonical answer to the question under the model
+    # beside its re-ask, labelled or not (plan version 2, M2:
+    # ``jev_prereg.FLIP_PAIRS``) — a flip uses no label, and an armed threshold
+    # would act on the population, so the population's flips are the ones
+    # that bear on it. Each pair counted only in the stratum and under the
+    # global plan its re-ask was sampled in; the near-threshold rate from
+    # either stratum, by the canonical margin, once a threshold is chosen.
+    # Version 1 counted a pair only when its canonical request answered a
+    # scored item, so thirty uniform pairs took some six hundred labels.
+    assert jev_prereg.FLIP_PAIRS == (
+        "every_canonical_request_of_the_question_under_the_pin"
+    )
     plan = jev_prereg.plan_hash()
     strata: dict[str, list[Mapping[str, Any]]] = {name: [] for name in STRATA}
     for pair in ledger.pairs:
-        if pair["canonical_request_id"] not in canonical:
-            continue
         job = ledger.reasks.get(reask_job_key(pair["canonical_request_id"])) or {}
         payload = job.get("payload") or {}
         stratum = payload.get("stratum") if isinstance(payload, Mapping) else None
@@ -1688,7 +1750,7 @@ async def evaluate(
     question_key: str,
     labelled_by: str,
     model: str,
-    split: Literal["all", "test"],
+    split: Literal["all", "test", "dev"],
 ) -> Evaluation:
     """
     One question of ``question_set`` against exactly one labeller's labels,
@@ -1697,6 +1759,11 @@ async def evaluate(
     Reads only; :class:`Refused` for a set with no ground truth, a question
     with no plan registered before its answers, a labeller or model nobody
     may name, and nothing labelled.
+
+    The function computes whatever split it is asked for: the rule that a
+    look at the held-out items is recorded binds the harness's own commands
+    (:func:`execute`), and a caller of this function, or anyone reading the
+    test split by hand, is outside the protocol (docs/08 open item 79).
     """
     if question_set is not jev_questions.REGISTRY.get(question_set.name):
         raise Refused(f"{question_set.name} v{question_set.version} is not registered")
@@ -2170,7 +2237,9 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
     split — never one labeller's standing for another's — each with whether
     it could arm a threshold and every reason it could not
     (``jev_calibration.usable``, against the pin and the plans in force now),
-    and the quarantines by what made them.
+    how many of its set, version and question's looks at the held-out items
+    are spent, under every model (plan version 2, M3), and the quarantines by
+    what made them.
     """
     pin = await flags.jev_model(conn)
     entries = []
@@ -2196,6 +2265,7 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
                 "usable": usable,
                 "usable_threshold": threshold,
                 "not_usable_because": reasons,
+                "looks_spent": looks_spent(row, everything),
             }
         )
     return {
@@ -2205,6 +2275,31 @@ async def evaluations_report(conn: asyncpg.Connection) -> dict[str, Any]:
             await jev_repo.quarantine_reasons(conn)
         ),
     }
+
+
+def looks_spent(
+    evaluation: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> int:
+    """
+    How many looks at the held-out items the set, version and question of
+    ``evaluation`` have spent: the recorded rows among ``rows`` of that
+    identity (``jev_prereg.LOOKS_COUNTED_BY``, never the model) on a split
+    that holds the test items (``jev_prereg.LOOKED_AT_SPLITS``), ``evaluation``
+    among them where it is one. What ``report`` prints beside each row, so an
+    operator sees how many of the ``jev_prereg.MAX_LOOKS`` are left before a
+    new set version is the only way to arm (docs/08 open item 78).
+    """
+
+    def identity(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return tuple(row.get(column) for column in jev_prereg.LOOKS_COUNTED_BY)
+
+    counted = {
+        row.get("id"): row
+        for row in [*rows, evaluation]
+        if identity(row) == identity(evaluation)
+        and row.get("split") in jev_prereg.LOOKED_AT_SPLITS
+    }
+    return len(counted)
 
 
 # ---------------------------------------------------------------------------
@@ -2250,7 +2345,8 @@ def format_count(name: str, value: Mapping[str, Any], of: str = "sessions") -> s
 def format_forward(report: Mapping[str, Any]) -> str:
     lines = [
         f"{report['signal']} for {report['symbol']}",
-        f"plan v{report['plan_version']} {report['plan_hash'][:12]}",
+        f"plan v{report['plan_version']} {report['plan_hash'][:12]}; regime plan "
+        f"v{report['regime_plan_version']} {report['regime_plan_hash'][:12]}",
         f"sessions: {report['sessions']} ({said(report['since'])} to "
         f"{said(report['until'])}), cutoffs passed",
         f"live measured {report['live_measured']}, abstain {report['live_abstain']}, "
@@ -2268,24 +2364,26 @@ def format_forward(report: Mapping[str, Any]) -> str:
         )
         for option, value in figures["answer_shares"].items():
             lines.append(format_count(f"  share {option}", value))
+        rule = f"the regime plan v{report['regime_plan_version']} baseline rule"
         lines.append(
             format_count(
-                f"  agrees with the plan v{report['plan_version']} baseline rule",
+                f"  agrees with {rule}",
                 figures["baseline_agreement_sessions"],
             )
         )
         lines.append(
             format_figure(
-                f"  agrees with the plan v{report['plan_version']} baseline rule, "
-                "distinct states",
+                f"  agrees with {rule}, distinct states",
                 figures["baseline_agreement_states"],
             )
         )
         for plan, sessions in figures["not_scored"].items():
-            lines.append(
-                f"  not scored: {sessions} sessions answered under plan "
-                f"{plan[:12]}, not this one"
+            under = (
+                "no regime plan recorded"
+                if plan == UNKNOWN_PLAN
+                else f"regime plan {plan[:12]}, not this one"
             )
+            lines.append(f"  not scored: {sessions} sessions answered under {under}")
     for model, strata in report["flip_rates"].items():
         for stratum in STRATA:
             value = strata[stratum]
@@ -2345,7 +2443,10 @@ def format_status(report: Mapping[str, Any]) -> str:
         f"validity {said(today['validity_rate'])} over {today['answers']} answers; "
         f"latency p50 {said(latency['p50'])} ms over {latency['n']}"
     )
-    lines.append(f"plan v{report['plan_version']} {report['plan_hash'][:12]}")
+    lines.append(
+        f"plan v{report['plan_version']} {report['plan_hash'][:12]}; regime plan "
+        f"v{report['regime_plan_version']} {report['regime_plan_hash'][:12]}"
+    )
     return "\n".join(lines)
 
 
@@ -2363,10 +2464,16 @@ def _interval(low: Any, high: Any, label: str) -> str:
 
 
 def _level(value: Any) -> str | None:
-    """A level a row recorded, as printed — 95%, 99.5% — or ``None``."""
+    """
+    A level a row recorded, as printed — 95%, 99.5%, 99.9375% — or ``None``:
+    exactly, as the decimal it was written as, since the gate's level from plan
+    version 2, 0.999375, rounded to one place would print as a level nobody
+    registered.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return f"{value:.1%}".replace(".0%", "%")
+    digits = format((Decimal(repr(float(value))) * 100).normalize(), "f")
+    return f"{digits}%"
 
 
 def _beaten(e: Mapping[str, Any], column: str, name: str, gate: float | None) -> str:
@@ -2562,11 +2669,28 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             if gate is not None
             else ""
         )
-        lines.append(
-            f"threshold: margin >= {said(e['threshold'])}, chosen on the dev split "
-            f"to reach {said(e['threshold_target'])}{by}, measured on the test "
-            f"split: coverage {said(e['coverage_at_threshold'])}, {measured}"
-        )
+        if e.get("split") == DEV_SPLIT:
+            # Never a promise that a look bears it out: the look's search runs
+            # only when every item the look reads is dated after the pin was
+            # first observed, and this run reads no date of a test item, so
+            # it cannot know (D1's review, D1RP-2; docs/08 open item 83).
+            lines.append(
+                f"threshold: margin >= {said(e['threshold'])}, chosen on the dev "
+                f"split to reach {said(e['threshold_target'])}{by}; nothing is "
+                "measured at it here, since this run reads no label or date of a "
+                "test item. A recorded look measures it on the test split, and "
+                "searches for it again only if every item the look reads, the "
+                "held-out ones included, is dated after the model was first "
+                "observed; otherwise the look is an upper bound and attempts no "
+                "threshold"
+            )
+        else:
+            lines.append(
+                f"threshold: margin >= {said(e['threshold'])}, chosen on the dev "
+                f"split to reach {said(e['threshold_target'])}{by}, measured on "
+                f"the test split: coverage {said(e['coverage_at_threshold'])}, "
+                f"{measured}"
+            )
     elif outcome == "none_found":
         lines.append(
             "threshold: none found on the dev split; every lane stays "
@@ -2631,11 +2755,17 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             f"{said(e.get('labeller_kappa'))}"
         )
     commit = e.get("code_commit")
-    lines.append(
-        f"commit {commit}"
-        if commit
-        else "dry run: nothing recorded; --record writes it"
-    )
+    if commit:
+        lines.append(f"commit {commit}")
+    elif e.get("split") == DEV_SPLIT:
+        lines.append(
+            "the development split's search: no look at the held-out items, no "
+            "label or date of a test item read, and never recorded; the flip "
+            "rates are the whole population's, as a look's are, since a flip "
+            "uses no label"
+        )
+    else:
+        lines.append("dry run: nothing recorded; --record writes it")
     return "\n".join(lines)
 
 
@@ -2647,10 +2777,21 @@ def format_report(report: Mapping[str, Any]) -> str:
     for entry in report["evaluations"]:
         lines.append("")
         lines.append(format_evaluation(entry["evaluation"]))
+        e = entry["evaluation"]
+        looks = entry.get("looks_spent")
+        lines.append(
+            f"looks at the held-out items of {e['question_set']} "
+            f"v{e['question_set_version']} {e['question_key']}, under every model: "
+            + (
+                "not counted"
+                if looks is None
+                else f"{looks} of {jev_prereg.MAX_LOOKS} spent"
+            )
+        )
         if entry["usable"]:
             lines.append(
                 f"usable as a calibration, at margin >= "
-                f"{said(entry['usable_threshold'])}; nothing in phase C arms one"
+                f"{said(entry['usable_threshold'])}; nothing that acts reads it"
             )
         else:
             reasons = "; ".join(
@@ -2672,6 +2813,24 @@ def format_report(report: Mapping[str, Any]) -> str:
 #: The three commands that write, each in its own transaction and through
 #: ``jev_repo`` alone; every other command reads, in one read-only snapshot.
 WRITING_COMMANDS = ("labels import", "labels copy", "evaluate --record")
+
+#: Every command the harness runs, as :func:`_command` names it: the ones
+#: that read and the three that write. Anything else is refused before any
+#: connection, so arguments ``_parser`` would never make run nothing, an
+#: evaluation least of all (D1's review, D1RP-1).
+#: ``tests/unit/test_jev_eval.py::TestLooks`` holds it to what the parser makes.
+COMMANDS = (
+    "status",
+    "forward",
+    "forward-audit",
+    "report",
+    "labels export",
+    "evaluate",
+    *WRITING_COMMANDS,
+)
+
+#: The two commands that evaluate: a dry run, and a look recorded.
+EVALUATE_COMMANDS = ("evaluate", "evaluate --record")
 
 
 def _positive(value: str) -> int:
@@ -2726,7 +2885,16 @@ def _parser() -> argparse.ArgumentParser:
     evaluate_.add_argument(
         "--labelled-by", "--labeller", dest="labelled_by", required=True
     )
-    evaluate_.add_argument("--split", choices=SPLITS, default="test")
+    evaluate_.add_argument(
+        "--split",
+        choices=EVALUATE_SPLITS,
+        required=True,
+        help=(
+            "required, with no default: dev, the search's own items, never "
+            "recorded; or test or all, a look at the held-out items, taken only "
+            "with --record"
+        ),
+    )
     evaluate_.add_argument("--model", help="a pinned model; the pin by default")
     evaluate_.add_argument("--record", action="store_true")
     evaluate_.add_argument("--commit", help="the commit --record records under")
@@ -2777,11 +2945,27 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _command(arguments: argparse.Namespace) -> str:
-    if arguments.command == "labels":
-        return f"labels {arguments.labels_command}"
-    if arguments.command == "evaluate" and arguments.record:
-        return "evaluate --record"
-    return str(arguments.command)
+    """
+    The command ``arguments`` name, as the harness runs it: one of
+    :data:`COMMANDS`, or :class:`Refused`. Read before any connection, by
+    :func:`look_problem` and by ``_run``, and nothing dispatches on anything
+    else: a command of ``None``, mis-cased or padded, or ``labels`` with a
+    subcommand it has none of, once fell through ``_read`` to the evaluation
+    and printed a held-out one with no look recorded (D1's review, D1RP-1).
+    """
+    command = getattr(arguments, "command", None)
+    if command == "labels":
+        name = f"labels {getattr(arguments, 'labels_command', None)}"
+    elif command == "evaluate":
+        record = getattr(arguments, "record", False)
+        name = "evaluate --record" if record else "evaluate"
+    else:
+        name = str(command)
+    # The parser's own name for it heads the name the harness runs it by, so
+    # neither of the derived names is taken as a command on its own.
+    if name not in COMMANDS or name.partition(" ")[0] != command:
+        raise Refused(f"the harness runs no command {name!r}; nothing was read")
+    return name
 
 
 def _dumped(value: Any) -> str:
@@ -2791,7 +2975,11 @@ def _dumped(value: Any) -> str:
 async def _read(
     conn: asyncpg.Connection, arguments: argparse.Namespace, command: str
 ) -> str:
-    """A command that reads, inside the caller's read-only snapshot."""
+    """
+    A command that reads, inside the caller's read-only snapshot, named by
+    :func:`_command`. Each command has its branch, and anything else is
+    refused: no command reaches the evaluation by default.
+    """
     now = await jev_clock.database_now(conn)
     report: Any
     if command == "status":
@@ -2814,10 +3002,12 @@ async def _read(
             sample=arguments.sample,
             include_quarantined=arguments.include_quarantined,
         )
-    else:
+    elif command == "evaluate":
         evaluation = await _evaluate(conn, arguments)
         report = evaluation.row()
         text = format_evaluation(report)
+    else:
+        raise Refused(f"no reading command {command!r}; nothing was read")
     return _dumped(report) if getattr(arguments, "json", False) else text
 
 
@@ -2866,6 +3056,8 @@ async def _write(
             f"{done['copied']} labels copied to v{arguments.to_version}; "
             f"{done['already_labelled']} items labelled there already kept theirs"
         )
+    if command != "evaluate --record":
+        raise Refused(f"no writing command {command!r}; nothing was written")
     evaluation = dataclasses.replace(
         await _evaluate(conn, arguments), code_commit=commit
     )
@@ -2910,12 +3102,70 @@ async def _run(arguments: argparse.Namespace, dsn: str) -> str:
         await conn.close()
 
 
+def look_problem(arguments: argparse.Namespace) -> str | None:
+    """
+    Why ``arguments`` would take a look at the held-out items that nothing
+    counts, or record what is not a look, or ``None`` (plan version 2, M3).
+
+    ``evaluate --split test`` and ``--split all`` read the test split, so
+    each is a look, and ``jev_calibration.usable`` counts recorded looks
+    alone: one taken as a dry run would be a look the gate's level was never
+    spent on, and labelling until a dry run passed, then recording that one,
+    is optional stopping. So each needs ``--record``. ``--split dev`` scores
+    the search's own items and reads no label of a test item, so it is never
+    recorded: it is no look, and a row of it would be one ``usable`` could
+    not read as one.
+
+    It decides from the command :func:`_command` names, which raises
+    :class:`Refused` for anything but a command the harness runs, and gives a
+    problem for a split that is not one of :data:`EVALUATE_SPLITS`, so
+    arguments no parser made fail closed rather than past the rule (D1's
+    review, D1RP-1).
+    """
+    command = _command(arguments)
+    if command not in EVALUATE_COMMANDS:
+        return None
+    split = getattr(arguments, "split", None)
+    record = command == "evaluate --record"
+    if split not in EVALUATE_SPLITS:
+        return (
+            f"--split takes {', '.join(EVALUATE_SPLITS)}, not {split!r}, and has "
+            "no default; nothing was read"
+        )
+    if split in jev_prereg.LOOKED_AT_SPLITS and not record:
+        return (
+            f"--split {split} reads the held-out test items, a look the gate's "
+            f"level is spent on, and each of the {jev_prereg.MAX_LOOKS} looks a "
+            "set, version and question has is recorded: add --record to take "
+            "it, or read the development split with --split dev, which spends "
+            "none; nothing was read"
+        )
+    if split == DEV_SPLIT and record:
+        return (
+            "--split dev is the development split's search, which reads no label "
+            "of a test item and is never recorded; record a look with --split "
+            "test or --split all; nothing was read"
+        )
+    return None
+
+
 async def execute(arguments: argparse.Namespace, dsn: str) -> int:
     """
     Run one parsed command against ``dsn`` and print what it found: 0 when
     it ran, 1 when the harness refused it, with why, on standard error.
+
+    Every command the harness runs comes through here, ``main`` included, so
+    the rule on looks is held here (:func:`look_problem`), before any
+    connection is made, and fails closed: arguments naming a command or a
+    split the harness does not run are refused the same way, never read as
+    an evaluation. ``tests/unit/test_jev_eval.py::TestLooks``, and on
+    PostgreSQL ``tests/integration/test_jev_evaluations.py::
+    TestTheCommandsOnPostgres``.
     """
     try:
+        problem = look_problem(arguments)
+        if problem is not None:
+            raise Refused(problem)
         output = await _run(arguments, dsn)
     except Refused as refused:
         print(str(refused), file=sys.stderr)

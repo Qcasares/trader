@@ -343,6 +343,29 @@ TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
     {"web_excerpt": "web", "hypothesis_title": "model"}
 )
 
+#: State models whose subject is the state itself (phase D), each with the
+#: provenance every set asking about it records: a subject that is not text,
+#: addressed by ``jev_hash.state_hash`` of the state as sent. The lane requires
+#: the subject id to be that hash (``jev_lane._check_subject``), as it requires
+#: a text subject's to be its text's, so a replay can never answer for another
+#: subject and a label joins its answer exactly. Registration refuses a model
+#: here that is also text (:data:`TEXT_SUBJECT_FIELD`), one the detail rule
+#: cannot prove text-free with no field exempted, and a set asking about one
+#: under any provenance but the one named, as :data:`TEXT_SUBJECT_PROVENANCE`
+#: does for text. Empty until phase D3 adds the job error's skeleton,
+#: ``{JobErrorState: "system"}`` (docs/09, section 2.1).
+STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType({})
+
+#: Lanes whose states carry no text at all (phase D): the ops lane's is a
+#: failed job's error reduced to a closed vocabulary, this system's own
+#: records. A set in one registers only declaring ``internal_detail``, so the
+#: lane and the planner read ``jev_send_internal_detail`` before it is asked,
+#: and only with a state model proved text-free with no field exempted, not
+#: even a ``title``; and :meth:`QuestionSet.dump_state` reads what every ask of
+#: it would send whatever its ``internal_detail``. The switch gates what is
+#: sent, and the check of what is sent stays (docs/09, D-SAFE-1).
+TEXT_FREE_LANES: frozenset[str] = frozenset({"ops"})
+
 #: The injection screen: the set, its one question, and the answer that means
 #: the text is addressed to people. A web set is asked about text only once the
 #: registered screen, under the pinned model, has answered this question about
@@ -458,6 +481,11 @@ class QuestionSet:
         output, not the types, so no annotation, validator or serializer that
         :func:`registration_problem` failed to read can carry detail past the
         switch (docs/08, fact 7): at worst the set is refused on its first ask.
+
+        For a set of a lane in :data:`TEXT_FREE_LANES`, the same reading runs
+        on every dump whatever its ``internal_detail``, and exempts no field,
+        a ``title`` included: such a lane's state holds only the words its
+        model writes (docs/09, D-SAFE-1).
         """
         if type(state) is not self.state_model:
             raise TypeError(
@@ -466,10 +494,22 @@ class QuestionSet:
             )
         dumped = state.model_dump(mode="json")
         self.state_model.model_validate_json(json.dumps(dumped, ensure_ascii=False))
+        words = _declared_words(self.state_model)
+        if self.lane in TEXT_FREE_LANES and _sends_undeclared_text(
+            dumped, words, title_exempt=False
+        ):
+            raise ValueError(
+                f"{self.name} v{self.version} would send a string "
+                f"{self.state_model.__name__} does not declare, and the "
+                f"{self.lane!r} lane's states carry no text (TEXT_FREE_LANES). "
+                "Read on every ask whatever the set's internal_detail, with no "
+                "field exempted: the detail switch gates what is sent, and this "
+                "check of what is sent stays (docs/09, D-SAFE-1)"
+            )
         if (
             self.provenance in _OWN_TEXT_PROVENANCES
             and not self.internal_detail
-            and _sends_undeclared_text(dumped, _declared_words(self.state_model))
+            and _sends_undeclared_text(dumped, words)
         ):
             raise ValueError(
                 f"{self.name} v{self.version} would send text beyond a title that "
@@ -833,8 +873,10 @@ def question_set_problem(question_set: QuestionSet) -> str | None:
 
 #: Provenances whose state is this system's own text, as opposed to the open
 #: web's. Detail of it — anything beyond a title — goes to the vendor only
-#: while ``jev_send_internal_detail`` is on (docs/08, fact 7).
-_OWN_TEXT_PROVENANCES = frozenset({"internal", "operator", "model"})
+#: while ``jev_send_internal_detail`` is on (docs/08, fact 7). ``system``
+#: (phase D) is this system's own records computed in code, which can quote an
+#: outsider, and is read as this system's own text like the rest.
+_OWN_TEXT_PROVENANCES = frozenset({"internal", "operator", "model", "system"})
 
 #: The one field of this system's own text that may be sent without the detail
 #: switch: a title, as fact 7's default sends hypothesis cards and findings.
@@ -998,13 +1040,18 @@ def _collect_words(annotation: object, words: set[str], seen: set[type]) -> None
 
 
 def _sends_undeclared_text(
-    value: object, words: frozenset[str], top: bool = True
+    value: object,
+    words: frozenset[str],
+    top: bool = True,
+    *,
+    title_exempt: bool = True,
 ) -> bool:
     """
     Whether ``value``, a state as it is sent, holds a string — a key or a value,
     at any depth — that is not one of ``words``, the value of the top-level
-    ``title`` excepted when it is a string. Numbers, booleans and nulls spell
-    nothing.
+    ``title`` excepted when it is a string and ``title_exempt`` holds (a
+    text-free lane's reading exempts nothing). Numbers, booleans and nulls
+    spell nothing.
     """
     if isinstance(value, str):
         return value not in words
@@ -1012,7 +1059,7 @@ def _sends_undeclared_text(
         for key, item in value.items():
             if key not in words:
                 return True
-            if top and key == _TITLE_FIELD and isinstance(item, str):
+            if top and title_exempt and key == _TITLE_FIELD and isinstance(item, str):
                 continue
             if _sends_undeclared_text(item, words, top=False):
                 return True
@@ -1090,6 +1137,16 @@ def registration_problem(
        nothing else** (:func:`screen_problem`), since the lane reads a valid
        ``false`` to it as clean and lets the screen alone ask about unscreened
        text.
+    8. **A text-free lane sends no text** (:data:`TEXT_FREE_LANES`, phase D).
+       A set in one declares ``internal_detail``, whatever rule 4 would say of
+       its state, so the lane and the planner read the detail switch before it
+       is asked; and its state model is proved text-free with no field
+       exempted, a ``title`` included. Checked right after rule 4.
+    9. **A state-addressed subject is its state** (:data:`STATE_ADDRESSED`,
+       phase D). Its model is not also text (:data:`TEXT_SUBJECT_FIELD`), is
+       proved text-free with no field exempted, and every set asking about it
+       records the provenance the mapping names, as rule 6 holds text to its
+       writer's.
     """
     qs = question_set
     if qs.name in registry:
@@ -1124,6 +1181,21 @@ def registration_problem(
             "internal_detail=True, so it is sent only while "
             "jev_send_internal_detail is on (docs/08, fact 7)"
         )
+    if qs.lane in TEXT_FREE_LANES:
+        if not qs.internal_detail:
+            return (
+                f"a set of the {qs.lane!r} lane is registered with "
+                "internal_detail=True: its state is this system's own records, "
+                "sent only while jev_send_internal_detail is on (docs/09, "
+                "D-SAFE-1)"
+            )
+        if _model_carries_text(qs.state_model, set(), exempt=()):
+            return (
+                f"{qs.state_model.__name__} could carry text, and a set of the "
+                f"{qs.lane!r} lane sends none: its state model is proved "
+                "text-free with no field exempted, a title included "
+                "(TEXT_FREE_LANES)"
+            )
     if qs.state_model not in STATE_SUBJECT:
         return (
             f"{qs.state_model.__name__} has no subject type in STATE_SUBJECT; "
@@ -1145,6 +1217,26 @@ def registration_problem(
             "phase F loader is to trust, and text written by a model or an "
             "outsider is never that"
         )
+    addressed = STATE_ADDRESSED.get(qs.state_model)
+    if addressed is not None:
+        if qs.state_model in TEXT_SUBJECT_FIELD:
+            return (
+                f"{qs.state_model.__name__} is addressed both by its text "
+                "(TEXT_SUBJECT_FIELD) and by its state (STATE_ADDRESSED); a "
+                "subject has one address"
+            )
+        if _model_carries_text(qs.state_model, set(), exempt=()):
+            return (
+                f"{qs.state_model.__name__} is addressed by its state, which "
+                "could carry text: a state-addressed subject is proved "
+                "text-free with no field exempted (STATE_ADDRESSED)"
+            )
+        if qs.provenance != addressed:
+            return (
+                f"{qs.state_model.__name__} describes a {subject!r} addressed "
+                f"by its state, recorded as {addressed!r} whoever asks about "
+                f"it, not as {qs.provenance!r} (STATE_ADDRESSED)"
+            )
     if qs.name == SCREEN_SET_NAME:
         return screen_problem(qs)
     return None

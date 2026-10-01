@@ -17,6 +17,7 @@ status. That the dark database plans nothing end to end, through the loop, is
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import itertools
 import json
@@ -24,9 +25,11 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from types import MappingProxyType
 from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from src.core import calendar
 from src.data.reference import REFERENCE_PRIORITY
@@ -37,6 +40,7 @@ from src.programme import (
     jev_clock,
     jev_plan,
     jev_prereg,
+    jev_questions,
     jev_repo,
     web_sources,
 )
@@ -997,21 +1001,22 @@ class TestTheAsks:
 
     async def test_never_beyond_the_lanes_share(self, queue: Queue) -> None:
         """
-        A budget of 10 gives the guardrail and research lanes 3 calls each;
-        the screen, planned first, takes the guardrail lane's three, and the
-        card check none.
+        A budget of 10 gives the guardrail and research lanes 2 calls each, at
+        phase D's 25%; the screen, planned first, takes the guardrail lane's
+        two, and the card check none.
         """
-        assert jev_catalogue.lane_budget(10, "guardrail") == 3
+        assert jev_catalogue.lane_budget(10, "guardrail") == 2
+        assert jev_catalogue.lane_budget(10, "research") == 2
         queue.screens = _screens(10)
         queue.titles = [TITLE_SUBJECT]
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
-        assert len(_asks(queue, "guardrail.injection")) == 3
+        assert len(_asks(queue, "guardrail.injection")) == 2
         assert _asks(queue, "guardrail.card") == []
         assert len(_asks(queue, "research.hypothesis")) == 1
 
     async def test_one_call_left_plans_one_ask(self, queue: Queue) -> None:
         queue.screens = _screens(10)
-        queue.calls_today["guardrail"] = 2
+        queue.calls_today["guardrail"] = 1
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
         assert len(_asks(queue, "guardrail.injection")) == 1
 
@@ -1019,10 +1024,11 @@ class TestTheAsks:
         self, queue: Queue
     ) -> None:
         """
-        Three card checks queued from an earlier pass fill the guardrail lane's
-        three calls, so no screen is planned; the research lane's are its own.
+        Two card checks waiting from an earlier pass, one running and one
+        queued, fill the guardrail lane's two calls, so no screen is planned;
+        the research lane's are its own.
         """
-        for n in range(3):
+        for n in range(2):
             queue.jobs[f"elsewhere:{n}"] = {
                 "kind": "jev_ask",
                 "status": "queued" if n else "running",
@@ -1045,7 +1051,7 @@ class TestTheAsks:
             }
         queue.screens = _screens(5)
         await _plan(_switches(**ASKS_ON, **{flags.JEV_DAILY_REQUEST_BUDGET: "10"}))
-        assert len(_asks(queue, "guardrail.injection")) == 3
+        assert len(_asks(queue, "guardrail.injection")) == 2
 
     async def test_content_a_block_is_on_record_for_is_planned_with_no_call_left(
         self, queue: Queue
@@ -1175,3 +1181,193 @@ class TestTheAsks:
         conn = _Conn(_switches(**ASKS_ON))
         await jev_plan.plan(conn, now=MORNING, key_available=True)
         assert {AREA_GUARDRAILS, AREA_RESEARCH} <= set(conn.asked)
+
+
+# ---------------------------------------------------------------------------
+# Phase D1: the detail switch gates planning
+# ---------------------------------------------------------------------------
+
+
+class _DetailState(BaseModel):
+    """A title and the detail behind it: more of this system's own text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    title: str
+    detail: str
+
+
+#: A test-only set declaring ``internal_detail``: no registered set declares
+#: it until phase D3's ``ops.job_error``.
+DETAILED = jev_questions.QuestionSet(
+    name="guardrail.detail_example",
+    version=1,
+    lane="guardrail",
+    provenance="model",
+    questions=(
+        ("claims", {"type": "noul", "instructions": "Does `detail` claim a result?"}),
+    ),
+    state_model=_DetailState,
+    purpose="test only: a set declaring internal_detail",
+    internal_detail=True,
+)
+
+#: Its one subject, and the plans in force it is planned under.
+DETAIL_SUBJECT = ("d4" * 32, "H-0042", True)
+DETAIL_PLANS = {
+    "plan_version": jev_prereg.PLAN_VERSION,
+    "plan_hash": jev_prereg.GOLDEN_PLAN_HASH,
+    "set_plan_version": 1,
+    "set_plan_hash": "e" * 64,
+}
+
+
+@pytest.fixture
+def detailed(monkeypatch: pytest.MonkeyPatch, queue: Queue) -> list[str]:
+    """
+    :data:`DETAILED` registered, given a subject type, planned at most five a
+    pass, with plans in force and one subject waiting. Returns the names of the
+    sets whose subjects were read, which is how a test sees that the planner
+    stopped before reading any.
+    """
+    reads: list[str] = []
+    monkeypatch.setitem(jev_questions.REGISTRY, DETAILED.name, DETAILED)
+    monkeypatch.setattr(
+        jev_questions,
+        "STATE_SUBJECT",
+        MappingProxyType(
+            {**jev_questions.STATE_SUBJECT, _DetailState: "hypothesis_title"}
+        ),
+    )
+    monkeypatch.setattr(
+        jev_plan,
+        "ASKS_PER_PASS",
+        MappingProxyType({**jev_plan.ASKS_PER_PASS, DETAILED.name: 5}),
+    )
+    in_force = jev_prereg.plans_in_force
+    monkeypatch.setattr(
+        jev_prereg,
+        "plans_in_force",
+        lambda name, version: (
+            DETAIL_PLANS if name == DETAILED.name else in_force(name, version)
+        ),
+    )
+    subjects_of = jev_plan._ask_subjects
+
+    async def subjects(
+        conn: Any, question_set: Any, model: str, day: date
+    ) -> list[tuple[str, object, bool]]:
+        if question_set is DETAILED:
+            reads.append(question_set.name)
+            return [DETAIL_SUBJECT]
+        return await subjects_of(conn, question_set, model, day)
+
+    monkeypatch.setattr(jev_plan, "_ask_subjects", subjects)
+    return reads
+
+
+async def _plan_reading(rows: Mapping[str, str]) -> _Conn:
+    """Plan once at :data:`MORNING`, and hand back what the switches read."""
+    conn = _Conn(rows)
+    await jev_plan.plan(conn, now=MORNING, key_available=True)
+    return conn
+
+
+DETAIL_ON = {flags.JEV_SEND_INTERNAL_DETAIL: "true"}
+
+
+class TestTheDetailSwitchGatesPlanning:
+    """
+    Phase D's one general planner rule (docs/09, section 5.2): a set declaring
+    ``internal_detail`` is planned only while ``jev_send_internal_detail`` is
+    on, read through its own reader, as the road reads it, neither derived
+    from the other — so no job is queued only to end ``disabled``. A test-only
+    set stands in for phase D3's ``ops.job_error``.
+    """
+
+    async def test_off_it_is_not_planned_and_nothing_of_it_is_read(
+        self, queue: Queue, detailed: list[str]
+    ) -> None:
+        conn = await _plan_reading(_switches(**ASKS_ON))
+        assert _asks(queue, DETAILED.name) == []
+        assert detailed == [], "its subjects were read with the switch off"
+        assert flags.JEV_SEND_INTERNAL_DETAIL in conn.asked
+
+    async def test_on_it_is_planned(self, queue: Queue, detailed: list[str]) -> None:
+        await _plan_reading(_switches(**ASKS_ON, **DETAIL_ON))
+        (job,) = _asks(queue, DETAILED.name)
+        assert job["payload"]["subject_id"] == DETAIL_SUBJECT[0]
+        assert job["payload"]["source_id"] == DETAIL_SUBJECT[1]
+        assert detailed == [DETAILED.name]
+
+    @pytest.mark.parametrize(
+        "stored", ['"true"', "1", "false", None], ids=["string", "one", "off", "none"]
+    )
+    async def test_only_json_true_is_on(
+        self, queue: Queue, detailed: list[str], stored: str | None
+    ) -> None:
+        rows = _switches(**ASKS_ON, **{flags.JEV_SEND_INTERNAL_DETAIL: stored})
+        await _plan_reading(rows)
+        assert _asks(queue, DETAILED.name) == []
+
+    async def test_the_switch_does_not_stand_for_the_area(
+        self, queue: Queue, detailed: list[str]
+    ) -> None:
+        rows = _switches(**{**ASKS_ON, **DETAIL_ON, AREA_GUARDRAILS: "false"})
+        await _plan_reading(rows)
+        assert _asks(queue, DETAILED.name) == []
+
+    async def test_the_registered_sets_are_planned_either_way(
+        self, queue: Queue, detailed: list[str]
+    ) -> None:
+        queue.screens = [SCREEN_SUBJECT]
+        await _plan_reading(_switches(**ASKS_ON))
+        assert len(_asks(queue, "guardrail.injection")) == 1
+        assert _asks(queue, DETAILED.name) == []
+
+    async def test_a_set_declaring_none_reads_no_detail_switch(
+        self, queue: Queue
+    ) -> None:
+        """Phase C's sets declare none, so the switch is not even read for them."""
+        queue.screens = [SCREEN_SUBJECT]
+        queue.titles = [TITLE_SUBJECT]
+        queue.canonical = [_canonical(1, _hash("00000000"))]
+        conn = await _plan_reading(_switches(**{**ASKS_ON, AREA_DECISIONS: "true"}))
+        assert _asks(queue)
+        assert flags.JEV_SEND_INTERNAL_DETAIL not in conn.asked
+
+    async def test_the_forward_clock_waits_for_it_too(
+        self, queue: Queue, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The rule is the planner's, not one rule's: a regime set declaring
+        ``internal_detail`` — none does — would wait for the switch as well,
+        while the worker's reference bars, which ask nothing, would not.
+        """
+        declaring = dataclasses.replace(DECISION_REGIME, internal_detail=True)
+        monkeypatch.setitem(jev_questions.REGISTRY, DECISION_REGIME.name, declaring)
+        planned = await _plan()
+        kinds = {queue.jobs[key]["kind"] for key in planned}
+        assert "jev_regime" not in kinds
+        assert "ingest_reference_bars" in kinds
+        planned = await _plan(_switches(**DETAIL_ON))
+        assert "jev_regime" in {queue.jobs[key]["kind"] for key in planned}
+
+    async def test_its_reasks_wait_for_the_switch_too(
+        self, queue: Queue, detailed: list[str]
+    ) -> None:
+        queue.canonical = [
+            _canonical(
+                1,
+                _hash("00000000"),
+                question_set=DETAILED.name,
+                question_set_version=DETAILED.version,
+                pack_hash=DETAILED.pack_hash,
+                lane="guardrail",
+                subject_type="hypothesis_title",
+                subject_id=DETAIL_SUBJECT[0],
+            )
+        ]
+        await _plan_reading(_switches(**ASKS_ON))
+        assert _reasks(queue) == []
+        await _plan_reading(_switches(**ASKS_ON, **DETAIL_ON))
+        assert [job["payload"]["request_id"] for job in _reasks(queue)] == [1]

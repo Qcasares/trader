@@ -128,12 +128,16 @@ async def _taken_ref(conn: asyncpg.Connection) -> str:
     Open a programme-wide finding and return its reference.
 
     Programme-wide — no candidate — so it blocks nothing here. It exists only
-    to be the reference another runner took first.
+    to be the reference another runner took first, so it is written as that
+    runner writes one: ``origin`` ``'model'``, which migration 0015 requires
+    every new finding to name, or the insert fails on NOT NULL before any
+    reference is taken and the clash this test is for never happens.
     """
     ref = f"F-ATOM-{uuid.uuid4().hex[:8]}"
     await conn.execute(
-        "INSERT INTO findings (id, ref, candidate_id, raised_by, severity, title) "
-        "VALUES ($1,$2,NULL,'operations','low','fixture: a reference already taken')",
+        "INSERT INTO findings (id, ref, candidate_id, raised_by, severity, title, "
+        "origin) VALUES ($1,$2,NULL,'operations','low',"
+        "'fixture: a reference already taken','model')",
         uuid.uuid4(),
         ref,
     )
@@ -209,12 +213,12 @@ async def test_a_finding_that_fails_to_write_takes_its_view_with_it(
 
     conn = await asyncpg.connect(TEST_DSN)
     outer = conn.transaction() if inside_a_transaction else None
-    candidate_id = taken = ""
+    candidate_id = ""
     try:
         if outer is not None:
             await outer.start()
         candidate_id = await _seed_candidate(conn)
-        clash["ref"] = taken = await _taken_ref(conn)
+        clash["ref"] = await _taken_ref(conn)
         facts = await repo.load_facts(conn, candidate_id)
         assert facts is not None
         assert evaluate(facts).passed, "the control: without a finding it promotes"
@@ -260,15 +264,18 @@ async def test_a_finding_that_fails_to_write_takes_its_view_with_it(
         if outer is not None:
             await outer.rollback()
         else:
-            # Deleting the candidate cascades to its views, findings and
-            # evaluations. The hypothesis stays: the ledger refuses deletes,
-            # which is its point.
+            # What was raised stays raised (migration 0015): a finding refuses
+            # DELETE, and a candidate's delete, which would cascade to its
+            # findings, fails with them. So the candidate is retired, out of
+            # every read of active candidates, and its findings, the taken
+            # reference's among them, stay under their unique refs, as the
+            # Jev ledger's tests leave their rows. The hypothesis stays too:
+            # the ledger refuses deletes, which is its point.
             if candidate_id:
                 await conn.execute(
-                    "DELETE FROM candidates WHERE id = $1", uuid.UUID(candidate_id)
+                    "UPDATE candidates SET status = 'retired' WHERE id = $1",
+                    uuid.UUID(candidate_id),
                 )
-            if taken:
-                await conn.execute("DELETE FROM findings WHERE ref = $1", taken)
             await conn.execute(
                 "DELETE FROM daily_bars WHERE symbol = $1 AND source = $2",
                 SYMBOL,

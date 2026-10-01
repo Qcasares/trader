@@ -774,7 +774,9 @@ def _check_subject(
 ) -> None:
     """
     The subject is the one the state describes: the state model's own subject
-    type, and for text, the sha256 of exactly the text sent.
+    type; for text, the sha256 of exactly the text sent; and for a subject
+    addressed by its state (``jev_questions.STATE_ADDRESSED``, phase D), the
+    state's own hash, ``jev_hash.state_hash`` of the state sent.
 
     Content-addressed because a replay is found by the request hash, which
     names no subject: without this, the same excerpt filed under two ids would
@@ -793,6 +795,14 @@ def _check_subject(
         raise ValueError(
             f"subject_type must be {expected!r} for a {model.__name__}, the "
             f"subject its state describes; got {subject_type!r}"
+        )
+    if model in jev_questions.STATE_ADDRESSED and subject_id != state_hash(
+        sent_state
+    ):
+        raise ValueError(
+            "subject_id must be the state_hash of the state sent: a subject "
+            "addressed by its state is that state, so a replay cannot answer "
+            "for another subject and a label joins its answer exactly"
         )
     field = jev_questions.TEXT_SUBJECT_FIELD.get(model)
     if field is not None:

@@ -350,13 +350,16 @@ class TestTheSettings:
     def test_a_budget_that_leaves_a_lane_no_call_is_refused(self, budget: int) -> None:
         """
         Each lane spends at most its share, rounded down, so from one to nine
-        the probe lane's is none — and, below five, the decision lane's —
-        while the setting reads like a budget that permits calls. Refused,
-        with the reason, so the runner reads it as the 0 it amounts to.
+        the 10% lanes' — findings, ops and probe — is none, and below five the
+        decision lane's too, while the setting reads like a budget that
+        permits calls. Refused, with the reason, so the runner reads it as the
+        0 it amounts to. The refusal names the lanes with the smallest share,
+        from the table, rather than one lane by name (docs/09, section 5.4).
         """
         problem = catalogue.settings_problem(catalogue.DEFAULT_MODEL, budget, 8_000)
         assert problem is not None and "jev_daily_request_budget" in problem
-        assert "at least 10" in problem and "probe lane" in problem, problem
+        assert "at least 10" in problem, problem
+        assert "the findings, ops and probe lanes' shares" in problem, problem
 
     def test_the_smallest_budget_but_zero_gives_every_lane_with_a_share_a_call(
         self,
@@ -426,8 +429,17 @@ class TestTheVocabulary:
         """
         Migration 0013 adds ``model``: text the programme's own model wrote,
         kept apart from ``internal``, which the phase F loader is to trust.
+        Migration 0015 adds ``system`` (phase D): this system's own records,
+        computed in code, which can quote an outsider — on ``jev_requests``
+        alone, so ``jev_signals`` still refuses it.
         """
-        assert catalogue.PROVENANCES == ("web", "internal", "operator", "model")
+        assert catalogue.PROVENANCES == (
+            "web",
+            "internal",
+            "operator",
+            "model",
+            "system",
+        )
 
     def test_subject_types(self) -> None:
         assert catalogue.SUBJECT_TYPES == (
@@ -455,10 +467,10 @@ class TestTheVocabulary:
         reserve, and a lane with no set yet has none.
         """
         assert dict(catalogue.LANE_BUDGET_PERCENT) == {
-            "research": 35,
-            "guardrail": 35,
-            "findings": 0,
-            "ops": 0,
+            "research": 25,
+            "guardrail": 25,
+            "findings": 10,
+            "ops": 10,
             "signals": 0,
             "decision": 20,
             "probe": 10,
@@ -472,10 +484,12 @@ class TestTheVocabulary:
         ("budget", "lane", "share"),
         [
             (500, "decision", 100),
-            (500, "guardrail", 175),
-            (500, "research", 175),
+            (500, "guardrail", 125),
+            (500, "research", 125),
             (500, "probe", 50),
-            (500, "ops", 0),
+            (500, "ops", 50),
+            (500, "findings", 50),
+            (500, "signals", 0),
             (9, "probe", 0),
             (10, "probe", 1),
             (19, "probe", 1),
@@ -574,3 +588,63 @@ def test_the_catalogue_loads_no_client_and_no_io() -> None:
         check=True,
     )
     assert result.stdout.strip() == "[]", result.stdout
+
+
+class TestTheShares:
+    """
+    Phase D's budget shares (docs/09, section 5.4): ten points each from
+    research and the guardrails for the findings and ops lanes, whose sets
+    arrive in D2 and D3; the decision lane's twenty untouched; the minimum
+    budget still 10; and a refused budget's message naming the lanes with
+    the smallest share, from the table. ``TestTheVocabulary`` pins the
+    table itself.
+    """
+
+    def test_the_slices_are_the_designed_ones_at_the_seeded_budget(self) -> None:
+        """
+        docs/09 section 5.4's table, at the seeded 500: research and the
+        guardrails 125 each, which still cover the README's first day (about
+        61 screens and 61 catalogue asks); findings, ops and the probe 50
+        each; the decision lane's 100 untouched.
+        """
+        seeded = catalogue.DEFAULT_DAILY_REQUEST_BUDGET
+        assert seeded == 500
+        shares = {lane: catalogue.lane_budget(seeded, lane) for lane in catalogue.LANES}
+        assert shares == {
+            "research": 125,
+            "guardrail": 125,
+            "findings": 50,
+            "ops": 50,
+            "signals": 0,
+            "decision": 100,
+            "probe": 50,
+        }
+
+    def test_the_minimum_is_still_ten(self) -> None:
+        """
+        Phase D's shares keep the smallest above none at 10%, so the minimum
+        budget stays 10 and no stored budget changes meaning (docs/09, 5.4).
+        """
+        assert catalogue.MIN_DAILY_REQUEST_BUDGET == 10
+        assert min(s for s in catalogue.LANE_BUDGET_PERCENT.values() if s) == 10
+
+    def test_the_settings_message_names_the_smallest_shares(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Read from the table: whichever lanes hold the smallest share above
+        none are the ones named, one lane or several.
+        """
+        assert catalogue.smallest_shares() == ("findings", "ops", "probe")
+        problem = catalogue.settings_problem(catalogue.DEFAULT_MODEL, 9, 8_000)
+        assert problem is not None
+        assert "the findings, ops and probe lanes' shares would be none" in problem
+        monkeypatch.setattr(
+            catalogue,
+            "LANE_BUDGET_PERCENT",
+            {"research": 50, "guardrail": 25, "findings": 0, "ops": 0,
+             "signals": 0, "decision": 20, "probe": 5},
+        )
+        assert catalogue.smallest_shares() == ("probe",)
+        problem = catalogue.settings_problem(catalogue.DEFAULT_MODEL, 9, 8_000)
+        assert problem is not None and "the probe lane's share would be none" in problem

@@ -515,20 +515,20 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 
 | Module | Role |
 |---|---|
-| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000. From C9, `MODEL_FIRST_OBSERVED`, the UTC day each pinned model was first seen answering — `jev-1.13.0` on 26 September 2026, by the key check — against which an evaluation's items are dated; a model in `KNOWN_MODELS` without one fails its test |
-| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels. C7+C8 register `guardrail.injection`, `research.catalogue`, `research.hypothesis` and `guardrail.card`, v1 each, and `HypothesisTitleState`, a title of 1 to `TITLE_MAX_CHARS` (300) characters |
+| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000. From C9, `MODEL_FIRST_OBSERVED`, the UTC day each pinned model was first seen answering — `jev-1.13.0` on 26 September 2026, by the key check — against which an evaluation's items are dated; a model in `KNOWN_MODELS` without one fails its test. From D1, phase D's shares (research 25, guardrail 25, findings 10, ops 10, decision 20, probe 10), `smallest_shares`, which a refused budget's message names, and provenance `system` |
+| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels. C7+C8 register `guardrail.injection`, `research.catalogue`, `research.hypothesis` and `guardrail.card`, v1 each, and `HypothesisTitleState`, a title of 1 to `TITLE_MAX_CHARS` (300) characters. D1 adds two rules with no registered set under them yet: `STATE_ADDRESSED`, the models whose subject is their whole state, its id `state_hash` of the state sent, and `TEXT_FREE_LANES`, the ops lane, whose sets declare `internal_detail` and send no text, read on every dump whatever they declare |
 | `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
 | `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state. From C4, `regime_state_problem` says why it would be `None`, for a job's error |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined`. From C7+C8, the one writer of `jev_labels` (`record_label`, and `record_label_once` for a source's headings), what each set is to be asked about (`documents_to_screen`, `documents_to_describe`, `hypotheses_to_ask`), the `jev_ask` jobs waiting, the earliest content block on record for a subject, and `ask_job_key`. From C9, the harness's reads — a question's labels, each subject's answer (the `ok` non-probe row's, else the newest `invalid` one's), the items' dates, their texts, the subjects a labeller is shown, the `jev_ask` jobs about them, the words a version was asked with, and what quarantined each content — and the one writer of `jev_evaluations`, `record_evaluation`, which takes exactly `EVALUATION_COLUMNS`, with `evaluations_for` and `latest_evaluations` |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined`. From C7+C8, the one writer of `jev_labels` (`record_label`, and `record_label_once` for a source's headings), what each set is to be asked about (`documents_to_screen`, `documents_to_describe`, `hypotheses_to_ask`), the `jev_ask` jobs waiting, the earliest content block on record for a subject, and `ask_job_key`. From C9, the harness's reads — a question's labels, each subject's answer (the `ok` non-probe row's, else the newest `invalid` one's), the items' dates, their texts, the subjects a labeller is shown, the `jev_ask` jobs about them, the words a version was asked with, and what quarantined each content — and the one writer of `jev_evaluations`, `record_evaluation`, which takes exactly `EVALUATION_COLUMNS`, with `evaluations_for` and `latest_evaluations`. From D1, `get_hypothesis_title`, the title sets' read: a hypothesis's ref, title, origin and creation time, by column list |
 | `jev_clock.py` | C4. Holds no client and is not runner-only, so phase E may read the cutoff. The forward clock's times — the reference bars at a session's close plus 45 minutes (the worker's ingest time), the collection at plus 50, the cutoff at plus 60 (the worker's decision time) — the sessions the planner plans, the signal's and the jobs' names, `sleeve_symbol`, and the bar loader, which reads `adj_close` from `yfinance` alone |
 | `jev_forward.py` | C4, runner-only. `collect`, the `jev_regime` job: one session's regime, asked before the cutoff by the database's clock, at most one call an attempt — an attempt whose call got no response is retried and asks again — and one answer recorded at most once; never a backfill and never a `missing` row |
 | `jev_jobs.py` | C4, runner-only. `run_reask`, the `jev_reask` job; from C7+C8, `run_ask`, the `jev_ask` job — one registered set asked about one stored text, a web excerpt read through the code screen or a model-written title within its cap — and what an answer changes (`ASKABLE`), a quarantine and nothing else. Re-exports `ask_verdict` |
-| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area; from C7+C8, the `jev_ask` jobs, each set behind its lane's area |
-| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test; from C7+C8, a plan for each set asked about text, with its keyword baseline, recorded with every answer (`plans_in_force`) |
+| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area; from C7+C8, the `jev_ask` jobs, each set behind its lane's area; from D1, a set declaring `internal_detail` only while `jev_send_internal_detail` is on |
+| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test; from C7+C8, a plan for each set asked about text, with its keyword baseline, recorded with every answer (`plans_in_force`). From D1, plan version 2, and the regime's rule and sleeves a plan of their own (`regime_plan`, `REGIME_PLAN_VERSION`) |
 | `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the Brier scores, a percentile bootstrap seeded by the caller, calibration bins, the threshold search on the development split, Cohen's kappa and the flip count, each `None`, never 0, over nothing |
-| `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client. C9 adds `evaluate`, `labels export`, `labels import`, `labels copy` and `report`: one question against one labeller's labels, the labels themselves, and the newest evaluations. Only `labels import`, `labels copy` and `evaluate --record` write, each in one transaction and through `jev_repo` alone; every other command reads in a read-only snapshot. `evaluate --record` alone reads a second variable, `GIT_COMMIT`, which names a commit and holds no secret |
-| `jev_calibration.py` | C9. Pure, `jev_prereg` alone. `usable`, whether a recorded evaluation could arm a threshold and every reason it could not; `card_verdict` and `document_path`, what an armed threshold would be allowed to do, which is add friction and never remove it; and `analysis_plan_hash`, the identity of the plans an evaluation is computed under. Loaded by the harness, to report, and by nothing that acts: phase C arms no threshold |
+| `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client. C9 adds `evaluate`, `labels export`, `labels import`, `labels copy` and `report`: one question against one labeller's labels, the labels themselves, and the newest evaluations. Only `labels import`, `labels copy` and `evaluate --record` write, each in one transaction and through `jev_repo` alone; every other command reads in a read-only snapshot. `evaluate --record` alone reads a second variable, `GIT_COMMIT`, which names a commit and holds no secret. From D1, `evaluate --split` has no default, a look at the held-out items is taken only with `--record`, and `report` prints the looks each set, version and question has spent |
+| `jev_calibration.py` | C9. Pure, `jev_prereg` alone. `usable`, whether a recorded evaluation could arm a threshold and every reason it could not; `card_verdict` and `document_path`, what an armed threshold would be allowed to do, which is add friction and never remove it; and `analysis_plan_hash`, the identity of the plans an evaluation is computed under. Loaded by the harness, to report, and by nothing that acts: phase C arms no threshold. From D1 `usable` counts the looks taken before an evaluation, across every model, and reads a flip limit in the worst case |
 | `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS`; from C7+C8, `ask_verdict` and `NOT_ASKED`, moved out of `jev_jobs`, and `described`, an error by its class, SQLSTATE and constraint, moved out of `web_ingest` |
 | `claims.py` | C8. Pure, the standard library alone. The performance-claim check — `PERFORMANCE_TERMS`, `find_performance_claim`, `NUMERIC_BY_DESIGN`, `reject_performance_claims`, `PerformanceClaimError` — moved verbatim out of `author.py`, which re-exports every name and screens a hypothesis's title with it too |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
@@ -654,6 +654,39 @@ nullable, NULL meaning not measured, and eighteen named CHECKs hold the rest
 database holds an evaluation; over one holding a row its rules refuse, 0014
 fails whole and leaves it at 0013.
 
+Migration `0015_jev_phase_d.sql`, phase D's first (D1), exactly as
+docs/09 section 7 gives it, gives `findings` its writer and keeps what was
+raised. `findings.origin` is `NOT NULL`: the rows already stored read
+`'unknown'`, which means raised before 0015 by a writer nobody can now prove,
+and the default that gave them it is dropped at once, so an insert naming no
+writer fails on the column, and a trigger refuses one naming `'unknown'`. From
+then on a finding is `'model'` (the tick's panel), `'operator'` (the API) or
+`'jev'`, the card check's, which only phase D4's writer is to raise. A Jev
+finding names the request it rests on (`source_request_id`,
+`findings_jev_names_its_request`), and a trigger,
+`findings_jev_rests_on_its_answer`, holds it to a valid `true` to
+`performance_claim` on an `ok`, non-probe `guardrail.card` request, raised as
+`jev:guardrail.card`; CHECKs keep the `jev:` raiser to Jev's findings alone, a
+Jev finding at `low` or `medium`, so that it never blocks, and on a candidate;
+and `findings_one_per_jev_answer` admits one per candidate per answer.
+`findings_keep_what_was_raised` lets only the closure's columns change and
+refuses a reopen, which 0008's CHECK always admitted; and DELETE and TRUNCATE
+are refused with an exception, so a candidate's delete, which would cascade
+to its findings, fails with them. Every comparison of `origin` in a trigger
+is NULL-safe, so an insert naming none fails on `NOT NULL` rather than on a
+trigger's message. 0015 also seeds the card check's arming switch off; adds
+provenance `system` to `jev_requests_provenance_check` alone, under its own
+name, so a request may be recorded as this system's own records computed in
+code — the ops lane's skeletons, from D3 — while `jev_signals`, whose CHECK
+stays as 0013 wrote it, can never hold a signal resting on one; and moves
+0014's flip conjuncts out of `jev_evaluations_counts_within_n` into
+`jev_evaluations_flip_counts_are_counts`, since under plan version 2 a flip
+rate counts the question's whole population and its pairs are no longer
+bounded by the scored items. Applied over a database at 0014 holding rows, it
+keeps every row as it was; over one holding a finding raised under a `jev:`
+raiser, which no writer has ever written, it fails whole and leaves it at 0014
+(`tests/integration/test_phase_d_schema.py::TestTheMigration`).
+
 ### Switches, all fail closed
 
 Seeded in `system_flags` by migration 0012 and read through `flags.py` with
@@ -668,14 +701,28 @@ already applies. A switch is on only for a stored JSON `true`, not the string
 counts read as 0, which permits no request, on any failure or any value the
 catalogue refuses, rather than being clamped. From phase C that includes a
 budget of 1 to 9: each lane spends at most its share of the budget, rounded
-down, and below 10 the probe lane's would be none while the setting read as one
+down, and below 10 the smallest shares — the probe lane's, and from D1 the
+findings and ops lanes' as well — would be none while the setting read as one
 that permitted calls, so a budget is 0 or at least 10
-(`jev_catalogue.MIN_DAILY_REQUEST_BUDGET`, derived from the shares). The programme's Jev loop asks
+(`jev_catalogue.MIN_DAILY_REQUEST_BUDGET`, derived from the shares), and the
+refusal names the lanes with the smallest share. The programme's Jev loop asks
 `programme_enabled` as well as `jev_enabled`: two independent switches, both
 required, neither derived from the other. From phase C the road asks them
 itself, on every ask, with the area of the set's own lane and, for a set that
 carries this system's own detail, `jev_send_internal_detail`, so a caller that
 forgot to is held to them anyway.
+
+Migration 0015 seeds one more, `jev_arm_card_check`, false: whether the card
+check may add a finding, from phase D4, and one of two independent conditions
+for it beside a usable, person-labelled evaluation, neither derived from the
+other. `flags.jev_arm_card_check` reads it through the same `_switch`, on only
+for a stored JSON `true`, and `JEV_KEYS`, held to the seeds of 0012 and 0015,
+gains it; in D1 nothing reads it to act. From D1 the planner reads
+`jev_send_internal_detail` too, through its own reader, as the road does: a
+set declaring `internal_detail` is planned only while it is on, so no job is
+queued only to end `disabled`. No registered set declares it until D3's
+`ops.job_error`, so a set of the ops lane will go only while the ops area and
+the detail switch are both on.
 
 ## Lanes
 
@@ -804,7 +851,7 @@ six below the table, beside a UI pull request that is not phase C's.
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
 | C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **Done**: C1+C2, W, C5, C4, C6, C7+C8 and C9, all dark |
-| D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A) | Not started |
+| D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A); and the card check armed. Designed in `docs/09-jev-phase-d-design.md`, with its build scope beside it | **In progress**: D1 done, dark |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
 | G. Shadow | A `jev_regime_allocator` candidate and its baseline twin, in shadow | Not started |
@@ -827,6 +874,18 @@ pull request beside them because it merges first, though it is not phase C.
 | C6 | Web ingest, which calls nothing | C1+C2, C4, C5 | **Done** |
 | C7+C8 | The injection screen and catalogue suggestions, and hypothesis categorisation with the card check, in shadow | C5, C6 | **Done** |
 | C9 | The evaluation harness, migration 0014 | C4, C7+C8 | **Done** |
+
+Phase D lands as four pull requests, each dark, each with its own subsection
+under "Phase D, as built" and its own CLAUDE.md rows. D1 merges first, before
+any Jev area is first switched on: plan version 2 is free only while the
+ledger holds no answer.
+
+| Pull request | Contents | Depends on | Status |
+|---|---|---|---|
+| D1 | Plan version 2 and the regime's plan apart, looks counted; migration 0015 and a finding's writer; the title sets read by column list; subjects addressed by their state and the text-free ops lane; the arming switch; phase D's shares; the detail switch in the planner; the walks that hold what Jev's code reads and writes | — | **Done** |
+| D2 | Findings routing: `findings.owner` and `findings.severity`, the chips, the harness's `preview` and `suggestions` | D1 | Not started |
+| D3 | Ops triage: the redactor, code triage first, `ops.job_error` behind the ops area and the detail switch | D1 | Not started |
+| D4 | The card check armed, behind the arming switch and a usable person-labelled evaluation | D1, D2, D3 | Not started |
 
 ### Phase A, as built
 
@@ -2393,16 +2452,22 @@ state (`test_the_baseline_rule_is_total_and_never_abstains`,
 the sleeves is a choice the operator has reviewed: both are the defaults the
 agent that built C4 chose.** Before the first regime answer exists — the
 decisions area is seeded off, so none does — a change to either is a new
-`PLAN_VERSION` with its hash appended, and costs nothing; a changed sleeve also
-changes `src/data/reference.py` and starts a new signal series, since the
-signal's symbol names the instruments. After it, the same bump, recorded as a
-change of plan: the regime job writes the plan in force into its result as it
-asks and the planner writes it into each re-ask's payload, so `forward` scores
-agreement only over answers first recorded under the plan it runs and counts
-the rest apart by the plan they were recorded under, and a flip rate counts
-only the pairs sampled under it; the report names its plan, no answer is
+`REGIME_PLAN_VERSION` with its hash appended, which sets aside regime
+agreement alone and costs nothing; a changed sleeve also changes
+`src/data/reference.py` and starts a new signal series, since the signal's
+symbol names the instruments. After it, the same bump, recorded as a change of
+plan: the regime job writes the plans in force into its result as it asks,
+the regime plan beside the global one, and the planner writes the global plan
+into each re-ask's payload, so `forward` scores agreement only over answers
+first recorded under the regime plan it runs and counts the rest apart by the
+regime plan they were recorded under (a result naming none, as C4's jobs
+wrote them, as plan unknown), and a flip rate counts only the pairs sampled
+under the global plan in force; the report names both plans, no answer is
 scored by a rule registered after it, and the old rule is never rewritten to
-match. The first cut said all this and built none of it.
+match. The first cut said all this and built none of it. As C4 built it, the
+rule and the sleeves sat inside the global plan, so a change was a new
+`PLAN_VERSION`, which would have set aside every lane's answers as well; phase
+D1 moved them into a regime plan of their own (M4, under "Phase D, as built").
 
 **The harness reads, and holds no key.** `python -m src.programme.jev_eval`
 runs `status`, `forward` and `forward-audit`, each in one read-only,
@@ -3311,7 +3376,7 @@ writes labels and evaluations, through `jev_repo`, in three commands alone.
 
 | Command | What it does |
 |---|---|
-| `evaluate --set S --key K --labelled-by L [--split test\|all] [--model M] [--record [--commit SHA]] [--json]` | One question of one registered set against exactly one labeller's labels, for one pinned model — the pin by default — over the held-out test split by default. A dry run, printing every figure with its n and interval and "dry run: nothing recorded", unless `--record`, which writes the row and refuses without a commit: `--commit`, else `GIT_COMMIT`, else `git rev-parse HEAD` on a tree with nothing uncommitted, 40 lowercase hex digits in each case. Refuses `decision.regime` ("its numbers are forward's"), a question no set plan registered, a labeller that is no labeller, a model that is not pinned, and nothing labelled under the plans in force: "not measured: no labelled items", with how many items were set apart, on standard error, and nothing written |
+| `evaluate --set S --key K --labelled-by L --split dev\|test\|all [--model M] [--record [--commit SHA]] [--json]` | One question of one registered set against exactly one labeller's labels, for one pinned model — the pin by default — over the split named. As C9 built it, `--split` took `test` or `all`, defaulted to the held-out test split, and ran as a dry run, printing every figure with its n and interval and "dry run: nothing recorded", unless `--record`; from phase D1 (plan version 2, M3) `--split` has no default, `test` and `all` are looks at the held-out items, each taken only with `--record`, and `dev`, the development split's search, is never recorded, all refused in `jev_eval.execute` before any connection (see Phase D, as built). `--record` writes the row and refuses without a commit: `--commit`, else `GIT_COMMIT`, else `git rev-parse HEAD` on a tree with nothing uncommitted, 40 lowercase hex digits in each case. Refuses `decision.regime` ("its numbers are forward's"), a question no set plan registered, a labeller that is no labeller, a model that is not pinned, and nothing labelled under the plans in force: "not measured: no labelled items", with how many items were set apart, on standard error, and nothing written |
 | `labels export --set S --key K --blind [--sample N] [--include-quarantined]` | CSV of `subject_type, subject_id, text` and nothing else: every stored subject of the set's kind — web content, each once by its earliest document's excerpt, or each title the programme's model wrote within the cap — in the order of their addresses, the first N where a sample is asked for. Which subjects is decided by the stored texts and the code alone: web text the code screen, run on it now, flags is left out unless `--include-quarantined`, a quarantine made by code from the words, which no set is ever asked about, and nothing else is. Content Jev's own injection screen quarantined, or a vendor's content block, is exported like any other, since leaving it out chose the subjects by what was answered: the first cut left out every quarantined content, so a labeller of the screen never saw one of its `true` answers (C9's review). No answer, request or quarantine is read, so neither what a labeller sees nor which subjects can depend on what Jev or the vendor said. For the catalogue, content the screen quarantined is never described, and counts as not asked. `--blind` is required, so no export can be asked for that is not |
 | `labels import --file F (--as operator:NAME \| --source DATASET)` | A UTF-8 CSV of `question_set, question_set_version, question_key, subject_type, subject_id, label`, optionally `note` and `text`, and no other column, an answer column above all. Every row is checked first: the set registered and the version its own, a question its plan plans, the subject its kind of text by a content address that is stored, the label one of the question's options and never its escape, a `text`, where given, the text the address names, each item once; and no item this labeller has labelled otherwise, since a label revised after the answers are seen is not ground truth. One refused row and nothing is recorded. A person is `operator:NAME`, lower case; a dataset is `source:DATASET@` the first twelve hex digits of the file's sha256, and an allow-listed source's name is refused, its labeller being the ingest's |
 | `labels copy --set S --key K --from-version A --to-version B` | Each label of the key at A, by its own labeller, to B, the registered version, noted "copied from vA", where the key's type and options, with their descriptions and in order, are A's exactly. A version no longer registered has its words only in the requests it was asked with, so they are read from there, and a version never asked is refused |
@@ -3357,7 +3422,8 @@ the reporting level like every other interval, beside the items only one of
 the two got right, which the row records; Jev beats a baseline only by the
 exact one-sided sign test of those items at the gate level (McNemar's, exact:
 `jev_stats.sign_test`), and the text says "too few to say" where not even
-every one of them going Jev's way could reach it — fewer than eight at 0.995.
+every one of them going Jev's way could reach it — fewer than eight at plan
+version 1's 0.995, and from phase D1 fewer than eleven at version 2's 0.999375.
 The bootstrap gates nothing: over a few discordant items it understates their
 uncertainty, and the first cut, which gated on its bound, called one item of
 one, and five, six or seven of 200 all Jev's way, a win at exact chances of
@@ -3929,14 +3995,22 @@ Numbered on from Phase B's.
     through `card_verdict`, the screen's line — is phase D's change, and must
     move the calibration across the boundary test that keeps it out of
     everything that acts.
-68. **`usable` does not read the re-asks that could not be compared.** A row
-    counts them, stratum by stratum and near the threshold (C9's review), and
-    the text prints them beside each rate, but a flip rate over the compared
-    pairs alone still decides the two flip conditions: thirty valid pairs and
-    thirty ties pass where sixty valid pairs would. A tie or an answer refused
-    whole on a re-ask is itself unstable, so a rule counting them against a
-    threshold may be wanted; it would be a new number of the plan, so it is a
-    new plan version's to register, not a choice made here after the answers.
+68. ~~**`usable` does not read the re-asks that could not be compared.**~~
+    *Closed by phase D1 (plan version 2, M5):* `usable` reads each flip rate in
+    the worst case, every re-ask that could not be compared counted as a flip,
+    `(flipped + not compared) / (compared + not compared)` within its limit on
+    at least `MIN_FLIP_PAIRS` compared pairs (`jev_prereg.FLIPS_NOT_COMPARED`),
+    so thirty valid pairs and thirty ties are refused where sixty valid pairs
+    pass, and a row that does not say how many could not be compared is
+    refused too. The rule is a number of the plan, registered by version 2
+    while no answer existed, as this item asked
+    (`tests/unit/test_jev_calibration.py::TestTheFlipLimitsReadTheWorstCase`).
+    As first written: a row counts them, stratum by stratum and near the
+    threshold (C9's review), and the text prints them beside each rate, but a
+    flip rate over the compared pairs alone still decided the two flip
+    conditions; a tie or an answer refused whole on a re-ask is itself
+    unstable, and a rule counting them against a threshold would be a new
+    number of the plan, a new plan version's to register.
 69. **A percentile bootstrap over few items understates its uncertainty.** The
     Brier score's interval and each paired difference's are reported only, at
     the reporting level, and gate nothing: "beats" is the exact sign test's
@@ -3951,6 +4025,341 @@ Numbered on from Phase B's.
     by an answer. Its evaluations are upper bounds, every excerpt being
     undated, and arm nothing; a labeller that must not be chosen by answers is
     a person labelling from the blind export, which keeps such content.
+
+### Phase D, as built
+
+Phase D routes findings, triages failed jobs and arms the card check, as
+`docs/09-jev-phase-d-design.md` designs it and its build scope binds it, in
+four pull requests, each dark. Its first, D1, builds the foundations the other
+three stand on, and calls nothing: it registers no question set, adds no job
+kind, plans and asks nothing that phase C did not, and switches nothing on, the
+arming switch it adds included. It touches nothing in the decision path, the
+signals, the worker's order path, the engine or the three live-money gates.
+
+#### D1: plan version 2 and the foundations
+
+**Plan version 2** (design section 3.2; the scope's 2a). The analysis plan is
+re-registered while the ledger holds no answer, so the new version sets aside
+nothing; version 1's hash,
+`f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf7caf`, stays in
+`tests/unit/test_jev_prereg.py`'s `RELEASED_PLAN_HASHES`, and version 2 hashes
+to `5d3a7fbbdb804440e70e077c75f9c997454786a84024d5ef58afabcab8365844`
+(`GOLDEN_PLAN_HASH`). What changed, each moving the hash:
+
+- **R1, floors by statistic.** `STATISTIC_FLOORS` replaces `LANE_TARGETS`:
+  covered accuracy at least 0.80, and covered precision of the acting class at
+  least 0.90, each met by its one-sided Wilson lower bound at the gate level. A
+  set plan may raise a floor and never lower it; a guardrail with an acting
+  class is held to precision, anything else to accuracy.
+- **R2, M3, the family and the looks.** `GATE_FAMILY` 20 set-and-question
+  pairs and `MAX_LOOKS` 4 looks at the held-out items, counted per set, version
+  and question across every model (`LOOKS_COUNTED_BY`, the identity
+  `_gated_family` counts), so a new pin restores no look. `GATE_CI` is
+  0.999375, written as a literal and held to 1 − 0.05/(20 × 4): one-sided
+  Wilson floors now need 42 covered items all right for accuracy and 94 for
+  precision, and the exact sign test eleven discordant items all one way.
+- **M1, the split.** `DEV_SPLIT_TENTHS` 5: half the items search, half test.
+- **M2, flips over the population.** A flip rate counts every canonical
+  request of the question under the pin (`FLIP_PAIRS`), labelled or not;
+  `build_evaluation` no longer drops a pair whose request answered no scored
+  item, and 0015 frees the pair counts from `n`.
+- **M5, the worst case.** A re-ask that could not be compared counts against
+  the flip limits as a flip (`FLIPS_NOT_COMPARED`): `usable` reads
+  `(flipped + not compared) / (compared + not compared)` as exact fractions, on
+  at least `MIN_FLIP_PAIRS` compared pairs, and refuses a row that does not say
+  how many could not be compared, or whose rate no count of its pairs could
+  give.
+
+**The regime's plan, apart** (M4; the scope's 2b). `REGIME_BASELINE_RULE` and
+the reference sleeves left the global plan for one of their own:
+`REGIME_PLAN_VERSION` 1, `regime_plan()`, `regime_plan_hash()` and
+`GOLDEN_REGIME_PLAN_HASH`,
+`2833a4c00d1a6b0adab46c6d6bf0e3544deae6dc1a964598a088162fc1b6af74`, with its
+own released history in the test. A change to the rule or the sleeves is a
+regime plan bump that sets aside no other lane's history. `jev_forward`'s
+result gains `regime_plan_version` and `regime_plan_hash` beside the global
+plan's, and `forward` scores agreement under the regime plan alone, counting an
+answer recorded under another, or before D1 under none (plan unknown), apart;
+`status` prints both plans. `tests/unit/test_jev_forward.py::test_the_result_names_both_plans`,
+`tests/unit/test_jev_eval.py::TestTheRegimeReport`,
+`tests/integration/test_jev_harness.py::TestTheForwardReportUnderTheRegimePlan`.
+
+**Looks at the command line** (the scope's 2c). `evaluate --split` has no
+default and takes `dev`, `test` or `all`. `test` and `all` read the held-out
+items, so each is a look and is taken only with `--record`; `dev` scores the
+development split's items alone — it reads no label or date of a test item and
+scores none of its answers — and is never recorded. Its flip rates are the
+population's (M2), as a look's are, since a flip uses no label: the re-asks of
+test items are counted among them, and the first cut's claim that `dev` read
+nothing of the test split was wrong (D1's review). Nor does its threshold line
+promise that a look will bear the threshold out, as the first cut's did: the
+look searches again only if every item it reads, the held-out ones included,
+is dated after the pin was first observed, which a `dev` run does not read
+(open item 83). The rule is `jev_eval.look_problem`, applied in
+`jev_eval.execute`, which `main` and every caller of the commands reach,
+before any connection is made, and it fails closed: it decides from the
+command `jev_eval._command` names, which refuses anything but one of
+`jev_eval.COMMANDS`, and it refuses a split that is not `dev`, `test` or
+`all`, while `_read` dispatches on each command by name with no default. The
+first cut held the rule to the literal `"evaluate"` and sent every reading
+command it did not know to the evaluation, so a caller handing `execute`
+arguments no parser makes — a command of `None`, mis-cased or padded, or
+`labels` with no such subcommand — printed a held-out evaluation and recorded
+no look (D1's review). `jev_calibration.usable` gains the `looks`
+reason: an evaluation with `MAX_LOOKS` recorded looks of its set, version and
+question before it, on the test split or every item, under any model, is
+refused. `report` prints the looks each identity has spent.
+`tests/unit/test_jev_eval.py::TestLooks`,
+`tests/unit/test_jev_calibration.py::TestUsable` and
+`::TestTheFlipLimitsReadTheWorstCase`; on PostgreSQL, a dry look at the test
+split, and arguments no parser made, refused before anything is read
+(`tests/integration/test_jev_evaluations.py::TestTheCommandsOnPostgres`).
+
+**Migration 0015** (the scope's 2d) is described under the schema above, and
+`tests/integration/test_phase_d_schema.py` holds it: every rule and every
+conjunct no other rule implies broken alone and admitted with that rule
+dropped, in a transaction rolled back after, the rules read from the catalogue
+against a database at 0014, so a rule added without a case fails
+(`TestEveryRuleBites`); the migration over 0014 holding findings and
+evaluations, or failing whole (`TestTheMigration`); an insert naming no origin
+failing on `NOT NULL` and not on a trigger's message, and `raise_finding`
+writing the origin it is given (`TestOriginIsKnownFromNowOn`); each column but
+the closure's refused, a closure admitted through `repo.close_finding`, a
+reopen, a DELETE, a TRUNCATE and a candidate's cascading delete each refused
+and the row read back (`TestWhatWasRaisedStaysRaised`); a Jev finding on a
+missing request, a request in each other status, a probe, another set, under
+another set's raiser, and on no valid `true` each refused alone
+(`TestAJevFindingRestsOnItsAnswer`); `repo.JEV_REF_SQL` never cutting a ref at
+1, 9,999, 10,000, 10,001 and 123,456 (`TestTheJevRefs`); `system` admitted on
+`jev_requests`, refused by `jev_signals_provenance_check` and, as a signal's
+claimed provenance on a `system` request, by the origin trigger
+(`TestTheProvenances`); the arming switch read off through the shipped reader;
+and flip counts above `n` admitted. The foreign key on `source_request_id` is
+the one rule with no case of its own: a Jev finding's trigger refuses a
+request it cannot see before the key is checked, nothing else names a request,
+and the request cannot change.
+
+**A finding's writer** (the scope's 2e). `repo.raise_finding(..., *, origin)`
+takes `origin` keyword-only with no default, and refuses any writer but
+`'model'` and `'operator'` before the connection is touched; the tick passes
+`'model'` and the API `'operator'`, each a literal. `findings.origin` is the
+API's one change, a literal on a write it already made.
+`tests/unit/test_jev_table_boundaries.py` reads every write of `findings` in
+`src/` and the protected entry points: every insert names its origin, every
+update sets the closure's columns alone, no write is anything else, and the
+two callers pass literals — each scan proved on sources that must trip it.
+From D1's review the update scan reads a `SET` list to the `WHERE`, `FROM` or
+`RETURNING` that ends it outside every parenthesis and string literal, where
+the first cut stopped at the first of those words anywhere, a subquery's or a
+literal's included, and missed every column set after it; and the caller scan
+counts the writer taken by its name — the literal `"raise_finding"`, or the
+`repo` module read by a computed name or as a namespace — as a call it cannot
+read.
+`test_programme_convene.py::TestThePanelSits::test_the_tick_raises_findings_as_model`
+holds the tick's value, and `test_programme_gates.py::TestTheVeto::test_veto_roles_are_role_keys`
+that no veto role holds a `:`, so a `jev:` raiser is never one.
+
+**The title sets read by column list** (the scope's 2f).
+`jev_repo.get_hypothesis_title` returns a hypothesis's ref, title, origin and
+creation time and nothing else (`HYPOTHESIS_TITLE_COLUMNS`), and is the title
+sets' `load` in place of `repo.get_hypothesis`, whose `SELECT *` handed every
+title ask the card. `jev_jobs` no longer imports `repo`.
+`tests/unit/test_jev_jobs.py::TestTheTitleProjection`,
+`tests/integration/test_jev_repo.py::TestTheTitleRead`.
+
+**Two registry rules, with no set under them yet** (the scope's 2g).
+`jev_questions.STATE_ADDRESSED` maps a state model to the provenance every set
+asking about it records, empty until D3's `{JobErrorState: "system"}`; for
+such a subject the road holds the id to `jev_hash.state_hash` of the state
+sent, before any switch is read, and registration refuses a model addressed
+both by its text and by its state, one the detail rule cannot prove text-free
+with no field exempted, and a set asking about one under another provenance.
+`TEXT_FREE_LANES` is the ops lane: a set in it registers only declaring
+`internal_detail`, with a state proved text-free and no field exempted, a
+`title` included, and `dump_state` reads what every ask of it would send, no
+title exempted, whatever it declares. `system` joins the provenance vocabulary
+and the provenances read as this system's own text. Each rule is proved with
+test-only sets and a stand-in for D3's state:
+`tests/unit/test_jev_questions.py::TestStateAddressedSubjects` and
+`::TestTheTextFreeLanes`, and
+`tests/unit/test_jev_lane.py::TestSubjectsAreContentAddressed::test_a_state_addressed_subject_is_refused_before_any_switch`.
+
+**The arming switch** (the scope's 2h), under the switches above.
+`tests/unit/test_jev_flags.py::TestTheReadersReadTheSeededKeys` holds the keys
+to the seeds of 0012 and 0015, and `::TestTheArmingSwitch` that it is on only
+for a stored JSON `true`, reads its own key and no other, is seeded off by 0015
+and, in D1, is read by nothing outside `flags`.
+
+**The shares** (the scope's 2i): research 25, guardrail 25, findings 10, ops
+10, signals 0, decision 20, probe 10; the minimum budget is still derived, and
+still 10; a refused budget's message names the lanes with the smallest share,
+read from the table (`jev_catalogue.smallest_shares`).
+`tests/unit/test_jev_catalogue.py::TestTheShares`.
+
+**The detail switch in the planner** (the scope's 2j). A set declaring
+`internal_detail` is planned only while `jev_send_internal_detail` is on, read
+through its own reader (`jev_plan._detail_allows`), for an ask, a re-ask and
+the forward clock alike; a set declaring none reads no switch for it.
+`_plan_asks`' screen-only hold exception is word for word as it was.
+`tests/unit/test_jev_plan.py::TestTheDetailSwitchGatesPlanning`, with a
+test-only set.
+
+**What Jev's code reaches** (the scope's 2k; design section 9.2). Two walks
+with `test_jev_jobs.py`'s `_Reach`, from every root on the Jev side that acts —
+each `JEV_HANDLERS` handler, each `ASKABLE` set's `load`, `admit`, `build` and
+`follow_up`, and the planner, read from the objects themselves — and one scan:
+
+- `test_jev_table_boundaries.py::test_the_jev_side_never_reads_detail`, the
+  harness's commands among its roots, refuses any reachable SQL that reads `*`
+  from `hypotheses`, `findings` or `role_assessments`, or names a detail column
+  of them (`card`, `decision_rationale`, `detail_md`, `remediation`,
+  `close_note`, `summary`, `evidence`) in a SELECT or a RETURNING; it trips on
+  handlers calling `repo.get_hypothesis` and `repo.list_findings`. From D1's
+  review it judges every statement that reads one of the three, whatever its
+  first word once comments and parentheses are read past — an `INSERT …
+  SELECT`, an `UPDATE … FROM`, a `DELETE … USING`, a `COPY (…) TO` — finds a
+  table after a comma in a `FROM` list and as the `TABLE` shorthand, counts a
+  table read as a whole row (`to_jsonb(h)`, `SELECT f`, `(f).*`) and a table
+  copied whole (`COPY t TO`, asyncpg's `copy_from_table`) as reads of every
+  column, refuses a column list it cannot read (interpolated, or a `%` or
+  `str.format` placeholder) on a table it reads, and treats a table it reads
+  but cannot name (`FROM {table}`) as any of the three. A module's string
+  constant interpolated into a statement is read as its text, comments and
+  string literals are read past, and docstrings and other prose are not
+  statements. The first cut judged only statements whose first word was
+  `SELECT` or `WITH`, found a table only after `FROM`, `JOIN`, `INTO` or
+  `UPDATE`, and read no whole row and no column list it could not read.
+- `::TestWhatJevCodeCanWrite::test_exactly_these_writers` finds exactly the
+  allow-listed `(table, writer)` pairs: `jev_requests` and `jev_answers` from
+  `jev_repo.record_request` and `record_answers`, which `record_exchange` alone
+  calls; `jev_signals` from `jev_lane.record_signal`; `web_documents` from
+  `insert_documents` and `quarantine_content`; `jev_labels` from
+  `record_label_once`; and `jobs` from `enqueue`. It runs the shared scanner
+  for a table wherever the texts that scanner reads name it, case aside; the
+  first cut looked for the table's lower-case name in a module's raw text,
+  and so never looked for a write named in capitals or split across `+` or
+  `str.join`, which the scanner reads (D1's review).
+- `::test_nothing_in_the_programme_writes_a_switch` and
+  `test_job_ownership.py::test_nothing_in_the_programme_changes_a_job_it_did_not_claim`:
+  no write of `system_flags` and no reference to a switch's writer anywhere in
+  `src/programme`; and no state-changing queue call there but the loop's claim,
+  completion, failure and lease of what it claimed and the planner's and the
+  tick's `enqueue`, never `requeue_expired`. From D1's review the switch test
+  also walks everything each programme module reaches with `_Reach`, so a
+  switch written through a wrapper it imports — the API's `set_enabled` and
+  `set_autonomy` routes call `set_flag`, and no boundary keeps the programme
+  from importing them — is a write the walk finds; and the queue scan also
+  refuses the queue's module, or a package holding it, used as a value, its
+  `__dict__`, a name loader loading it, a star import of it, and a changer's
+  name handed to `getattr`, `attrgetter` or `methodcaller` on anything else,
+  as the enqueue scan always has.
+
+**The tests D1 moved** (the scope's 2l), re-derived by running both suites on
+this build: the 86 unit cases design section 13 listed, in the eight files it
+named, with `test_jev_prereg.py` rewritten; and its 31 integration cases in four
+files, `test_programme_panel_atomicity.py`'s clean-up now retiring its
+candidate and leaving its findings, and `test_a_dry_run_records_nothing` a
+`--split dev` dry run. The table missed one, by the way the seeded switches are
+held: `test_jev_schema.py::TestTheMigration::test_it_applies_on_top_of_a_database_already_at_0011`
+compares the switches at 0012, so it reads 0012's seeds (`SEEDED_BY_0012`)
+while every other case reads them with 0015's. Two cases the table listed
+needed nothing: `test_a_chosen_threshold[precision]`, whose fixture grew with
+the unit builder it shares, and the two hold tests of `TestTheAsks`, as the
+design said.
+
+**Where D1 departs from the design and its scope.** The ledger's writers in
+the write walk are `record_request` and `record_answers`, the definitions the
+SQL is in, where the design names `record_exchange`, their one caller.
+`raise_finding` also refuses any writer but `'model'` and `'operator'`, so
+`'jev'` can come only from D4's own writer. `repo.JEV_REF_SQL`, the `J-` ref
+expression, lands in D1 with no user, because design section 13 tags
+`TestTheJevRefs` D1 while the scope places its writer in D4. The planner's
+detail rule covers the re-asks and the forward clock as well as the asks,
+reading "the planner's one general rule" as the planner's. `report` prints the
+looks spent from D1, since D1 is where looks start to count. `usable`'s
+worst-case flip rule also refuses a rate no count of its pairs could give. The
+integration split test's expectations were re-derived under five tenths rather
+than its fixture's titles re-chosen. 0015 carries a header saying why, above
+SQL identical to the design's.
+
+**D1's review.** Fifteen findings, each checked against the code and each
+real; every one is fixed with a test that failed before it, recorded beside
+what it changed above, or below as an open item:
+
+- the harness's command line fails closed: `execute` refuses a command or a
+  split no parser makes, where the first cut evaluated any command it did not
+  know (looks at the command line, above);
+- a `dev` run promises no look its threshold cannot have, and says that its
+  flip rates are the population's, as a look's are (looks at the command
+  line, above, and open item 83);
+- the four boundary scans read the spellings they missed: the write walk a
+  table in capitals or split across `+` or `str.join`, the detail walk every
+  statement reading a guarded table, whatever its first word, its comma joins
+  and whole-row reads, and its column lists it cannot read, the switch test
+  everything the programme reaches, the queue scan the queue held as a value
+  or looked up by name, the findings-update scan a `SET` list past a subquery
+  or a literal, and the caller scan `raise_finding` taken by name (what Jev's
+  code reaches, and a finding's writer, above);
+- two tests now bind what they claimed: the text-free check is tested without
+  the declaration and under a provenance the detail rule does not read, and
+  two flip cases ask rates their pairs can give, so the limit refuses them;
+- three passages that still stated what D1 changed now say what it is: C4's
+  rule and sleeves are a `REGIME_PLAN_VERSION`'s, C9's `evaluate` row says
+  `--split` has no default and a look needs `--record`, and open item 68 is
+  closed by M5.
+
+### Open items Phase D found
+
+Numbered on from Phase C's, as design section 14 numbers them. Each says the
+pull request it belongs to; D1 builds the ones it names.
+
+71. **The Jev duplicate question is deferred** (D2). Duplicates are code-exact
+    only; asking Jev whether two findings are one is left for later.
+72. **Card labels are exposed after the first armed finding** (D4). A Jev
+    finding on the register says what Jev answered about a title, and nothing
+    records which labeller has seen it.
+73. **The worker records `str(exc)` without its class** (D3), so no ops
+    keyword reads a class name; naming the class is the worker's own review.
+74. **The daily report's blocking count is not veto-aware** (D2 and after): it
+    counts high and critical findings whoever raised them.
+75. **Findings labels can echo the register** (D2). The findings page shows
+    the raiser and the severity beside every title — the values the recorded
+    baseline reads — and nothing records which labeller has read it. No
+    findings set arms in phase D.
+76. **Findings raised before 0015 read `'unknown'`** (D1), and are never
+    asked about: no writer of them can now be proved, and a backfill from
+    `audit_log` would be a guess.
+77. **The vocabulary bounds what a skeleton can say** (D3); a change to it is
+    a new set version.
+78. **Looks are counted per set, version and question across every model**
+    (D1), so after four looks a set's question cannot arm under any pin until
+    a new set version.
+79. **The harness enforces only its own commands** (D1). `jev_eval.evaluate()`,
+    the function, computes a test-split evaluation and records nothing, and
+    anyone who reads the test split by hand is outside the protocol.
+80. **Near-threshold flips above a threshold of 0.30 rest on the uniform
+    stratum alone** (D1, plan version 2); a margin-banded stratum is a later
+    plan's.
+81. **Ops items are dated over the rows their population reads** (D3), so an
+    occurrence of a skeleton before the pin's first observation does not mark
+    it possibly in training. For private records the date carries nothing
+    about training, and a skeleton that is also a public library message is in
+    training whatever its date.
+82. **The detail switch is one switch for all of this system's detail** (D1,
+    live from D3). Switched on for ops, it lets any later set declaring
+    `internal_detail` send too, once that set's own area is on; the planner
+    and the road both read it for every such set.
+83. **A `dev` run cannot say whether a look would be an upper bound** (D1,
+    found by D1's review). `evaluate --split dev` reads no date of a test
+    item, and a look searches for a threshold only if every item it reads is
+    dated after the pin was first observed, so a held-out item undated, or
+    dated on or before that day, makes the look an upper bound that attempts
+    no threshold while it still spends one of the four looks every pin
+    shares (item 78). The `dev` run's threshold line names that condition and
+    promises nothing; reading the held-out items' dates, which carry no label
+    and no answer, in a line of their own beside the `dev` figures, without
+    moving any of them, would let an operator know before spending the look.
+    Left for review: it is a new read of the test split, however harmless.
 
 ## Inputs needed from the operator
 
@@ -3971,9 +4380,11 @@ Inputs, not approvals.
    area is on as well.
 2. **A review of `REGIME_BASELINE_RULE` and the reference sleeves** (SPY,
    IEF, GSG). Both are the defaults the agent that built C4 chose (see C4
-   above). Before the decisions area is first switched on, a change is a plan
-   version bump that costs nothing; after the first regime answer, the same
-   bump is recorded as a change of plan.
+   above). From D1 they are the regime's own plan, apart from the global one,
+   so before the decisions area is first switched on a change is a
+   `REGIME_PLAN_VERSION` bump that costs nothing and sets aside no other
+   lane's history; after the first regime answer, the same bump is recorded as
+   a change of plan.
 3. **A replacement Alpaca paper key** for the revoked one.
 4. **For phase H, a second Alpaca paper account's key**: a `PK` key, checked
    against both endpoints before it is stored, as CLAUDE.md requires of any

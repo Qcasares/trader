@@ -1071,7 +1071,10 @@ class TestTheTitleAsksChangeNothing:
             date(2021, 1, 4),
             "synthetic",
         )
-        await repo.raise_finding(conn, candidate, "risk_officer", "high", "Invented")
+        # Written as the tick's panel writes one (migration 0015's origin).
+        await repo.raise_finding(
+            conn, candidate, "risk_officer", "high", "Invented", origin="model"
+        )
         before = await _shadow(conn)
         if outcome in ("true", "false"):
             vendor.noul = {MODEL_TITLE: 0.97 if outcome == "true" else 0.03}

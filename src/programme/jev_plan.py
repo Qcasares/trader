@@ -26,6 +26,14 @@ fetched for a lane that cannot ask about it is a fetch for nothing (design
 R28). Seeded as migration 0012 seeds the switches, it plans nothing
 (``tests/integration/test_jev_dark.py``).
 
+And one rule for every set (phase D, docs/09 section 5.2): a set declaring
+``internal_detail`` — this system's own text beyond a title, sent only while
+``jev_send_internal_detail`` is on — is planned only while that switch is on,
+read through its own reader as the road reads it, neither derived from the
+other, so no job is queued only to end ``disabled``. A set declaring none
+reads no switch for it. No registered set declares it until phase D3's
+``ops.job_error``.
+
 The rules
 ~~~~~~~~~
 Each with the area it needs, what it enqueues, when, and under which key:
@@ -208,6 +216,21 @@ LANE_KINDS: Mapping[str, tuple[str, ...]] = {
 REGIME_SET_NAME = "decision.regime"
 
 
+async def _detail_allows(
+    conn: asyncpg.Connection, question_set: jev_questions.QuestionSet
+) -> bool:
+    """
+    Whether ``question_set`` may be planned as far as this system's detail
+    goes: a set declaring ``internal_detail`` only while
+    ``jev_send_internal_detail`` is on, read through its own fail-closed
+    reader, as the road reads it on every ask (docs/09, section 5.2). A set
+    declaring none reads nothing here.
+    """
+    if not question_set.internal_detail:
+        return True
+    return await flags.jev_send_internal_detail(conn)
+
+
 def _lane_asks(lane: str) -> tuple[str, ...]:
     """The sets a ``jev_ask`` job asks whose answers are recorded in ``lane``."""
     return tuple(
@@ -326,7 +349,7 @@ async def _plan_clock(
         )
         if added is not None:
             planned.append(reference)
-        if question_set is None:
+        if question_set is None or not await _detail_allows(conn, question_set):
             continue
         regime = jev_clock.regime_job_key(question_set, session)
         if await _queued(conn, regime) or await room.left("decision") <= 0:
@@ -393,6 +416,9 @@ async def _plan_asks(
     :func:`jev_repo.documents_to_describe` — content the screen cleared, and
     nothing else — and :func:`jev_repo.hypotheses_to_ask`.
 
+    A set declaring ``internal_detail`` is planned only while
+    ``jev_send_internal_detail`` is on (:func:`_detail_allows`).
+
     While an authentication failure recorded today holds every lane, or the
     vendor has refused a set with a 422 at its version under the pin, nothing
     of it that would make a call is planned: the road would refuse each such
@@ -412,6 +438,8 @@ async def _plan_asks(
             continue
         area = jev_catalogue.LANE_AREA.get(question_set.lane)
         if area is None or not await flags.jev_area_enabled(conn, area):
+            continue
+        if not await _detail_allows(conn, question_set):
             continue
         plans = jev_prereg.plans_in_force(name, question_set.version)
         if plans is None:
@@ -586,7 +614,8 @@ async def _reaskable(
     """
     Whether a canonical request may be re-asked as itself: its set registered
     under the pack that asked it, the pin the model that answered, its set's
-    area on, and, for web text, the text neither quarantined since nor found
+    area on, the detail switch on for a set declaring ``internal_detail``,
+    and, for web text, the text neither quarantined since nor found
     addressed to an AI system by the injection screen, whose quarantine may
     have failed to write (``jev_repo.screen_flag``): a probe would send the
     flagged text to the vendor again, and its repair is the screen's job.
@@ -598,6 +627,8 @@ async def _reaskable(
         return False
     area = jev_catalogue.LANE_AREA.get(question_set.lane)
     if area is None or not await flags.jev_area_enabled(conn, area):
+        return False
+    if not await _detail_allows(conn, question_set):
         return False
     if row["subject_type"] == "web_excerpt":
         return (

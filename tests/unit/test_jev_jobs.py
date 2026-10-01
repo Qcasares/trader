@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -813,18 +814,11 @@ def _document(**overrides: Any) -> dict[str, Any]:
 
 
 def _hypothesis(**overrides: Any) -> dict[str, Any]:
-    """A hypothesis as ``repo.get_hypothesis`` returns one: times as ISO text."""
-    row = {
-        "id": "3f1c2b8e-0000-4000-8000-000000000007",
-        "ref": "H-0007",
-        "title": TITLE,
-        "owner": "programme",
-        "card": {},
-        "status": "proposed",
-        "origin": "model",
-        "model": "an-invented-model",
-        "created_at": CREATED.isoformat(),
-    }
+    """
+    A hypothesis as ``jev_repo.get_hypothesis_title`` returns one: its ref,
+    title, origin and creation time, and nothing else (docs/09, D-SAFE-2).
+    """
+    row = {"ref": "H-0007", "title": TITLE, "origin": "model", "created_at": CREATED}
     row.update(overrides)
     return row
 
@@ -862,9 +856,16 @@ class AskRig:
             self.loaded.append(("document", document_id))
             return self.document
 
-        async def get_hypothesis(conn: Any, ref: str) -> dict[str, Any] | None:
+        async def get_hypothesis_title(
+            conn: Any, ref: str
+        ) -> dict[str, Any] | None:
             self.loaded.append(("hypothesis", ref))
             return self.hypothesis
+
+        async def get_hypothesis(conn: Any, ref: str) -> None:
+            raise AssertionError(
+                "a title set read the card through repo.get_hypothesis"
+            )
 
         async def get_request(conn: Any, request_id: int) -> dict[str, Any] | None:
             assert self.request is None or request_id == self.request["id"]
@@ -880,6 +881,7 @@ class AskRig:
             return AskResult("ok", request_row_id=88, answers=_answers(name))
 
         monkeypatch.setattr(jev_repo, "get_document", get_document)
+        monkeypatch.setattr(jev_repo, "get_hypothesis_title", get_hypothesis_title)
         monkeypatch.setattr(repo, "get_hypothesis", get_hypothesis)
         monkeypatch.setattr(jev_repo, "get_request", get_request)
         monkeypatch.setattr(jev_lane, "ask", ask)
@@ -2766,6 +2768,64 @@ _INNOCENT = [
 ]
 
 
+class TestTheTitleProjection:
+    """
+    The title sets read a hypothesis by column list — its ref, title, origin
+    and creation time — through ``jev_repo.get_hypothesis_title``, never
+    through ``repo.get_hypothesis``, whose ``SELECT *`` hands this side the
+    card, the decision's rationale and every column a later migration adds
+    (docs/09, D-SAFE-2). At ``23dee2b`` every title ask read the card that
+    way; the rig's ``repo.get_hypothesis`` now fails any test that reaches it.
+    """
+
+    @pytest.mark.parametrize("name", TITLE_SETS)
+    async def test_the_title_sets_load_by_column_list(
+        self, ask_rig: AskRig, name: str
+    ) -> None:
+        assert jev_jobs.ASKABLE[name].subject_type == "hypothesis_title"
+        result = await ask_rig.run(_payload(name))
+        assert ask_rig.loaded == [("hypothesis", "H-0007")]
+        assert result["status"] == "ok"
+        assert set(ask_rig.hypothesis) == set(jev_repo.HYPOTHESIS_TITLE_COLUMNS)
+
+    async def test_the_read_names_its_four_columns(self) -> None:
+        class Conn:
+            def __init__(self) -> None:
+                self.asked: list[tuple[str, tuple[object, ...]]] = []
+
+            async def fetchrow(self, query: str, *args: object) -> dict[str, Any]:
+                self.asked.append((query, args))
+                return {"ref": "H-0007", "title": TITLE, "origin": "model", "x": 1}
+
+        conn = Conn()
+        row = await jev_repo.get_hypothesis_title(conn, "H-0007")
+        ((query, args),) = conn.asked
+        assert args == ("H-0007",)
+        selected = re.fullmatch(
+            r"\s*SELECT\s+(?P<columns>.+?)\s+FROM\s+hypotheses\s+"
+            r"WHERE\s+ref\s*=\s*\$1\s*",
+            query,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert selected is not None, query
+        columns = [column.strip() for column in selected["columns"].split(",")]
+        assert tuple(columns) == jev_repo.HYPOTHESIS_TITLE_COLUMNS
+        assert jev_repo.HYPOTHESIS_TITLE_COLUMNS == (
+            "ref",
+            "title",
+            "origin",
+            "created_at",
+        )
+        assert row is not None and row["ref"] == "H-0007"
+
+    async def test_an_unknown_ref_is_none(self) -> None:
+        class Conn:
+            async def fetchrow(self, query: str, *args: object) -> None:
+                return None
+
+        assert await jev_repo.get_hypothesis_title(Conn(), "H-9999") is None
+
+
 class TestTheCardCheckChangesNothing:
     """
     Section 10f of the scope. Nothing reachable from ``jev_jobs`` — its
@@ -2800,9 +2860,10 @@ class TestTheCardCheckChangesNothing:
             ("src.programme.jev_lane", "ask"),
             ("src.programme.jev_repo", "quarantine_content"),
             ("src.programme.jev_repo", "content_block_request"),
-            ("src.programme.repo", "get_hypothesis"),
+            ("src.programme.jev_repo", "get_hypothesis_title"),
             ("src.programme.web_sources", "code_screen"),
         } <= set(reach.reached)
+        assert ("src.programme.repo", "get_hypothesis") not in set(reach.reached)
 
     def test_the_writers_it_looks_for_are_found(self) -> None:
         """Guards the guard: the scanner sees the writers that do exist."""

@@ -1,18 +1,25 @@
 """
 The analysis is registered before the answers it analyses (docs/08, phase C,
-I15).
+I15; docs/09, section 3, plan version 2).
 
 ``src/programme/jev_prereg.py`` holds every choice the forward report and the
-harness will make — the split, the size floors, the confidence levels, the
-flip limits, the re-ask sample and the rule Jev's regime is compared with — as
-data, hashed. An analysis chosen after the data is a search, and a search
-finds something; these tests are what make the choice unrevisable:
+harness will make — the split, the size floors, the statistics' floors, the
+confidence levels and the looks they are spent over, the flip limits and how
+their pairs are counted, the re-ask sample, and, in a plan of its own, the
+rule Jev's regime is compared with — as data, hashed. An analysis chosen
+after the data is a search, and a search finds something; these tests are
+what make the choice unrevisable:
 
-* the plan hashes to its golden, and every version to
-  :data:`RELEASED_PLAN_HASHES`, an append-only history kept here, apart from
-  the plan, so re-recording the golden after an edit still fails;
-* every constant of the plan is in the hash, so a number cannot move without
-  moving it;
+* the global plan and the regime plan each hash to their golden, and every
+  version to an append-only history kept here, apart from the plans —
+  :data:`RELEASED_PLAN_HASHES` and :data:`RELEASED_REGIME_PLAN_HASHES` — so
+  re-recording a golden after an edit still fails; version 1 of the global
+  plan stays released beside version 2, which phase D1 released while the
+  ledger held no answer;
+* every constant of each plan is in its hash, so a number cannot move without
+  moving it, and a constant of one plan moves no other plan's hash;
+* the gate's level is Bonferroni over the family and the looks, and a look is
+  counted by the family's own identity, never by the model;
 * the functions of the plan — the split, the re-ask strata, the baseline rule,
   and from phases C7 and C8 the sets' keyword baselines, the card's claims
   check among them — are checked against copies written here independently,
@@ -33,6 +40,7 @@ import sys
 import types
 import typing
 from datetime import timedelta
+from fractions import Fraction
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -51,18 +59,33 @@ from src.programme.jev_questions import (
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = ROOT / "src" / "programme" / "jev_prereg.py"
 
-#: Every released plan's hash, by version. A version bump appends a row; no row
-#: is ever edited or removed. The module's ``GOLDEN_PLAN_HASH`` sits beside the
-#: plan, so re-recording it is exactly the edit a developer makes when the hash
-#: test fails; this table is history, and editing a released row is an edit to
-#: it that a reviewer sees for what it is: an analysis moved after it was
-#: registered. Version 1 is the agent's default plan, the baseline rule and the
-#: sleeves included (docs/08, phase C, C4). Its row was re-pinned once, in C4's
-#: review, before the plan merged and before any answer existed: the research
-#: target had been registered without the Wilson bound the design's metric
-#: definition requires (``TestTheLaneTargets``).
+#: Every released global plan's hash, by version. A version bump appends a row;
+#: no row is ever edited or removed. The module's ``GOLDEN_PLAN_HASH`` sits
+#: beside the plan, so re-recording it is exactly the edit a developer makes
+#: when the hash test fails; this table is history, and editing a released row
+#: is an edit to it that a reviewer sees for what it is: an analysis moved
+#: after it was registered.
+#:
+#: Version 1 is the agent's default plan of phase C4, the baseline rule and the
+#: sleeves included (docs/08, phase C, C4). Its row was re-pinned once, in
+#: C4's review, before the plan merged and before any answer existed: the
+#: research target had been registered without the Wilson bound the design's
+#: metric definition requires. Version 2 is phase D1's (docs/09, section 3.2):
+#: floors by statistic, a family of 20, a 50/50 split, flips over the
+#: population, four looks counted across models, re-asks not compared counted
+#: against the flip limits, and the regime's rule moved to a plan of its own.
+#: It was released while the ledger held no answer, so it set aside none.
 RELEASED_PLAN_HASHES: dict[int, str] = {
     1: "f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf7caf",
+    2: "5d3a7fbbdb804440e70e077c75f9c997454786a84024d5ef58afabcab8365844",
+}
+
+#: Every released regime plan's hash, by version (M4): the sleeves and the
+#: baseline rule, apart from the global plan since its version 2. Version 1
+#: is the agent's defaults of phase C4, as they stood inside global plan
+#: version 1, now hashed on their own; append-only, as above.
+RELEASED_REGIME_PLAN_HASHES: dict[int, str] = {
+    1: "2833a4c00d1a6b0adab46c6d6bf0e3544deae6dc1a964598a088162fc1b6af74",
 }
 
 
@@ -87,6 +110,34 @@ def _release_problems(module: types.ModuleType) -> list[str]:
     newest = max(RELEASED_PLAN_HASHES)
     if version != newest:
         problems.append(f"plan v{version} is the module's, but v{newest} was released")
+    return problems
+
+
+def _regime_release_problems(module: types.ModuleType) -> list[str]:
+    problems: list[str] = []
+    version = module.REGIME_PLAN_VERSION
+    computed = module.regime_plan_hash()
+    if computed != module.GOLDEN_REGIME_PLAN_HASH:
+        problems.append(
+            f"the regime plan hashes to {computed}, but its golden is "
+            f"{module.GOLDEN_REGIME_PLAN_HASH}"
+        )
+    released = RELEASED_REGIME_PLAN_HASHES.get(version)
+    if released is None:
+        problems.append(
+            f"regime plan v{version} is not in RELEASED_REGIME_PLAN_HASHES: append it"
+        )
+    elif computed != released:
+        problems.append(
+            f"regime plan v{version} hashes to {computed}, but was released as "
+            f"{released}: a released plan is frozen, so bump REGIME_PLAN_VERSION "
+            "and append a row"
+        )
+    newest = max(RELEASED_REGIME_PLAN_HASHES)
+    if version != newest:
+        problems.append(
+            f"regime plan v{version} is the module's, but v{newest} was released"
+        )
     return problems
 
 
@@ -131,10 +182,11 @@ class TestThePlanIsItsReleasedHash:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         source = MODULE.read_text(encoding="utf-8")
-        line = "PLAN_VERSION = 1"
+        line = f"PLAN_VERSION = {jev_prereg.PLAN_VERSION}"
         assert source.count(line) == 1
         variant = _execute_variant(
-            monkeypatch, source.replace(line, "PLAN_VERSION = 2")
+            monkeypatch,
+            source.replace(line, f"PLAN_VERSION = {jev_prereg.PLAN_VERSION + 1}"),
         )
         variant.GOLDEN_PLAN_HASH = variant.plan_hash()
         problems = _release_problems(variant)
@@ -168,27 +220,85 @@ class TestThePlanIsItsReleasedHash:
         assert json.loads(json.dumps(plan, allow_nan=False)) == plan
 
 
-#: A different value for every constant of the plan. A constant added to the
-#: module's ``__all__`` must be added here too, and then fails
+class TestThePlanVersions:
+    def test_v2_is_released_and_v1_kept(self) -> None:
+        """
+        Plan version 2 is phase D1's, released while the ledger held no answer
+        (docs/09, section 3.1): it is the module's and the newest released,
+        and version 1, the plan phase C recorded nothing under, keeps its row,
+        so an answer a job recorded under it would still name a released plan.
+        """
+        assert jev_prereg.PLAN_VERSION == 2 == max(RELEASED_PLAN_HASHES)
+        assert jev_prereg.GOLDEN_PLAN_HASH == RELEASED_PLAN_HASHES[2]
+        assert RELEASED_PLAN_HASHES[1] == (
+            "f744c2d88bded050e7b1b0fb946c9e29b502264d55ee6ac7c6a68b182daf7caf"
+        )
+        assert jev_prereg.plans_in_force("research.catalogue", 1)["plan_version"] == 2
+
+    def test_what_v2_registers(self) -> None:
+        """
+        The numbers docs/09 section 3.2 gives version 2, read back from the
+        plan as hashed, not from the module's names alone.
+        """
+        plan = jev_prereg.global_plan()
+        assert plan["version"] == 2
+        assert plan["split"]["dev_tenths"] == 5
+        assert plan["uncertainty"]["gate_family"] == 20
+        assert plan["uncertainty"]["gate_ci"] == 0.999375
+        assert plan["looks"] == {
+            "max": 4,
+            "counted_by": ["question_set", "question_set_version", "question_key"],
+            "splits": ["test", "all"],
+        }
+        floors = plan["statistic_floors"]
+        assert floors["covered_accuracy"]["at_least"] == 0.80
+        assert floors["covered_precision_of_the_acting_class"]["at_least"] == 0.90
+        assert plan["flips"]["pairs"] == (
+            "every_canonical_request_of_the_question_under_the_pin"
+        )
+        assert plan["flips"]["not_compared"] == "counted_as_flipped_in_the_worst_case"
+        # Unchanged from version 1.
+        assert plan["uncertainty"]["report_ci"] == 0.95
+        assert plan["sizes"] == {
+            "min_test_items": 200,
+            "min_dev_items": 100,
+            "min_covered": 30,
+            "too_few_per_class": 10,
+        }
+        assert plan["flips"]["max_rate"] == 0.05
+        assert plan["flips"]["max_rate_near_threshold"] == 0.10
+        assert plan["flips"]["min_pairs"] == 30
+        assert plan["flips"]["near_threshold"] == 0.10
+        assert "lane_targets" not in plan
+
+
+#: A different value for every constant of the global plan. A constant added
+#: to the module's ``__all__`` must be added here too, and then fails
 #: :meth:`TestEveryConstantIsHashed.test_moving_it_moves_the_hash` unless
 #: ``global_plan`` carries it: a choice outside the hash is a choice nobody
 #: registered.
 _MOVED: dict[str, Any] = {
-    "PLAN_VERSION": 2,
+    "PLAN_VERSION": 3,
     "DEV_SPLIT_TENTHS": 4,
     "MIN_TEST_ITEMS": 201,
     "MIN_DEV_ITEMS": 101,
     "MIN_COVERED": 31,
     "MARGIN_GRID": jev_prereg.MARGIN_GRID[:-1],
-    "LANE_TARGETS": MappingProxyType(
+    "STATISTIC_FLOORS": MappingProxyType(
         {
-            **jev_prereg.LANE_TARGETS,
-            "research": {"statistic": "covered_accuracy", "at_least": 0.75},
+            **jev_prereg.STATISTIC_FLOORS,
+            "covered_accuracy": {
+                **jev_prereg.STATISTIC_FLOORS["covered_accuracy"],
+                "at_least": 0.75,
+            },
         }
     ),
     "REPORT_CI": 0.90,
     "GATE_CI": 0.99,
-    "GATE_FAMILY": 11,
+    "GATE_FAMILY": 21,
+    "MAX_LOOKS": 5,
+    "LOOKS_COUNTED_BY": (*jev_prereg.LOOKS_COUNTED_BY, "model"),
+    "LOOKED_AT_SPLITS": ("test",),
     "BOOTSTRAP_RESAMPLES": 1_000,
     "BOOTSTRAP_SEED_RULE": "int(dataset_sha256[:8], 16)",
     "CALIBRATION_BINS": 5,
@@ -197,10 +307,19 @@ _MOVED: dict[str, Any] = {
     "MAX_FLIP_RATE_NEAR_THRESHOLD": 0.11,
     "MIN_FLIP_PAIRS": 31,
     "NEAR_THRESHOLD": 0.11,
+    # Version 1's rules, which M2 and M5 replaced.
+    "FLIP_PAIRS": "the_canonical_requests_of_the_scored_items",
+    "FLIPS_NOT_COMPARED": "set_apart_from_the_rate",
     "REASK_UNIFORM_MODULUS": 21,
     "REASK_LOW_MARGIN": 0.21,
     "REASKS_PER_DAY": 11,
     "REASK_AFTER": timedelta(hours=25),
+}
+
+#: A different value for every constant of the regime plan (M4), held below to
+#: move the regime plan's hash and leave the global plan's alone.
+_MOVED_REGIME: dict[str, Any] = {
+    "REGIME_PLAN_VERSION": 2,
     "REGIME_SLEEVES": MappingProxyType(
         {"equities": "SPY", "bonds": "TLT", "commodities": "GSG"}
     ),
@@ -229,9 +348,18 @@ _SET_PLAN_CHOICES = frozenset(
 
 #: The upper-case names in ``__all__`` that are not choices of the global plan:
 #: ``ANY_OF`` is the rule's own syntax, the goldens are hashes, and the set
-#: plans' choices are held by their own test below.
-_NOT_CHOICES = frozenset({"ANY_OF", "GOLDEN_PLAN_HASH", "GOLDEN_SET_PLAN_HASHES"}) | (
-    _SET_PLAN_CHOICES
+#: plans' and the regime plan's choices are held by their own tests below.
+_NOT_CHOICES = (
+    frozenset(
+        {
+            "ANY_OF",
+            "GOLDEN_PLAN_HASH",
+            "GOLDEN_REGIME_PLAN_HASH",
+            "GOLDEN_SET_PLAN_HASHES",
+        }
+    )
+    | _SET_PLAN_CHOICES
+    | frozenset(_MOVED_REGIME)
 )
 
 
@@ -245,35 +373,24 @@ class TestEveryConstantIsHashed:
         self, monkeypatch: pytest.MonkeyPatch, name: str
     ) -> None:
         before = jev_prereg.plan_hash()
+        regime_before = jev_prereg.regime_plan_hash()
         assert _MOVED[name] != getattr(jev_prereg, name)
         monkeypatch.setattr(jev_prereg, name, _MOVED[name])
         assert jev_prereg.plan_hash() != before
-
-    def test_the_order_of_the_rules_lines_is_part_of_the_plan(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """
-        First match wins, so the same lines in another order are a different
-        rule: the hash keeps a sequence's order and sorts only a mapping's
-        keys. The move above is exactly a reordering.
-        """
-        moved = _MOVED["REGIME_BASELINE_RULE"]
-        assert sorted(moved, key=lambda line: line[0]) == sorted(
-            jev_prereg.REGIME_BASELINE_RULE, key=lambda line: line[0]
+        assert jev_prereg.regime_plan_hash() == regime_before, (
+            f"{name} is the global plan's, and moved the regime plan"
         )
-        before = jev_prereg.plan_hash()
-        monkeypatch.setattr(jev_prereg, "REGIME_BASELINE_RULE", moved)
-        assert jev_prereg.plan_hash() != before
 
     def test_nothing_in_the_plan_can_be_changed_in_place(self) -> None:
         """
         A mapping of the plan is read-only, so the hash computed at the start
         of a report is still the plan's at its end.
         """
+        floors = jev_prereg.STATISTIC_FLOORS
         with pytest.raises(TypeError):
-            jev_prereg.LANE_TARGETS["research"] = {}  # type: ignore[index]
+            floors["covered_accuracy"] = {}  # type: ignore[index]
         with pytest.raises(TypeError):
-            jev_prereg.LANE_TARGETS["research"]["at_least"] = 0.5  # type: ignore[index]
+            floors["covered_accuracy"]["at_least"] = 0.5  # type: ignore[index]
         with pytest.raises(TypeError):
             jev_prereg.REGIME_SLEEVES["bonds"] = "TLT"  # type: ignore[index]
         risk_off = jev_prereg.REGIME_BASELINE_RULE[0][1]
@@ -281,42 +398,86 @@ class TestEveryConstantIsHashed:
             risk_off["equities.trend"] = ("near",)  # type: ignore[index]
         with pytest.raises(TypeError):
             risk_off[jev_prereg.ANY_OF][0]["equities.drawdown"] = ()  # type: ignore[index]
+        assert isinstance(jev_prereg.LOOKS_COUNTED_BY, tuple)
+        assert isinstance(jev_prereg.LOOKED_AT_SPLITS, tuple)
 
 
-class TestTheLaneTargets:
+class TestTheStatisticFloors:
     """
-    The design's binding metric definition (docs/08, phase C, design section
-    10.1): a threshold is the smallest margin with at least ``MIN_COVERED``
-    covered items whose target's **Wilson lower bound at ``GATE_CI``** meets
-    the target — for every lane. A point estimate is not a target met.
+    R1: the floors are by statistic, where version 1 held a target per lane,
+    and each is read as the design's binding metric definition reads every
+    target (docs/08, phase C, design section 10.1): a threshold is the
+    smallest margin with at least ``MIN_COVERED`` covered items whose
+    statistic's **Wilson lower bound at ``GATE_CI``** meets the floor. A point
+    estimate is not a floor met.
     """
 
-    def test_every_lane_target_is_a_wilson_lower_bound_at_the_gate_level(
-        self,
-    ) -> None:
-        for lane, target in jev_prereg.LANE_TARGETS.items():
-            assert target.get("bound") == "wilson_lower_at_gate_ci", (
-                f"the {lane} target is registered as a bare point estimate: "
-                f"{dict(target)}"
+    def test_every_floor_is_a_wilson_lower_bound_at_the_gate_level(self) -> None:
+        assert set(jev_prereg.STATISTIC_FLOORS) == {
+            "covered_accuracy",
+            "covered_precision_of_the_acting_class",
+        }
+        for statistic, floor in jev_prereg.STATISTIC_FLOORS.items():
+            assert floor.get("bound") == "wilson_lower_at_gate_ci", (
+                f"the {statistic} floor is registered as a bare point estimate: "
+                f"{dict(floor)}"
             )
+        assert jev_prereg.STATISTIC_FLOORS["covered_accuracy"]["at_least"] == 0.80
+        assert (
+            jev_prereg.STATISTIC_FLOORS["covered_precision_of_the_acting_class"][
+                "at_least"
+            ]
+            == 0.90
+        )
 
-    def test_a_point_estimate_at_the_target_is_far_from_meeting_it(self) -> None:
+    def test_each_floor_says_which_questions_it_measures(self) -> None:
+        """The rule R1 states, written into the hash beside each floor."""
+        floors = jev_prereg.STATISTIC_FLOORS
+        assert floors["covered_accuracy"]["measures"] == (
+            "a question with no acting class"
+        )
+        assert floors["covered_precision_of_the_acting_class"]["measures"] == (
+            "a question with an acting class"
+        )
+
+    def test_a_point_estimate_at_the_floor_is_far_from_meeting_it(self) -> None:
         """
         Why the bound matters, in the plan's own numbers: 24 of the 30 covered
-        items a threshold needs is a covered accuracy of 0.80, exactly the
-        research target, and its lower bound at the gate level is 0.57.
+        items a threshold needs is a covered accuracy of 0.80, exactly its
+        floor, and its lower bound at the gate level is about 0.51.
         """
         from src.programme import jev_stats
 
-        target = jev_prereg.LANE_TARGETS["research"]["at_least"]
+        floor = jev_prereg.STATISTIC_FLOORS["covered_accuracy"]["at_least"]
         n = jev_prereg.MIN_COVERED
-        k = round(target * n)
-        assert k / n == pytest.approx(target)
+        k = round(floor * n)
+        assert k / n == pytest.approx(floor)
         bounds = jev_stats.wilson(k, n, jev_prereg.GATE_CI, one_sided=True)
         assert bounds is not None
         low, _ = bounds
-        assert low == pytest.approx(0.567, abs=0.001)
-        assert low < target
+        assert low == pytest.approx(0.505, abs=0.001)
+        assert low < floor
+
+    def test_how_many_items_all_right_a_floor_needs(self) -> None:
+        """
+        docs/09 section 3.6: at 0.999375 a covered accuracy floor of 0.80
+        needs 42 covered items all right, and a covered precision floor of
+        0.90 needs 94 — against 30 and 60 at version 1's 0.995, where the
+        first was ``MIN_COVERED``'s, the bound alone needing 27.
+        """
+        from src.programme import jev_stats
+
+        def fewest(floor: float, level: float) -> int:
+            bound_alone = next(
+                n
+                for n in range(1, 1_000)
+                if jev_stats.wilson(n, n, level, one_sided=True)[0] >= floor
+            )
+            return max(jev_prereg.MIN_COVERED, bound_alone)
+
+        assert fewest(0.80, jev_prereg.GATE_CI) == 42
+        assert fewest(0.90, jev_prereg.GATE_CI) == 94
+        assert (fewest(0.80, 0.995), fewest(0.90, 0.995)) == (30, 60)
 
 
 def _gated_family() -> set[tuple[str, int, str]]:
@@ -335,26 +496,70 @@ def _gated_family() -> set[tuple[str, int, str]]:
 
 class TestTheGateFamily:
     """
-    ``GATE_CI`` is a Bonferroni level: one-sided 99.5%, so that at most
-    ``GATE_FAMILY`` gated set-and-question pairs together err no more often
-    than one reported interval leaves out. A pair added through a set plan
-    moves no hash of the global plan, so without this nothing would notice
-    the family outgrow the level: a larger family is a new global plan, with
-    ``GATE_FAMILY`` raised and ``GATE_CI`` with it (docs/08, C9).
+    ``GATE_CI`` is a Bonferroni level: one-sided, so that at most
+    ``GATE_FAMILY`` gated set-and-question pairs, each looked at the held-out
+    items of at most ``MAX_LOOKS`` times, together err no more often than one
+    reported interval leaves out. A pair added through a set plan moves no
+    hash of the global plan, so without this nothing would notice the family
+    outgrow the level: a larger family is a new global plan, with
+    ``GATE_FAMILY`` raised and ``GATE_CI`` with it (docs/08, C9; docs/09,
+    section 3.2, R2 and M3).
     """
 
     def test_the_gated_pairs_fit_the_family(self) -> None:
         family = _gated_family()
         assert len(family) <= jev_prereg.GATE_FAMILY, sorted(family)
 
-    def test_the_gate_level_is_bonferroni_over_the_family(self) -> None:
-        family_error = (1 - jev_prereg.GATE_CI) * jev_prereg.GATE_FAMILY
-        assert family_error <= (1 - jev_prereg.REPORT_CI) + 1e-12
+    def test_the_level_is_bonferroni_over_the_family_and_the_looks(self) -> None:
+        """
+        (1 − ``GATE_CI``) × ``GATE_FAMILY`` × ``MAX_LOOKS`` ≤ 1 − ``REPORT_CI``,
+        exactly, and ``GATE_CI`` is the literal 0.999375 = 1 − 0.05 / (20 × 4):
+        computed as the fractions the numbers are written as, so no binary
+        rounding passes a level the formula does not give.
+        """
+        gate = Fraction(repr(jev_prereg.GATE_CI))
+        report = Fraction(repr(jev_prereg.REPORT_CI))
+        spent = (1 - gate) * jev_prereg.GATE_FAMILY * jev_prereg.MAX_LOOKS
+        assert spent <= 1 - report
+        assert gate == 1 - (1 - report) / (
+            jev_prereg.GATE_FAMILY * jev_prereg.MAX_LOOKS
+        )
+        assert jev_prereg.GATE_CI == 0.999375
+        assert (jev_prereg.GATE_FAMILY, jev_prereg.MAX_LOOKS) == (20, 4)
+
+    def test_the_level_check_bites(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A fifth look, the level unchanged, spends more than it claims."""
+        monkeypatch.setattr(jev_prereg, "MAX_LOOKS", 5)
+        with pytest.raises(AssertionError):
+            self.test_the_level_is_bonferroni_over_the_family_and_the_looks()
+
+    def test_looks_are_counted_as_the_family_is(self) -> None:
+        """
+        A look is counted by the set, its version and the question — the
+        identity a pair of the family has (:func:`_gated_family`) — and never
+        by the model: the family the level is spent over counts sets,
+        versions and questions, so a look counted per model would let a
+        second pin spend four more looks outside the 0.05 the level claims
+        (docs/09, D-HMB-06). The names are the evaluation row's columns,
+        which ``jev_calibration.usable`` counts by.
+        """
+        assert jev_prereg.LOOKS_COUNTED_BY == (
+            "question_set",
+            "question_set_version",
+            "question_key",
+        )
+        assert "model" not in jev_prereg.LOOKS_COUNTED_BY
+        (sample,) = list(_gated_family())[:1]
+        assert len(sample) == len(jev_prereg.LOOKS_COUNTED_BY)
+        assert jev_prereg.LOOKED_AT_SPLITS == ("test", "all")
+        from src.programme import jev_repo
+
+        assert set(jev_prereg.LOOKS_COUNTED_BY) <= set(jev_repo.EVALUATION_COLUMNS)
 
     def test_the_count_sees_a_question_a_set_plan_adds(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Not vacuous: five more planned questions and the family is eleven."""
+        """Not vacuous: enough more planned questions and the family overflows."""
         before = len(_gated_family())
         real = jev_prereg._set_plans
 
@@ -386,6 +591,124 @@ class TestThePureModuleLoadsNothing:
                 assert node.level == 0 and node.module is not None
                 roots.add(node.module.split(".")[0])
         assert roots <= set(sys.stdlib_module_names) | {"__future__"}, roots
+
+
+# ---------------------------------------------------------------------------
+# The regime plan (M4): the baseline rule and the sleeves, apart
+# ---------------------------------------------------------------------------
+
+
+class TestTheRegimePlan:
+    def test_golden_and_released(self) -> None:
+        assert _regime_release_problems(jev_prereg) == []
+        values = list(RELEASED_REGIME_PLAN_HASHES.values())
+        assert len(set(values)) == len(values)
+        assert sorted(RELEASED_REGIME_PLAN_HASHES) == list(
+            range(1, len(RELEASED_REGIME_PLAN_HASHES) + 1)
+        )
+
+    def test_editing_the_rule_with_its_golden_redone_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The edit a failing hash test invites, refused by the history."""
+        source = MODULE.read_text(encoding="utf-8")
+        line = '"equities.volatility_quintile": (1, 2, 3),'
+        assert source.count(line) == 1
+        variant = _execute_variant(
+            monkeypatch,
+            source.replace(line, '"equities.volatility_quintile": (1, 2),'),
+        )
+        variant.GOLDEN_REGIME_PLAN_HASH = variant.regime_plan_hash()
+        problems = _regime_release_problems(variant)
+        assert any("a released plan is frozen" in p for p in problems), problems
+        # The global plan does not hold the rule, so it does not move.
+        assert variant.plan_hash() == jev_prereg.plan_hash()
+
+    def test_a_bump_without_its_row_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = MODULE.read_text(encoding="utf-8")
+        line = f"REGIME_PLAN_VERSION = {jev_prereg.REGIME_PLAN_VERSION}"
+        assert source.count(line) == 1
+        bumped = f"REGIME_PLAN_VERSION = {jev_prereg.REGIME_PLAN_VERSION + 1}"
+        variant = _execute_variant(monkeypatch, source.replace(line, bumped))
+        variant.GOLDEN_REGIME_PLAN_HASH = variant.regime_plan_hash()
+        problems = _regime_release_problems(variant)
+        assert any("append it" in p for p in problems), problems
+
+    def test_the_global_plan_holds_no_regime(self) -> None:
+        """
+        M4: the rule and the sleeves are the regime plan's, and the global
+        plan holds neither, so reviewing either sets aside regime agreement
+        alone, never every lane's answers.
+        """
+        plan = jev_prereg.global_plan()
+        assert "regime" not in plan
+        text = json.dumps(plan)
+        for label, _ in jev_prereg.REGIME_BASELINE_RULE:
+            assert label not in text, label
+        for symbol in jev_prereg.REGIME_SLEEVES.values():
+            assert f'"{symbol}"' not in text, symbol
+        regime = jev_prereg.regime_plan()
+        assert regime["version"] == jev_prereg.REGIME_PLAN_VERSION
+        assert regime["sleeves"] == dict(jev_prereg.REGIME_SLEEVES)
+        assert [label for label, _ in regime["baseline"]] == [
+            "risk_off",
+            "risk_on",
+            "neutral",
+        ]
+
+    @pytest.mark.parametrize("name", sorted(_MOVED_REGIME))
+    def test_moving_it_moves_the_regime_plan_and_not_the_global_plan(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        before, global_before = jev_prereg.regime_plan_hash(), jev_prereg.plan_hash()
+        assert _MOVED_REGIME[name] != getattr(jev_prereg, name)
+        monkeypatch.setattr(jev_prereg, name, _MOVED_REGIME[name])
+        assert jev_prereg.regime_plan_hash() != before, name
+        assert jev_prereg.plan_hash() == global_before, name
+
+    def test_every_regime_constant_has_a_move(self) -> None:
+        constants = {name for name in jev_prereg.__all__ if name.isupper()}
+        assert set(_MOVED_REGIME) <= constants
+        assert {n for n in constants if n.startswith("REGIME_")} == set(_MOVED_REGIME)
+
+    def test_the_order_of_the_rules_lines_is_part_of_the_plan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        First match wins, so the same lines in another order are a different
+        rule: the hash keeps a sequence's order and sorts only a mapping's
+        keys. The move above is exactly a reordering.
+        """
+        moved = _MOVED_REGIME["REGIME_BASELINE_RULE"]
+        assert sorted(moved, key=lambda line: line[0]) == sorted(
+            jev_prereg.REGIME_BASELINE_RULE, key=lambda line: line[0]
+        )
+        before = jev_prereg.regime_plan_hash()
+        monkeypatch.setattr(jev_prereg, "REGIME_BASELINE_RULE", moved)
+        assert jev_prereg.regime_plan_hash() != before
+
+    def test_the_hash_is_of_the_regime_plan_as_compact_sorted_json(self) -> None:
+        text = json.dumps(
+            jev_prereg.regime_plan(), sort_keys=True, separators=(",", ":")
+        )
+        assert hashlib.sha256(text.encode()).hexdigest() == (
+            jev_prereg.regime_plan_hash()
+        )
+        plan = jev_prereg.regime_plan()
+        assert json.loads(json.dumps(plan, allow_nan=False)) == plan
+
+    def test_the_sleeves_are_the_workers(self) -> None:
+        """
+        The regime plan's record of which instruments a regime series
+        describes is the worker's copy, in the state's own order: two copies
+        that disagreed would describe one series by instruments nobody
+        fetched.
+        """
+        assert dict(jev_prereg.REGIME_SLEEVES) == dict(REFERENCE_SLEEVES)
+        assert tuple(jev_prereg.REGIME_SLEEVES) == SLEEVES == tuple(REFERENCE_SLEEVES)
+        assert jev_prereg.regime_plan()["sleeves"] == dict(REFERENCE_SLEEVES)
 
 
 # ---------------------------------------------------------------------------
@@ -534,15 +857,6 @@ class TestTheBaselineRule:
         with pytest.raises(KeyError):
             jev_prereg.regime_baseline({"equities": {"trend": "below"}})
 
-    def test_the_sleeves_are_the_workers(self) -> None:
-        """
-        The plan's record of which instruments a regime series describes is
-        the worker's copy, in the state's own order: two copies that disagreed
-        would describe one series by instruments nobody fetched.
-        """
-        assert dict(jev_prereg.REGIME_SLEEVES) == dict(REFERENCE_SLEEVES)
-        assert tuple(jev_prereg.REGIME_SLEEVES) == SLEEVES == tuple(REFERENCE_SLEEVES)
-
 
 # ---------------------------------------------------------------------------
 # The split and the re-ask sample
@@ -559,13 +873,19 @@ class TestTheSplit:
         for i in range(2_000):
             subject_id = _hash_of(f"item {i}")
             digest = _hash_of(f"web_excerpt:{subject_id}")
-            expected = "dev" if int(digest[:8], 16) % 10 < 3 else "test"
+            expected = "dev" if int(digest[:8], 16) % 10 < 5 else "test"
             assert jev_prereg.split_of("web_excerpt", subject_id) == expected
 
-    def test_about_three_in_ten_are_development(self) -> None:
+    def test_the_split_is_five_tenths(self) -> None:
+        """
+        M1: half the items are development items, where version 1 held three
+        in ten; the test split is held to the bar the search applied, so the
+        development share binds as hard as the test share does.
+        """
+        assert jev_prereg.DEV_SPLIT_TENTHS == 5
         splits = [jev_prereg.split_of("session", f"{i:06d}") for i in range(10_000)]
         share = splits.count("dev") / len(splits)
-        assert 0.28 < share < 0.32
+        assert 0.48 < share < 0.52
 
     def test_the_type_is_part_of_the_address(self) -> None:
         """One id under two subject types is two items, each split on its own."""
@@ -699,7 +1019,7 @@ RELEASED_SET_PLAN_HASHES: dict[tuple[str, int, int], str] = {
 }
 
 #: The sets with no plan of their own: the probe measures the vendor, not a
-#: set, and the regime is the global plan's ``regime`` section.
+#: set, and the regime's rule is the regime plan's (M4).
 WITHOUT_A_SET_PLAN = frozenset({"probe.connectivity", "decision.regime"})
 
 
@@ -801,10 +1121,25 @@ class TestTheSetPlansAreTheirReleasedHashes:
             "set_plan_hash": jev_prereg.set_plan_hash("research.catalogue", 1),
         }
 
-    def test_the_global_plan_did_not_move(self) -> None:
-        """The set plans are beside the global plan, not in it."""
-        assert jev_prereg.PLAN_VERSION == 1
-        assert jev_prereg.plan_hash() == RELEASED_PLAN_HASHES[1]
+    def test_the_set_plans_are_beside_the_global_plan_not_in_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        No set plan holds a constant of the global plan, which is why plan
+        version 2 moved no set plan's hash: moving the gate's level, the
+        family, the looks or the floors leaves every set plan as released.
+        What a job records beside an answer names both, so it is the plans in
+        force that moved (``plans_in_force``).
+        """
+        before = _set_plan_hashes()
+        for name, value in (
+            ("GATE_CI", 0.995),
+            ("GATE_FAMILY", 10),
+            ("MAX_LOOKS", 1),
+            ("DEV_SPLIT_TENTHS", 3),
+        ):
+            monkeypatch.setattr(jev_prereg, name, value)
+        assert _set_plan_hashes() == before
 
 
 #: A different value for every choice of the set plans.
@@ -888,7 +1223,7 @@ class TestEveryAskedSetHasItsPlan:
             assert plan is not None, f"{name} v{question_set.version} has no plan"
             keys = [key for key, _ in question_set.questions]
             assert sorted(plan["questions"]) == sorted(keys), name
-        assert "regime" in jev_prereg.global_plan()
+        assert jev_prereg.regime_plan()["baseline"], "the regime's rule is its plan's"
 
     def test_every_plan_is_of_a_registered_set(self) -> None:
         registered = {(qs.name, qs.version) for qs in _registered().values()}
@@ -911,38 +1246,62 @@ class TestEveryAskedSetHasItsPlan:
             self.test_every_registered_set_asking_a_question_has_a_plan()
 
 
-def _target_problems(plan: dict[str, Any], lane: str) -> list[str]:
-    """How a plan's targets fall short of its lane's, if they do."""
-    lane_target = jev_prereg.LANE_TARGETS[lane]
+#: R1's rule, written here as literals: a question with an acting class is
+#: measured by that class's covered precision, any other by its covered
+#: accuracy.
+_STATISTIC_OF = {
+    True: "covered_precision_of_the_acting_class",
+    False: "covered_accuracy",
+}
+
+
+def _target_problems(plan: dict[str, Any]) -> list[str]:
+    """How a plan's targets fall short of their statistics' floors, if they do."""
     problems = []
     for key, question in plan["questions"].items():
-        if question["statistic"] != lane_target["statistic"]:
-            problems.append(f"{key} measures {question['statistic']}")
-        if question["bound"] != lane_target["bound"]:
+        statistic = _STATISTIC_OF[question["acting_class"] is not None]
+        floor = jev_prereg.STATISTIC_FLOORS[statistic]
+        if question["statistic"] != statistic:
+            problems.append(f"{key} measures {question['statistic']}, not {statistic}")
+        if question["bound"] != floor["bound"]:
             problems.append(f"{key} is bounded by {question['bound']}")
-        if question["at_least"] < lane_target["at_least"]:
-            problems.append(f"{key}'s target is below its lane's")
+        if question["at_least"] < floor["at_least"]:
+            problems.append(f"{key}'s target is below its statistic's floor")
     return problems
 
 
 class TestTheTargets:
-    def test_a_set_plan_may_raise_a_target_never_lower_it(self) -> None:
+    def test_a_set_plan_may_raise_a_floor_never_lower_it(self) -> None:
         """
-        The lane's target is a floor: the same statistic, read the same way —
-        a Wilson lower bound at the gate level — and at least as high.
+        R1: a question's statistic is its acting class's covered precision
+        where it has one and its covered accuracy otherwise, read the same
+        way as the floor — a Wilson lower bound at the gate level — and its
+        target is at least the floor. Any lane arrives through a set plan
+        alone, so no floor needs keeping here, outside the hash.
         """
         for name, question_set in _registered().items():
             plan = jev_prereg.set_plan(name, question_set.version)
             if plan is not None:
-                assert _target_problems(plan, question_set.lane) == [], name
+                assert _target_problems(plan) == [], name
 
     def test_the_target_check_bites(self) -> None:
         plan = jev_prereg.set_plan("guardrail.card", 1)
         assert plan is not None
         plan["questions"]["performance_claim"]["at_least"] = 0.85
-        assert _target_problems(plan, "guardrail") == [
-            "performance_claim's target is below its lane's"
+        assert _target_problems(plan) == [
+            "performance_claim's target is below its statistic's floor"
         ]
+        plan = jev_prereg.set_plan("guardrail.card", 1)
+        assert plan is not None
+        plan["questions"]["performance_claim"]["statistic"] = "covered_accuracy"
+        assert _target_problems(plan) == [
+            "performance_claim measures covered_accuracy, not "
+            "covered_precision_of_the_acting_class"
+        ]
+        plan = jev_prereg.set_plan("research.catalogue", 1)
+        assert plan is not None
+        plan["questions"]["mechanism"]["bound"] = "point_estimate"
+        assert _target_problems(plan) == ["mechanism is bounded by point_estimate"]
 
     def test_the_design_targets(self) -> None:
         """Covered precision of at least 0.90 for the guardrails, covered

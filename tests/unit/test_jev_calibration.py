@@ -66,7 +66,7 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "threshold_target": 0.80,
         "coverage_at_threshold": 0.55,
         # 114 of the 120 test items at the threshold right: a one-sided lower
-        # bound of 0.871 at the gate level, above the plan's 0.80.
+        # bound of 0.843 at the gate level, 0.999375, above the plan's 0.80.
         "n_at_threshold": 120,
         "accuracy_at_threshold": 0.95,
         "accuracy_wilson_low": 0.83,
@@ -74,16 +74,49 @@ def _usable_row(**overrides: Any) -> dict[str, Any]:
         "majority_baseline_accuracy": 0.40,
         "keyword_baseline_accuracy": 0.55,
         # Of the items only one of the two got right, Jev got 90 of 100 against
-        # the majority label and 60 of 90 against the keyword rule: each
-        # beaten by the exact one-sided sign test at the gate level.
+        # the majority label and 70 of 90 against the keyword rule: each
+        # beaten by the exact one-sided sign test at the gate level. Plan
+        # version 1's 60 of 90 no longer is: its chance, about 1 in 970, is
+        # above the 1 in 1,600 the level of version 2 claims.
         "vs_majority_jev_right_only": 90,
         "vs_majority_baseline_right_only": 10,
-        "vs_keyword_jev_right_only": 60,
-        "vs_keyword_baseline_right_only": 30,
-        "flip_rate": 0.02,
-        "flip_rate_n": jev_prereg.MIN_FLIP_PAIRS,
-        "flip_rate_near_threshold": 0.08,
-        "flip_rate_near_threshold_n": jev_prereg.MIN_FLIP_PAIRS,
+        "vs_keyword_jev_right_only": 70,
+        "vs_keyword_baseline_right_only": 20,
+        # Uniform re-asks: 60 compared, one flipped, and none that could not
+        # be compared; near the threshold, 40 compared, two flipped. In the
+        # worst case (plan version 2, M5) each is within its limit.
+        "flip_rate": 1 / 60,
+        "flip_rate_n": 60,
+        "flip_rate_not_compared": 0,
+        "flip_rate_low_margin": None,
+        "flip_rate_low_margin_n": 0,
+        "flip_rate_low_margin_not_compared": 0,
+        "flip_rate_near_threshold": 2 / 40,
+        "flip_rate_near_threshold_n": 40,
+        "flip_rate_near_threshold_not_compared": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def _look(row_id: int, minutes_before: int, **overrides: Any) -> dict[str, Any]:
+    """
+    An evaluation recorded before :func:`_usable_row`'s, of its set, version
+    and question, on the test split: one look at the held-out items. Older,
+    so it supersedes nothing, and of the same version, so its test set is
+    reused by nobody.
+    """
+    row = {
+        "id": row_id,
+        "created_at": CREATED - timedelta(minutes=minutes_before),
+        "question_set": SET,
+        "question_set_version": 1,
+        "question_key": "asset_class",
+        "model": PIN,
+        "split": "test",
+        "dataset_sha256": f"{row_id:064x}",
+        "threshold_dataset_sha256": None,
+        "dataset_ref": "operator:someone",
     }
     row.update(overrides)
     return row
@@ -107,16 +140,21 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
     "training": ({"possibly_in_training": True}, []),
     "threshold": ({"threshold_outcome": "none_found", "threshold": None}, []),
     # 102 of 120 right at the threshold on the test split: 0.85, whose
-    # one-sided lower bound at the gate level, 0.748, falls short of 0.80.
+    # one-sided lower bound at the gate level, 0.717, falls short of 0.80.
     "held_out": ({"accuracy_at_threshold": 0.85}, []),
     "majority": ({"majority_baseline_accuracy": 0.82}, []),
-    # Seven of seven discordant items Jev's way, which the bootstrap called a
-    # win: its exact chance, 1 in 128, is above the gate's 1 in 200.
+    # Ten of ten discordant items Jev's way: its exact chance, 1 in 1,024,
+    # would have beaten plan version 1's gate of 1 in 200, and is above
+    # version 2's 1 in 1,600, which the family and the looks spend.
     "keyword": (
-        {"vs_keyword_jev_right_only": 7, "vs_keyword_baseline_right_only": 0},
+        {"vs_keyword_jev_right_only": 10, "vs_keyword_baseline_right_only": 0},
         [],
     ),
-    "uniform_flips": ({"flip_rate": jev_prereg.MAX_FLIP_RATE + 0.01}, []),
+    # Four of the sixty uniform re-asks flipped: 0.067, over the 0.05 limit.
+    # A rate the pairs can give, so it is the limit that refuses it; the
+    # first cut moved this case to 0.06 of 60, 3.6 flips, which the count
+    # check refused before the limit was read (D1's review, D1RT-6).
+    "uniform_flips": ({"flip_rate": 4 / 60}, []),
     "near_threshold_flips": (
         {"flip_rate_near_threshold_n": jev_prereg.MIN_FLIP_PAIRS - 1},
         [],
@@ -149,6 +187,18 @@ BROKEN: dict[str, tuple[dict[str, Any], list[dict[str, Any]]]] = {
                 "question_key": "asset_class",
                 "model": PIN,
             }
+        ],
+    ),
+    # Four looks at the held-out items of the set, version and question were
+    # recorded before it, under other models, by other labellers, on the
+    # test split and on every item (plan version 2, M3): this is the fifth.
+    "looks": (
+        {},
+        [
+            _look(4, 40, model="jev-1.14.0"),
+            _look(5, 30, split="all"),
+            _look(6, 20, model="jev-1.14.0", dataset_ref="source:pwb-readme@1"),
+            _look(7, 10),
         ],
     ),
 }
@@ -229,7 +279,9 @@ class TestUsable:
             ),
             ({"flip_rate": None}, "uniform_flips"),
             ({"flip_rate_n": None}, "uniform_flips"),
-            ({"flip_rate_near_threshold": 0.11}, "near_threshold_flips"),
+            # Five of forty near the threshold: 0.125, over the 0.10 limit, a
+            # rate the pairs can give (D1RT-6; 0.11 of 40 is 4.4 flips).
+            ({"flip_rate_near_threshold": 5 / 40}, "near_threshold_flips"),
             ({"n": True}, "size"),
         ],
     )
@@ -244,11 +296,13 @@ class TestUsable:
     @pytest.mark.parametrize(
         ("question_set", "key", "right", "tested", "borne_out"),
         [
-            ("research.catalogue", "asset_class", 30, 30, True),
-            ("research.catalogue", "asset_class", 29, 30, False),
+            ("research.catalogue", "asset_class", 42, 42, True),
+            ("research.catalogue", "asset_class", 41, 41, False),
+            ("research.catalogue", "asset_class", 51, 52, True),
             ("research.catalogue", "asset_class", 114, 120, True),
-            ("guardrail.card", "performance_claim", 70, 70, True),
-            ("guardrail.card", "performance_claim", 66, 70, False),
+            ("guardrail.card", "performance_claim", 94, 94, True),
+            ("guardrail.card", "performance_claim", 93, 94, False),
+            ("guardrail.card", "performance_claim", 112, 113, True),
         ],
     )
     def test_the_held_out_bound_is_the_searchs_own_rule(
@@ -258,8 +312,9 @@ class TestUsable:
         The test split is held to the rule the development split's search
         applied: the statistic's one-sided Wilson lower bound at the gate level,
         on at least ``MIN_COVERED`` items, against the plan's target — 0.80
-        for the research lane, which 30 of 30 meets and 29 of 30 does not, and
-        0.90 for a guardrail's covered precision.
+        for the research lane, which 42 of 42 meets at plan version 2's level
+        and 41 of 41 does not, and 0.90 for a guardrail's covered precision,
+        which takes 94 of 94 (docs/09, section 3.6).
         """
         target = jev_prereg.SET_TARGETS[(question_set, key)]["at_least"]
         bound = jev_stats.wilson(right, tested, jev_prereg.GATE_CI, one_sided=True)
@@ -281,17 +336,19 @@ class TestUsable:
     def test_a_baseline_is_beaten_by_the_exact_sign_test_alone(self) -> None:
         """
         The paired difference's bootstrap interval is reported and gates
-        nothing: a bound above 0 beside 7 of 7 discordant items does not beat
-        the baseline, and a bound below 0 beside 60 of 90 does not stop it.
-        The exact test at the gate level decides — 8 of 8 is the fewest that
-        can.
+        nothing: a bound above 0 beside 10 of 10 discordant items does not
+        beat the baseline, and a bound below 0 beside 70 of 90 does not stop
+        it. The exact test at the gate level decides — 11 of 11 is the fewest
+        that can at plan version 2's 0.999375, and 14 with one the other way
+        (docs/09, section 3.6).
         """
         for low, counts, beaten in (
-            (0.30, (7, 0), False),
+            (0.30, (10, 0), False),
             (0.005, (5, 0), False),
-            (-0.20, (60, 30), True),
-            (None, (8, 0), True),
-            (0.30, (7, 1), False),
+            (-0.20, (70, 20), True),
+            (None, (11, 0), True),
+            (0.30, (13, 1), False),
+            (0.30, (14, 1), True),
         ):
             row = _usable_row(
                 vs_keyword_diff_low=low,
@@ -307,9 +364,145 @@ class TestUsable:
         assert usable(row, earlier=[], pin="", plan_hash=PLAN)[2] == ["model"]
         assert usable(row, earlier=[], pin=PIN, plan_hash="")[2] == ["plan"]
 
+    def test_a_look_under_another_pin_is_counted(self) -> None:
+        """
+        docs/09, D-HMB-06: looks are counted per set, version and question,
+        the identity the gate's family counts (``jev_prereg.LOOKS_COUNTED_BY``),
+        never per model. Four looks under one pin leave none for the next: a
+        new pin restores no look the level never paid for.
+        """
+        earlier = [_look(i, 10 * i, model="jev-1.12.0") for i in range(1, 5)]
+        assert jev_calibration.looks_before(_usable_row(), earlier) == 4
+        assert _verdict(_usable_row(), earlier) == (False, None, ["looks"])
+        # Three are not four: the fourth look itself may arm.
+        assert _verdict(_usable_row(), earlier[:3]) == (True, 0.42, [])
+
+    def test_what_counts_as_a_look(self) -> None:
+        """
+        A recorded evaluation of the same set, version and question, on the
+        test split or on every item, recorded before this one; a row of
+        another question, another version or another set, a later row, and
+        the row itself are not. A row whose order cannot be read counts.
+        """
+        row = _usable_row()
+        for other in (
+            _look(1, 10, question_key="mechanism"),
+            _look(2, 10, question_set_version=0),
+            _look(3, 10, question_set="guardrail.card"),
+            _look(4, -10),
+            _look(10, 10),
+        ):
+            assert jev_calibration.looks_before(row, [other]) == 0, other
+        assert jev_calibration.looks_before(row, [_look(5, 10)]) == 1
+        assert jev_calibration.looks_before(row, [_look(6, 10, split="all")]) == 1
+        unordered = _look(7, 10, created_at=None)
+        assert jev_calibration.looks_before(row, [unordered]) == 1
+        assert jev_prereg.LOOKED_AT_SPLITS == ("test", "all")
+
     def test_a_row_never_recorded_is_never_the_newest(self) -> None:
         row = _usable_row(id=None, created_at=None)
         assert _verdict(row) == (False, None, ["superseded"])
+
+
+class TestTheFlipLimitsReadTheWorstCase:
+    """
+    Plan version 2, M5 (docs/09, section 3.2; docs/08 open item 68): a re-ask
+    that could not be compared — the re-ask, or its canonical answer, not
+    valid, failed or refused before it was sent — counts as a flip. A rate is
+    within its limit only if (flipped + not compared) / (compared + not
+    compared) is, on at least ``MIN_FLIP_PAIRS`` compared pairs. Version 1
+    read the compared pairs alone, so a vendor that malformed every unstable
+    re-ask read as stable.
+    """
+
+    @pytest.mark.parametrize(
+        ("rate", "limit", "reason"),
+        [
+            ("flip_rate", jev_prereg.MAX_FLIP_RATE, "uniform_flips"),
+            (
+                "flip_rate_near_threshold",
+                jev_prereg.MAX_FLIP_RATE_NEAR_THRESHOLD,
+                "near_threshold_flips",
+            ),
+        ],
+    )
+    def test_a_re_ask_not_compared_counts_as_a_flip(
+        self, rate: str, limit: float, reason: str
+    ) -> None:
+        """
+        Sixty compared and none flipped is a rate of 0, within either limit;
+        beside them, re-asks not compared up to the limit pass and one more
+        does not — the compared rate never moves.
+        """
+        compared = 60
+        # The most not compared whose worst case is still within the limit:
+        # k / (60 + k) <= limit.
+        most = max(k for k in range(0, 100) if k <= limit * (compared + k))
+        for apart, within in ((most, True), (most + 1, False)):
+            row = _usable_row(
+                **{
+                    rate: 0.0,
+                    f"{rate}_n": compared,
+                    f"{rate}_not_compared": apart,
+                }
+            )
+            ok, _, reasons = _verdict(row)
+            assert (reason not in reasons) is within, (apart, reasons)
+            assert ok is within
+
+    def test_the_worst_case_is_flipped_and_not_compared_over_all_asked(self) -> None:
+        """
+        Two of thirty flipped is 0.067, under the near-threshold limit of
+        0.10; with two re-asks that could not be compared it is 4 / 32 =
+        0.125, over it: the rate the compared pairs give alone passes, and the
+        worst case does not.
+        """
+        row = _usable_row(
+            flip_rate_near_threshold=2 / 30,
+            flip_rate_near_threshold_n=30,
+            flip_rate_near_threshold_not_compared=2,
+        )
+        limit = jev_prereg.MAX_FLIP_RATE_NEAR_THRESHOLD
+        assert row["flip_rate_near_threshold"] <= limit
+        assert _verdict(row) == (False, None, ["near_threshold_flips"])
+        assert _verdict(dict(row, flip_rate_near_threshold_not_compared=0)) == (
+            True,
+            0.42,
+            [],
+        )
+
+    def test_the_limit_is_read_as_the_decimal_written(self) -> None:
+        """Three of sixty is exactly 0.05, the uniform limit, and passes."""
+        row = _usable_row(flip_rate=3 / 60, flip_rate_n=60, flip_rate_not_compared=0)
+        assert _verdict(row) == (True, 0.42, [])
+        row = _usable_row(flip_rate=2 / 60, flip_rate_n=60, flip_rate_not_compared=1)
+        assert _verdict(row) == (True, 0.42, [])
+        row = _usable_row(flip_rate=3 / 60, flip_rate_n=60, flip_rate_not_compared=1)
+        assert _verdict(row)[2] == ["uniform_flips"]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"flip_rate_not_compared": None},
+            {"flip_rate_not_compared": -1},
+            {"flip_rate_not_compared": True},
+            {"flip_rate_n": jev_prereg.MIN_FLIP_PAIRS - 1, "flip_rate": 0.0},
+            {"flip_rate": 1.5},
+            # 0.011 of 60 pairs is 0.66 of a flip: no count gives it.
+            {"flip_rate": 0.011},
+        ],
+    )
+    def test_what_cannot_be_read_does_not_pass(self, overrides: dict) -> None:
+        """
+        A row that does not say how many re-asks could not be compared — a row
+        of 0012's shape — or says it in a way no count could, has no worst
+        case to read, and is not within the limit; nor are too few compared
+        pairs, or a share no count of them could give.
+        """
+        assert _verdict(_usable_row(**overrides))[2] == ["uniform_flips"]
+
+    def test_the_rule_is_the_plans(self) -> None:
+        assert jev_prereg.FLIPS_NOT_COMPARED == "counted_as_flipped_in_the_worst_case"
 
 
 class TestTheAnalysisPlanHash:

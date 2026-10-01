@@ -44,6 +44,7 @@ come from publishes no licence. Skipped unless ``TEST_DATABASE_URL`` is set.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import csv
 import dataclasses
@@ -592,53 +593,41 @@ BROKEN: list[tuple[str, dict[str, Any], str]] = [
         for column in ("n_distinct_states", "n_at_threshold", "labeller_agreement_n")
         for where, value in (("below 0", -1), ("above n", 201))
     ],
-    # A stratum's pairs: below 0 with no rate, as no pairs have none; above n
-    # with the re-asks not compared unrecorded, which would otherwise carry
-    # them past n in the sum below.
+    # A stratum's pairs, a count: below 0 with no rate, as no pairs have none.
+    # From 0015 a flip rate counts the set's whole population (plan v2's M2),
+    # so neither its pairs nor the re-asks it could not compare are bounded by
+    # the n scored items any more: 0015 moved these conjuncts out of
+    # jev_evaluations_counts_within_n into a rule of their own, and
+    # test_phase_d_schema.py::TestFlipCountsAboveN admits rows above n.
     *[
-        case
+        (
+            f"{pairs} below 0",
+            {
+                pairs: -1,
+                rate: None,
+                **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
+            },
+            "jev_evaluations_flip_counts_are_counts",
+        )
         for rate, pairs in (
             ("flip_rate", "flip_rate_n"),
             ("flip_rate_low_margin", "flip_rate_low_margin_n"),
             ("flip_rate_near_threshold", "flip_rate_near_threshold_n"),
         )
-        for case in (
-            (
-                f"{pairs} below 0",
-                {
-                    pairs: -1,
-                    rate: None,
-                    **({"flip_median_lag_hours": None} if rate == "flip_rate" else {}),
-                },
-                "jev_evaluations_counts_within_n",
-            ),
-            (
-                f"{pairs} above n",
-                {pairs: 201, f"{rate}_not_compared": None},
-                "jev_evaluations_counts_within_n",
-            ),
-        )
     ],
-    # The re-asks that could not be compared: each a count, and every re-ask
-    # of the two strata, as of the window, within n.
+    # The re-asks that could not be compared: each a count.
     *[
-        (f"{column} below 0", {column: -1}, "jev_evaluations_counts_within_n")
+        (
+            f"{column} below 0",
+            {column: -1},
+            "jev_evaluations_flip_counts_are_counts",
+        )
         for column in (
             "flip_rate_not_compared",
             "flip_rate_low_margin_not_compared",
             "flip_rate_near_threshold_not_compared",
         )
     ],
-    (
-        "more re-asks in the two strata than items",
-        {"flip_rate_not_compared": 106},
-        "jev_evaluations_counts_within_n",
-    ),
-    (
-        "more re-asks near the threshold than items",
-        {"flip_rate_near_threshold_not_compared": 166},
-        "jev_evaluations_counts_within_n",
-    ),
     # The discordant items: each a count, and the two of one baseline within
     # n, each case keeping the difference their arithmetic.
     *[
@@ -894,7 +883,11 @@ class TestEveryRuleBites:
     async def test_every_rule_0014_adds_has_a_case(
         self, conn: asyncpg.Connection
     ) -> None:
-        """A CHECK added without a case here would be a rule nobody saw bite."""
+        """
+        A CHECK added without a case here would be a rule nobody saw bite.
+        Read on a fully migrated database, so it holds 0015's
+        jev_evaluations_flip_counts_are_counts to its cases too.
+        """
         rows = await conn.fetch(
             "SELECT conname FROM pg_constraint "
             "WHERE conrelid = 'jev_evaluations'::regclass AND contype = 'c'"
@@ -1330,9 +1323,13 @@ class TestTheSchemaAdmitsWhatTheHarnessComputes:
         self, conn: asyncpg.Connection, acting: bool
     ) -> None:
         """
-        A threshold chosen on 120 development items and measured on 40 test
+        A threshold chosen on 160 development items and measured on 40 test
         items, with re-asks near it and away from it: the one part of a row no
-        seeded ledger reaches, since a search needs a hundred items.
+        seeded ledger reaches, since a search needs a hundred items. From plan
+        version 2 the unit suite's book holds 100 development items right
+        above the coin, since at its gate level a covered precision of 0.90
+        needs 94 covered items all right, so a precision threshold is chosen
+        under it too.
         """
         book, _, test = unit._threshold_book(acting)
         rng = random.Random(9)
@@ -1752,18 +1749,29 @@ class TestTheLedgerTheJobsWrote:
             == (jev_eval.keyword_baseline(CATALOGUE, "asset_class")[1])
         )
 
-    async def test_the_test_split_leaves_the_development_item_out(
+    async def test_the_test_split_leaves_the_development_items_out(
         self, written: asyncpg.Connection
     ) -> None:
-        assert jev_prereg.split_of("web_excerpt", text_sha256(B1)) == "dev"
-        assert {
-            jev_prereg.split_of("web_excerpt", text_sha256(text))
+        """
+        By content, under plan version 2's five tenths (M1), E1, C1 and X1
+        are test items and the other five development items; under version
+        1's three tenths only B1 was a development item. The test-split row
+        reads the three: E1 answered right, C1 quarantined by the screen and
+        never asked, and X1's answer a tie.
+        """
+        splits = {
+            text: jev_prereg.split_of("web_excerpt", text_sha256(text))
             for text in EXCERPTS
-            if text != B1
-        } == {"test"}
+        }
+        assert [text for text in EXCERPTS if splits[text] == "test"] == [E1, C1, X1]
         row = await _stored(written, CATALOGUE, "asset_class", TESTER, "test")
-        assert (row["n"], row["n_valid"], row["n_not_asked"]) == (7, 5, 1)
-        assert row["accuracy"] == 2 / 5
+        assert (
+            row["n"],
+            row["n_valid"],
+            row["n_invalid"],
+            row["n_not_asked"],
+        ) == (3, 1, 1, 1)
+        assert row["accuracy"] == 1.0
 
     async def test_the_catalogue_against_the_readme(
         self, ledger: SimpleNamespace, written: asyncpg.Connection
@@ -1929,9 +1937,11 @@ READERS = (
         "export_labels",
         id="labels export",
     ),
+    # The one evaluation a command runs without recording: the development
+    # split's search (plan version 2, M3).
     pytest.param(
         ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
-        + ["--labelled-by", TESTER],
+        + ["--labelled-by", TESTER, "--split", "dev"],
         "evaluate",
         id="evaluate",
     ),
@@ -1984,11 +1994,88 @@ class TestTheCommandsOnPostgres:
         written: asyncpg.Connection,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        """
+        From plan version 2 the one dry run is the development split's search
+        (M3): it runs, scores the five development items and no test item,
+        and records nothing.
+        """
         before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
         argv = ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
-        argv += ["--labelled-by", TESTER, "--split", "all"]
+        argv += ["--labelled-by", TESTER, "--split", "dev", "--json"]
         assert await _run(argv, ledger.dsn) == jev_eval.EXIT_OK
-        assert "dry run: nothing recorded" in capsys.readouterr().out
+        shown = json.loads(capsys.readouterr().out)
+        assert (shown["split"], shown["n"], shown["code_commit"]) == ("dev", 5, None)
+        assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
+
+    @pytest.mark.parametrize("split", ["test", "all"])
+    async def test_a_look_at_the_held_out_items_is_recorded_or_refused(
+        self,
+        ledger: SimpleNamespace,
+        written: asyncpg.Connection,
+        capsys: pytest.CaptureFixture[str],
+        split: str,
+    ) -> None:
+        """
+        A dry look at the test split is refused through ``execute``, as
+        ``main`` runs it, before the ledger is read; and ``--split dev`` is
+        never recorded. Nothing is written either way.
+        """
+        before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
+        argv = ["evaluate", "--set", CATALOGUE.name, "--key", "asset_class"]
+        argv += ["--labelled-by", TESTER]
+        assert await _run([*argv, "--split", split], ledger.dsn) == (
+            jev_eval.EXIT_REFUSED
+        )
+        assert "add --record" in capsys.readouterr().err
+        dev = [*argv, "--split", "dev", "--record", "--commit", COMMIT]
+        assert await _run(dev, ledger.dsn) == jev_eval.EXIT_REFUSED
+        assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            pytest.param({"command": None}, id="no-command"),
+            pytest.param({"command": "Evaluate"}, id="mis-cased"),
+            pytest.param({"command": "evaluate "}, id="padded"),
+            pytest.param(
+                {"command": "labels", "labels_command": "evaluate"},
+                id="labels-with-a-subcommand-it-has-none-of",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("record", [False, True])
+    async def test_arguments_no_parser_made_read_nothing(
+        self,
+        ledger: SimpleNamespace,
+        written: asyncpg.Connection,
+        capsys: pytest.CaptureFixture[str],
+        named: dict[str, Any],
+        record: bool,
+    ) -> None:
+        """
+        D1's review (D1RP-1), on the ledger it found it with: a caller handing
+        ``execute`` arguments whose command is not one the harness runs once
+        had the held-out evaluation computed and printed, its look recorded
+        nowhere. Each is refused, nothing is printed, and nothing is written.
+        """
+        before = await written.fetchval("SELECT COUNT(*) FROM jev_evaluations")
+        arguments = argparse.Namespace(
+            **{
+                "question_set": CATALOGUE.name,
+                "key": "asset_class",
+                "labelled_by": TESTER,
+                "split": "test",
+                "model": None,
+                "record": record,
+                "commit": COMMIT,
+                "json": True,
+                **named,
+            }
+        )
+        assert await jev_eval.execute(arguments, ledger.dsn) == jev_eval.EXIT_REFUSED
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "nothing was read" in captured.err
         assert await written.fetchval("SELECT COUNT(*) FROM jev_evaluations") == before
 
     @pytest.mark.parametrize(

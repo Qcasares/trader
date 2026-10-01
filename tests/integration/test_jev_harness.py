@@ -526,3 +526,85 @@ class TestTheReportsOnRealRows:
         # and three re-asks, the one that got no response among them.
         assert status["lanes"]["decision"]["spent_today"] == 3
         assert status["lanes"]["probe"]["spent_today"] == 4
+
+
+class TestTheForwardReportUnderTheRegimePlan:
+    """
+    Plan version 2, M4 (docs/09, section 3.3): the regime's baseline rule and
+    its sleeves are a plan of their own. The regime job, run by the
+    programme's own drain, records both plans in its result, and the forward
+    report scores agreement only over answers first recorded under the regime
+    plan it runs: a new global plan sets aside no regime agreement, a new
+    regime plan sets aside regime agreement alone, and a result naming no
+    regime plan, as a phase C4 job's did, is "plan unknown".
+    """
+
+    async def test_the_job_records_both_plans(
+        self, conn: asyncpg.Connection, dsn: str, client: _Client
+    ) -> None:
+        ledger = await _write_the_ledger(conn, dsn, client)
+        for session in (ledger.first, ledger.second):
+            job = await _job(conn, jev_clock.regime_job_key(DECISION_REGIME, session))
+            assert job["result"]["plan_version"] == jev_prereg.PLAN_VERSION
+            assert job["result"]["plan_hash"] == jev_prereg.plan_hash()
+            assert (
+                job["result"]["regime_plan_version"] == jev_prereg.REGIME_PLAN_VERSION
+            )
+            assert job["result"]["regime_plan_hash"] == jev_prereg.regime_plan_hash()
+
+    async def test_a_new_global_plan_sets_aside_no_regime_agreement(
+        self,
+        conn: asyncpg.Connection,
+        dsn: str,
+        client: _Client,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ledger = await _write_the_ledger(conn, dsn, client)
+        monkeypatch.setattr(jev_prereg, "plan_hash", lambda: "1" * 64)
+
+        report = await jev_eval.forward_report(conn, since=None, now=ledger.report_at)
+
+        figures = report["models"][MODEL]
+        assert figures["not_scored"] == {}
+        assert figures["baseline_agreement_sessions"]["n"] == 2
+
+    async def test_a_new_regime_plan_sets_aside_regime_agreement_alone(
+        self,
+        conn: asyncpg.Connection,
+        dsn: str,
+        client: _Client,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ledger = await _write_the_ledger(conn, dsn, client)
+        recorded = jev_prereg.regime_plan_hash()
+        monkeypatch.setattr(jev_prereg, "regime_plan_hash", lambda: "2" * 64)
+
+        report = await jev_eval.forward_report(conn, since=None, now=ledger.report_at)
+
+        figures = report["models"][MODEL]
+        # Both live sessions rest on the first session's answer, recorded
+        # under the regime plan the job named.
+        assert figures["not_scored"] == {recorded: 2}
+        assert figures["baseline_agreement_sessions"]["n"] == 0
+        assert report["plan_hash"] == jev_prereg.plan_hash()
+        assert report["flip_rates"][MODEL]["other_plans"] == 0, (
+            "a flip pair counts under the global plan its re-ask names, which "
+            "a new regime plan does not move"
+        )
+
+    async def test_a_result_naming_no_regime_plan_is_plan_unknown(
+        self, conn: asyncpg.Connection, dsn: str, client: _Client
+    ) -> None:
+        ledger = await _write_the_ledger(conn, dsn, client)
+        key = jev_clock.regime_job_key(DECISION_REGIME, ledger.first)
+        await conn.execute(
+            "UPDATE jobs SET result = result - 'regime_plan_version' "
+            "- 'regime_plan_hash' WHERE dedupe_key = $1",
+            key,
+        )
+
+        report = await jev_eval.forward_report(conn, since=None, now=ledger.report_at)
+
+        figures = report["models"][MODEL]
+        assert figures["not_scored"] == {jev_eval.UNKNOWN_PLAN: 2}
+        assert figures["baseline_agreement_sessions"]["n"] == 0

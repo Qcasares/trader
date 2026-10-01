@@ -32,6 +32,7 @@ shipped planner, forward job, re-ask job and daily probe wrote on PostgreSQL.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import csv
 import dataclasses
@@ -73,6 +74,7 @@ EVAL = ROOT / "src" / "programme" / "jev_eval.py"
 SYMBOL = jev_clock.sleeve_symbol()
 MODEL = "jev-1.13.0"
 PLAN = jev_prereg.plan_hash()
+REGIME_PLAN = jev_prereg.regime_plan_hash()
 
 #: The forward report's fields, in order. Adding one is an edit here, where a
 #: reviewer reads what it is; a return, a P&L or a hit rate is refused below
@@ -80,6 +82,8 @@ PLAN = jev_prereg.plan_hash()
 PINNED_FIELDS = (
     "plan_version",
     "plan_hash",
+    "regime_plan_version",
+    "regime_plan_hash",
     "signal",
     "symbol",
     "since",
@@ -167,11 +171,17 @@ def _signal(
     }
 
 
-def _asked(session: date, plan: str | None = PLAN) -> tuple[str, dict[str, Any]]:
-    """A regime job that asked about ``session`` and recorded ``plan``."""
-    result: dict[str, Any] = {"status": "measured"}
-    if plan is not None:
-        result["plan_hash"] = plan
+def _asked(
+    session: date, regime_plan: str | None = REGIME_PLAN
+) -> tuple[str, dict[str, Any]]:
+    """
+    A regime job that asked about ``session`` and recorded ``regime_plan``,
+    beside the global plan, as the shipped forward job does from plan version
+    2; ``None`` for a phase C4 job, whose result named the global plan alone.
+    """
+    result: dict[str, Any] = {"status": "measured", "plan_hash": PLAN}
+    if regime_plan is not None:
+        result["regime_plan_hash"] = regime_plan
     return (
         jev_clock.regime_job_key(DECISION_REGIME, session),
         {"status": "succeeded", "error": None, "result": result},
@@ -329,6 +339,8 @@ class TestTheFieldListIsPinned:
         report = _populated()
         assert report["plan_version"] == jev_prereg.PLAN_VERSION
         assert report["plan_hash"] == jev_prereg.plan_hash()
+        assert report["regime_plan_version"] == jev_prereg.REGIME_PLAN_VERSION
+        assert report["regime_plan_hash"] == jev_prereg.regime_plan_hash()
         assert report["signal"] == "decision.regime@1:regime"
         assert report["symbol"] == "equities=SPY;bonds=IEF;commodities=GSG"
 
@@ -575,8 +587,10 @@ class TestAnAnswerIsScoredUnderThePlanThatRegisteredIt:
     """
     docs/08: after the first regime answer, a change of plan is recorded as
     one — what was analysed under the old plan stays under it. The regime job
-    records the plan in force when it asks, and agreement is scored only over
-    answers first recorded under the plan the report runs.
+    records the plans in force when it asks, and agreement is scored only
+    over answers first recorded under the regime plan the report runs: from
+    plan version 2 the rule and the sleeves are a plan of their own (M4), so
+    the hashes below are the regime plan's.
     """
 
     def test_an_answer_recorded_under_another_plan_is_not_scored(self) -> None:
@@ -621,7 +635,76 @@ class TestAnAnswerIsScoredUnderThePlanThatRegisteredIt:
         text = jev_eval.format_forward(
             _build([_signal(first, "risk_on")], jobs=dict([_asked(first, "e" * 64)]))
         )
-        assert "not scored: 1 sessions answered under plan eeeeeeeeeeee" in text
+        assert (
+            "not scored: 1 sessions answered under regime plan eeeeeeeeeeee, not "
+            "this one" in text
+        )
+        unknown = jev_eval.format_forward(
+            _build([_signal(first, "risk_on")], jobs=dict([_asked(first, None)]))
+        )
+        assert "not scored: 1 sessions answered under no regime plan recorded" in (
+            unknown
+        )
+
+
+class TestTheRegimeReport:
+    """
+    M4: the forward report scores agreement under the regime plan alone. A
+    job whose result names this regime plan is scored whatever global plan
+    it names beside it, one naming another regime plan is counted apart by
+    it, and a phase C4 job's result, which names the global plan alone, is
+    "plan unknown" — its global hash is never read as a regime plan's.
+    """
+
+    def test_agreement_is_scored_under_the_regime_plan(self) -> None:
+        first, second, third, *_ = SESSIONS
+        under_another_global_plan = (
+            jev_clock.regime_job_key(DECISION_REGIME, first),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": "1" * 64, "regime_plan_hash": REGIME_PLAN},
+            },
+        )
+        under_another_regime_plan = (
+            jev_clock.regime_job_key(DECISION_REGIME, second),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": PLAN, "regime_plan_hash": "2" * 64},
+            },
+        )
+        phase_c4 = (
+            jev_clock.regime_job_key(DECISION_REGIME, third),
+            {
+                "status": "succeeded",
+                "error": None,
+                "result": {"plan_hash": REGIME_PLAN},
+            },
+        )
+        report = _build(
+            [
+                _signal(first, "risk_on", state=RISING),
+                _signal(second, "risk_off", state=FALLING),
+                _signal(third, "neutral", state=SIDEWAYS),
+            ],
+            jobs=dict([under_another_global_plan, under_another_regime_plan, phase_c4]),
+        )
+        figures = _model(report)
+        assert figures["baseline_agreement_sessions"]["n"] == 1
+        assert figures["baseline_agreement_sessions"]["k"] == 1
+        assert figures["not_scored"] == {"2" * 64: 1, jev_eval.UNKNOWN_PLAN: 1}
+
+    def test_the_text_names_the_regime_plan_its_rule_is(self) -> None:
+        text = jev_eval.format_forward(_populated())
+        assert (
+            f"regime plan v{jev_prereg.REGIME_PLAN_VERSION} "
+            f"{jev_prereg.regime_plan_hash()[:12]}" in text
+        )
+        assert (
+            f"agrees with the regime plan v{jev_prereg.REGIME_PLAN_VERSION} "
+            "baseline rule" in text
+        )
 
 
 class TestTheFlipRates:
@@ -772,8 +855,10 @@ class TestNothingMeasuredIsNotZero:
                     "validity_rate": None,
                     "latency_ms": {"p50": None, "n": 0},
                 },
-                "plan_version": 1,
+                "plan_version": jev_prereg.PLAN_VERSION,
                 "plan_hash": jev_prereg.plan_hash(),
+                "regime_plan_version": jev_prereg.REGIME_PLAN_VERSION,
+                "regime_plan_hash": jev_prereg.regime_plan_hash(),
             }
         )
         assert "model not measured" in text
@@ -1503,15 +1588,17 @@ class TestPossiblyInTraining:
 
 def _threshold_book(acting: bool = False) -> tuple[_Book, list[str], list[str]]:
     """
-    120 development items, right above a margin of 0.5 and a coin below it,
-    and 40 test items: enough for a threshold to be chosen.
+    160 development items, right above a margin of 0.5 and a coin below it,
+    and 40 test items: enough for a threshold to be chosen — 100 right above
+    the coin, since at plan version 2's gate level a covered precision of
+    0.90 needs 94 covered items all right, and a covered accuracy of 0.80 42.
     """
     book = _Book(SCREEN, "addressed_to_ai") if acting else _Book()
-    dev, test = _texts_in("dev", 120), _texts_in("test", 40)
+    dev, test = _texts_in("dev", 160), _texts_in("test", 40)
     yes, no = ("true", "false") if acting else ("equities", "bonds")
     for i, text in enumerate(dev):
         book.label(text, yes)
-        if i < 60:
+        if i < 100:
             book.answer(text, yes, margin=0.9)
         else:
             book.answer(text, yes if i % 2 else no, margin=0.2)
@@ -1819,15 +1906,6 @@ class TestTheFlips:
         assert evaluation.flip_rate_near_threshold_n is None
         assert evaluation.flip_rate_near_threshold_not_compared is None
 
-    def test_a_pair_of_an_unscored_item_is_not_counted(self) -> None:
-        book = _Book()
-        book.label(_title(0), "equities")
-        book.answer(_title(0), "equities")
-        book.answer(_title(9), "equities")  # answered, and labelled by nobody
-        self._paired(book, _title(9), "uniform", flipped=True)
-        evaluation = book.evaluate()
-        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (None, 0)
-
     def test_near_the_threshold_from_either_stratum(self) -> None:
         book, _, test = _threshold_book()
         self._paired(book, test[0], "uniform", flipped=True, margin=0.25)
@@ -1879,6 +1957,79 @@ class TestTheFlips:
             for beyond in (exact - further, exact + further):
                 if 0 <= beyond <= 1:
                     assert not jev_eval.near_threshold(float(beyond), threshold)
+
+
+class TestTheFlipsCountThePopulation:
+    """
+    Plan version 2, M2 (docs/09, section 3.2): a flip rate counts every
+    canonical answer to the question under the model that was asked again —
+    labelled or not, in either split — since a flip uses no label and an
+    armed threshold would act on every answer. Version 1 counted a pair only
+    when its canonical answer scored a labelled item, so thirty uniform pairs
+    needed some six hundred labelled test items. The plan that sampled a
+    re-ask, and its stratum, still decide whether and where it counts.
+    """
+
+    def _paired(self, book: _Book, text: str, stratum: str, **kwargs: Any) -> None:
+        TestTheFlips()._paired(book, text, stratum, **kwargs)
+
+    def test_a_pair_of_an_unlabelled_subject_counts(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.answer(_title(9), "equities")  # answered, and labelled by nobody
+        self._paired(book, _title(9), "uniform", flipped=True)
+        evaluation = book.evaluate()
+        assert jev_prereg.FLIP_PAIRS == (
+            "every_canonical_request_of_the_question_under_the_pin"
+        )
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (1.0, 1)
+        assert evaluation.n == 1
+
+    def test_a_pair_of_the_other_split_counts_on_the_test_split(self) -> None:
+        """The population is every answer, so a test-split evaluation counts
+        the development split's pairs too, and its own labels decide nothing
+        about them."""
+        book = _Book()
+        dev = _texts_in("dev", 1)[0]
+        test = _texts_in("test", 1)[0]
+        for text in (dev, test):
+            book.label(text, "equities")
+            book.answer(text, "equities")
+        self._paired(book, dev, "uniform", flipped=True)
+        self._paired(book, test, "low_margin", flipped=False)
+        evaluation = book.evaluate("test")
+        assert evaluation.n == 1
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (1.0, 1)
+        assert (
+            evaluation.flip_rate_low_margin,
+            evaluation.flip_rate_low_margin_n,
+        ) == (0.0, 1)
+
+    def test_flip_pairs_may_outnumber_the_scored_items(self) -> None:
+        """Three pairs beside one scored item: a count above ``n``, which
+        migration 0015 frees from ``n`` (``jev_evaluations_flip_counts_are_
+        counts``)."""
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        for i in (7, 8, 9):
+            book.answer(_title(i), "equities")
+            self._paired(book, _title(i), "uniform", flipped=i == 7)
+        evaluation = book.evaluate()
+        assert evaluation.n == 1
+        assert evaluation.flip_rate_n == 3 > evaluation.n
+        assert evaluation.flip_rate == pytest.approx(1 / 3)
+
+    def test_a_pair_sampled_under_another_plan_still_does_not_count(self) -> None:
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        book.answer(_title(9), "equities")
+        self._paired(book, _title(9), "uniform", flipped=True, plan="0" * 64)
+        evaluation = book.evaluate()
+        assert (evaluation.flip_rate, evaluation.flip_rate_n) == (None, 0)
+        assert evaluation.flip_rate_not_compared == 0
 
 
 class TestLabellerAgreement:
@@ -2001,6 +2152,382 @@ def _git(status: str | None, head: str | None = "a" * 40) -> Any:
     return git
 
 
+def _evaluate_argv(split: str | None, *extra: str) -> list[str]:
+    argv = [
+        "evaluate",
+        "--set",
+        "research.catalogue",
+        "--key",
+        "asset_class",
+        "--labelled-by",
+        LABELLER,
+    ]
+    if split is not None:
+        argv += ["--split", split]
+    return [*argv, *extra]
+
+
+class TestLooks:
+    """
+    Plan version 2, M3 (docs/09, section 3.2): each set, version and question
+    has ``MAX_LOOKS`` looks at the held-out items, and ``usable`` counts the
+    recorded ones, so the harness takes no look it does not record. ``--split
+    test`` and ``--split all`` need ``--record``; ``--split dev``, the
+    search's own items, never records and reads no label or date of a test
+    item, its flip rates the population's as a look's are; and ``--split``
+    has no default. The rule is held in ``jev_eval.execute``, which ``main``
+    and every caller of the harness's commands reach, the integration suite's
+    included.
+    """
+
+    def _connect(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        connected: list[str] = []
+
+        async def connect(dsn: str) -> Any:
+            connected.append(dsn)
+            raise AssertionError("a refused look connected to the ledger")
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://reader@db/trader")
+        monkeypatch.setattr(jev_eval.asyncpg, "connect", connect)
+        return connected
+
+    @pytest.mark.parametrize("split", ["test", "all"])
+    def test_a_held_out_look_must_be_recorded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        split: str,
+    ) -> None:
+        connected = self._connect(monkeypatch)
+        assert jev_eval.main(_evaluate_argv(split)) == jev_eval.EXIT_REFUSED
+        assert connected == []
+        error = capsys.readouterr().err
+        assert f"--split {split} reads the held-out test items" in error
+        assert "add --record" in error
+
+    def test_the_dev_split_is_never_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        connected = self._connect(monkeypatch)
+        argv = _evaluate_argv("dev", "--record", "--commit", "c" * 40)
+        assert jev_eval.main(argv) == jev_eval.EXIT_REFUSED
+        assert connected == []
+        assert "--split dev is the development split's search" in (
+            capsys.readouterr().err
+        )
+
+    def test_split_has_no_default(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Nobody looks at the test split by accident: naming none is a usage error."""
+        connected = self._connect(monkeypatch)
+        assert jev_eval.main(_evaluate_argv(None)) == jev_eval.EXIT_USAGE
+        assert jev_eval.main(_evaluate_argv(None, "--record")) == jev_eval.EXIT_USAGE
+        assert jev_eval.main(_evaluate_argv("train")) == jev_eval.EXIT_USAGE
+        assert connected == []
+        assert "--split" in capsys.readouterr().err
+        for split in ("dev", "test", "all"):
+            parsed = jev_eval._parser().parse_args(_evaluate_argv(split))
+            assert parsed.split == split
+
+    @pytest.mark.parametrize(
+        ("split", "record", "refused"),
+        [
+            ("test", False, True),
+            ("all", False, True),
+            ("dev", True, True),
+            ("test", True, False),
+            ("all", True, False),
+            ("dev", False, False),
+        ],
+    )
+    async def test_execute_refuses_a_dry_look_at_held_out_items(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        split: str,
+        record: bool,
+        refused: bool,
+    ) -> None:
+        """
+        ``execute`` is what ``main`` and the integration suite's ``_run`` both
+        call once the command line is parsed, so the rule holds for each:
+        refused before any connection, whatever the ledger holds.
+        """
+        reached: list[str] = []
+
+        async def run(arguments: Any, dsn: str) -> str:
+            reached.append(arguments.split)
+            return "ran"
+
+        monkeypatch.setattr(jev_eval, "_run", run)
+        argv = _evaluate_argv(split, *(("--record",) if record else ()))
+        arguments = jev_eval._parser().parse_args(argv)
+        code = await jev_eval.execute(arguments, "postgresql://reader@db/trader")
+        assert (code == jev_eval.EXIT_REFUSED) is refused
+        assert (reached == []) is refused
+
+    @pytest.mark.parametrize(
+        "named",
+        [
+            pytest.param({"command": None}, id="no-command"),
+            pytest.param({"command": "Evaluate"}, id="mis-cased"),
+            pytest.param({"command": "evaluate "}, id="padded"),
+            pytest.param({"command": "evaluate --record"}, id="the-record-spelled"),
+            pytest.param({"command": "dev"}, id="a-split-as-a-command"),
+            pytest.param(
+                {"command": "labels", "labels_command": "evaluate"},
+                id="labels-with-a-subcommand-it-has-none-of",
+            ),
+            pytest.param(
+                {"command": "labels", "labels_command": None}, id="labels-alone"
+            ),
+            pytest.param(
+                {"command": "evaluate", "split": "TEST"}, id="a-split-mis-cased"
+            ),
+            pytest.param({"command": "evaluate", "split": None}, id="no-split"),
+            pytest.param(
+                {"command": "evaluate", "split": "test "}, id="a-split-padded"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("record", [False, True])
+    async def test_execute_refuses_whatever_it_does_not_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        named: dict[str, Any],
+        record: bool,
+    ) -> None:
+        """
+        D1's review (D1RP-1): ``execute`` is the enforcement point every caller
+        reaches, so it fails closed on arguments ``_parser`` would never make.
+        The first cut held the look rule to the literal ``"evaluate"`` while
+        ``_read`` sent every command it did not know to the evaluation, so a
+        caller handing ``execute`` a command of ``None``, mis-cased or padded,
+        or ``labels`` with no such subcommand, printed a held-out evaluation
+        with no look recorded. A split nobody parsed is refused before the
+        ledger too, rather than by the evaluation once connected.
+        """
+        connected = self._connect(monkeypatch)
+        given: dict[str, Any] = {
+            "question_set": "research.catalogue",
+            "key": "asset_class",
+            "labelled_by": LABELLER,
+            "split": "test",
+            "model": None,
+            "record": record,
+            "commit": "c" * 40,
+            "json": True,
+            **named,
+        }
+        arguments = argparse.Namespace(**given)
+        code = await jev_eval.execute(arguments, "postgresql://reader@db/trader")
+        assert code == jev_eval.EXIT_REFUSED
+        assert connected == []
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "nothing was read" in captured.err
+
+    @pytest.mark.parametrize("command", ["Evaluate", "None", "labels evaluate"])
+    async def test_neither_dispatch_has_a_default(
+        self, monkeypatch: pytest.MonkeyPatch, command: str
+    ) -> None:
+        """
+        Behind ``_command``, a second layer: ``_read`` and ``_write`` run each
+        command by its name, and a name they do not know is refused rather
+        than run as the evaluation, the first cut's catch-all (D1RP-1).
+        """
+
+        async def database_now(conn: Any) -> datetime:
+            return AFTER
+
+        async def evaluated(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an unknown command reached the evaluation")
+
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
+        monkeypatch.setattr(jev_eval, "_evaluate", evaluated)
+        arguments = argparse.Namespace(json=False)
+        with pytest.raises(jev_eval.Refused, match="no reading command"):
+            await jev_eval._read(object(), arguments, command)  # type: ignore[arg-type]
+        with pytest.raises(jev_eval.Refused, match="no writing command"):
+            await jev_eval._write(
+                object(),  # type: ignore[arg-type]
+                arguments,
+                command,
+                commit=None,
+                rows=None,
+                labelled_by=None,
+            )
+
+    def test_every_command_the_parser_makes_is_one_the_harness_runs(self) -> None:
+        """
+        The commands ``_command`` admits are exactly the ones ``_parser`` can
+        produce, so the fail-closed rule refuses nothing ``main`` can parse.
+        """
+        parser = jev_eval._parser()
+        made = {
+            jev_eval._command(parser.parse_args(argv))
+            for argv in (
+                ["status"],
+                ["forward"],
+                ["forward-audit"],
+                ["report"],
+                ["labels", "export", "--set", "s", "--key", "k", "--blind"],
+                ["labels", "import", "--file", "f", "--as", "operator:q"],
+                ["labels", "copy", "--set", "s", "--key", "k"]
+                + ["--from-version", "0", "--to-version", "1"],
+                _evaluate_argv("dev"),
+                _evaluate_argv("test", "--record"),
+            )
+        }
+        assert made == set(jev_eval.COMMANDS)
+        assert set(jev_eval.WRITING_COMMANDS) < set(jev_eval.COMMANDS)
+
+    def test_the_rule_reads_the_plans_splits(self) -> None:
+        """
+        The recorded splits are the plan's looks, and the commands' are those
+        and the development split: one vocabulary, held here.
+        """
+        assert jev_eval.SPLITS == jev_prereg.LOOKED_AT_SPLITS
+        assert jev_eval.EVALUATE_SPLITS == (jev_eval.DEV_SPLIT, *jev_eval.SPLITS)
+        assert jev_eval.DEV_SPLIT == "dev"
+
+    def test_the_dev_split_never_records_and_reads_no_test_item(self) -> None:
+        """
+        A dev evaluation scores the development split's items alone: change
+        every test item's label, answer and date and it does not move; it
+        holds no test item; and nothing is measured at a threshold, which is
+        the test split's to bear out. Its flip rates are the population's,
+        which use no label (``test_the_dev_splits_flips_are_the_populations``).
+        """
+        book, dev, test = _threshold_book()
+        before = book.evaluate("dev")
+        assert before.split == "dev"
+        assert before.threshold_outcome == "chosen"
+        assert before.n == len(dev)
+        assert (
+            before.coverage_at_threshold,
+            before.n_at_threshold,
+            before.accuracy_at_threshold,
+        ) == (None, None, None)
+        assert before.code_commit is None
+        for text in test:
+            subject = book.subject(text)
+            book.labels = [
+                {**row, "label": "bonds"}
+                if (row["subject_type"], row["subject_id"]) == subject
+                else row
+                for row in book.labels
+            ]
+            book.answer(text, "currencies", margin=0.99)
+            book.dates[subject] = None
+        after = book.evaluate("dev")
+        assert after == before
+        # The same changes move the test split's evaluation, which reads them.
+        assert book.evaluate("test") != _threshold_book()[0].evaluate("test")
+        text = jev_eval.format_evaluation(before.row())
+        assert "this run reads no label or date of a test item" in text
+        assert "never recorded" in text
+        assert "dry run" not in text
+        assert "reads no test item" not in text
+
+    def test_a_dev_threshold_promises_no_look(self) -> None:
+        """
+        D1's review (D1RP-2): a dev run reads no date of a test item, so it
+        cannot know that an undated held-out item, or one dated on or before
+        the pin's first observation, makes the look an upper bound that
+        searches no threshold. It said only a recorded look would bear its
+        threshold out, which pointed the operator at spending one of the four
+        looks every pin shares on a look that can never arm. It now names the
+        condition the look's own search needs, and promises nothing.
+        """
+        book, _, test = _threshold_book()
+        book.dates[book.subject(test[0])] = None
+        dev, look = book.evaluate("dev"), book.evaluate("test")
+        assert (dev.possibly_in_training, dev.threshold_outcome) == (False, "chosen")
+        assert (look.possibly_in_training, look.threshold_outcome) == (
+            True,
+            "not_attempted",
+        )
+        (line,) = [
+            line
+            for line in jev_eval.format_evaluation(dev.row()).splitlines()
+            if line.startswith("threshold:")
+        ]
+        assert "bears it out" not in line
+        assert "only if every item the look reads" in line
+        assert "dated after the model was first observed" in line
+        assert "otherwise the look is an upper bound" in line
+
+    def test_the_dev_splits_flips_are_the_populations(self) -> None:
+        """
+        D1's review (D1RT-2): flips use no label, and plan version 2 counts
+        them over every canonical request of the question under the pin (M2),
+        so a dev evaluation's flip rates count the re-asks of test items as a
+        look's do, and are the look's own. Nothing else in it moves with
+        them, and its text says whose flips they are rather than that it
+        reads nothing of the test split.
+        """
+        book, _, test = _threshold_book()
+        before = book.evaluate("dev")
+        for text in test[:5]:
+            TestTheFlips()._paired(book, text, "uniform", flipped=True)
+            assert jev_prereg.split_of(*book.subject(text)) == "test"
+        dev, look = book.evaluate("dev"), book.evaluate("test")
+        flips = [f.name for f in dataclasses.fields(dev) if f.name.startswith("flip_")]
+        assert (dev.flip_rate, dev.flip_rate_n) == (1.0, 5)
+        assert {f: getattr(dev, f) for f in flips} == {
+            f: getattr(look, f) for f in flips
+        }
+        unmoved = dataclasses.replace(dev, **{f: getattr(before, f) for f in flips})
+        assert unmoved == before
+        text = jev_eval.format_evaluation(dev.row())
+        assert "the flip rates are the whole population's" in text
+
+    def test_report_prints_the_looks_each_identity_has_spent(self) -> None:
+        """
+        Every recorded row of the set, version and question on a split holding
+        the test items, under every model and labeller, is a look spent.
+        """
+        base = {
+            "question_set": "research.catalogue",
+            "question_set_version": 1,
+            "question_key": "asset_class",
+        }
+        rows = [
+            {**base, "id": 1, "split": "test", "model": "jev-1.13.0"},
+            {**base, "id": 2, "split": "all", "model": "jev-1.14.0"},
+            {**base, "id": 3, "split": "test", "question_key": "mechanism"},
+            {**base, "id": 4, "split": "test", "question_set_version": 2},
+        ]
+        assert jev_eval.looks_spent(rows[0], rows) == 2
+        assert jev_eval.looks_spent(rows[2], rows) == 1
+        book = _Book()
+        book.label(_title(0), "equities")
+        book.answer(_title(0), "equities")
+        row = _recorded(book.evaluate("all"))
+        text = jev_eval.format_report(
+            {
+                "pin": MODEL,
+                "evaluations": [
+                    {
+                        "evaluation": row,
+                        "usable": False,
+                        "usable_threshold": None,
+                        "not_usable_because": ["looks"],
+                        "looks_spent": 4,
+                    }
+                ],
+                "quarantined_content": {},
+            }
+        )
+        assert (
+            "looks at the held-out items of research.catalogue v1 asset_class, "
+            "under every model: 4 of 4 spent"
+        ) in text
+        assert jev_calibration.REASONS["looks"] in text
+
+
 class TestTheCommitARecordNames:
     def test_named_by_the_flag_then_the_environment_then_git(self) -> None:
         commit = "0123456789abcdef0123456789abcdef01234567"
@@ -2051,6 +2578,8 @@ class TestTheCommitARecordNames:
                 "asset_class",
                 "--labelled-by",
                 LABELLER,
+                "--split",
+                "test",
                 "--record",
             ]
         )
@@ -2403,11 +2932,14 @@ class TestWhatTheTextSays:
     @pytest.mark.parametrize(
         ("counts", "said_of_it"),
         [
-            ((1, 0), "too few for the exact one-sided sign test at 99.5% to say"),
-            ((7, 0), "too few for the exact one-sided sign test at 99.5% to say"),
-            ((8, 0), "p = 0.00391: beats it"),
+            ((1, 0), "too few for the exact one-sided sign test at 99.9375% to say"),
+            ((10, 0), "too few for the exact one-sided sign test at 99.9375% to say"),
+            ((11, 0), "p = 0.000488: beats it"),
             ((30, 20), "p = 0.101: does not beat it"),
-            ((60, 30), ": beats it"),
+            # Version 1's level beat it; version 2's, spent over the looks,
+            # does not.
+            ((60, 30), "p = 0.00103: does not beat it"),
+            ((70, 20), ": beats it"),
             ((None, None), "not measured whether Jev is the better of the two"),
         ],
     )
@@ -2435,7 +2967,7 @@ class TestWhatTheTextSays:
         assert line.endswith(said_of_it), line
         assert "(bootstrap 95%: 0.010 to 0.500)" in line
         beaten = "beats it" in line.replace("does not beat it", "")
-        assert beaten is (counts in ((8, 0), (60, 30)))
+        assert beaten is (counts in ((11, 0), (70, 20)))
 
     def test_the_reviewers_comparisons_are_too_few_to_say(self) -> None:
         """
@@ -2509,12 +3041,16 @@ class TestWhatTheTextSays:
         assert "Wilson 90%" in other and "bootstrap 90%" in other
         assert "Wilson 95%" not in other and "bootstrap 95%" not in other
         assert "one-sided Wilson lower bound at 99%" in other
-        assert "99.5%" not in other
+        assert "99.9375%" not in other and "99.5%" not in other
+        own = jev_eval.format_evaluation(row)
+        assert "one-sided Wilson lower bound at 99.9375%" in own, (
+            "the plan's level is printed exactly as written, never rounded"
+        )
         unrecorded = jev_eval.format_evaluation(
             {**row, "ci_level": None, "gate_ci_level": None}
         )
         assert "Wilson, level not recorded" in unrecorded
-        assert "95%" not in unrecorded and "99.5%" not in unrecorded
+        assert "95%" not in unrecorded and "99.9375%" not in unrecorded
 
     def test_the_report_is_in_the_order_read_and_never_by_a_figure(
         self,
@@ -2616,59 +3152,64 @@ def _reasked_near(book: _Book, texts: list[str], margin: float) -> None:
 
 def _catalogue_threshold(confident_right: bool) -> _Book:
     """
-    120 development items: 40 answered right by 0.9 and 80 wrong by 0.4, so
-    the threshold is chosen at 0.42, where 40 of 40 are right. 200 test items:
-    30 answered by 0.9, right or wrong as asked, and 170 right by 0.4, below
+    130 development items: 50 answered right by 0.9 and 80 wrong by 0.4, so
+    the threshold is chosen at 0.42, where 50 of 50 are right. 220 test items:
+    50 answered by 0.9, right or wrong as asked, and 170 right by 0.4, below
     it; 35 of the latter re-asked, near the threshold, none flipped. Every
-    item dated after the model was first observed.
+    item dated after the model was first observed. Fifty, not plan version
+    1's thirty and forty, because at version 2's gate level a covered
+    accuracy of 0.80 needs 42 covered items all right, on the development
+    split and on the test split alike.
     """
     book = _Book()
     options = [o for o in ASSET_OPTIONS if o != "insufficient_evidence"]
-    for i, text in enumerate(_texts_in("dev", 120)):
+    for i, text in enumerate(_texts_in("dev", 130)):
         label = options[i % len(options)]
         book.label(text, label)
         wrong = options[(i + 1) % len(options)]
-        book.answer(text, label if i < 40 else wrong, margin=0.9 if i < 40 else 0.4)
-    test = _texts_in("test", 200)
+        book.answer(text, label if i < 50 else wrong, margin=0.9 if i < 50 else 0.4)
+    test = _texts_in("test", 220)
     for i, text in enumerate(test):
         label = options[i % len(options)]
         book.label(text, label)
-        if i < 30:
+        if i < 50:
             chosen = label if confident_right else options[(i + 1) % len(options)]
             book.answer(text, chosen, margin=0.9)
         else:
             book.answer(text, label, margin=0.4)
-    _reasked_near(book, test[30:65], 0.4)
+    _reasked_near(book, test[50:85], 0.4)
     return book
 
 
 def _card_threshold(confident_right: bool) -> _Book:
     """
-    The card check, whose acting class is ``true``. 130 development titles:
-    80 claims answered ``true`` by 0.9, right; 20 answered ``true`` by 0.1,
-    wrong; 30 answered ``false``; so the threshold is chosen at 0.12. 280 test
-    titles: 150 claims answered ``true`` by 0.1, below it; 60 answered
-    ``false``, right; and 70 answered ``true`` by 0.9, right or wrong as
-    asked — 70 being enough for 70 of 70 to meet the guardrail's 0.90 by its
-    lower bound. 40 of the narrow ``true`` re-asked, near the threshold.
+    The card check, whose acting class is ``true``. 150 development titles:
+    100 claims answered ``true`` by 0.9, right; 20 answered ``true`` by 0.1,
+    wrong; 30 answered ``false``; so the threshold is chosen at 0.12. 360 test
+    titles: 200 claims answered ``true`` by 0.1, below it; 60 answered
+    ``false``, right; and 100 answered ``true`` by 0.9, right or wrong as
+    asked — 100 being enough for 100 of 100 to meet the guardrail's 0.90 by
+    its lower bound at plan version 2's gate level, which needs 94, where
+    version 1's needed 60. 40 of the narrow ``true`` re-asked, near the
+    threshold.
     """
     book = _Book(CARD, "performance_claim")
     words = "Invented Fictional Card Pattern"
-    dev = _subjects_in("dev", 130, "hypothesis_title", words)
+    dev = _subjects_in("dev", 150, "hypothesis_title", words)
     for i, text in enumerate(dev):
-        label = "true" if i < 80 else "false"
+        label = "true" if i < 100 else "false"
         book.label(text, label)
         book.answer(
             text,
-            "false" if i >= 100 else "true",
-            margin=0.9 if i < 80 else 0.1 if i < 100 else 0.8,
+            "false" if i >= 120 else "true",
+            margin=0.9 if i < 100 else 0.1 if i < 120 else 0.8,
         )
-    test = _subjects_in("test", 280, "hypothesis_title", words, start=100_000)
+    test = _subjects_in("test", 360, "hypothesis_title", words, start=100_000)
     for i, text in enumerate(test):
-        if i < 150:
+        if i < 200:
             book.label(text, "true")
             book.answer(text, "true", margin=0.1)
-        elif i < 210:
+        elif i < 260:
             book.label(text, "false")
             book.answer(text, "false", margin=0.8)
         else:
@@ -2777,8 +3318,12 @@ class TestTheCommandsThatWrite:
         labels = tmp_path / "labels.csv"
         labels.write_bytes(_labels_file(_row()))
         book = _Book()
-        book.label("Invented Bond Timing", "bonds")
-        book.answer("Invented Bond Timing", "bonds")
+        # One item of each split: the test split's for the recorded look, and
+        # the development split's for --split dev, which scores no test item.
+        assert jev_prereg.split_of(*book.subject("Invented Bond Timing")) == "test"
+        for text in ("Invented Bond Timing", _texts_in("dev", 1)[0]):
+            book.label(text, "bonds")
+            book.answer(text, "bonds")
 
         async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
             return {s: "Invented Bond Timing" for s in subjects}
@@ -2835,12 +3380,16 @@ class TestTheCommandsThatWrite:
                     "asset_class",
                     "--labelled-by",
                     LABELLER,
+                    "--split",
+                    "test",
                     "--record",
                     "--commit",
                     "c" * 40,
                 ],
                 ["record_evaluation"],
             ),
+            # The one evaluation that is not recorded: the development
+            # split's search, which scores no test item (plan version 2, M3).
             "evaluate": (
                 [
                     "evaluate",
@@ -2850,6 +3399,8 @@ class TestTheCommandsThatWrite:
                     "asset_class",
                     "--labelled-by",
                     LABELLER,
+                    "--split",
+                    "dev",
                 ],
                 [],
             ),

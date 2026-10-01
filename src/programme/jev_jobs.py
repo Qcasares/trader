@@ -64,7 +64,10 @@ hypothesis: only one the programme's model
 wrote is sent (``origin = 'model'``; an operator's text would be a subject of
 its own, docs/08 open item 28), and only a title within
 ``jev_questions.TITLE_MAX_CHARS``, refused by that number before any state is
-built, so the refusal is the cap's and never pydantic's.
+built, so the refusal is the cap's and never pydantic's. The row is read by
+column list (``jev_repo.get_hypothesis_title``: its ref, title, origin and
+creation time, and nothing else), never through ``repo.get_hypothesis``,
+whose ``SELECT *`` would hand this side the card (docs/09, D-SAFE-2).
 
 Step 6: pydantic's ``ValidationError`` quotes the input it refused, so it is
 replaced by an error naming the document's id or the hypothesis's ref and
@@ -176,7 +179,6 @@ from src.programme import (
     jev_prereg,
     jev_questions,
     jev_repo,
-    repo,
     web_sources,
 )
 from src.programme.jev_hash import text_sha256
@@ -461,13 +463,19 @@ def _probability(p: float | None) -> str:
 async def _load_hypothesis(
     conn: asyncpg.Connection, source_id: object
 ) -> Mapping[str, Any] | None:
+    """
+    The hypothesis a title set asks about, by its ref: its ref, title, origin
+    and creation time, and nothing else (``jev_repo.get_hypothesis_title``).
+    Never ``repo.get_hypothesis``, whose ``SELECT *`` would hand this side the
+    card and every column a later migration adds (docs/09, D-SAFE-2).
+    """
     if not isinstance(source_id, str) or not source_id.strip():
         raise JobFailedError(
             f"a hypothesis title's row is a hypothesis, named by its ref; got "
             f"{type(source_id).__name__}",
             retry=False,
         )
-    return await repo.get_hypothesis(conn, source_id)
+    return await jev_repo.get_hypothesis_title(conn, source_id)
 
 
 async def _admit_title(conn: asyncpg.Connection, row: Mapping[str, Any]) -> None:
