@@ -633,7 +633,8 @@ inert while the backtest continues to honour them.
   reference sleeves are the defaults the agent that built C4 chose, not
   choices the operator has reviewed (docs/08, C4). The client is tested
   against the real SDK and a fake TypeSafe server over real HTTP, as are one
-  call end to end into the ledger and the regime job end to end into a signal.
+  call end to end into the ledger, the regime job end to end into a signal,
+  and a stored excerpt screened and described end to end.
   The key has been proven against TypeSafe itself: on 2026-09-26
   `jev-check.yml` found the `TYPESAFE_API_KEY` secret accepted by TypeSafe's
   host, the listing naming only the aliases `jev-latest` and `jev-preview`,
