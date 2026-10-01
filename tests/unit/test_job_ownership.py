@@ -110,6 +110,30 @@ class TestEachKindHasOneOwner:
         assert set(DRAINABLE) <= set(HANDLERS)
         assert not set(DRAINABLE) & set(JEV_HANDLERS)
 
+    def test_triaged_kinds_are_the_workers_and_no_others(self) -> None:
+        """
+        The kinds whose failed job's error Jev may be asked about, as a
+        skeleton (phase D3): the worker's research and ingest alone. A venue
+        kind, the shadow replay and the programme's own kinds get code chips
+        alone (docs/09, D9; design M9 and M18), and no triaged kind is one the
+        kill switch gates, since none places an order.
+        """
+        from src.programme import jev_chips, jev_redact
+        from src.worker.kill_job import KILL_GATED_KINDS
+
+        triaged = set(jev_redact.TRIAGED_KINDS)
+        assert triaged == {
+            "backtest",
+            "walkforward",
+            "ingest_bars",
+            "ingest_reference_bars",
+        }
+        assert triaged <= set(HANDLERS)
+        assert not triaged & set(jev_chips.VENUE_KINDS)
+        assert "shadow_decision" not in triaged
+        assert not triaged & set(JEV_HANDLERS)
+        assert not triaged & set(KILL_GATED_KINDS)
+
 
 # ---------------------------------------------------------------------------
 # Every kind anything enqueues
