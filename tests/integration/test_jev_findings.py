@@ -617,8 +617,10 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
         dsn, conn = db
         title = "Invented Look-Ahead in an Invented Signal"
         address = text_sha256(title)
+        clear = text_sha256("Invented Borrow Nobody Blocked")
         await _hypothesis(conn, title, at=RAISED)
         finding = await _finding(conn, title)
+        await _finding(conn, "Invented Borrow Nobody Blocked")
         vendor.failing[title] = "content_block"
         await flag_repo.set_flag(conn, FINDINGS, False, "test")
         await flag_repo.set_flag(conn, GUARDRAILS, True, "test")
@@ -650,7 +652,7 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
                 conn, question_set=question_set, limit=10, day=day
             )
             assert report["would_plan"] is True, report["not_planned_because"]
-            assert address not in {s["subject_id"] for s in report["subjects"]}
+            assert [s["subject_id"] for s in report["subjects"]] == [clear]
         statuses = {
             row["ref"]: row["asks"]
             for row in (await jev_eval.suggestions_report(conn))["findings"]
@@ -665,6 +667,7 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
             key for key in await _asks_about(conn, address) if "findings." in key
         ] == [], "a findings set's ask about the blocked words was planned"
         assert len(vendor.about(title)) == calls, "a call about the words left"
+        assert len(await _asks_about(conn, clear)) == 2, "the planner planned none"
 
     async def test_a_block_on_a_finding_title_holds_the_hypothesis(
         self,
@@ -676,8 +679,10 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
         dsn, conn = db
         title = "Invented Survivorship in an Invented Index"
         address = text_sha256(title)
+        clear = text_sha256("Invented Carry Nobody Blocked")
         await _finding(conn, title)
         await _hypothesis(conn, title, at=RAISED)
+        await _hypothesis(conn, "Invented Carry Nobody Blocked", at=RAISED)
         vendor.failing[title] = "content_block"
         await _loop(monkeypatch, dsn)
         blocked = await conn.fetch(
@@ -707,7 +712,7 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
                 conn, question_set=question_set, limit=10, day=day
             )
             assert report["would_plan"] is True, report["not_planned_because"]
-            assert address not in {s["subject_id"] for s in report["subjects"]}
+            assert [s["subject_id"] for s in report["subjects"]] == [clear]
         for days in (0, 1, 2):
             await _plan_and_drain(conn, dsn, datetime.now(UTC) + timedelta(days=days))
         titles = ("guardrail.card", "research.hypothesis")
@@ -717,6 +722,7 @@ class TestABlockOnTheSameWordsHoldsBothTitles:
             if key.startswith(tuple(f"jev_ask:{name}@" for name in titles))
         ] == [], "a title set's ask about the blocked words was planned"
         assert len(vendor.about(title)) == calls, "a call about the words left"
+        assert len(await _asks_about(conn, clear)) == 2, "the planner planned none"
 
 
 # ---------------------------------------------------------------------------
