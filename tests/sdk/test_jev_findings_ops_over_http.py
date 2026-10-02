@@ -19,11 +19,13 @@ phases D2 and D3 through the programme's loop against a fake of
   leaving at all;
 * phase D3's half: a failed job's error that code leaves to Jev asked about
   by ``ops.job_error`` — the request's state exactly the job's kind and the
-  error's skeleton, none of the error's own words, the job's id or its
-  payload in the body — recorded in the ops lane as provenance ``system``,
-  addressed by the state's hash; then another job failing with the same
-  skeleton at another value asked about, and replayed from the row with no
-  request leaving; and the job left as it failed.
+  error's skeleton: the error's words that are in the redactor's vocabulary,
+  lowercased and in their order, and a placeholder for every other. The
+  error itself, its identifier, its original casing, the job's id and its
+  payload are absent from the body — recorded in the ops lane as provenance
+  ``system``, addressed by the state's hash; then another job failing with
+  the same skeleton at another value asked about, and replayed from the row
+  with no request leaving; and the job left as it failed.
 
 The handler calls ``jev_lane.ask`` through the module attribute with every
 keyword spelled and no transport; the transport is bound here by replacing
@@ -348,7 +350,19 @@ class TestOneJobErrorSkeletonOverHTTP:
         )
         assert list(wire["questions"]) == ["cause"]
         body = sent.body.decode("utf-8")
-        for withheld in (FIRST_ID, "Errno 111", "Connection", PAYLOAD, str(first)):
+        # What leaves is the skeleton: the error's words in the vocabulary,
+        # lowercased and in order, and a placeholder for every other. The
+        # error itself never does, nor its identifier, its casing ("Errno",
+        # "Connection"), the job's id or its payload (D3's review, D3RT-1).
+        assert wire["state"]["error"] == list(tokens)
+        for withheld in (
+            ERROR.format(FIRST_ID),
+            FIRST_ID,
+            "Errno 111",
+            "Connection",
+            PAYLOAD,
+            str(first),
+        ):
             assert withheld not in body, withheld
 
         row = await jev_repo.get_request(conn, asked["request_id"])

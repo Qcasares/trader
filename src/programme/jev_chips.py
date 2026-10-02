@@ -5,12 +5,17 @@ What phase E may show beside a finding, computed when the page is read and
 stored nowhere: a suggested reviewer, a suggested severity, and a pointer to
 an older finding the newer one repeats (docs/09, sections 6.1 and 6.4).
 
-Pure: the standard library, and nothing else, so the API may import it and a
-test may run every function on random registers with no database. Nothing
-here reads the ledger, a finding or an answer: phase E reads them and hands
-over what a chip is computed from. Phase D shows no chip anywhere — the
-harness's ``suggestions`` prints statuses, never a chip (docs/09, section
-9.3) — so these are the functions phase E's contract binds, tested now.
+Pure: the standard library and ``jev_redact``, itself pure, and nothing else,
+so the API may import it and a test may run every function on random
+registers with no database. Nothing here reads the ledger, a finding or an
+answer: phase E reads them and hands over what a chip is computed from. Phase
+D shows no finding chip anywhere — the harness's ``suggestions`` prints a
+finding's statuses, never a severity, route or duplicate chip (docs/09,
+section 9.3) — so these are the functions phase E's contract binds, tested
+now. The one chip phase D prints is code's for a failed job
+(:func:`code_cause`, :func:`job_error_shape`): ``preview`` and
+``suggestions`` show it beside each job, code's own table's entry and never
+Jev's.
 
 Friction, never its release
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -529,8 +529,8 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 | `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the Brier scores, a percentile bootstrap seeded by the caller, calibration bins, the threshold search on the development split, Cohen's kappa and the flip count, each `None`, never 0, over nothing |
 | `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client. C9 adds `evaluate`, `labels export`, `labels import`, `labels copy` and `report`: one question against one labeller's labels, the labels themselves, and the newest evaluations. Only `labels import`, `labels copy` and `evaluate --record` write, each in one transaction and through `jev_repo` alone; every other command reads in a read-only snapshot. `evaluate --record` alone reads a second variable, `GIT_COMMIT`, which names a commit and holds no secret. From D1, `evaluate --split` has no default, a look at the held-out items is taken only with `--record`, and `report` prints the looks each set, version and question has spent. From D2, a finding's title is a labelled subject, measured against `findings.recorded`; and two more reading commands: `preview`, what a title set would be asked about and the exact state that would leave, and `suggestions`, how each findings set's ask about each open finding came out, never an answer. From D3, a failed job's skeleton is a labelled subject, its label read back through the state its text names and its date over the population's rows; `preview` takes the ops set, and `suggestions` lists each failed job of the week with code's chip |
 | `jev_calibration.py` | C9. Pure, `jev_prereg` alone. `usable`, whether a recorded evaluation could arm a threshold and every reason it could not; `card_verdict` and `document_path`, what an armed threshold would be allowed to do, which is add friction and never remove it; and `analysis_plan_hash`, the identity of the plans an evaluation is computed under. Loaded by the harness, to report, and by nothing that acts: phase C arms no threshold. From D1 `usable` counts the looks taken before an evaluation, across every model, and reads a flip limit in the worst case |
-| `jev_chips.py` | D2. Pure, the standard library alone, importable by the API. What phase E may show beside a finding, computed when the page is read and stored nowhere: `severity_chip`, only where Jev's valid suggestion is more serious than the severity recorded; `route_chip`, a suggested reviewer, which on a finding that blocks names only a role in `VETO_ROLES`; and `duplicate_chips`, code's, by exact normalised title, from a newer finding to the earliest older one on the same candidate that blocks at least as much. A chip is labels and numbers, never a title. `VETO_ROLES`, the blocking severities, the severities and the role keys are copies of `gates`' and `roles`', which load pydantic, held equal to them by test. Nothing in phase D shows a chip. From D3, code first for a failed job: `code_cause` places an error by `JOB_ERROR_SHAPES`, a pinned, hashed table of the shapes this system's raise sites write, and returns `None` only for a triaged kind's residue, which `residue_skeleton` turns into what may be sent; and `reconciliation_chip`, `data_health_chips` and `ingest_chips`, code's labels of structured rows, never sent. It loads `jev_redact` and nothing else of the programme |
-| `jev_redact.py` | D3. Pure, the standard library alone, importable by the API. `skeleton`: a failed job's error, its first 4,000 characters, reduced to at most 48 tokens of a closed vocabulary — 393 words, the exception names and the HTTP tokens — in order, everything else a placeholder saying what kind of thing stood there, never what it was. The one way any part of `jobs.error` can become state: an allow-list of numbered rules, idempotent, total and never raising, its vocabulary, never-list, placeholders and rules hashed (`redactor_sha256`) and pinned (`GOLDEN_REDACTOR_SHA256`). `TRIAGED_KINDS`, the research and ingest kinds whose residue Jev may be asked about, and `admissible`, at least three words of content |
+| `jev_chips.py` | D2. Pure — the standard library and, from D3, `jev_redact`, itself pure — and importable by the API. What phase E may show beside a finding, computed when the page is read and stored nowhere: `severity_chip`, only where Jev's valid suggestion is more serious than the severity recorded; `route_chip`, a suggested reviewer, which on a finding that blocks names only a role in `VETO_ROLES`; and `duplicate_chips`, code's, by exact normalised title, from a newer finding to the earliest older one on the same candidate that blocks at least as much. A chip is labels and numbers, never a title. `VETO_ROLES`, the blocking severities, the severities and the role keys are copies of `gates`' and `roles`', which load pydantic, held equal to them by test. No finding chip — severity, route or duplicate — is shown anywhere in phase D. From D3, code first for a failed job: `code_cause` places an error by `JOB_ERROR_SHAPES`, a pinned, hashed table of the shapes this system's raise sites write, and returns `None` only for a triaged kind's residue, which `residue_skeleton` turns into what may be sent; and `reconciliation_chip`, `data_health_chips` and `ingest_chips`, code's labels of structured rows, never sent. Code's chip for a failed job is the one chip phase D prints: `preview` and `suggestions` show it beside each job, code's own table's entry and never Jev's. It loads `jev_redact` and nothing else of the programme |
+| `jev_redact.py` | D3. Pure, the standard library alone, importable by the API. `skeleton`: a failed job's error, its first 4,000 characters, reduced to at most 48 tokens of a closed vocabulary — 393 words, the exception names and the HTTP tokens — in order, everything else a placeholder saying what kind of thing stood there, never what it was. The one way any part of `jobs.error` can become state: an allow-list of numbered rules, idempotent, total and never raising, its vocabulary, never-list, placeholders, rules and every datum and pattern they read hashed (`redactor_sha256`) and pinned (`GOLDEN_REDACTOR_SHA256`), version 2 since D3's review, and what each released version makes of a fixed corpus pinned in its test. `TRIAGED_KINDS`, the research and ingest kinds whose residue Jev may be asked about, and `admissible`, at least three words of content |
 | `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS`; from C7+C8, `ask_verdict` and `NOT_ASKED`, moved out of `jev_jobs`, and `described`, an error by its class, SQLSTATE and constraint, moved out of `web_ingest` |
 | `claims.py` | C8. Pure, the standard library alone. The performance-claim check — `PERFORMANCE_TERMS`, `find_performance_claim`, `NUMERIC_BY_DESIGN`, `reject_performance_claims`, `PerformanceClaimError` — moved verbatim out of `author.py`, which re-exports every name and screens a hypothesis's title with it too |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
@@ -763,7 +763,7 @@ with its golden hash, so the sets below are named without one.
 | Research | `research.catalogue` (asset class, mechanism), built in C7; `research.hypothesis` (the same two questions about a hypothesis's title), built in C8; `research.news` (relevance, event type, tone), not planned | Allow-listed web excerpts; the programme's model-written hypothesis titles | Today: be recorded and planned on, the catalogue only for text the injection screen cleared, which it asks under the research area alone. Later: label the catalogue page; rank a shortlist `author.py` may use to prioritise | Satisfy any gate criterion |
 | Guardrails | `guardrail.injection` ("addressed to an AI system"), built in C7, asked before any other set about a stored web excerpt, under the guardrails area alone; `guardrail.card` (a performance claim), built in C8 beside `find_performance_claim`, in shadow; an untestable falsification test, planned | Allow-listed web excerpts; hypothesis titles; cards as titles unless the detail switch is on | Today: the injection screen quarantines what it flags, uncalibrated, and its clearance is what lets the catalogue ask; the card check is recorded and changes nothing. Later, once calibrated (phase D): a "yes" from the card check rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
 | Findings routing | `findings.owner` (the owning role: the twelve, in `roles`' order, then "unclear") and `findings.severity` (low to critical, then "insufficient_evidence"), two sets so that rewording one re-asks nothing of the other, built in D2; a likely-duplicate question, deferred (open item 71), duplicates being code's alone | The title of each finding the programme's model raised, whatever its status, of 1 to 200 characters, under the findings area alone: never an operator's, Jev's or one raised before 0015, and never a finding's detail, remediation, close note, raiser or recorded severity | Today: be recorded and change nothing; measured against the value already recorded, who raised the finding and at what severity (`findings.recorded`). For phase E, `jev_chips` computes a suggested reviewer, a suggested severity shown only where it escalates, and code's duplicate pointer, shown beside the recorded raiser and severity and never instead | Write a finding's severity, status or anything else, close or remove one, or argue against a veto: on a finding that blocks, a suggested reviewer names only a role holding one, and a duplicate points only to an older finding that blocks at least as much. Findings Jev raises (D4, the card check alone) carry `raised_by='jev:<set>'`, never in `VETO_ROLES` |
-| Ops triage | `ops.job_error` (the likely cause of a failed job: the ten causes code shares, `jev_chips.CAUSES`, then "unclear"), built in D3; reconciliation discrepancies, data health and the ingest get code's chips alone | A failed job's kind and its error's skeleton, the redactor's tokens and nothing else, recorded as provenance `system`: only for a research or ingest job whose error code's table cannot place, and only while the ops area and the detail switch are both on. Code places every error it can first; a venue, shadow or programme job, or an account's data, is never sent | Today: be recorded and change nothing, measured against the keyword rule on the skeleton's text. For phase E, code's chip beside every failed job on System > Jobs, and Jev's suggestion beside the residue's | Resume, retry, cancel or change any job, touch the kill switch, or see an error's own words |
+| Ops triage | `ops.job_error` (the likely cause of a failed job: the ten causes code shares, `jev_chips.CAUSES`, then "unclear"), built in D3; reconciliation discrepancies, data health and the ingest get code's chips alone | A failed job's kind and its error's skeleton, the redactor's tokens and nothing else — those of the error's words that are in its closed vocabulary, lowercased and in their order, and a placeholder for every other word — recorded as provenance `system`: only for a research or ingest job whose error code's table cannot place, and only while the ops area and the detail switch are both on. Code places every error it can first; a venue, shadow or programme job, or an account's data, is never sent | Today: be recorded and change nothing, measured against the keyword rule on the skeleton's text. For phase E, code's chip beside every failed job on System > Jobs, and Jev's suggestion beside the residue's | Resume, retry, cancel or change any job, touch the kill switch, or see the error itself: of its words only those in the redactor's vocabulary reach it, lowercased, and nothing marked as a credential, a value, an address, a path or quoted text, within the limits open items 90 and 91 state |
 | Recorded signals | `signal.news_tone` | Web content | Be recorded and scored going forward | Be loaded by the decision path. The loader's filter excludes web provenance by construction |
 | Direct decisions | `decision.regime` v1: a Choice over `risk_on`, `neutral`, `risk_off`, `insufficient_evidence` | Only `jev_features` descriptors: internal provenance, which no outsider can write to, so the prompt-injection route recorded as C-1 in `docs/02-security-audit.md` stays closed | Feed `jev_regime_allocator`, a pure strategy with a fixed universe and fixed weight vectors declared in code; the pack hash and threshold are its parameters | Act on a missing, invalid, argmax-mismatched or below-threshold answer: each means **hold** |
 
@@ -4660,31 +4660,51 @@ it for the first time.
 
 **The redactor** (the scope's 4, first and second points; design sections 4.2
 and 4.3). `jev_redact.skeleton` reduces an error, its first 4,000 characters
-(`MAX_INPUT_CHARS`), to at most 48 tokens (`SKELETON_MAX_TOKENS`): the words of
-a closed vocabulary of 393, the exception names and the HTTP tokens, in order,
-and for everything else one of twelve placeholders saying what kind of thing
-stood there — a number, an identifier, a name, another word, a date, a time,
-an address, a path, quoted text, a setting's value, a credential, or words left
-out at the end — never what it was. Placeholders are taken before the split,
-in square brackets; rules 0 to 16 run in order; runs are collapsed, the
-skeleton is cut to 47 tokens and `[more]`, and runs are collapsed again, so it
-is idempotent. It is pure, the standard library alone
-(`PURE_PROGRAMME_MODULES`), total, and never raises. The vocabulary holds at
-most 400 words, none a job kind outside `TRIAGED_KINDS` or a table's name;
-every underscore part of every word and HTTP token, and every capital-split
-part of every exception name, is held to `NEVER_IN_VOCABULARY`, 79 words; and
-every word alone and every ordered pair is read by the code screen's
-instruction rules, rule by rule, and trips none. The vocabulary, the never
-list, the placeholders and the rules hash to
-`e7742dcfc1b4ebafb2ab87e595fb8a9fce67a8dc540bdca39a63fb05330984e9`
-(`redactor_sha256`, pinned by `GOLDEN_REDACTOR_SHA256`), with an append-only
-released history kept in the test. `tests/unit/test_jev_redact.py`: total,
-closed, bounded, deterministic across hash seeds and idempotent over a seeded
-fuzz of 10,000 inputs; no synthetic credential or identifier survives in any
-of 36 marked forms and 30 templates, and swapping one for another of its
-shape changes nothing; one case per rule; this system's own raise sites in
-the triaged modules pinned skeleton by skeleton; every hashed attribute moves
-the hash.
+(`MAX_INPUT_CHARS`), to at most 48 tokens (`SKELETON_MAX_TOKENS`): the error's
+words that are in a closed vocabulary of 393, lowercased, the exception names
+and the HTTP tokens, in their order, and for everything else one of twelve
+placeholders saying what kind of thing stood there — a number, an identifier,
+a name, another word, a date, a time, an address, a path, quoted text, a
+setting's value, a credential, or words left out at the end — never what it
+was. The message itself never leaves; those of its words in the vocabulary
+do. Placeholders are taken before the split, in square brackets; rules 0 to
+16 run in order; runs are collapsed, the skeleton is cut to 47 tokens and
+`[more]`, and runs are collapsed again, so it is idempotent. It is pure, the
+standard library alone (`PURE_PROGRAMME_MODULES`), total, and never raises.
+It is version 2 since D3's review, which reads rules 5 to 7 on whole chunks,
+lines and runs rather than on the pieces rule 2 cuts a chunk into, and hides
+a credential in the marked forms version 1 missed (each wider reading is
+listed under "Where D3 departs" below). The vocabulary holds at most 400
+words, none a job kind outside `TRIAGED_KINDS` or a table's name; every
+underscore part of every word and HTTP token, and every capital-split part of
+every exception name, is held to `NEVER_IN_VOCABULARY`, 79 words; and every
+word alone and every ordered pair is read by the code screen's instruction
+rules, rule by rule, and trips none. Every datum the rules read — the
+vocabulary, the never list, the placeholders, the secret words, leads and
+suffixes, each character set, mark and bound, and every pattern as written
+with its flags (`PATTERNS`) — hashes to
+`ed4585f4750734e4615fc193300fddbc858fcb234462d3667bb859e05c1a3814`
+(`redactor_sha256`, pinned by `GOLDEN_REDACTOR_SHA256`); and what each released
+version makes of a fixed corpus of 17,386 texts is pinned beside it, since
+how the code reads the data no datum can say. Both histories are append-only
+and kept in the test, version 1's rows among them.
+`tests/unit/test_jev_redact.py`: total, closed, bounded, deterministic across
+hash seeds and idempotent over a seeded fuzz of 10,000 inputs and over that
+corpus; no synthetic credential or identifier survives in any of 60 marked
+forms and 33 templates — PostgreSQL's DETAIL lines among them — and swapping
+one for another of its shape changes nothing, over forty pairs of generated
+passwords holding rule 2's split characters, one in two a vocabulary word
+between two of them, beside the thirteen shapes; one case per rule and per
+wider reading; this system's own raise sites in the triaged modules pinned
+skeleton by skeleton; every hashed datum moves the hash, and a pattern
+narrowed in a copy of the module moves both pins
+(`TestPinned::test_a_pattern_narrowed_under_one_hash_is_seen`). Each of
+version 2's 32 new controls was removed in turn, and for each a named test
+and the behaviour pin both failed. The first run found three that only one
+of the two caught — two that a test caught and the pin did not, and one the
+other way round — and two edges in `BEHAVIOUR_EDGES` and
+`TestEachRule::test_rule_6_a_value_of_equals_signs_alone_is_written_apart`
+were added for them.
 
 **Code first** (the scope's 4, third point; design sections 4.5 and 4.6).
 `jev_chips.code_cause` places an error by `JOB_ERROR_SHAPES`, 82 shapes read in
@@ -4708,12 +4728,17 @@ them all read by it. The table is version 2 and hashes to
 `reconciliation_chip`, `data_health_chips` and `ingest_chips` label structured
 rows code computed, by labels alone, and are never sent. `jev_chips` loads
 `jev_redact` and nothing else of the programme.
-`tests/unit/test_jev_chips.py::TestCodeFirst` holds the table to the code —
-every literal raise of the triaged modules and of `src/data`, every
-pass-through raise in a reviewed list, every ask, re-ask, regime and probe
-verdict, every `JobFailedError` a handler spells and every fetch failure
-kind, each placed by the shape pinned for it, and every venue shape live on
-a message a venue module writes — and
+`tests/unit/test_jev_chips.py` holds the table to the code:
+`::TestCodeFirst` every literal raise of the triaged modules and of
+`src/data`, each placed for every kind that reaches it, and every
+pass-through raise in a reviewed list;
+`::TestTheProgrammeShapes::test_every_verdict_is_placed_by_its_own_shape`,
+`::test_every_error_a_handler_spells_is_placed` and
+`::test_every_fetch_failure_is_placed_by_a_fetch_shape` every ask, re-ask,
+regime and probe verdict, every `JobFailedError` a handler spells and every
+fetch failure kind, each by the shape pinned for it; and
+`::TestTheVenueShapes::test_every_venue_shape_places_a_message_a_venue_module_writes`
+every venue shape live on a message a venue module writes. And
 `::TestCodeFirst::test_code_cause_is_none_only_for_triaged_residue` holds
 `None` to the residue over the redactor's fuzz; `test_job_ownership.py::TestEachKindHasOneOwner::test_triaged_kinds_are_the_workers_and_no_others`
 holds the triaged kinds to the worker's own and keeps them apart from the
@@ -4760,11 +4785,15 @@ before `data_missing`. `OPS_POPULATION` names the population: failed jobs of
 the triaged kinds, finished after the UTC day the pin was first observed, left
 to Jev by `code_cause`, admissible, each skeleton dated by the earliest
 `finished_at` of those same rows, with the redactor's and the shapes table's
-versions and hashes, so moving either moves the plan. The plan hashes to
-`eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883`, in
-`GOLDEN_SET_PLAN_HASHES` and the released history. The gated family is nine
-pairs of twenty. `tests/unit/test_jev_prereg.py::TestTheOpsKeywords` and
-`::TestTheOpsPlan`.
+versions and hashes, so moving either moves the plan. The plan is version 2,
+naming the redactor's version 2, and hashes to
+`0578dd14068847a7062f0f0a2f8f2f938a834efd1ac0c41092a9be7168ae5bba`, in
+`GOLDEN_SET_PLAN_HASHES` and the released history; version 1, which named the
+redactor's version 1, hashed to
+`eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883` and keeps
+its row, and its keyword rules, and so its verdicts, are version 2's. The
+gated family is nine pairs of twenty.
+`tests/unit/test_jev_prereg.py::TestTheOpsKeywords` and `::TestTheOpsPlan`.
 
 **The reads** (design sections 3.7 and 5.3). `jev_repo.get_failed_job` reads a
 job by its id, as its id, kind, status, error and finish time and nothing
@@ -4875,13 +4904,19 @@ planner, lane or client:
   (`::TestOnlyWhatCodeLeavesToJevIsAsked`); and the failed job, the findings
   register, the hypotheses, the candidates, the assessments and the switches
   are unchanged under an answer, a timeout, a response refused whole, a
-  content block, a 422 and a refused key (`::TestAJobIsUnchangedByEveryOutcome`);
+  content block, a 422 and a refused key (`::TestAJobIsUnchangedByEveryOutcome`),
+  over a register holding a row of each — a hypothesis the programme's model
+  wrote, a candidate on it, a finding that blocks and one that does not, an
+  assessment — so a change to one is seen and not only an insert (D3's
+  review, D3RS-1);
 - what leaves (`tests/sdk/test_jev_findings_ops_over_http.py::TestOneJobErrorSkeletonOverHTTP`):
   with the ops area on and the detail switch off, nothing planned and nothing
   sent; with both on, a failed job's skeleton asked through the planner, the
   handler, the lane, the real client and SDK and real HTTP to the fake
-  TypeSafe server, the request's state exactly the kind and the skeleton,
-  none of the error's words, the job's id or its payload in the body,
+  TypeSafe server, the request's state exactly the kind and the skeleton —
+  the error's words that are in the vocabulary, lowercased and in order, and
+  a placeholder for every other — and the error itself, its identifier, its
+  original casing, the job's id and its payload absent from the body,
   recorded in the ops lane as `system`; and a second job of the same skeleton
   replayed with no request leaving;
 - the dark matrix (`tests/integration/test_jev_dark.py`): a failed job stored
@@ -4918,6 +4953,53 @@ should a token ever hold a space.
   their own (`ops_ask_outside_the_population`, `code_defect`, and
   `ops_ask_left_to_code`, `held_by_design`); no plan named version 1, and its
   hash stays in the released history.
+- The redactor is version 2 (D3's review, D3RR-1 to D3RR-3). Version 1 read
+  rules 5, 6 and 7 on the pieces rule 2 cuts a chunk into, so whatever of a
+  password, a DSN or a tuple's values followed one of `,;()[]{}|` was read as a
+  new, ordinary piece — verbatim when a vocabulary word, its class otherwise —
+  and two generated passwords of one shape gave two skeletons in 15,085 of
+  21,600 cases; it let a vocabulary word through several marked forms; and it
+  hashed its rules' names, not their data, so a pattern narrowed under one
+  hash went unseen. Version 1 was published on the branch in `543f93f`, named
+  by the ops set's plan version 1, and replaced before D3 merged, while no
+  `ops.job_error` answer existed and every switch was off, so no answer was
+  ever recorded under it: its hash keeps its row in the released history, and
+  so does plan version 1's; `ops.job_error` v1, its words and both its hashes
+  unchanged, is asked under redactor version 2 (`REDACTOR_OF_OPS_VERSION`
+  maps it there), and its plan is version 2, naming it. Open item 87 is why
+  this is free only now.
+- The redactor reads rules 2, 5, 6 and 7 wider than design 4.2's sentences,
+  and each wider reading only hides more; `GOLDEN_REDACTOR_SHA256` pins every
+  datum they read, and the released behaviour hash what they do. From version
+  1: rule 7's lead word sets aside rule 3's characters and one trailing `=` as
+  well as its casefold and leading dashes, so `password: x` and `password= x`
+  hide `x`; a value hidden still leads, so `headers= password: x` hides `x`;
+  rule 6's value written apart (`key= value`, `key = value`) is the next
+  chunk, and a quote opened in a value spans what it quotes; and a quote is
+  read after rule 3's characters at a piece's start, so `:'a b'` is one
+  `[quoted]`. From version 2: rule 5 reads the whole chunk, so a chunk
+  holding `://` or `@`, or with a piece starting `www.`, is one `[address]`
+  whatever rule 2 would split it on, and a quote it leaves open runs on;
+  rule 6's value is the rest of its chunk, and a tuple's values — an `=`
+  straight after `)`, as PostgreSQL's DETAIL writes `Key (a, b)=(x, y)` — the
+  rest of their line; rule 7 hides the whole next chunk, or the rest of the
+  lead's own, never only a piece; a compound key holding a lead as a part or
+  two parts (`access_token`, `X-Api-Key`), or ending with one
+  (`PGPASSWORD`), leads; a key of `SECRET_WORDS`, holding one or ending with
+  one (`privateKey`), leads written as a key — `dsn:`, `"dsn":`, `dsn :`,
+  `password:x` in one piece; what stands between a lead and its value made
+  only of rule 2's and rule 3's characters and `-=<>` (`->`, `=>`, `-`) is
+  neither; `Authorization` hides two chunks, a scheme's and the credential's,
+  whatever the scheme; a value hidden ending with a lead, a key written apart
+  or a key and its value in one piece (`Authorization=Bearer x`,
+  `headers={password= x}`) leads, and so does a quoted key a run closes on;
+  only a word shaped as a key is one, so a path ending `/token` leads
+  nothing, and an address leads nothing; a quoted run closes only where a
+  chunk ends with its quote, rule 2's and rule 3's characters set aside, and
+  a piece beginning and ending with the quote is a run of its own only when
+  the rest of its chunk does not end with it too. Version 1's reading of
+  rule 2 closed a run at any piece ending with its quote, so a bracket of a
+  quoted password could end the quote early.
 - `OPS_KEYWORDS` is design 3.4's table cut, and only cut, by the evidence
   rule. Every HTTP status, the rate-limit words, `unauthorized`,
   `unauthorised`, `forbidden`, `credential`, `password`, `exhausted`, `dns`,
@@ -5073,7 +5155,10 @@ pull request it belongs to; D1 builds the ones it names.
     which open item 15's rule refuses. Such a change must move the words as
     well, a reworded legend say, or the rule must learn that one set's next
     version may repeat its own questions. Open item 77 is why a change is a
-    new version at all.
+    new version at all. D3's review made the one change that costs nothing:
+    redactor version 2 replaced version 1 before D3 merged, while no
+    `ops.job_error` answer existed, under the set's version 1 and a plan
+    version of its own.
 88. **The rule reads the newest 200 failed jobs of the week** (D3), the page
     `failed_jobs_for_triage` reads, and `suggestions` lists at most 200
     (`recent_failed_jobs`). A burst of more than 200 failures — a parameter
@@ -5090,6 +5175,30 @@ pull request it belongs to; D1 builds the ones it names.
     system's own text and goes only while the detail switch is on; answered
     the other way, fact 7 is amended and the planner and the road change
     with it.
+90. **Non-interference is shown for secrets without the characters the rules
+    read as structure** (D3, found by D3's review). The redactor's test draws
+    its generated passwords from letters, digits and a generator's
+    punctuation, rule 2's split characters among it, and shows two of one
+    shape give one skeleton in every marked form and template. A secret
+    holding a quote, `=`, `:`, `@`, `/`, `\` or a space is read by what those
+    characters mean — a quoted run, a key, an address, a path, two chunks —
+    and is hidden where it is marked, but two such secrets need not give one
+    skeleton: one holding `@` is an `[address]` where another is
+    `password [secret]`. A space ends a chunk whatever it stands in, so an
+    unquoted passphrase after `key=` or a lead hides its first word alone, and
+    the words after it are read as prose: their class, or a vocabulary word as
+    itself. No allow-list can tell where an unquoted value with spaces ends;
+    quoted, it is one `[quoted]` or `[secret]`. Left for the owner's review of
+    the redactor (scope item 9.5).
+91. **PostgreSQL's `Failing row contains (…)` lists a row's values unmarked**
+    (D3, found by D3's review). A CHECK or NOT NULL violation's DETAIL quotes
+    every value of the failing row in one parenthesised list with no `=`, so
+    rule 6's tuple reading, which needs `Key (…)=(…)`, does not hide them, and
+    each value is read as prose: its class, or a vocabulary word as itself.
+    That is within the stated limit, since nothing marks the values as a
+    credential; a rule hiding the list to the end of its line would narrow
+    what leaves further, and is left for review with the redactor (scope item
+    9.5).
 
 ## Inputs needed from the operator
 
