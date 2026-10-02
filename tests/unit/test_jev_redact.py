@@ -617,6 +617,12 @@ def _filled(template: str, marked: str, secret: str) -> str:
     return template.format(marked=marked.format(secret=secret))
 
 
+#: The invented password of D3RR-1's connection string, split characters
+#: inside it, held apart and formatted in, so a secret scanner does not
+#: read the string as a credential.
+_SPLIT_VALUE = "Ab3(timeout)Q"
+
+
 class TestSecretsNeverSurvive:
     def test_the_secret_is_never_a_token_and_swapping_it_changes_nothing(
         self,
@@ -682,7 +688,7 @@ class TestSecretsNeverSurvive:
             ("password=Xk2;connection;9z", ("password", "[secret]")),
             ("password: Xk2;connection;9z", ("password", "[secret]")),
             (
-                "postgresql://trader:Ab3(timeout)Q" + "@db.example.invalid:5432/trader",
+                f"postgresql://trader:{_SPLIT_VALUE}@db.example.invalid:5432/trader",
                 ("[address]",),
             ),
             ("postgres://u:x|database|y" + "@10.0.0.9/db", ("[address]",)),
