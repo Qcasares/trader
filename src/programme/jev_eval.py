@@ -228,6 +228,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 import asyncpg
@@ -2487,6 +2488,26 @@ def said(value: Any) -> str:
     return str(value)
 
 
+#: The words of each hold the harness names by a key of its own. Every other
+#: hold is keyed by the words it is printed in, a set's name among them, and is
+#: printed as it is: ``ops.job_error`` is a set's name, and printed with its
+#: underscore read as a space it named a set that does not exist (D3's review,
+#: D3RT-4; ``tests/unit/test_jev_eval.py::TestSuggestions``).
+HOLD_WORDS: Mapping[str, str] = MappingProxyType(
+    {
+        "authentication_failure_today": "authentication failure today",
+        "refused_at_this_version_under_the_pin": (
+            "refused at this version under the pin"
+        ),
+    }
+)
+
+
+def said_hold(hold: str) -> str:
+    """A hold as the harness prints it: its words, never a set's name rewritten."""
+    return HOLD_WORDS.get(hold, hold)
+
+
 def format_figure(name: str, value: Mapping[str, Any]) -> str:
     """One proportion, with its n and its interval, or why there is none."""
     if value["share"] is None:
@@ -3373,7 +3394,7 @@ async def preview_report(
         reasons.append("no usable pin is set")
     if plans is None:
         reasons.append(f"{name} v{version} has no analysis plan in force")
-    reasons += [f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on]
+    reasons += [f"held: {said_hold(hold)}" for hold, on in holds.items() if on]
     if calls_left <= 0:
         reasons.append(f"the {lane} lane has no call left today")
     day_spent = (
@@ -3457,7 +3478,7 @@ def format_preview(report: Mapping[str, Any]) -> str:
         f"plans in force: {'yes' if report['plans_in_force'] else 'no'}",
         "holds: "
         + "; ".join(
-            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            f"{said_hold(hold)}: {'yes' if on else 'no'}"
             for hold, on in report["holds"].items()
         ),
         f"calls left today in the lane: {report['calls_left_today']}",
@@ -3802,7 +3823,7 @@ def format_suggestions(report: Mapping[str, Any]) -> str:
         ),
         "holds: "
         + "; ".join(
-            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            f"{said_hold(hold)}: {'yes' if on else 'no'}"
             for hold, on in report["holds"].items()
         ),
         f"findings Jev raised: {report['jev_findings_raised']} (counted, never named)",

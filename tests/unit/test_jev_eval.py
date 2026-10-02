@@ -2246,6 +2246,12 @@ class TestSuggestions:
         assert "findings.severity refused under the pin: yes" in text
         assert "findings.owner refused under the pin: no" in text
         assert "authentication failure today: yes" in text
+        # D3's review (D3RT-4): a hold is printed under its set's own name.
+        # ``ops.job_error`` is the first set whose name holds an underscore,
+        # and the line once printed it as "ops.job error", a set that does
+        # not exist.
+        assert "ops.job_error refused under the pin: no" in text
+        assert "ops.job error" not in text
 
     @pytest.mark.parametrize(
         "pin",
