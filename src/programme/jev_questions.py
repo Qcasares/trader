@@ -89,15 +89,17 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
+    Field,
     PlainSerializer,
     PlainValidator,
     StringConstraints,
+    ValidationError,
     WrapSerializer,
     WrapValidator,
     field_validator,
 )
 
-from src.programme import jev_catalogue, jev_hash
+from src.programme import jev_catalogue, jev_hash, jev_redact
 
 # ---------------------------------------------------------------------------
 # Rules a question set is held to
@@ -338,6 +340,72 @@ class FindingTitleState(BaseModel):
     ]
 
 
+class JobErrorState(BaseModel):
+    """
+    A failed research or ingest job's error, as a skeleton: its kind, and its
+    message reduced by ``jev_redact.skeleton`` to tokens of a closed
+    vocabulary and placeholders, in their order (phase D3).
+
+    Every value is a Literal written in code — a triaged kind, and tokens of
+    ``jev_redact.TOKENS`` — so the state carries no text, and is addressed by
+    its own hash (:data:`STATE_ADDRESSED`, :func:`job_error_subject`) rather
+    than by a text's. The message itself is read by the redactor and by
+    ``jev_chips.code_cause`` alone, and never stored, sent or logged by the
+    Jev side. This system's own records, so it is recorded as ``system`` and
+    sent only while ``jev_send_internal_detail`` is on (docs/09, D-SAFE-1 and
+    D-SAFE-5).
+    """
+
+    model_config = _STATE_CONFIG
+
+    job_kind: Literal[jev_redact.TRIAGED_KINDS]
+    error: Annotated[
+        tuple[Literal[jev_redact.TOKENS], ...],
+        Field(min_length=1, max_length=jev_redact.SKELETON_MAX_TOKENS),
+    ]
+
+
+def job_error_subject(state: JobErrorState) -> str:
+    """
+    A ``job_error`` subject's address: ``jev_hash.state_hash`` of the state
+    as sent, which the lane holds every ask about one to
+    (``jev_lane._check_subject``). One skeleton is one subject, however many
+    jobs failed with it.
+    """
+    return jev_hash.state_hash(state.model_dump(mode="json"))
+
+
+def job_error_text(state: JobErrorState) -> str:
+    """
+    A ``job_error`` subject's text, as the harness exports it and the ops
+    baseline reads it: the kind, a colon and a space, and the tokens joined by
+    single spaces. No token holds a space and no kind holds a colon, so the
+    text names exactly one state, which :func:`job_error_from_text` reads back
+    (``tests/unit/test_jev_questions.py::test_job_error_text_round_trips``).
+    """
+    return f"{state.job_kind}: {' '.join(state.error)}"
+
+
+def job_error_from_text(text: object) -> JobErrorState | None:
+    """
+    The state a ``job_error`` subject's text names, or ``None`` for text that
+    names none: anything but a triaged kind, ``": "`` and tokens of the
+    vocabulary each separated by one space, as :func:`job_error_text` writes
+    them. Exact both ways, so a label's text is read as the one state it was
+    exported from, or refused (docs/09, D-HMB-07). Never raises.
+    """
+    if not isinstance(text, str):
+        return None
+    kind, separator, rest = text.partition(": ")
+    if not separator or not rest:
+        return None
+    try:
+        state = JobErrorState(job_kind=kind, error=tuple(rest.split(" ")))
+    except ValidationError:
+        return None
+    return state if job_error_text(state) == text else None
+
+
 #: The state models a ``web``-provenance set may take, and the only sets that
 #: may take them. Held both ways at registration: web text in any other shape
 #: would reach no screen, and a web state under another provenance would be
@@ -354,6 +422,7 @@ STATE_SUBJECT: Mapping[type[BaseModel], str] = MappingProxyType(
         WebExcerptState: "web_excerpt",
         HypothesisTitleState: "hypothesis_title",
         FindingTitleState: "finding_title",
+        JobErrorState: "job_error",
     }
 )
 
@@ -391,9 +460,13 @@ TEXT_SUBJECT_PROVENANCE: Mapping[str, str] = MappingProxyType(
 #: here that is also text (:data:`TEXT_SUBJECT_FIELD`), one the detail rule
 #: cannot prove text-free with no field exempted, and a set asking about one
 #: under any provenance but the one named, as :data:`TEXT_SUBJECT_PROVENANCE`
-#: does for text. Empty until phase D3 adds the job error's skeleton,
-#: ``{JobErrorState: "system"}`` (docs/09, section 2.1).
-STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType({})
+#: does for text. Phase D3 adds the one such subject, a failed job's error as
+#: a skeleton, recorded as ``system``: this system's own records, computed in
+#: code, which can quote an outsider, and so never ``internal``, which the
+#: phase F loader is to trust (docs/09, sections 2.1 and D-SAFE-5).
+STATE_ADDRESSED: Mapping[type[BaseModel], str] = MappingProxyType(
+    {JobErrorState: "system"}
+)
 
 
 def _text_sent_alone(model: type[BaseModel]) -> str | None:
@@ -1960,13 +2033,123 @@ FINDINGS_SEVERITY = _register(
     )
 )
 
+
+def _placeholder_legend() -> str:
+    """
+    The placeholders, each with what it stands for, as ``ops.job_error``
+    tells Jev: rendered from ``jev_redact.PLACEHOLDERS``, so a placeholder
+    added, reworded or reordered moves the set's pack hash
+    (``tests/unit/test_jev_questions.py::
+    test_the_skeleton_bound_and_legend_are_rendered_from_jev_redact``).
+    """
+    items = [f"{token} {meaning}" for token, meaning in jev_redact.PLACEHOLDERS.items()]
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+#: Phase D3's one set: the likely cause of a failed research or ingest job
+#: whose error code's table of known failures could not place
+#: (``jev_chips.code_cause``), asked about its skeleton alone. Causes, never
+#: actions: no option says to wait, retry or ignore, since an option that
+#: recommends dismissing an error removes friction by persuasion, and what
+#: code knows exactly is code's chip and never asked (docs/09, section 2.5).
+#: The options are ``jev_chips.CAUSES`` and the escape, in that order
+#: (``test_the_cause_options_are_jev_chips_causes``). Sent only while
+#: ``jev_send_internal_detail`` is on: :data:`TEXT_FREE_LANES` requires the
+#: declaration, and ``dump_state`` checks what is sent all the same.
+OPS_JOB_ERROR = _register(
+    QuestionSet(
+        name="ops.job_error",
+        version=1,
+        lane="ops",
+        provenance="system",
+        internal_detail=True,
+        questions=(
+            (
+                "cause",
+                {
+                    "type": "choice",
+                    "instructions": (
+                        "What most likely caused the failure recorded in `error`? "
+                        "`error` is the error message of a failed background job "
+                        "of the kind named in `job_kind`, reduced to at most "
+                        f"{jev_redact.SKELETON_MAX_TOKENS} words from a fixed "
+                        "technical vocabulary and kept in their order, and each "
+                        "word outside that vocabulary is replaced by a "
+                        f"placeholder: {_placeholder_legend()}. It is all the "
+                        "text given."
+                    ),
+                    "criteria": {
+                        "network": (
+                            "A connection to another service failed, was refused, "
+                            "was reset or timed out."
+                        ),
+                        "rate_limit": (
+                            "Another service refused the request because too many "
+                            "requests were made in a short time."
+                        ),
+                        "vendor_service": (
+                            "A data vendor or another outside service reported an "
+                            "error or an outage, or sent a reply that was empty or "
+                            "unreadable."
+                        ),
+                        "credentials": (
+                            "A key, password or permission was missing, wrong, "
+                            "expired or refused."
+                        ),
+                        "data_missing": (
+                            "Data the job needed was missing: prices, sessions, "
+                            "rows or records it expected to find."
+                        ),
+                        "data_invalid": (
+                            "Data the job read was malformed, inconsistent or "
+                            "outside the range it accepts."
+                        ),
+                        "configuration": (
+                            "A setting, parameter or other input given to the job "
+                            "was invalid or contradictory."
+                        ),
+                        "database": (
+                            "The database refused or failed an operation: a "
+                            "constraint, a lock, a deadlock or its own connection "
+                            "dropping."
+                        ),
+                        "resource_limit": (
+                            "The job ran out of time, memory, disk space or "
+                            "another resource."
+                        ),
+                        "code_defect": (
+                            "A defect in this system's own code: an unexpected "
+                            "exception such as a missing attribute, a wrong type "
+                            "or an index out of range."
+                        ),
+                        "unclear": (
+                            "The error fits two or more of the causes above about "
+                            "equally well, or fits each of them only weakly."
+                        ),
+                    },
+                },
+            ),
+        ),
+        state_model=JobErrorState,
+        purpose=(
+            "Suggests the most likely cause of a failed research or ingest job "
+            "that code's table of known failures cannot place, from a skeleton "
+            "of its error message. A cause, never an action: nothing it answers "
+            "retries, resumes, cancels or fails a job, or reads or writes a "
+            "switch. This system's own text, so it is sent only while "
+            "jev_send_internal_detail is on."
+        ),
+    )
+)
+
 #: The pack hash of every registered set, pinned. A test requires each
 #: registered set to hash to its entry and every entry to be registered, so
 #: editing a set's words without bumping its version fails the build, and so
 #: does bumping the version without recording the new hash here. The four
 #: phase C sets hash to the values design section 5 computed from the same
-#: words, and the two findings sets of phase D2 to the values docs/09 section
-#: 2.6 computed from theirs.
+#: words, and the two findings sets of phase D2 and phase D3's ops set to the
+#: values docs/09 section 2.6 computed from theirs, the ops set's under
+#: provenance ``system``.
 GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ("probe.connectivity", 1): (
         "5d5d091e936ae7b0a2006d2d2a92f90c7a08b0bbe55453550ef2c08c2370560e"
@@ -1991,6 +2174,9 @@ GOLDEN_PACK_HASHES: dict[tuple[str, int], str] = {
     ),
     ("findings.severity", 1): (
         "a9cae8cdafff291715982ea74dc3fe05f3e0da1ba8ffdd03cc428df585e830e0"
+    ),
+    ("ops.job_error", 1): (
+        "1e625e8f0965342d12907dbc27fb78e66db44086bb0b6428359c8ab9c512b512"
     ),
 }
 
@@ -2031,6 +2217,7 @@ __all__ = [
     "MIN_SCORE_LEVELS",
     "MOMENTUM_FLAT_BAND",
     "MOMENTUM_SESSIONS",
+    "OPS_JOB_ERROR",
     "OWNING_ROLE_CRITERIA",
     "PROBE_CONNECTIVITY",
     "PROBE_TEXT",
@@ -2044,8 +2231,10 @@ __all__ = [
     "SCREEN_SET_NAME",
     "SEVERITY_CRITERIA",
     "SLEEVES",
+    "STATE_ADDRESSED",
     "STATE_SUBJECT",
     "TEXT_SUBJECT_FIELD",
+    "TEXT_FREE_LANES",
     "TEXT_SUBJECT_PROVENANCE",
     "TITLE_MAX_CHARS",
     "TREND_AVERAGE_SESSIONS",
@@ -2056,6 +2245,7 @@ __all__ = [
     "Drawdown",
     "FindingTitleState",
     "HypothesisTitleState",
+    "JobErrorState",
     "Momentum",
     "ProbeState",
     "QuestionSet",
@@ -2065,6 +2255,9 @@ __all__ = [
     "VolatilityQuintile",
     "WebExcerptState",
     "get",
+    "job_error_from_text",
+    "job_error_subject",
+    "job_error_text",
     "question_set_problem",
     "registration_problem",
     "same_state_subjects",

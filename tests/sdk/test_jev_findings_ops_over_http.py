@@ -1,20 +1,31 @@
 """
 test_jev_findings_ops_over_http.py
 ----------------------------------
-One finding's title asked about end to end, with nothing replaced but the
-vendor (docs/09, section 13; phase D3 adds the job-error skeleton's half).
+One finding's title, and one failed job's error, asked about end to end, with
+nothing replaced but the vendor (docs/09, section 13).
 
-``tests/integration/test_jev_findings.py`` drives phase D2 through the
-programme's loop against a fake of ``jev_client.ask``. This drives the
-shipped planner and the shipped ``jev_ask`` handler through the lane, the real
-client, the real ``typesafe_sdk`` and ``httpx2``, real HTTP to the fake
-TypeSafe server in ``conftest.py``, the validator and the ledger on a real
-Postgres: a model-written finding's title asked about by ``findings.owner``
-and ``findings.severity`` — each request's state exactly ``{"title": …}``,
-nothing of the finding's detail, remediation, raiser or severity beside it —
-and an operator's finding asked nothing; then the same title, held by a
-second finding, asked again and replayed from its row, with no request
-leaving at all.
+``tests/integration/test_jev_findings.py`` and ``test_jev_ops.py`` drive
+phases D2 and D3 through the programme's loop against a fake of
+``jev_client.ask``. This drives the shipped planner and the shipped
+``jev_ask`` handler through the lane, the real client, the real
+``typesafe_sdk`` and ``httpx2``, real HTTP to the fake TypeSafe server in
+``conftest.py``, the validator and the ledger on a real Postgres:
+
+* a model-written finding's title asked about by ``findings.owner`` and
+  ``findings.severity`` — each request's state exactly ``{"title": …}``,
+  nothing of the finding's detail, remediation, raiser or severity beside it
+  — and an operator's finding asked nothing; then the same title, held by a
+  second finding, asked again and replayed from its row, with no request
+  leaving at all;
+* phase D3's half: a failed job's error that code leaves to Jev asked about
+  by ``ops.job_error`` — the request's state exactly the job's kind and the
+  error's skeleton: the error's words that are in the redactor's vocabulary,
+  lowercased and in their order, and a placeholder for every other. The
+  error itself, its identifier, its original casing, the job's id and its
+  payload are absent from the body — recorded in the ops lane as provenance
+  ``system``, addressed by the state's hash; then another job failing with
+  the same skeleton at another value asked about, and replayed from the row
+  with no request leaving; and the job left as it failed.
 
 The handler calls ``jev_lane.ask`` through the module attribute with every
 keyword spelled and no transport; the transport is bound here by replacing
@@ -31,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -43,9 +55,11 @@ import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import flags as flag_repo  # noqa: E402
+from src.db.repos import jobs as job_repo  # noqa: E402
 from src.programme import (  # noqa: E402
     flags,
     jev_catalogue,
+    jev_chips,
     jev_jobs,
     jev_lane,
     jev_plan,
@@ -57,6 +71,9 @@ from src.programme.jev_hash import text_sha256  # noqa: E402
 from src.programme.jev_questions import (  # noqa: E402
     FINDINGS_OWNER,
     FINDINGS_SEVERITY,
+    OPS_JOB_ERROR,
+    JobErrorState,
+    job_error_subject,
 )
 from tests.sdk.conftest import ENDPOINT, FakeTypeSafe, Redirect, Reply  # noqa: E402
 
@@ -72,6 +89,15 @@ KEY = "ts-test-key-not-a-secret"
 TITLE = "Invented Fills Assumed at Prices No Venue Gave"
 DETAIL = "Invented detail no request may carry"
 OPERATORS = "An Operator's Invented Finding"
+
+#: An invented failed job's error that code leaves to Jev, with a slot an
+#: invented identifier goes in; the two identifiers the redactor reduces to
+#: one ``[id]``, so the two jobs below hold one skeleton.
+ERROR = "[Errno 111] Connection refused while reading {}"
+FIRST_ID = "m4c0ffee19"
+SECOND_ID = "m7d00dad29"
+#: A marker in the first job's payload, which no request may carry.
+PAYLOAD = "invented-payload-no-request-may-carry"
 
 
 def _own_dsn() -> str:
@@ -249,3 +275,111 @@ class TestOneFindingTitleOverHTTP:
             ("high", "open"),
             ("low", "open"),
         ], "an answer changed a finding"
+
+
+async def _failed_job(
+    conn: asyncpg.Connection, error: str, payload: dict[str, Any] | None = None
+) -> uuid.UUID:
+    """
+    An ``ingest_bars`` job through the shipped writer, then ended as the queue
+    ends one: failed an hour ago with ``error``.
+    """
+    job_id = await job_repo.enqueue(
+        conn, "ingest_bars", payload or {}, dedupe_key=f"test:{uuid.uuid4()}"
+    )
+    assert job_id is not None
+    await conn.execute(
+        "UPDATE jobs SET status = 'failed', attempts = 1, error = $2, "
+        "started_at = now() - interval '1 hour', "
+        "finished_at = now() - interval '1 hour' WHERE id = $1",
+        job_id,
+        error,
+    )
+    return job_id
+
+
+async def _job_row(conn: asyncpg.Connection, job_id: uuid.UUID) -> dict[str, Any]:
+    return dict(await conn.fetchrow("SELECT * FROM jobs WHERE id = $1", job_id))
+
+
+class TestOneJobErrorSkeletonOverHTTP:
+    async def test_the_skeleton_alone_leaves_and_a_second_ask_replays(
+        self, conn: asyncpg.Connection, server: FakeTypeSafe, routed: Redirect
+    ) -> None:
+        await flag_repo.set_flag(conn, f"{flags.JEV_AREA_PREFIX}ops", True, "test")
+        await flag_repo.set_flag(conn, flags.JEV_SEND_INTERNAL_DETAIL, False, "test")
+        tokens = jev_chips.residue_skeleton("ingest_bars", ERROR.format(FIRST_ID))
+        assert tokens is not None
+        assert tokens == jev_chips.residue_skeleton(
+            "ingest_bars", ERROR.format(SECOND_ID)
+        ), "the two jobs do not hold one skeleton"
+        state = JobErrorState(job_kind="ingest_bars", error=tokens)
+        address = job_error_subject(state)
+        first = await _failed_job(conn, ERROR.format(FIRST_ID), {"invented": PAYLOAD})
+        before = await _job_row(conn, first)
+        server.script(_reply(OPS_JOB_ERROR, "req_ops"))
+
+        # The ops area on and the detail switch off: nothing is planned, and
+        # nothing leaves (docs/09, owner item 9.1's default).
+        await jev_plan.plan(conn, now=datetime.now(UTC), key_available=True)
+        assert not await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'jev_ask' AND payload->>'set' = $1",
+            OPS_JOB_ERROR.name,
+        ), "planned with the detail switch off"
+        assert routed.sent == [] and server.received == []
+
+        await flag_repo.set_flag(conn, flags.JEV_SEND_INTERNAL_DETAIL, True, "test")
+        await jev_plan.plan(conn, now=datetime.now(UTC), key_available=True)
+        payload = await _ask_job(conn, OPS_JOB_ERROR.name)
+        assert payload["source_id"] == str(first)
+        assert (payload["subject_type"], payload["subject_id"]) == (
+            "job_error",
+            address,
+        )
+        asked = await jev_jobs.run_ask(conn, payload, KEY)
+        assert asked["status"] == "ok"
+        assert asked["answers"]["cause"]["argmax"] == "network"
+        assert asked["plan_hash"] == jev_prereg.GOLDEN_PLAN_HASH
+
+        (sent,) = routed.sent
+        assert sent.url == ENDPOINT
+        wire = json.loads(sent.body)
+        assert wire["model"] == MODEL
+        assert wire["state"] == OPS_JOB_ERROR.dump_state(state), (
+            "more than the kind and the skeleton left"
+        )
+        assert list(wire["questions"]) == ["cause"]
+        body = sent.body.decode("utf-8")
+        # What leaves is the skeleton: the error's words in the vocabulary,
+        # lowercased and in order, and a placeholder for every other. The
+        # error itself never does, nor its identifier, its casing ("Errno",
+        # "Connection"), the job's id or its payload (D3's review, D3RT-1).
+        assert wire["state"]["error"] == list(tokens)
+        for withheld in (
+            ERROR.format(FIRST_ID),
+            FIRST_ID,
+            "Errno 111",
+            "Connection",
+            PAYLOAD,
+            str(first),
+        ):
+            assert withheld not in body, withheld
+
+        row = await jev_repo.get_request(conn, asked["request_id"])
+        assert (row["question_set"], row["status"]) == (OPS_JOB_ERROR.name, "ok")
+        assert (row["lane"], row["provenance"]) == ("ops", "system")
+        assert (row["subject_type"], row["subject_id"]) == ("job_error", address)
+        assert row["http_status"] == 200 and row["model_answered"] == MODEL
+
+        # Another job failing with the same skeleton at another value: asked
+        # again, it is replayed from the row, and no request leaves.
+        second = await _failed_job(conn, ERROR.format(SECOND_ID))
+        replayed = await jev_jobs.run_ask(
+            conn, {**payload, "source_id": str(second)}, KEY
+        )
+        assert replayed["replayed"] is True
+        assert replayed["request_id"] == asked["request_id"]
+        assert len(routed.sent) == len(server.received) == 1, (
+            "the skeleton asked again sent a request"
+        )
+        assert await _job_row(conn, first) == before, "an answer changed the job"

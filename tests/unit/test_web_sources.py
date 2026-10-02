@@ -2185,6 +2185,9 @@ def test_web_sources_loads_nothing_heavy() -> None:
         "src.programme.jev_hash",
         "src.programme.jev_questions",
         "src.programme.jev_catalogue",
+        # Phase D3: jev_questions builds the job error's state from the
+        # redactor's vocabulary, the standard library alone.
+        "src.programme.jev_redact",
     }, ours
     assert "src.programme.web_sources" in ours
     forbidden = (

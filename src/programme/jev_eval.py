@@ -77,7 +77,11 @@ prints "not measured: no labelled items".
   web document is stored undated, so an evaluation of a web set — against
   the README's grouping or a person's labels alike — is an upper bound, and
   says so everywhere it is printed; it is never given a threshold (docs/08
-  open item 65).
+  open item 65). From phase D3 a job error's skeleton is dated over exactly
+  the rows its population reads, failed jobs finished after the day the pin
+  was first observed, so an ops evaluation is never an upper bound by its
+  dates, which carry nothing about training there, and it says so beside its
+  figures (:data:`OPS_DATING_NOTE`; docs/08 open item 81).
 * **The threshold is the development split's**, searched on its items alone
   and measured on the test split's; the figure a gate reads is a one-sided
   Wilson lower bound, never a point estimate, and a threshold is usable only
@@ -115,7 +119,9 @@ text the code screen flags, content Jev's own screen quarantined among them,
 since leaving that out would choose the subjects by what Jev said
 (:func:`export_labels`). ``labels import`` records a file of
 labels only if every row names the registered set, version and question, an
-option that is not the escape, and a subject that is stored; ``labels copy``
+option that is not the escape, and a subject that is stored — from phase D3 a
+job error's skeleton, whose address is its state's hash, held to the one
+state its exported text names (:data:`STATE_FROM_TEXT`); ``labels copy``
 carries one version's labels to the registered version only where the
 question's options are the same. ``report`` prints the newest evaluation of
 each set, version, question, model, labeller and split, with whether it could
@@ -136,6 +142,17 @@ but Jev's, by its ref, how each findings set's ask came out — answered,
 invalid, held, retired, waiting, or not asked and why — and never a title,
 an option, a probability or a chip, since anyone who reads it may later
 label a set; Jev's own findings are counted, never named.
+
+From phase D3 both read failed jobs (docs/09, section 9.3). ``preview --set
+ops.job_error`` lists the skeletons the planner would ask about, each with
+the state the handler would send, and each failed job of a triaged kind the
+planner's read reaches, by its id and kind, with code's chip and shape or
+that code leaves it to Jev; the switches it names include the detail switch.
+``suggestions`` adds each failed job of the last week, of any kind, by its id
+and kind, with code's chip and how the ops set's ask about it came out. A
+job's error is read by code's triage and the redactor alone and printed by
+neither (``tests/unit/test_jev_table_boundaries.py::
+test_a_job_error_is_used_only_by_the_redactor_and_code_cause``).
 
 What the forward report may say
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -206,10 +223,12 @@ import re
 import statistics
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 import asyncpg
@@ -221,10 +240,12 @@ from src.programme import (
     flags,
     jev_calibration,
     jev_catalogue,
+    jev_chips,
     jev_clock,
     jev_features,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     jev_stats,
     web_sources,
@@ -305,9 +326,37 @@ NO_GROUND_TRUTH: Mapping[str, str] = {
 }
 
 #: The subjects a label may be of: text, which a person can read and judge —
-#: a web excerpt, a hypothesis title and, from phase D2, a finding's title
-#: (docs/09, section 3.7).
-LABELLED_SUBJECTS = ("web_excerpt", "hypothesis_title", "finding_title")
+#: a web excerpt, a hypothesis title, from phase D2 a finding's title, and
+#: from phase D3 a failed job's error as its skeleton, written as
+#: ``jev_questions.job_error_text`` writes it (docs/09, section 3.7).
+LABELLED_SUBJECTS = ("web_excerpt", "hypothesis_title", "finding_title", "job_error")
+
+#: For each state model whose subject is the state itself
+#: (``jev_questions.STATE_ADDRESSED``), how a label's text is read back: the
+#: state the text names, or ``None``, and that state's address. A label of
+#: such a subject is held to the state its text names, since its address is
+#: the state's hash and never its text's (docs/09, D-HMB-07); a model
+#: addressed by its state with no entry here is refused, never read as text.
+STATE_FROM_TEXT: Mapping[type, tuple[Callable[[object], Any], Callable[[Any], str]]] = {
+    jev_questions.JobErrorState: (
+        jev_questions.job_error_from_text,
+        jev_questions.job_error_subject,
+    ),
+}
+
+#: What an evaluation of a job error's skeleton says beside its figures: its
+#: items are dated over the population's own rows, every one finished after
+#: the day the pin was first observed, so "possibly in training" reads false
+#: for every item and carries no information there — and a skeleton that is
+#: also a library's public message was in the training data whatever its date
+#: (docs/09, section 3.7, D-HMB-08; docs/08 open item 81).
+OPS_DATING_NOTE = (
+    "dates: each skeleton is dated over the failed jobs its population reads, "
+    "every one finished after the day the pin was first observed, so "
+    "'possibly in training' reads false for every item and says nothing about "
+    "training here; a skeleton that is also a library's public message is in "
+    "the training data whatever its date (docs/08 open item 81)"
+)
 
 #: The splits an evaluation may be recorded over: the held-out test split,
 #: which a gate reads, or every labelled item, which holds it. Each is a look
@@ -1047,7 +1096,8 @@ def question_problem(
     if subject_type not in LABELLED_SUBJECTS:
         return (
             f"{question_set.name} is asked about a {subject_type!r}, and a label "
-            "is of text: a web excerpt, a hypothesis title or a finding title"
+            "is of text: a web excerpt, a hypothesis title, a finding title or a "
+            "job error's skeleton"
         )
     plan = jev_prereg.set_plan(question_set.name, question_set.version)
     if plan is None or question_key not in plan["questions"]:
@@ -1819,7 +1869,7 @@ async def read_ledger(
         jobs=await jev_repo.ask_jobs_about(
             conn, question_set=name, version=version, subjects=subjects
         ),
-        dates=await jev_repo.item_dates(conn, subjects),
+        dates=await jev_repo.item_dates(conn, subjects, model=model),
         texts=await jev_repo.subject_texts(conn, subjects),
         pairs=pairs,
         reasks=reasks,
@@ -2043,7 +2093,13 @@ def label_problems(
     question one it asks with a plan, the subject its kind of text named by
     a content address, the label one of the question's options and never its
     escape, a ``text`` given the text the address names, and each item
-    labelled once in the file.
+    labelled once in the file. A subject addressed by its state — from phase
+    D3 a job error, whose address is its state's hash and never its text's —
+    is held to the state its ``text`` names (:data:`STATE_FROM_TEXT`): the
+    text is required, must name exactly one state, and that state's address
+    must be the subject, so an exported row imports as the item it was
+    exported as, and a row whose text was blanked or edited is refused
+    (docs/09, D-HMB-07).
     """
     problems = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -2093,7 +2149,12 @@ def label_problems(
             problems.append(f"line {line}: {label!r} is not one of {options}")
             continue
         text = row.get("text")
-        if text and text_sha256(text) != subject_id:
+        if question_set.state_model in jev_questions.STATE_ADDRESSED:
+            problem = _state_text_problem(question_set.state_model, text, subject_id)
+            if problem is not None:
+                problems.append(f"line {line}: {problem}")
+                continue
+        elif text and text_sha256(text) != subject_id:
             problems.append(
                 f"line {line}: its text is not the text its subject names; the "
                 "label would be of words nobody is asked about"
@@ -2105,6 +2166,33 @@ def label_problems(
             continue
         seen.add(item)
     return problems
+
+
+def _state_text_problem(model: type, text: object, subject_id: str) -> str | None:
+    """
+    Why a label's ``text`` does not name the state-addressed subject it labels,
+    or ``None``: no way to read the model's text back, no text, a text naming
+    no state, or one naming another state than the subject.
+    """
+    readers = STATE_FROM_TEXT.get(model)
+    if readers is None:
+        return (
+            f"a {model.__name__} subject is addressed by its state, and no reader "
+            "of its text is registered; nothing is labelled"
+        )
+    from_text, address = readers
+    state = from_text(text)
+    if state is None:
+        return (
+            "its text names no state its subject could be; a label of this "
+            "subject keeps the text it was exported with"
+        )
+    if address(state) != subject_id:
+        return (
+            "its text names another state than its subject; the label would be "
+            "of a skeleton nobody is asked about"
+        )
+    return None
 
 
 async def import_labels(
@@ -2400,6 +2488,26 @@ def said(value: Any) -> str:
     return str(value)
 
 
+#: The words of each hold the harness names by a key of its own. Every other
+#: hold is keyed by the words it is printed in, a set's name among them, and is
+#: printed as it is: ``ops.job_error`` is a set's name, and printed with its
+#: underscore read as a space it named a set that does not exist (D3's review,
+#: D3RT-4; ``tests/unit/test_jev_eval.py::TestSuggestions``).
+HOLD_WORDS: Mapping[str, str] = MappingProxyType(
+    {
+        "authentication_failure_today": "authentication failure today",
+        "refused_at_this_version_under_the_pin": (
+            "refused at this version under the pin"
+        ),
+    }
+)
+
+
+def said_hold(hold: str) -> str:
+    """A hold as the harness prints it: its words, never a set's name rewritten."""
+    return HOLD_WORDS.get(hold, hold)
+
+
 def format_figure(name: str, value: Mapping[str, Any]) -> str:
     """One proportion, with its n and its interval, or why there is none."""
     if value["share"] is None:
@@ -2637,6 +2745,12 @@ def format_evaluation(evaluation: Mapping[str, Any]) -> str:
             "first observed, so it may be in the model's training data; every "
             "figure below is an upper bound, and no threshold rests on it"
         )
+    question_set = jev_questions.REGISTRY.get(e["question_set"])
+    if (
+        question_set is not None
+        and jev_questions.STATE_SUBJECT.get(question_set.state_model) == "job_error"
+    ):
+        lines.append(OPS_DATING_NOTE)
     lines.append(
         f"items: {e['n']} scored; {said(e.get('n_other_plans'))} answered under "
         f"other plans and {said(e.get('n_plan_unknown'))} under plans unknown, set "
@@ -2891,28 +3005,39 @@ def format_report(report: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# What would leave, and how each ask came out (phase D2)
+# What would leave, and how each ask came out (phases D2 and D3)
 # ---------------------------------------------------------------------------
 #
 # docs/09, section 9.3. ``preview`` is what an operator reads before switching
 # an area on; ``suggestions`` says how the asks about the findings register
-# came out, and shows no answer. Both read, in the caller's read-only
-# snapshot, and neither loads the planner or the handler: the reads and rules
-# below are copies of theirs, held equal on the same rows by
-# ``tests/integration/test_jev_findings.py::TestPreviewIsThePlanners``.
+# and, from phase D3, about the week's failed jobs came out, and shows no
+# answer. Both read, in the caller's read-only snapshot, and neither loads the
+# planner or the handler: the reads and rules below are copies of theirs,
+# held equal on the same rows by ``tests/integration/test_jev_findings.py::
+# TestPreviewIsThePlanners`` and ``tests/integration/test_jev_ops.py::
+# TestPreviewIsThePlanners``. A job's error is read by code's triage and the
+# redactor alone, and printed nowhere: a failed job is shown by its id, its
+# kind, code's chip and, for the ops set, the skeleton that would be sent.
 
-#: The subjects ``preview`` shows: a title the programme's model wrote. A web
-#: set's subjects are chosen by the injection screen's own answers — content
-#: it cleared, for the catalogue, and content its ``true`` is on record for,
-#: for the screen's repairs — so listing them would show those answers, and
-#: ``preview`` does not; phase D3's job-error skeleton joins it.
-PREVIEWED_SUBJECTS = ("hypothesis_title", "finding_title")
+#: The subjects ``preview`` shows: a title the programme's model wrote, and
+#: from phase D3 a failed job's error as its skeleton. A web set's subjects
+#: are chosen by the injection screen's own answers — content it cleared, for
+#: the catalogue, and content its ``true`` is on record for, for the screen's
+#: repairs — so listing them would show those answers, and ``preview`` does
+#: not.
+PREVIEWED_SUBJECTS = ("hypothesis_title", "finding_title", "job_error")
 
 #: How many subjects ``preview`` lists unless told: the planner's cap a pass
 #: for every set it reads (``jev_plan.ASKS_PER_PASS``, held equal by
 #: ``tests/unit/test_jev_eval.py::TestPreview``, since the harness may not
 #: load the planner).
 PREVIEW_LIMIT = 10
+
+#: How far back the ops rule reads failed jobs: ``jev_plan.OPS_WINDOW``,
+#: copied, since the harness may not load the planner, and held equal by
+#: ``tests/unit/test_jev_eval.py::TestThePreviewOfAFailedJob``. ``suggestions``
+#: shows the failed jobs of the same week.
+OPS_WINDOW = timedelta(days=7)
 
 
 async def _titles_to_ask(
@@ -3025,12 +3150,180 @@ async def _previewed(
     return entry
 
 
+def _ops_since(model: str | None, now: datetime) -> datetime:
+    """
+    Where the ops rule's read starts at ``now``: a week back, never before the
+    midnight after the pin was first observed (``jev_plan._job_error_subjects``).
+    """
+    return max(now - OPS_WINDOW, jev_repo.job_error_since(model))
+
+
+async def _failed_jobs_previewed(
+    conn: asyncpg.Connection, model: str | None, now: datetime
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """
+    The planner's read of failed jobs for the ops set, as ``preview`` shows
+    it: each failed job of a triaged kind within the ops rule's window, newest
+    first, by its id and kind, with code's chip — the cause and the shape
+    code places its error by, or that code leaves it to Jev — and, for one
+    left to Jev, whether its skeleton is long enough to ask about and its
+    address. Also returns, by address, the newest job of each skeleton the
+    planner would plan, newest first. The error is read by code's triage and
+    the redactor alone (``jev_chips.residue_skeleton``) and printed nowhere.
+    """
+    rows = await jev_repo.failed_jobs_for_triage(
+        conn, kinds=jev_redact.TRIAGED_KINDS, since=_ops_since(model, now)
+    )
+    jobs: list[dict[str, Any]] = []
+    newest: dict[str, str] = {}
+    for row in rows:
+        cause = jev_chips.code_cause(row["kind"], row["error"])
+        shape = jev_chips.job_error_shape(row["kind"], row["error"])
+        tokens = jev_chips.residue_skeleton(row["kind"], row["error"])
+        address = None
+        if tokens is not None:
+            state = jev_questions.JobErrorState(job_kind=row["kind"], error=tokens)
+            address = jev_questions.job_error_subject(state)
+            newest.setdefault(address, str(row["id"]))
+        if cause is not None:
+            left = f"placed by code: {cause}"
+        elif address is None:
+            left = "left to Jev, and too few words of the vocabulary to ask about"
+        else:
+            left = "left to Jev"
+        jobs.append(
+            {
+                "job_id": str(row["id"]),
+                "kind": row["kind"],
+                "finished_at": row["finished_at"].isoformat(),
+                "code_cause": cause,
+                "code_shape": None if shape is None else shape.name,
+                "triage": left,
+                "subject_id": address,
+            }
+        )
+    return jobs, newest
+
+
+async def _job_errors_to_ask(
+    conn: asyncpg.Connection,
+    question_set: jev_questions.QuestionSet,
+    model: str,
+    limit: int,
+    day: date,
+    newest: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """
+    The planner's subjects of the ops set (``jev_plan._job_error_subjects``),
+    copied: of the skeletons ``newest`` names, newest first, those
+    ``jev_repo.unasked_subjects`` keeps on ``day``, at most ``limit``, each
+    naming its newest job.
+    """
+    if not newest:
+        return []
+    unasked = await jev_repo.unasked_subjects(
+        conn,
+        question_set=question_set,
+        model=model,
+        subject_type="job_error",
+        subjects=list(newest),
+        day=day,
+    )
+    return [
+        {"subject_id": address, "source_id": newest[address]}
+        for address in unasked[:limit]
+    ]
+
+
+async def _previewed_job(
+    conn: asyncpg.Connection,
+    question_set: jev_questions.QuestionSet,
+    row: Mapping[str, Any],
+    *,
+    state_limit: int,
+    day_spent: str | None,
+) -> dict[str, Any]:
+    """
+    One failed job as the ``jev_ask`` handler would take it: read again by
+    its id and column list (``jev_repo.get_failed_job``), held to the
+    handler's admission rule by rule — failed, of a triaged kind, finished,
+    its error left to Jev by code and its skeleton long enough to ask about —
+    built into the state that would be sent, held to the address planned,
+    and then to the road's two refusals the planner does not foresee, as
+    :func:`_previewed` holds a title to them. Never quotes the error.
+    """
+    entry: dict[str, Any] = {
+        "subject_type": "job_error",
+        "subject_id": row["subject_id"],
+        "source_id": row["source_id"],
+        "state": None,
+        "not_sent_because": None,
+    }
+    try:
+        job_id = uuid.UUID(str(row["source_id"]))
+    except ValueError:
+        entry["not_sent_because"] = "the job is not named by its id"
+        return entry
+    loaded = await jev_repo.get_failed_job(conn, job_id)
+    if loaded is None:
+        entry["not_sent_because"] = "the job is no longer stored"
+        return entry
+    if loaded["status"] != "failed":
+        entry["not_sent_because"] = f"the job is {loaded['status']!r}, not failed"
+        return entry
+    if loaded["kind"] not in jev_redact.TRIAGED_KINDS:
+        entry["not_sent_because"] = (
+            f"a {loaded['kind']!r} job, whose errors code alone places"
+        )
+        return entry
+    if loaded["finished_at"] is None:
+        entry["not_sent_because"] = "the job has no finish time"
+        return entry
+    cause = jev_chips.code_cause(loaded["kind"], loaded["error"])
+    if cause is not None:
+        entry["not_sent_because"] = f"code places its error ({cause})"
+        return entry
+    tokens = jev_redact.skeleton(loaded["error"])
+    if not jev_redact.admissible(tokens):
+        entry["not_sent_because"] = (
+            "its error reduces to too few words of the vocabulary to ask about"
+        )
+        return entry
+    state = jev_questions.JobErrorState(job_kind=loaded["kind"], error=tokens)
+    if jev_questions.job_error_subject(state) != row["subject_id"]:
+        entry["not_sent_because"] = "the job no longer holds the skeleton planned"
+        return entry
+    dumped = question_set.dump_state(state)
+    if day_spent is not None:
+        entry["not_sent_because"] = (
+            f"the road would refuse it before any call: {day_spent}"
+        )
+        return entry
+    too_large = jev_catalogue.request_size_problem(
+        json.dumps(dumped, ensure_ascii=False),
+        {
+            key: json.dumps(question, ensure_ascii=False)
+            for key, question in question_set.as_request_questions().items()
+        },
+        state_limit,
+    )
+    if too_large is not None:
+        entry["not_sent_because"] = (
+            "over the size limits, so the road would refuse it before any "
+            f"call: {too_large}"
+        )
+    else:
+        entry["state"] = dumped
+    return entry
+
+
 async def preview_report(
     conn: asyncpg.Connection,
     *,
     question_set: jev_questions.QuestionSet,
     limit: int,
     day: date,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """
     What ``question_set`` would be asked about on ``day``, and what would be
@@ -3043,6 +3336,13 @@ async def preview_report(
     standing holds, the lane's calls left today, the day's budget and its
     spend, and the state limit. Whether a key is set is not the harness's to
     know: it holds none. Reads only, and enqueues nothing.
+
+    For the ops set (phase D3) the planner's read is of failed jobs within a
+    week of ``now`` — the database's clock unless given — so the report also
+    lists each of them, by its id and kind, with code's chip and shape, or
+    that code leaves it to Jev (``failed_jobs``); the switches it names
+    include the detail switch, which the set declares; and each subject's
+    state is the skeleton the handler would build, never the error.
     """
     subject_type = jev_questions.STATE_SUBJECT.get(question_set.state_model)
     if question_set is not jev_questions.REGISTRY.get(question_set.name):
@@ -3094,7 +3394,7 @@ async def preview_report(
         reasons.append("no usable pin is set")
     if plans is None:
         reasons.append(f"{name} v{version} has no analysis plan in force")
-    reasons += [f"held: {hold.replace('_', ' ')}" for hold, on in holds.items() if on]
+    reasons += [f"held: {said_hold(hold)}" for hold, on in holds.items() if on]
     if calls_left <= 0:
         reasons.append(f"the {lane} lane has no call left today")
     day_spent = (
@@ -3103,7 +3403,24 @@ async def preview_report(
         else None
     )
     subjects = []
-    if model is not None and plans is not None:
+    failed_jobs: list[dict[str, Any]] | None = None
+    if subject_type == "job_error":
+        now = await jev_clock.database_now(conn) if now is None else now
+        failed_jobs, newest = await _failed_jobs_previewed(conn, model, now)
+        if model is not None and plans is not None:
+            for row in await _job_errors_to_ask(
+                conn, question_set, model, limit, day, newest
+            ):
+                subjects.append(
+                    await _previewed_job(
+                        conn,
+                        question_set,
+                        row,
+                        state_limit=state_limit,
+                        day_spent=day_spent,
+                    )
+                )
+    elif model is not None and plans is not None:
         for row in await _titles_to_ask(
             conn, subject_type, question_set, model, limit, day
         ):
@@ -3117,7 +3434,7 @@ async def preview_report(
                     day_spent=day_spent,
                 )
             )
-    return {
+    report = {
         "set": name,
         "version": version,
         "lane": lane,
@@ -3137,10 +3454,17 @@ async def preview_report(
         "not_planned_because": reasons,
         "subjects": subjects,
     }
+    if failed_jobs is not None:
+        report["failed_jobs"] = failed_jobs
+    return report
 
 
 def format_preview(report: Mapping[str, Any]) -> str:
-    """``preview`` as text: the switches, then each subject and its state."""
+    """
+    ``preview`` as text: the switches, then each subject and its state, and
+    for the ops set each failed job the planner read, by id and kind, with
+    code's chip.
+    """
     lines = [
         f"preview of {report['set']} v{report['version']} ({report['lane']} lane, "
         f"provenance {report['provenance']}, about a {report['subject_type']}) "
@@ -3154,7 +3478,7 @@ def format_preview(report: Mapping[str, Any]) -> str:
         f"plans in force: {'yes' if report['plans_in_force'] else 'no'}",
         "holds: "
         + "; ".join(
-            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            f"{said_hold(hold)}: {'yes' if on else 'no'}"
             for hold, on in report["holds"].items()
         ),
         f"calls left today in the lane: {report['calls_left_today']}",
@@ -3177,6 +3501,17 @@ def format_preview(report: Mapping[str, Any]) -> str:
             lines.append(f"  would send: {state}")
         else:
             lines.append(f"  would send nothing: {subject['not_sent_because']}")
+    if "failed_jobs" in report:
+        lines.append(
+            "failed jobs the ops rule reads, newest first: "
+            f"{len(report['failed_jobs'])}"
+        )
+        for job in report["failed_jobs"]:
+            shape = "" if job["code_shape"] is None else f" ({job['code_shape']})"
+            lines.append(
+                f"job {job['job_id']} ({job['kind']}, failed {job['finished_at']}): "
+                f"{job['triage']}{shape}"
+            )
     return "\n".join(lines)
 
 
@@ -3213,6 +3548,14 @@ def ask_status(origin: str, title: object, outcome: Mapping[str, Any] | None) ->
         return (
             f"not asked: over the {jev_questions.FINDING_TITLE_MAX_CHARS}-character cap"
         )
+    return _outcome_status(outcome)
+
+
+def _outcome_status(outcome: Mapping[str, Any] | None) -> str:
+    """
+    How an ask the set makes came out, from ``jev_repo.ask_outcomes``' row,
+    in a fixed phrase; unknown with no usable pin (``outcome`` ``None``).
+    """
     if outcome is None:
         return UNKNOWN_WITHOUT_A_PIN
     if outcome["answered"]:
@@ -3228,7 +3571,125 @@ def ask_status(origin: str, title: object, outcome: Mapping[str, Any] | None) ->
     return "not asked yet"
 
 
-async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
+def job_ask_status(
+    kind: object,
+    cause: str | None,
+    address: str | None,
+    finished_at: datetime | None,
+    since: datetime,
+    outcome: Mapping[str, Any] | None,
+) -> str:
+    """
+    How the ops set's ask about one failed job came out, in a fixed phrase
+    (phase D3). What the job's own row decides is said whatever the pin: a
+    kind whose errors code alone places, an error code places, and a
+    skeleton too short to ask about are never asked. Otherwise what is asked
+    is the skeleton, and a job the planner does not read — one with no
+    finish time, which an expired lease leaves, or one that failed on or
+    before the day the pin was first observed (``since``, where the
+    population starts) — holds the very words another job may have had
+    asked, so its status is read from the ledger first, as every other's is
+    (:func:`_outcome_status`): how the ask of its skeleton came out where one
+    is on record, and only where none is, why this job is not planned. With
+    no usable pin (``outcome`` ``None``) that is unknown, never "not asked",
+    which the ledger may contradict (D2's review, D2RW-2). Never its error,
+    its skeleton or an answer.
+    """
+    if kind not in jev_redact.TRIAGED_KINDS:
+        return "not asked: code alone places this kind's errors"
+    if cause is not None:
+        return "not asked: code places its error"
+    if address is None:
+        return "not asked: too few words of the vocabulary to ask about"
+    if outcome is None:
+        return UNKNOWN_WITHOUT_A_PIN
+    if _on_record(outcome):
+        return _outcome_status(outcome)
+    if finished_at is None:
+        return "not asked: no finish time, so the planner does not read it"
+    if finished_at <= since:
+        return "not asked: failed on or before the day the pin was first observed"
+    return _outcome_status(outcome)
+
+
+def _on_record(outcome: Mapping[str, Any]) -> bool:
+    """
+    Whether the ledger or the queue holds anything of the ask: an answer, a
+    failed call, a content block or a job waiting.
+    """
+    return bool(
+        outcome["answered"]
+        or outcome["failed_calls"]
+        or outcome["blocked"]
+        or outcome["waiting"]
+    )
+
+
+async def _failed_jobs_suggested(
+    conn: asyncpg.Connection,
+    ops_sets: Sequence[jev_questions.QuestionSet],
+    model: str | None,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """
+    Each failed job of the last week (:data:`OPS_WINDOW`), of any kind,
+    newest first, by its id and kind, with code's chip — the cause and the
+    shape code places its error by, or that code leaves it to Jev — and how
+    each ops set's ask about it came out (:func:`job_ask_status`). The error
+    is read by code's triage and the redactor alone, and printed nowhere.
+    """
+    rows = await jev_repo.recent_failed_jobs(conn, since=now - OPS_WINDOW)
+    read: list[tuple[Mapping[str, Any], str | None, str | None, str | None]] = []
+    for row in rows:
+        cause = jev_chips.code_cause(row["kind"], row["error"])
+        shape = jev_chips.job_error_shape(row["kind"], row["error"])
+        tokens = jev_chips.residue_skeleton(row["kind"], row["error"])
+        address = None
+        if tokens is not None:
+            state = jev_questions.JobErrorState(job_kind=row["kind"], error=tokens)
+            address = jev_questions.job_error_subject(state)
+        read.append((row, cause, None if shape is None else shape.name, address))
+    addresses = sorted({address for *_, address in read if address is not None})
+    outcomes: dict[str, dict[str, dict[str, Any]]] = {}
+    if model is not None:
+        for question_set in ops_sets:
+            outcomes[question_set.name] = await jev_repo.ask_outcomes(
+                conn,
+                question_set=question_set,
+                model=model,
+                subject_type="job_error",
+                subject_ids=addresses,
+            )
+    since = jev_repo.job_error_since(model)
+    jobs = []
+    for row, cause, shape, address in read:
+        jobs.append(
+            {
+                "job_id": str(row["id"]),
+                "kind": row["kind"],
+                "code": "left to Jev" if cause is None else cause,
+                "shape": shape,
+                "asks": {
+                    question_set.name: job_ask_status(
+                        row["kind"],
+                        cause,
+                        address,
+                        row["finished_at"],
+                        since,
+                        None
+                        if model is None
+                        else outcomes[question_set.name].get(address or ""),
+                    )
+                    for question_set in ops_sets
+                },
+            }
+        )
+    return jobs
+
+
+async def suggestions_report(
+    conn: asyncpg.Connection, *, now: datetime | None = None
+) -> dict[str, Any]:
     """
     For each open finding but Jev's, by its ref, whether each findings set
     asked about its title and how the ask came out (:func:`ask_status`); and
@@ -3238,13 +3699,26 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
     made after seeing the answer is not blind (docs/09, sections 3.5 and
     9.3). Jev's own findings are counted, never named: a ref beside a
     hypothesis would say what Jev answered about its title.
+
+    From phase D3, each failed job of the last week, of any kind, by its id
+    and kind, with code's chip and how the ops set's ask about it came out
+    (:func:`_failed_jobs_suggested`), the week ending at ``now``, the
+    database's clock unless given; never its error, its skeleton or an
+    answer. The switches and holds named are those of the findings sets and
+    the ops set, the detail switch among them.
     """
     model = await flags.jev_model(conn)
-    sets = [
+    finding_sets = [
         question_set
         for question_set in jev_questions.REGISTRY.values()
         if jev_questions.STATE_SUBJECT.get(question_set.state_model) == "finding_title"
     ]
+    ops_sets = [
+        question_set
+        for question_set in jev_questions.REGISTRY.values()
+        if jev_questions.STATE_SUBJECT.get(question_set.state_model) == "job_error"
+    ]
+    sets = [*finding_sets, *ops_sets]
     areas = sorted(
         {
             area
@@ -3260,6 +3734,10 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
             for area in areas
         },
     }
+    if any(question_set.internal_detail for question_set in sets):
+        switches[flags.JEV_SEND_INTERNAL_DETAIL] = await flags.jev_send_internal_detail(
+            conn
+        )
     holds = {"authentication_failure_today": await jev_repo.auth_failed_today(conn)}
     for question_set in sets:
         holds[f"{question_set.name} refused under the pin"] = (
@@ -3283,7 +3761,7 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
     }
     outcomes: dict[str, dict[str, dict[str, Any]]] = {}
     if model is not None:
-        for question_set in sets:
+        for question_set in finding_sets:
             outcomes[question_set.name] = await jev_repo.ask_outcomes(
                 conn,
                 question_set=question_set,
@@ -3305,10 +3783,12 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
                         if model is None
                         else outcomes[question_set.name].get(address or ""),
                     )
-                    for question_set in sets
+                    for question_set in finding_sets
                 },
             }
         )
+    now = await jev_clock.database_now(conn) if now is None else now
+    failed_jobs = await _failed_jobs_suggested(conn, ops_sets, model, now)
     return {
         "pin": model,
         "switches": switches,
@@ -3316,19 +3796,23 @@ async def suggestions_report(conn: asyncpg.Connection) -> dict[str, Any]:
         "jev_findings_raised": await jev_repo.jev_findings_raised(conn),
         "open_findings": len(rows),
         "findings": rows,
+        "failed_jobs_since": (now - OPS_WINDOW).isoformat(),
+        "failed_jobs": failed_jobs,
     }
 
 
 def format_suggestions(report: Mapping[str, Any]) -> str:
     """
-    ``suggestions`` as text: refs, statuses and counts, and nothing else. With
-    no usable pin the header says so, and that how each ask came out is not
-    read, so no status of a finding a set asks about reads as a fact.
+    ``suggestions`` as text: refs, ids, statuses, counts and, for a failed
+    job, code's own chip, and nothing else. With no usable pin the header says
+    so, and that how each ask came out is not read, so no status of a subject
+    a set asks about reads as a fact.
     """
     pin = report["pin"]
     lines = [
         "suggestions: how each ask came out, never what it answered; no answer, "
-        "probability or chip is shown before phase E",
+        "probability or chip of Jev's is shown before phase E, and a failed "
+        "job's chip is code's",
         f"pin: {pin}"
         if pin is not None
         else "pin: none usable, so how each ask came out is not read",
@@ -3339,7 +3823,7 @@ def format_suggestions(report: Mapping[str, Any]) -> str:
         ),
         "holds: "
         + "; ".join(
-            f"{hold.replace('_', ' ')}: {'yes' if on else 'no'}"
+            f"{said_hold(hold)}: {'yes' if on else 'no'}"
             for hold, on in report["holds"].items()
         ),
         f"findings Jev raised: {report['jev_findings_raised']} (counted, never named)",
@@ -3348,6 +3832,16 @@ def format_suggestions(report: Mapping[str, Any]) -> str:
     for row in report["findings"]:
         asks = "; ".join(f"{name} {status}" for name, status in row["asks"].items())
         lines.append(f"{row['ref']}: {asks}")
+    lines.append(
+        f"failed jobs since {report['failed_jobs_since']}, newest first: "
+        f"{len(report['failed_jobs'])}"
+    )
+    for job in report["failed_jobs"]:
+        shape = "" if job["shape"] is None else f" ({job['shape']})"
+        asks = "; ".join(f"{name} {status}" for name, status in job["asks"].items())
+        lines.append(
+            f"job {job['job_id']} ({job['kind']}): code {job['code']}{shape}; {asks}"
+        )
     return "\n".join(lines)
 
 
@@ -3571,10 +4065,11 @@ async def _read(
             question_set=_registered(arguments.question_set),
             limit=arguments.limit,
             day=now.astimezone(UTC).date(),
+            now=now,
         )
         text = format_preview(report)
     elif command == "suggestions":
-        report = await suggestions_report(conn)
+        report = await suggestions_report(conn, now=now)
         text = format_suggestions(report)
     else:
         raise Refused(f"no reading command {command!r}; nothing was read")

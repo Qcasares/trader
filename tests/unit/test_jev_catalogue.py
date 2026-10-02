@@ -442,13 +442,17 @@ class TestTheVocabulary:
         )
 
     def test_subject_types(self) -> None:
-        """Phase D2 adds a finding's title (docs/09, section 2.1)."""
+        """
+        Phase D2 adds a finding's title, and phase D3 a failed job's error
+        (docs/09, section 2.1).
+        """
         assert catalogue.SUBJECT_TYPES == (
             "probe",
             "session",
             "web_excerpt",
             "hypothesis_title",
             "finding_title",
+            "job_error",
         )
 
     def test_the_lane_slices_cover_every_lane_and_sum_to_at_most_100(self) -> None:

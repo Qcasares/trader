@@ -515,21 +515,22 @@ Flat files, not a subpackage, so the transitive boundary test sees each one.
 
 | Module | Role |
 |---|---|
-| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000. From C9, `MODEL_FIRST_OBSERVED`, the UTC day each pinned model was first seen answering — `jev-1.13.0` on 26 September 2026, by the key check — against which an evaluation's items are dated; a model in `KNOWN_MODELS` without one fails its test. From D1, phase D's shares (research 25, guardrail 25, findings 10, ops 10, decision 20, probe 10), `smallest_shares`, which a refused budget's message names, and provenance `system`. From D2, the subject type `finding_title` |
-| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels. C7+C8 register `guardrail.injection`, `research.catalogue`, `research.hypothesis` and `guardrail.card`, v1 each, and `HypothesisTitleState`, a title of 1 to `TITLE_MAX_CHARS` (300) characters. D1 adds two rules with no registered set under them yet: `STATE_ADDRESSED`, the models whose subject is their whole state, its id `state_hash` of the state sent, and `TEXT_FREE_LANES`, the ops lane, whose sets declare `internal_detail` and send no text, read on every dump whatever they declare. D2 registers `findings.owner` and `findings.severity`, v1 each, lane `findings`, provenance `model`, about `FindingTitleState`, a title of 1 to `FINDING_TITLE_MAX_CHARS` (200) characters, `roles.ProposedFinding`'s cap |
+| `jev_catalogue.py` | Pure, and importable by the API. `JEV_BASE_URL`; `KNOWN_MODELS`, the pinned IDs this repository has chosen to call, today `jev-1.13.0` alone, each matching `^jev-\d+\.\d+\.\d+\Z` under `re.ASCII` (with `$`, `"jev-1.13.0\n"` would pass); the refused aliases `jev-latest`, `jev-preview`, `jev` and `jev-1.13`, by name in any case or spacing; the size limits, 56k tokens in total and 28k for state plus the longest question, on an estimate of one token per three ASCII bytes and one per byte of anything else, the byte-level worst case, since the vendor's tokenizer is undisclosed; the client's rate ceilings; the lane, provenance, subject-type and area vocabularies and `LANE_AREA`; `LANE_BUDGET_PERCENT`, each recorded lane's share of the daily budget, in code so that no database write can raise one (phase C); and one `settings_problem()` shared by the form and the runner, which caps the daily budget at 10,000. From C9, `MODEL_FIRST_OBSERVED`, the UTC day each pinned model was first seen answering — `jev-1.13.0` on 26 September 2026, by the key check — against which an evaluation's items are dated; a model in `KNOWN_MODELS` without one fails its test. From D1, phase D's shares (research 25, guardrail 25, findings 10, ops 10, decision 20, probe 10), `smallest_shares`, which a refused budget's message names, and provenance `system`. From D2, the subject type `finding_title`, and from D3 `job_error` |
+| `jev_questions.py` | Pure. Versioned question sets: name, version, lane, provenance, questions as ordered pairs, a `state_model` (pydantic, `extra='forbid'`, frozen, strict) and a purpose. Each has a golden hash. Every Choice has exactly one escape option, last, and a frozen option order. Phase B registers `probe.connectivity` v1 and `decision.regime` v1. Phase C adds `WebExcerptState`, the one state web text is asked about in, of 1 to 300 characters; each state model's subject type, and for text who writes it (`TEXT_SUBJECT_PROVENANCE`); the injection screen's name, its one question and clear answer (`screen_problem`); and `registration_problem`, which holds a set to the sets already registered and to the rules the lane relies on. A set's state is read twice for this system's own detail: from its model at registration, failing closed, and from what `dump_state` would send. A Score question registers with at most four levels. C7+C8 register `guardrail.injection`, `research.catalogue`, `research.hypothesis` and `guardrail.card`, v1 each, and `HypothesisTitleState`, a title of 1 to `TITLE_MAX_CHARS` (300) characters. D1 adds two rules with no registered set under them yet: `STATE_ADDRESSED`, the models whose subject is their whole state, its id `state_hash` of the state sent, and `TEXT_FREE_LANES`, the ops lane, whose sets declare `internal_detail` and send no text, read on every dump whatever they declare. D2 registers `findings.owner` and `findings.severity`, v1 each, lane `findings`, provenance `model`, about `FindingTitleState`, a title of 1 to `FINDING_TITLE_MAX_CHARS` (200) characters, `roles.ProposedFinding`'s cap. D3 registers `ops.job_error` v1, lane `ops`, provenance `system`, declaring `internal_detail`, about `JobErrorState`: a failed research or ingest job's kind and its error's skeleton, the redactor's tokens and nothing else, addressed by its whole state (`STATE_ADDRESSED`), with `job_error_text` and `job_error_from_text`, its text and the one state a text names |
 | `jev_validate.py` | Pure, and never raises. The response rules in fact 3, and from phase C a Score's legend and its agreement with its own probabilities |
 | `jev_hash.py` | Pure; importable by the programme, the API and the harness, and, like every module here, never by the worker or the decision path. A request's identity: `state_hash`, `request_hash`, `questions_hash` — the part of the request hash a set contributes — and `text_sha256`, a text subject's content address. Moved out of `jev_lane` in phase C, which re-exports the first two, so the API and the harness can compute one without loading the client |
 | `jev_features.py` | Pure. `regime_state` turns a `PricePanel` into enumerated descriptors of three sleeves, computed in code from `adj_close` — trend relative to the 200-session average, a volatility quintile, a drawdown bucket, the direction of 63-session momentum — or `None` when the data cannot support them. The decision lane's only state. From C4, `regime_state_problem` says why it would be `None`, for a job's error |
-| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined`. From C7+C8, the one writer of `jev_labels` (`record_label`, and `record_label_once` for a source's headings), what each set is to be asked about (`documents_to_screen`, `documents_to_describe`, `hypotheses_to_ask`), the `jev_ask` jobs waiting, the earliest content block on record for a subject, and `ask_job_key`. From C9, the harness's reads — a question's labels, each subject's answer (the `ok` non-probe row's, else the newest `invalid` one's), the items' dates, their texts, the subjects a labeller is shown, the `jev_ask` jobs about them, the words a version was asked with, and what quarantined each content — and the one writer of `jev_evaluations`, `record_evaluation`, which takes exactly `EVALUATION_COLUMNS`, with `evaluations_for` and `latest_evaluations`. From D1, `get_hypothesis_title`, the title sets' read: a hypothesis's ref, title, origin and creation time, by column list. From D2, `get_finding_title`, the findings sets' read: a finding's ref, title, origin and `opened_at`, by column list; `findings_to_ask`, the titles of model-written findings each findings set is to be asked about; the harness's finding-title dates, texts and labelling population, read over the sets' population, and `finding_records`, who raised the earliest model-written finding holding a title and its severity, which only the harness reads; and `suggestions`' reads, `open_findings`, `jev_findings_raised` and `ask_outcomes`, which read no option, probability or margin |
+| `jev_repo.py` | Queries for the Jev tables. No SDK, so the API can import it. A request and its answers are one write. From phase C, the road's reads: the calls a lane made today, whether the vendor refused a key today, a set's version or a state, whether content is quarantined, and whether the injection screen cleared a text; from C4, the clock's, the planner's and the harness's: whether a session has a signal, a series' signals with their answers, the canonical requests of a day, each canonical answer beside its re-asks, the probe's series, and the jobs behind a list of keys. Inside the programme it is the one reader of `jev_signals`. From C6, the one writer of `web_documents`: `insert_documents`, `ON CONFLICT DO NOTHING`, `title` and `published_at` NULL by the statement, and `quarantine_content`, the one update the table allows, by content and one-way; with `get_document` and `earliest_quarantined`. From C7+C8, the one writer of `jev_labels` (`record_label`, and `record_label_once` for a source's headings), what each set is to be asked about (`documents_to_screen`, `documents_to_describe`, `hypotheses_to_ask`), the `jev_ask` jobs waiting, the earliest content block on record for a subject, and `ask_job_key`. From C9, the harness's reads — a question's labels, each subject's answer (the `ok` non-probe row's, else the newest `invalid` one's), the items' dates, their texts, the subjects a labeller is shown, the `jev_ask` jobs about them, the words a version was asked with, and what quarantined each content — and the one writer of `jev_evaluations`, `record_evaluation`, which takes exactly `EVALUATION_COLUMNS`, with `evaluations_for` and `latest_evaluations`. From D1, `get_hypothesis_title`, the title sets' read: a hypothesis's ref, title, origin and creation time, by column list. From D2, `get_finding_title`, the findings sets' read: a finding's ref, title, origin and `opened_at`, by column list; `findings_to_ask`, the titles of model-written findings each findings set is to be asked about; the harness's finding-title dates, texts and labelling population, read over the sets' population, and `finding_records`, who raised the earliest model-written finding holding a title and its severity, which only the harness reads; and `suggestions`' reads, `open_findings`, `jev_findings_raised` and `ask_outcomes`, which read no option, probability or margin. From D3, the ops set's reads: `get_failed_job`, a job by its id, as its id, kind, status, error and finish time; `failed_jobs_for_triage`, the planner's; `unasked_subjects`, C7's filters over addresses computed in code; `job_error_since` and `job_error_population`, where the population starts and what it holds, each skeleton by its state's address; the harness's job-error dates and texts, read over that population; and `recent_failed_jobs`, what `suggestions` lists. None reads a job's error but to hand it to code's triage and the redactor |
 | `jev_clock.py` | C4. Holds no client and is not runner-only, so phase E may read the cutoff. The forward clock's times — the reference bars at a session's close plus 45 minutes (the worker's ingest time), the collection at plus 50, the cutoff at plus 60 (the worker's decision time) — the sessions the planner plans, the signal's and the jobs' names, `sleeve_symbol`, and the bar loader, which reads `adj_close` from `yfinance` alone |
 | `jev_forward.py` | C4, runner-only. `collect`, the `jev_regime` job: one session's regime, asked before the cutoff by the database's clock, at most one call an attempt — an attempt whose call got no response is retried and asks again — and one answer recorded at most once; never a backfill and never a `missing` row |
-| `jev_jobs.py` | C4, runner-only. `run_reask`, the `jev_reask` job; from C7+C8, `run_ask`, the `jev_ask` job — one registered set asked about one stored text, a web excerpt read through the code screen or a model-written title within its cap — and what an answer changes (`ASKABLE`), a quarantine and nothing else. Re-exports `ask_verdict`. From D2, `ASKABLE` holds the findings sets: a finding's title read by column list, admitted only when the programme's model wrote it and it is within its cap, and no follow-up, so an answer changes nothing |
-| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area; from C7+C8, the `jev_ask` jobs, each set behind its lane's area; from D1, a set declaring `internal_detail` only while `jev_send_internal_detail` is on; from D2, the findings sets behind the findings area, ten a pass each, from the findings share |
-| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test; from C7+C8, a plan for each set asked about text, with its keyword baseline, recorded with every answer (`plans_in_force`). From D1, plan version 2, and the regime's rule and sleeves a plan of their own (`regime_plan`, `REGIME_PLAN_VERSION`). From D2, the findings sets' plans, whose baseline is `findings.recorded`, the value already recorded, and which name the population they are asked about (`FINDINGS_POPULATION`); and `keyword_label`'s `fallback` |
+| `jev_jobs.py` | C4, runner-only. `run_reask`, the `jev_reask` job; from C7+C8, `run_ask`, the `jev_ask` job — one registered set asked about one stored text, a web excerpt read through the code screen or a model-written title within its cap — and what an answer changes (`ASKABLE`), a quarantine and nothing else. Re-exports `ask_verdict`. From D2, `ASKABLE` holds the findings sets: a finding's title read by column list, admitted only when the programme's model wrote it and it is within its cap, and no follow-up, so an answer changes nothing. From D3, `ASKABLE` holds `ops.job_error`: a failed job read by its id and admitted rule by rule, its state the skeleton, its subject the state's address, checked once the state is built (`Askable.address`), and no follow-up |
+| `jev_plan.py` | C4, runner-only. The planner: the daily probe, the worker's reference bars, the regime job and the re-asks, each behind its switches, enqueued with literal kinds and nothing else; from C6, the web ingest, once a UTC day for each allowed source, behind the research area; from C7+C8, the `jev_ask` jobs, each set behind its lane's area; from D1, a set declaring `internal_detail` only while `jev_send_internal_detail` is on; from D2, the findings sets behind the findings area, ten a pass each, from the findings share; from D3, the ops set behind the ops area and the detail switch, ten a pass, from the ops share, each skeleton once by its newest job |
+| `jev_prereg.py` | C4. Pure, the standard library alone, importable by the API. The analysis plan and `REGIME_BASELINE_RULE`, registered before any answer and golden-hashed, with an append-only release history kept in its test; from C7+C8, a plan for each set asked about text, with its keyword baseline, recorded with every answer (`plans_in_force`). From D1, plan version 2, and the regime's rule and sleeves a plan of their own (`regime_plan`, `REGIME_PLAN_VERSION`). From D2, the findings sets' plans, whose baseline is `findings.recorded`, the value already recorded, and which name the population they are asked about (`FINDINGS_POPULATION`); and `keyword_label`'s `fallback`. From D3, the ops set's plan, its baseline the keyword rule on the skeleton's text (`OPS_KEYWORDS`, every keyword held to an evidence corpus), its population named with the redactor's and the shapes table's versions and hashes (`OPS_POPULATION`) |
 | `jev_stats.py` | C4. Pure. `proportion` and `wilson`; a figure over nothing is `None`. C9 adds the Brier scores, a percentile bootstrap seeded by the caller, calibration bins, the threshold search on the development split, Cohen's kappa and the flip count, each `None`, never 0, over nothing |
-| `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client. C9 adds `evaluate`, `labels export`, `labels import`, `labels copy` and `report`: one question against one labeller's labels, the labels themselves, and the newest evaluations. Only `labels import`, `labels copy` and `evaluate --record` write, each in one transaction and through `jev_repo` alone; every other command reads in a read-only snapshot. `evaluate --record` alone reads a second variable, `GIT_COMMIT`, which names a commit and holds no secret. From D1, `evaluate --split` has no default, a look at the held-out items is taken only with `--record`, and `report` prints the looks each set, version and question has spent. From D2, a finding's title is a labelled subject, measured against `findings.recorded`; and two more reading commands: `preview`, what a title set would be asked about and the exact state that would leave, and `suggestions`, how each findings set's ask about each open finding came out, never an answer |
+| `jev_eval.py` | C4, runner-only CLI. `python -m src.programme.jev_eval status`, `forward` and `forward-audit`: read-only, `DATABASE_URL` and nothing else, no key, and a closure that reaches no client. C9 adds `evaluate`, `labels export`, `labels import`, `labels copy` and `report`: one question against one labeller's labels, the labels themselves, and the newest evaluations. Only `labels import`, `labels copy` and `evaluate --record` write, each in one transaction and through `jev_repo` alone; every other command reads in a read-only snapshot. `evaluate --record` alone reads a second variable, `GIT_COMMIT`, which names a commit and holds no secret. From D1, `evaluate --split` has no default, a look at the held-out items is taken only with `--record`, and `report` prints the looks each set, version and question has spent. From D2, a finding's title is a labelled subject, measured against `findings.recorded`; and two more reading commands: `preview`, what a title set would be asked about and the exact state that would leave, and `suggestions`, how each findings set's ask about each open finding came out, never an answer. From D3, a failed job's skeleton is a labelled subject, its label read back through the state its text names and its date over the population's rows; `preview` takes the ops set, and `suggestions` lists each failed job of the week with code's chip |
 | `jev_calibration.py` | C9. Pure, `jev_prereg` alone. `usable`, whether a recorded evaluation could arm a threshold and every reason it could not; `card_verdict` and `document_path`, what an armed threshold would be allowed to do, which is add friction and never remove it; and `analysis_plan_hash`, the identity of the plans an evaluation is computed under. Loaded by the harness, to report, and by nothing that acts: phase C arms no threshold. From D1 `usable` counts the looks taken before an evaluation, across every model, and reads a flip limit in the worst case |
-| `jev_chips.py` | D2. Pure, the standard library alone, importable by the API. What phase E may show beside a finding, computed when the page is read and stored nowhere: `severity_chip`, only where Jev's valid suggestion is more serious than the severity recorded; `route_chip`, a suggested reviewer, which on a finding that blocks names only a role in `VETO_ROLES`; and `duplicate_chips`, code's, by exact normalised title, from a newer finding to the earliest older one on the same candidate that blocks at least as much. A chip is labels and numbers, never a title. `VETO_ROLES`, the blocking severities, the severities and the role keys are copies of `gates`' and `roles`', which load pydantic, held equal to them by test. Nothing in phase D shows a chip |
+| `jev_chips.py` | D2. Pure — the standard library and, from D3, `jev_redact`, itself pure — and importable by the API. What phase E may show beside a finding, computed when the page is read and stored nowhere: `severity_chip`, only where Jev's valid suggestion is more serious than the severity recorded; `route_chip`, a suggested reviewer, which on a finding that blocks names only a role in `VETO_ROLES`; and `duplicate_chips`, code's, by exact normalised title, from a newer finding to the earliest older one on the same candidate that blocks at least as much. A chip is labels and numbers, never a title. `VETO_ROLES`, the blocking severities, the severities and the role keys are copies of `gates`' and `roles`', which load pydantic, held equal to them by test. No finding chip — severity, route or duplicate — is shown anywhere in phase D. From D3, code first for a failed job: `code_cause` places an error by `JOB_ERROR_SHAPES`, a pinned, hashed table of the shapes this system's raise sites write, and returns `None` only for a triaged kind's residue, which `residue_skeleton` turns into what may be sent; and `reconciliation_chip`, `data_health_chips` and `ingest_chips`, code's labels of structured rows, never sent. Code's chip for a failed job is the one chip phase D prints: `preview` and `suggestions` show it beside each job, code's own table's entry and never Jev's. It loads `jev_redact` and nothing else of the programme |
+| `jev_redact.py` | D3. Pure, the standard library alone, importable by the API. `skeleton`: a failed job's error, its first 4,000 characters, reduced to at most 48 tokens of a closed vocabulary — 393 words, the exception names and the HTTP tokens — in order, everything else a placeholder saying what kind of thing stood there, never what it was. The one way any part of `jobs.error` can become state: an allow-list of numbered rules, idempotent, total and never raising, its vocabulary, never-list, placeholders, rules and every datum and pattern they read hashed (`redactor_sha256`) and pinned (`GOLDEN_REDACTOR_SHA256`), version 2 since D3's review, and what each released version makes of a fixed corpus pinned in its test. `TRIAGED_KINDS`, the research and ingest kinds whose residue Jev may be asked about, and `admissible`, at least three words of content |
 | `job_errors.py` | C4. Pure. `JobFailedError`, moved out of `main.py`, which re-exports it, and `RETRIED_ERROR_KINDS`; from C7+C8, `ask_verdict` and `NOT_ASKED`, moved out of `jev_jobs`, and `described`, an error by its class, SQLSTATE and constraint, moved out of `web_ingest` |
 | `claims.py` | C8. Pure, the standard library alone. The performance-claim check — `PERFORMANCE_TERMS`, `find_performance_claim`, `NUMERIC_BY_DESIGN`, `reject_performance_claims`, `PerformanceClaimError` — moved verbatim out of `author.py`, which re-exports every name and screens a hypothesis's title with it too |
 | `jev_client.py` | The only importer of `typesafe_sdk`, lazily, runner-only. Builds the SDK's `httpx2` client itself — redirects refused, every attempt admitted by a sliding-window rate limiter, the final attempt's response kept as it arrived — and constructs `AsyncTypeSafeClient(api_key=…, base_url=JEV_BASE_URL, model=<pin>, retry=RetryPolicy(max_retries=1, timeout=20, respect_retry_after=False, http_statuses={429, 500, 502, 503, 504, 529}), timeout=10, http_client=…)`, with the key the programme resolved from the vault, then the environment. Returns a `JevCall`: status, raw body, request id, latency, error class and kind |
@@ -732,6 +733,16 @@ switch too. A finding's title goes only while the programme, Jev and the
 findings area are all on, each read by its own reader; neither findings set
 declares `internal_detail`, so the detail switch is not read for them.
 
+From D3 the ops area and the detail switch have their consumers: the road, for
+`ops.job_error`, and the planner's ops rule, each reading the ops area through
+`flags.jev_area_enabled(conn, "ops")`, which needs the master switch too, and the
+detail switch through `flags.jev_send_internal_detail`, each its own fail-closed
+reader, neither derived from the other. A failed job's skeleton goes only while
+the programme, Jev, the ops area and the detail switch are all on: the ops area
+on with the detail switch off plans and sends nothing. That is the default the
+scope chose for the owner's item 9.1, which is still open, and fact 7 is not
+amended (open item 89).
+
 ## Lanes
 
 Planned, except where a row says what is built. Phase B built the one road
@@ -742,7 +753,9 @@ into that road, and C7+C8 registered the research and guardrail sets below,
 dark and in shadow; C9 measures their answers against labels, and arms
 nothing with what it finds. Phase D2 registered the two findings sets, dark,
 asked about the title of every finding the programme's model raised, and
-recorded with nothing changed. A set's version is a field of its own, pinned
+recorded with nothing changed. Phase D3 registered `ops.job_error`, dark, asked
+about the skeleton of a failed research or ingest job's error that code cannot
+place, and recorded with nothing changed. A set's version is a field of its own, pinned
 with its golden hash, so the sets below are named without one.
 
 | Lane | Question sets | State | What Jev may do | What it may never do |
@@ -750,7 +763,7 @@ with its golden hash, so the sets below are named without one.
 | Research | `research.catalogue` (asset class, mechanism), built in C7; `research.hypothesis` (the same two questions about a hypothesis's title), built in C8; `research.news` (relevance, event type, tone), not planned | Allow-listed web excerpts; the programme's model-written hypothesis titles | Today: be recorded and planned on, the catalogue only for text the injection screen cleared, which it asks under the research area alone. Later: label the catalogue page; rank a shortlist `author.py` may use to prioritise | Satisfy any gate criterion |
 | Guardrails | `guardrail.injection` ("addressed to an AI system"), built in C7, asked before any other set about a stored web excerpt, under the guardrails area alone; `guardrail.card` (a performance claim), built in C8 beside `find_performance_claim`, in shadow; an untestable falsification test, planned | Allow-listed web excerpts; hypothesis titles; cards as titles unless the detail switch is on | Today: the injection screen quarantines what it flags, uncalibrated, and its clearance is what lets the catalogue ask; the card check is recorded and changes nothing. Later, once calibrated (phase D): a "yes" from the card check rejects or raises a finding | Accept anything. A "no" changes nothing, so the accepted set with Jev is a subset of the set without it — a property test |
 | Findings routing | `findings.owner` (the owning role: the twelve, in `roles`' order, then "unclear") and `findings.severity` (low to critical, then "insufficient_evidence"), two sets so that rewording one re-asks nothing of the other, built in D2; a likely-duplicate question, deferred (open item 71), duplicates being code's alone | The title of each finding the programme's model raised, whatever its status, of 1 to 200 characters, under the findings area alone: never an operator's, Jev's or one raised before 0015, and never a finding's detail, remediation, close note, raiser or recorded severity | Today: be recorded and change nothing; measured against the value already recorded, who raised the finding and at what severity (`findings.recorded`). For phase E, `jev_chips` computes a suggested reviewer, a suggested severity shown only where it escalates, and code's duplicate pointer, shown beside the recorded raiser and severity and never instead | Write a finding's severity, status or anything else, close or remove one, or argue against a veto: on a finding that blocks, a suggested reviewer names only a role holding one, and a duplicate points only to an older finding that blocks at least as much. Findings Jev raises (D4, the card check alone) carry `raised_by='jev:<set>'`, never in `VETO_ROLES` |
-| Ops triage | Job errors, reconciliation discrepancies, data-quality alerts, through a redactor | Free text only; code handles structured cases first | Show chips on System > Jobs | Resume anything, or touch the kill switch |
+| Ops triage | `ops.job_error` (the likely cause of a failed job: the ten causes code shares, `jev_chips.CAUSES`, then "unclear"), built in D3; reconciliation discrepancies, data health and the ingest get code's chips alone | A failed job's kind and its error's skeleton, the redactor's tokens and nothing else — those of the error's words that are in its closed vocabulary, lowercased and in their order, and a placeholder for every other word — recorded as provenance `system`: only for a research or ingest job whose error code's table cannot place, and only while the ops area and the detail switch are both on. Code places every error it can first; a venue, shadow or programme job, or an account's data, is never sent | Today: be recorded and change nothing, measured against the keyword rule on the skeleton's text. For phase E, code's chip beside every failed job on System > Jobs, and Jev's suggestion beside the residue's | Resume, retry, cancel or change any job, touch the kill switch, or see the error itself: of its words only those in the redactor's vocabulary reach it, lowercased, and nothing marked as a credential, a value, an address, a path or quoted text, within the limits open items 90 and 91 state |
 | Recorded signals | `signal.news_tone` | Web content | Be recorded and scored going forward | Be loaded by the decision path. The loader's filter excludes web provenance by construction |
 | Direct decisions | `decision.regime` v1: a Choice over `risk_on`, `neutral`, `risk_off`, `insufficient_evidence` | Only `jev_features` descriptors: internal provenance, which no outsider can write to, so the prompt-injection route recorded as C-1 in `docs/02-security-audit.md` stays closed | Feed `jev_regime_allocator`, a pure strategy with a fixed universe and fixed weight vectors declared in code; the pack hash and threshold are its parameters | Act on a missing, invalid, argmax-mismatched or below-threshold answer: each means **hold** |
 
@@ -861,7 +874,7 @@ six below the table, beside a UI pull request that is not phase C's.
 | A. Safety fixes | No Jev code. The defects in fact 10, the boundaries, and this document | **Done** |
 | B. Foundations, dark | Migration 0012; the pure modules; the switches and the secret name; `jev_client` and `jev_lane` behind the switches; the programme's job loop; the lock file and the SDK CI job | **Done** |
 | C. Research lane | Web ingest, the injection screen, catalogue labels, hypothesis categorisation, guardrails; the evaluation harness (`python -m src.programme.jev_eval`, never `src/cli.py`). **The forward clock starts:** `decision.regime` v1 is collected, recorded and not consumed | **Done**: C1+C2, W, C5, C4, C6, C7+C8 and C9, all dark |
-| D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A); and the card check armed. Designed in `docs/09-jev-phase-d-design.md`, with its build scope beside it | **In progress**: D1 and D2 done, dark |
+| D. Ops triage and findings routing | Triage chips for job errors, reconciliation discrepancies and data-quality alerts; suggested reviewer, duplicate and severity for findings, which needs the panel to sit (phase A); and the card check armed. Designed in `docs/09-jev-phase-d-design.md`, with its build scope beside it | **In progress**: D1, D2 and D3 done, dark |
 | E. Web UI | For everything above | Not started |
 | F. Signals in the engine | The signals channel, the loader at every `Driver` site, parity with signals; provenance columns and the contaminated-evidence refusals; the Rule 5 amendment and its CLAUDE.md changes | Not started |
 | G. Shadow | A `jev_regime_allocator` candidate and its baseline twin, in shadow | Not started |
@@ -894,7 +907,7 @@ ledger holds no answer.
 |---|---|---|---|
 | D1 | Plan version 2 and the regime's plan apart, looks counted; migration 0015 and a finding's writer; the title sets read by column list; subjects addressed by their state and the text-free ops lane; the arming switch; phase D's shares; the detail switch in the planner; the walks that hold what Jev's code reads and writes | — | **Done** |
 | D2 | Findings routing: `findings.owner` and `findings.severity`, the chips, the harness's `preview` and `suggestions` | D1 | **Done** |
-| D3 | Ops triage: the redactor, code triage first, `ops.job_error` behind the ops area and the detail switch | D1 | Not started |
+| D3 | Ops triage: the redactor, code triage first, `ops.job_error` behind the ops area and the detail switch | D1 | **Done** |
 | D4 | The card check armed, behind the arming switch and a usable person-labelled evaluation | D1, D2, D3 | Not started |
 
 ### Phase A, as built
@@ -4049,7 +4062,12 @@ Its second, D2, routes findings, behind the findings area, seeded off: it
 registers two sets, asks them about titles the programme's model wrote,
 records the answers and changes nothing with them. It adds no job kind, no
 switch, no migration, no API route and no worker change, and touches none of
-what D1 left untouched.
+what D1 left untouched. Its third, D3, triages failed jobs, behind the ops area
+and the detail switch, both seeded off: code places every error it can, and
+the residue of a research or ingest job's error is sent as a skeleton the
+redactor builds, to one set, recorded and changing nothing. It too adds no job
+kind, no switch, no migration, no API route and no worker change, and touches
+none of what D1 left untouched.
 
 #### D1: plan version 2 and the foundations
 
@@ -4625,6 +4643,416 @@ recorded beside what it changed, above, or below as an open item:
   first, so the session the test names replayed its answer. The test now
   holds any other regime job back a day, and passed inside that window.
 
+#### D3: ops triage
+
+D3 places every failed job's error it can by code first, and asks one question
+set, `ops.job_error`, about the rest: the error of a failed research or ingest
+job that code's table cannot place, sent as a skeleton the redactor builds and
+nothing else, behind the ops area and the detail switch together. Each answer
+is recorded and changes nothing. Code's chips for reconciliation, data health
+and the ingest label structured rows and are never sent. The harness gains the
+job error as a subject, and `preview` and `suggestions` their jobs half. The
+ops area and the detail switch are both seeded off, so the shipped loop, as
+seeded, plans, claims and asks nothing new. No answer writes, retries, resumes
+or cancels a job, or writes a finding, a hypothesis, a candidate, a label or a
+switch. The scope asks that D3 be reviewed as this system's own text leaving
+it for the first time.
+
+**The redactor** (the scope's 4, first and second points; design sections 4.2
+and 4.3). `jev_redact.skeleton` reduces an error, its first 4,000 characters
+(`MAX_INPUT_CHARS`), to at most 48 tokens (`SKELETON_MAX_TOKENS`): the error's
+words that are in a closed vocabulary of 393, lowercased, the exception names
+and the HTTP tokens, in their order, and for everything else one of twelve
+placeholders saying what kind of thing stood there — a number, an identifier,
+a name, another word, a date, a time, an address, a path, quoted text, a
+setting's value, a credential, or words left out at the end — never what it
+was. The message itself never leaves; those of its words in the vocabulary
+do. Placeholders are taken before the split, in square brackets; rules 0 to
+16 run in order; runs are collapsed, the skeleton is cut to 47 tokens and
+`[more]`, and runs are collapsed again, so it is idempotent. It is pure, the
+standard library alone (`PURE_PROGRAMME_MODULES`), total, and never raises.
+It is version 2 since D3's review, which reads rules 5 to 7 on whole chunks,
+lines and runs rather than on the pieces rule 2 cuts a chunk into, and hides
+a credential in the marked forms version 1 missed (each wider reading is
+listed under "Where D3 departs" below). The vocabulary holds at most 400
+words, none a job kind outside `TRIAGED_KINDS` or a table's name; every
+underscore part of every word and HTTP token, and every capital-split part of
+every exception name, is held to `NEVER_IN_VOCABULARY`, 79 words; and every
+word alone and every ordered pair is read by the code screen's instruction
+rules, rule by rule, and trips none. Every datum the rules read — the
+vocabulary, the never list, the placeholders, the secret words, leads and
+suffixes, each character set, mark and bound, and every pattern as written
+with its flags (`PATTERNS`) — hashes to
+`ed4585f4750734e4615fc193300fddbc858fcb234462d3667bb859e05c1a3814`
+(`redactor_sha256`, pinned by `GOLDEN_REDACTOR_SHA256`); and what each released
+version makes of a fixed corpus of 17,386 texts is pinned beside it, since
+how the code reads the data no datum can say. Both histories are append-only
+and kept in the test, version 1's rows among them.
+`tests/unit/test_jev_redact.py`: total, closed, bounded, deterministic across
+hash seeds and idempotent over a seeded fuzz of 10,000 inputs and over that
+corpus; no synthetic credential or identifier survives in any of 60 marked
+forms and 33 templates — PostgreSQL's DETAIL lines among them — and swapping
+one for another of its shape changes nothing, over forty pairs of generated
+passwords holding rule 2's split characters, one in two a vocabulary word
+between two of them, beside the thirteen shapes; one case per rule and per
+wider reading; this system's own raise sites in the triaged modules pinned
+skeleton by skeleton; every hashed datum moves the hash, and a pattern
+narrowed in a copy of the module moves both pins
+(`TestPinned::test_a_pattern_narrowed_under_one_hash_is_seen`). Each of
+version 2's 32 new controls was removed in turn, and for each a named test
+and the behaviour pin both failed. The first run found three that only one
+of the two caught — two that a test caught and the pin did not, and one the
+other way round — and two edges in `BEHAVIOUR_EDGES` and
+`TestEachRule::test_rule_6_a_value_of_equals_signs_alone_is_written_apart`
+were added for them.
+
+**Code first** (the scope's 4, third point; design sections 4.5 and 4.6).
+`jev_chips.code_cause` places an error by `JOB_ERROR_SHAPES`, 82 shapes read in
+order, the first match deciding: the queue's own whole messages first, then
+the triaged kinds' raise sites, the data sources', the venues', every error a
+programme handler fails its job with and the ops ask's own refusals, and a
+SQLSTATE last, so a quoted SQLSTATE never outranks the message quoting it. It
+returns one of the ten causes Jev may also name (`CAUSES`) or of the five
+only code does (`CODE_ONLY_CAUSES`: `switched_off`, `expired`,
+`held_by_design`, `needs_review`, `unclassified`); `unclassified` for any
+other kind's error no shape places, and for a value that is not text; and
+`None` only for the error of a triaged kind — `backtest`, `walkforward`,
+`ingest_bars`, `ingest_reference_bars` — that no shape places: the residue,
+the one thing Jev may be asked about. `residue_skeleton` is the one rule that
+turns an error into what may be sent — code's cause `None`, then the
+redactor, then at least three words of content (`jev_redact.admissible`) —
+and the planner, the handler's admission, the harness and the reads beneath
+them all read by it. The table is version 2 and hashes to
+`0ce6cdc62fbbbfe20ba80fa5f268157f6a21f838687fc8657bf8f4a84aa474d8`
+(`GOLDEN_SHAPES_SHA256`), version 1's hash kept in the released history.
+`reconciliation_chip`, `data_health_chips` and `ingest_chips` label structured
+rows code computed, by labels alone, and are never sent. `jev_chips` loads
+`jev_redact` and nothing else of the programme.
+`tests/unit/test_jev_chips.py` holds the table to the code:
+`::TestCodeFirst` every literal raise of the triaged modules and of
+`src/data`, each placed for every kind that reaches it, and every
+pass-through raise in a reviewed list;
+`::TestTheProgrammeShapes::test_every_verdict_is_placed_by_its_own_shape`,
+`::test_every_error_a_handler_spells_is_placed` and
+`::test_every_fetch_failure_is_placed_by_a_fetch_shape` every ask, re-ask,
+regime and probe verdict, every `JobFailedError` a handler spells and every
+fetch failure kind, each by the shape pinned for it; and
+`::TestTheVenueShapes::test_every_venue_shape_places_a_message_a_venue_module_writes`
+every venue shape live on a message a venue module writes. And
+`::TestCodeFirst::test_code_cause_is_none_only_for_triaged_residue` holds
+`None` to the residue over the redactor's fuzz; `test_job_ownership.py::TestEachKindHasOneOwner::test_triaged_kinds_are_the_workers_and_no_others`
+holds the triaged kinds to the worker's own and keeps them apart from the
+venue kinds, the shadow replay, the programme's kinds and the kill switch's.
+
+**The state** (the scope's 4, fourth point; design sections 2.1 and 3.5).
+`JobErrorState` is a triaged kind, a `Literal` of `TRIAGED_KINDS`, and 1 to 48
+tokens, each a `Literal` of `jev_redact.TOKENS`: every value written in code,
+so the detail rule proves it text-free with no field exempted, as the ops lane
+requires. Its subject, `job_error`, is addressed by the state itself:
+`job_error_subject` is `jev_hash.state_hash` of the state as sent, and
+`STATE_ADDRESSED` is `{JobErrorState: "system"}`, so the road holds an ask's
+subject to the state sent and registration holds every set asking about it to
+provenance `system`. `job_error_text`, `"{kind}: {tokens}"`, is the subject's
+text as the harness exports it and the baseline reads it, and
+`job_error_from_text` reads a text back to the one state it names, or `None`.
+`tests/unit/test_jev_questions.py::TestTheJobError` and
+`::test_job_error_text_round_trips`, over the redactor's fuzz.
+
+**The set and its words** (the scope's 4, fifth point; design sections 2.4 and
+2.6). `ops.job_error` v1 asks `cause`: the ten causes of `jev_chips.CAUSES`,
+then `unclear`, about a failed job's kind and its error's skeleton, the
+placeholders' legend and the skeleton's bound rendered from `jev_redact`'s
+constants, so moving either moves the pack hash. Lane `ops`, provenance
+`system`, `internal_detail` declared. Word for word as design 2.4 gives it, it
+hashes as the scope gives: pack
+`1e625e8f0965342d12907dbc27fb78e66db44086bb0b6428359c8ab9c512b512`, questions
+`e24fe30799ea8252dd3eac4dba6df02cb7fd9a0aaf4d4d11007fedc7df6a617a`. The
+registry is nine sets, and the released pack and question histories gain
+their rows. `tests/unit/test_jev_questions.py::TestTheRegistry`,
+`::test_the_cause_options_are_jev_chips_causes` and
+`::test_the_skeleton_bound_and_legend_are_rendered_from_jev_redact`, run with
+each constant moved.
+
+**Its plan** (the scope's 4, sixth and seventh points; design sections 3.4 and
+3.7). Covered accuracy at least 0.80, no acting class. The baseline is
+`keyword_label` over the subject's text, `job_error_text`, falling back to
+`unclear`, by `OPS_KEYWORDS`, every keyword held to an evidence corpus of
+real messages a triaged job can record and code leaves to Jev, admissible:
+the builtins' messages triggered in the test, operating-system errors by
+errno, PostgreSQL's as asyncpg's classes raise them, and numpy's and pandas'
+own. A keyword no message produces is dropped, and the code-defect label comes
+before `data_missing`. `OPS_POPULATION` names the population: failed jobs of
+the triaged kinds, finished after the UTC day the pin was first observed, left
+to Jev by `code_cause`, admissible, each skeleton dated by the earliest
+`finished_at` of those same rows, with the redactor's and the shapes table's
+versions and hashes, so moving either moves the plan. The plan is version 2,
+naming the redactor's version 2, and hashes to
+`0578dd14068847a7062f0f0a2f8f2f938a834efd1ac0c41092a9be7168ae5bba`, in
+`GOLDEN_SET_PLAN_HASHES` and the released history; version 1, which named the
+redactor's version 1, hashed to
+`eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883` and keeps
+its row, and its keyword rules, and so its verdicts, are version 2's. The
+gated family is nine pairs of twenty.
+`tests/unit/test_jev_prereg.py::TestTheOpsKeywords` and `::TestTheOpsPlan`.
+
+**The reads** (design sections 3.7 and 5.3). `jev_repo.get_failed_job` reads a
+job by its id, as its id, kind, status, error and finish time and nothing
+else. `failed_jobs_for_triage` is the planner's: jobs of the kinds named that
+failed and finished after a bound, newest first, at most 200; a job an
+expired lease failed has no finish time and is never read. `unasked_subjects`
+applies C7's filters to addresses its caller computed — an `ok` answer under
+the pin at the registered version, three failed calls, a job waiting or
+planned today — since a skeleton's address is no SQL's to compute; no content
+block holds a subject addressed by its state (open item 36).
+`job_error_since` is the UTC midnight after the pin's first day, and
+`job_error_population` every skeleton of the population by its state's
+address, with its earliest and latest failure and its newest job. The
+harness's dates, texts and labelling population of a job error are read over
+that population, so a skeleton whose only occurrences fell on or before the
+pin's first day is no item, and no item is dated by one (D-HMB-08).
+`recent_failed_jobs` is `suggestions`' read. No read writes, retries or
+resumes a job. `tests/integration/test_jev_repo.py::TestTheFailedJobRead`,
+`::TestFailedJobsForTriage`, `::TestUnaskedSubjects`,
+`::TestTheJobErrorPopulation` and `::TestRecentFailedJobs`, each filter held
+by a case only it refuses.
+
+**The ask** (the scope's 4, eighth point; design section 5.1). `ASKABLE` gains
+the ops set, and `Askable` gains `address(row, state)`, the subject a row
+holds: for a text set the sha256 of its text, checked before admission as
+before; for the ops set the address of the state built, checked once the
+state is built. The job is read by its id; the admission refuses, each alone
+and for good, a job that did not fail, one of a kind code alone places, one
+with no finish time, one whose error code places and one whose skeleton is
+too short, naming the job by its id and quoting nothing of its error. No
+follow-up: an answer is recorded and changes nothing.
+`tests/unit/test_jev_jobs.py::TestTheJobErrorAsk`;
+`test_job_ownership.py::TestEveryJevHandlerMakesAtMostOneCall`, every road
+outcome through the ops set; and
+`test_jev_table_boundaries.py::test_a_job_error_is_used_only_by_the_redactor_and_code_cause`,
+an AST scan of the handler, the planner, the harness and `jev_repo` holding
+every use of a job's error to the redactor and code's triage —
+`jev_redact.skeleton`, `jev_chips.code_cause`, `residue_skeleton` and, for the
+harness's chips, `job_error_shape` — proved on synthetic sources.
+
+**The planner** (the scope's 4, ninth point; design section 5.2). The ops set
+behind the ops area and the detail switch, each through its own reader, at
+most ten a pass, one call each from the ops share, under
+`jev_ask:ops.job_error@1:job_error:{address}:{UTC date}`: the failed jobs of
+the triaged kinds within a week of the clock (`OPS_WINDOW`) and after the
+pin's first day, the residue only, each skeleton once by its address, naming
+its newest job, newest first, then `unasked_subjects`. The authentication and
+422 holds stand. A row it cannot read is logged by its class and the job's
+id; no error is logged. `tests/unit/test_jev_plan.py::TestTheOpsRule`,
+`test_the_planner_logs_no_text` among its cases, captured at DEBUG;
+`::TestTheDetailSwitchGatesPlanning` with `ops.job_error`; and
+`::TestTheSwitchMatrix`'s ops conjunction. The road holds the same:
+`tests/unit/test_jev_lane.py::TestTheDetailSwitch::test_ops_asks_nothing_with_the_detail_switch_off`
+and `::TestStandingRefusals::test_a_skeleton_is_held_by_no_content_block`.
+
+**The harness** (the scope's 4, tenth point; design sections 3.5, 3.7 and
+9.3). A job error's skeleton is a labelled subject. A label of one is read
+back through the state its text names (`STATE_FROM_TEXT`, D-HMB-07): the text
+required, naming exactly one state, whose address is the subject. An ops
+evaluation prints beside its figures that its dates carry nothing about
+training (`OPS_DATING_NOTE`, open item 81). Both read surfaces gain their jobs
+half, each still reading in the harness's read-only snapshot and loading no
+planner, lane or client:
+
+- `preview --set ops.job_error` runs the ops rule from copies of the
+  planner's reads and the handler's rules: each skeleton the planner would ask
+  about, by its newest job, with the exact state that would be sent — the
+  kind and the skeleton, which is what leaves — or why nothing would be, in
+  code's words; the switches it names, the detail switch among them; and
+  every failed job of a triaged kind the rule reads, by its id and kind, with
+  code's chip and shape, or that code leaves it to Jev.
+  `tests/integration/test_jev_ops.py::TestPreviewIsThePlanners` holds the
+  subjects equal to the planner's, in order, and every state to the one the
+  handler hands the road, on the same rows; with the detail switch off,
+  preview names it and the planner plans nothing.
+- `suggestions` lists each failed job of the last seven days, of any kind
+  (`jev_repo.recent_failed_jobs`, where a job an expired lease failed is
+  placed by when it was first claimed), by its id and kind, with code's chip
+  and how the ops set's ask about its skeleton came out; never its error, its
+  skeleton or an answer. What the job's row decides — a kind code alone
+  places, an error code places, a skeleton too short — is said whatever the
+  pin. A job the planner does not read, one with no finish time or one that
+  failed on or before the pin's first day, holds words another job may have
+  had asked, so its status is read from the ledger first, and "not asked" is
+  said only where nothing is on record; with no pin it is unknown (D2RW-2's
+  rule).
+
+`tests/unit/test_jev_eval.py::TestTheJobErrorLabels`, `::TestTheOpsSubject`,
+`::TestTheOpsDates`, `::TestThePreviewOfAFailedJob` and
+`::TestTheSuggestionsOfFailedJobs`; `tests/integration/test_jev_ops.py::TestSuggestionsOnPostgres`.
+
+**What holds it** (the scope's 4, last points; design section 13):
+
+- the ops canary (`tests/integration/test_jev_ops.py::TestTheCanary`): markers
+  in failed jobs' errors — one code leaves to Jev, one it places, one too short
+  to ask about, one of a kind code alone places — and in a job's payload and
+  result; a marker in every placeholder class; and synthetic secrets of every
+  shape this deployment holds or could echo, marked as credentials and bare;
+  each found in its own job's own column alone once the loop has asked about
+  every skeleton it may, every text and JSON column of every table read from
+  `information_schema`; `jev_requests.state` holding the redactor's tokens and
+  nothing else, exactly what the vendor saw; and no marker in a log record at
+  DEBUG or in another job. Beside it, only what code leaves to Jev is asked
+  about, each skeleton once by its newest job, replayed for an older one with
+  no call and planned again on no later day, and never a venue kind's, the
+  shadow replay's, a programme kind's, one before the population starts, one
+  older than the week or one an expired lease left
+  (`::TestOnlyWhatCodeLeavesToJevIsAsked`); and the failed job, the findings
+  register, the hypotheses, the candidates, the assessments and the switches
+  are unchanged under an answer, a timeout, a response refused whole, a
+  content block, a 422 and a refused key (`::TestAJobIsUnchangedByEveryOutcome`),
+  over a register holding a row of each — a hypothesis the programme's model
+  wrote, a candidate on it, a finding that blocks and one that does not, an
+  assessment — so a change to one is seen and not only an insert (D3's
+  review, D3RS-1);
+- what leaves (`tests/sdk/test_jev_findings_ops_over_http.py::TestOneJobErrorSkeletonOverHTTP`):
+  with the ops area on and the detail switch off, nothing planned and nothing
+  sent; with both on, a failed job's skeleton asked through the planner, the
+  handler, the lane, the real client and SDK and real HTTP to the fake
+  TypeSafe server, the request's state exactly the kind and the skeleton —
+  the error's words that are in the vocabulary, lowercased and in order, and
+  a placeholder for every other — and the error itself, its identifier, its
+  original casing, the job's id and its payload absent from the body,
+  recorded in the ops lane as `system`; and a second job of the same skeleton
+  replayed with no request leaving;
+- the dark matrix (`tests/integration/test_jev_dark.py`): a failed job stored
+  while dark is asked nothing; the big matrix stores one before every case and
+  none asks about it; `TestTheOpsMatrix` crosses the programme, Jev, the ops
+  area and the detail switch, sixteen cases, the skeleton alone sent exactly
+  when all four are on, so the ops area on with the detail switch off plans
+  and sends nothing; and `TestTheArmingSwitchHasNoConsumerYet` holds the
+  arming switch, which has none until D4;
+- the evaluation (`tests/integration/test_jev_evaluations.py::TestTheOpsSetEndToEnd`):
+  a ledger the loop wrote, the population exported blind, labelled by its
+  text, imported and evaluated through `jev_eval.main`; the row equal to its
+  recomputation, the keyword rule reading each skeleton's text, and every item
+  dated after the pin's first day, the early job's skeleton no item.
+
+Each new control was removed in turn, thirty-five in all, two of them again
+against the dark matrix and `suggestions` on PostgreSQL, and a named test
+failed for every one but one: the exact round-trip comparison at the end of
+`job_error_from_text`, which the parse before it already implies — a text
+that validates is the text `job_error_text` writes, since no token holds a
+space and none is empty — so no input reaches it. It is kept as a guard
+should a token ever hold a space.
+
+**Where D3 departs from the design and its scope.**
+
+- Owner item 9.1 is open, and D3 builds its chosen default: a skeleton goes
+  only while the ops area and the detail switch are both on, each read through
+  its own fail-closed reader. Fact 7 is not amended. Restating fact 7's
+  defaults and the "Inputs needed" defaults with ops, which the scope's docs
+  list asks for once the owner answers 9.1, waits on that answer (open item
+  89).
+- The shapes table is version 2. Version 1 was published on the branch in
+  `a7a6a27`, before the ops ask's own refusals were placed by two shapes of
+  their own (`ops_ask_outside_the_population`, `code_defect`, and
+  `ops_ask_left_to_code`, `held_by_design`); no plan named version 1, and its
+  hash stays in the released history.
+- The redactor is version 2 (D3's review, D3RR-1 to D3RR-3). Version 1 read
+  rules 5, 6 and 7 on the pieces rule 2 cuts a chunk into, so whatever of a
+  password, a DSN or a tuple's values followed one of `,;()[]{}|` was read as a
+  new, ordinary piece — verbatim when a vocabulary word, its class otherwise —
+  and two generated passwords of one shape gave two skeletons in 15,085 of
+  21,600 cases; it let a vocabulary word through several marked forms; and it
+  hashed its rules' names, not their data, so a pattern narrowed under one
+  hash went unseen. Version 1 was published on the branch in `543f93f`, named
+  by the ops set's plan version 1, and replaced before D3 merged, while no
+  `ops.job_error` answer existed and every switch was off, so no answer was
+  ever recorded under it: its hash keeps its row in the released history, and
+  so does plan version 1's; `ops.job_error` v1, its words and both its hashes
+  unchanged, is asked under redactor version 2 (`REDACTOR_OF_OPS_VERSION`
+  maps it there), and its plan is version 2, naming it. Open item 87 is why
+  this is free only now.
+- The redactor reads rules 2, 5, 6 and 7 wider than design 4.2's sentences,
+  and each wider reading only hides more; `GOLDEN_REDACTOR_SHA256` pins every
+  datum they read, and the released behaviour hash what they do. From version
+  1: rule 7's lead word sets aside rule 3's characters and one trailing `=` as
+  well as its casefold and leading dashes, so `password: x` and `password= x`
+  hide `x`; a value hidden still leads, so `headers= password: x` hides `x`;
+  rule 6's value written apart (`key= value`, `key = value`) is the next
+  chunk, and a quote opened in a value spans what it quotes; and a quote is
+  read after rule 3's characters at a piece's start, so `:'a b'` is one
+  `[quoted]`. From version 2: rule 5 reads the whole chunk, so a chunk
+  holding `://` or `@`, or with a piece starting `www.`, is one `[address]`
+  whatever rule 2 would split it on, and a quote it leaves open runs on;
+  rule 6's value is the rest of its chunk, and a tuple's values — an `=`
+  straight after `)`, as PostgreSQL's DETAIL writes `Key (a, b)=(x, y)` — the
+  rest of their line; rule 7 hides the whole next chunk, or the rest of the
+  lead's own, never only a piece; a compound key holding a lead as a part or
+  two parts (`access_token`, `X-Api-Key`), or ending with one
+  (`PGPASSWORD`), leads; a key of `SECRET_WORDS`, holding one or ending with
+  one (`privateKey`), leads written as a key — `dsn:`, `"dsn":`, `dsn :`,
+  `password:x` in one piece; what stands between a lead and its value made
+  only of rule 2's and rule 3's characters and `-=<>` (`->`, `=>`, `-`) is
+  neither; `Authorization` hides two chunks, a scheme's and the credential's,
+  whatever the scheme; a value hidden ending with a lead, a key written apart
+  or a key and its value in one piece (`Authorization=Bearer x`,
+  `headers={password= x}`) leads, and so does a quoted key a run closes on;
+  only a word shaped as a key is one, so a path ending `/token` leads
+  nothing, and an address leads nothing; a quoted run closes only where a
+  chunk ends with its quote, rule 2's and rule 3's characters set aside, and
+  a piece beginning and ending with the quote is a run of its own only when
+  the rest of its chunk does not end with it too. Version 1's reading of
+  rule 2 closed a run at any piece ending with its quote, so a bracket of a
+  quoted password could end the quote early.
+- `OPS_KEYWORDS` is design 3.4's table cut, and only cut, by the evidence
+  rule. Every HTTP status, the rate-limit words, `unauthorized`,
+  `unauthorised`, `forbidden`, `credential`, `password`, `exhausted`, `dns`,
+  `cannot connect`, `outage`, `empty response`, `not subscriptable`,
+  `is not defined`, `not callable`, `no data`, `delisted`, `not found` and
+  `inconsistent` are produced by no subject text of the corpus: the data
+  sources wrap every vendor failure in a message code places, and the
+  redactor never lets some of the words through. So `rate_limit` is a cause
+  the baseline never answers, and a person's `rate_limit` label is always the
+  rule's miss. `TestTheOpsKeywords::test_the_rule_is_the_drafts_less_what_no_message_produces`
+  holds the cut to the draft, in the draft's order.
+- The population starts at the UTC midnight after the day the pin was first
+  observed (`job_error_since`), not at the observation itself: a job is the
+  population's only when it finished after that day, the day an item is
+  dated by, so every item reads as not possibly in training, for the reason
+  open item 81 gives.
+- The planner reads a week (`OPS_WINDOW`) while the population reads every
+  failed job since the pin's first day (open item 86).
+- `Askable.address` takes the row and the state, not design 5.1's row alone,
+  since a skeleton's address is its state's, built only after admission.
+- The harness shows code's chip where the design names it for `suggestions`
+  and beyond: `preview` lists every failed job of a triaged kind the rule
+  reads, with code's chip and shape, and `suggestions` every failed job of
+  the week, of any kind, a lease-expired one included. The chip is code's
+  own table's entry, never Jev's, and the error-use scan admits
+  `jev_chips.job_error_shape`, whose result names that entry and carries no
+  word of the error.
+- Test names in the binding list that this build spells otherwise:
+  `TestPreview::test_it_prints_exactly_what_would_leave` for ops is
+  `TestThePreviewOfAFailedJob::test_it_prints_exactly_the_skeleton_that_would_leave`;
+  `TestSuggestions::test_ids_labels_and_numbers_only` and
+  `::test_no_answer_no_probability_no_chip_and_no_jev_ref` for ops are
+  `TestTheSuggestionsOfFailedJobs::test_ids_kinds_and_codes_chip_only` and
+  `::test_no_answer_no_probability_and_no_chip_of_jevs`;
+  `TestTheSetPlans::test_released_rows` is
+  `TestTheSetPlansAreTheirReleasedHashes`, as in D2;
+  `TestTheGateFamily::test_the_gated_pairs_fit_the_family`'s nine are pinned
+  pair by pair by `::test_the_family_holds_phase_ds_pairs`; and
+  `TestWhatAnAnswerMayChange` is still `TestTheCardCheckChangesNothing` until
+  D4 renames it, its walk from `jev_jobs` covering the ops entry and finding
+  no writer.
+- The ops area and the detail switch get a matrix of their own with the
+  programme and Jev, sixteen cases, rather than joining the big matrix as two
+  more dimensions, which would make 256 cases of a database each; no other
+  switch bears on whether the ops set asks, and the planner's unit matrix
+  covers every combination of all of them. The class that held the ops area
+  and the detail switch to having no consumer, true until D3, now holds the
+  arming switch alone.
+- The SDK case's skeleton half needs the SDK and a database in one process,
+  which this machine cannot give: the database here admits the `postgres`
+  operating-system user alone, which cannot read the SDK's environment. It was
+  collected with the SDK installed, and CI's `programme sdk` job runs it.
+
 ### Open items Phase D found
 
 Numbered on from Phase C's, as design section 14 numbers them. Each says the
@@ -4709,6 +5137,68 @@ pull request it belongs to; D1 builds the ones it names.
     re-ask the road refused as not compared, would each change which pairs
     the flip limits count, which is the plan's to decide, not a planner's;
     left for review.
+86. **The ops rule reads a week, and the population every failed job since
+    the pin's first day** (D3). The planner asks about the skeletons of the
+    last seven days' failed jobs (`OPS_WINDOW`), while the population a
+    labeller is shown, and an evaluation is computed over, holds every
+    skeleton since the midnight after the pin was first observed. A skeleton
+    whose jobs all failed more than a week before the ops area is switched
+    on, or before a pass reaches it, is exported and labelled and never
+    asked, unless a job fails with it again, and the evaluation counts it not
+    asked. Exporting only what was asked would choose the subjects by the
+    planner's work rather than the code alone, and widening the window would
+    ask about errors nobody is looking at any more; left for review.
+87. **A redactor change needs new words** (D3). The plan names the
+    redactor's hash and the set's words render its legend and bound, but a
+    change to the vocabulary or the rules leaves the words as they are, and a
+    new version of the set asking the same words repeats its questions hash,
+    which open item 15's rule refuses. Such a change must move the words as
+    well, a reworded legend say, or the rule must learn that one set's next
+    version may repeat its own questions. Open item 77 is why a change is a
+    new version at all. D3's review made the one change that costs nothing:
+    redactor version 2 replaced version 1 before D3 merged, while no
+    `ops.job_error` answer existed, under the set's version 1 and a plan
+    version of its own.
+88. **The rule reads the newest 200 failed jobs of the week** (D3), the page
+    `failed_jobs_for_triage` reads, and `suggestions` lists at most 200
+    (`recent_failed_jobs`). A burst of more than 200 failures — a parameter
+    grid failing point by point, say — hides the week's older failures from
+    the rule until the burst ages out, and from `suggestions`. The address is
+    computed in code, so no SQL can read distinct skeletons; paging the read
+    until ten unasked skeletons are found is left for review.
+89. **Fact 7's defaults and "Inputs needed" are not yet restated with ops**
+    (D3; the owner's item 9.1). D3 builds the scope's chosen default — a
+    skeleton goes only while the ops area and the detail switch are both on —
+    and amends nothing of fact 7. Restating fact 7's defaults and the
+    "Inputs needed" defaults with ops waits on the owner's answer to 9.1:
+    confirmed, they gain a line saying a failed job's skeleton is this
+    system's own text and goes only while the detail switch is on; answered
+    the other way, fact 7 is amended and the planner and the road change
+    with it.
+90. **Non-interference is shown for secrets without the characters the rules
+    read as structure** (D3, found by D3's review). The redactor's test draws
+    its generated passwords from letters, digits and a generator's
+    punctuation, rule 2's split characters among it, and shows two of one
+    shape give one skeleton in every marked form and template. A secret
+    holding a quote, `=`, `:`, `@`, `/`, `\` or a space is read by what those
+    characters mean — a quoted run, a key, an address, a path, two chunks —
+    and is hidden where it is marked, but two such secrets need not give one
+    skeleton: one holding `@` is an `[address]` where another is
+    `password [secret]`. A space ends a chunk whatever it stands in, so an
+    unquoted passphrase after `key=` or a lead hides its first word alone, and
+    the words after it are read as prose: their class, or a vocabulary word as
+    itself. No allow-list can tell where an unquoted value with spaces ends;
+    quoted, it is one `[quoted]` or `[secret]`. Left for the owner's review of
+    the redactor (scope item 9.5).
+91. **PostgreSQL's `Failing row contains (…)` lists a row's values unmarked**
+    (D3, found by D3's review). A CHECK or NOT NULL violation's DETAIL quotes
+    every value of the failing row in one parenthesised list with no `=`, so
+    rule 6's tuple reading, which needs `Key (…)=(…)`, does not hide them, and
+    each value is read as prose: its class, or a vocabulary word as itself.
+    That is within the stated limit, since nothing marks the values as a
+    credential; a rule hiding the list to the end of its line would narrow
+    what leaves further, and is left for review with the redactor (scope item
+    9.5).
 
 ## Inputs needed from the operator
 

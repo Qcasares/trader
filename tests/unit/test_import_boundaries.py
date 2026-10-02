@@ -2563,30 +2563,37 @@ def test_the_jev_module_the_runners_may_load_loads_no_other() -> None:
 #: the performance-claim check moved out of ``author``, which prompts a
 #: generative model, so that reading the rule no longer loads one; phase C9's
 #: ``jev_calibration`` and the statistics it adds to ``jev_stats`` joined in C9;
-#: and phase D2's ``jev_chips``, which phase E's pages compute their chips
+#: phase D2's ``jev_chips``, which phase E's pages compute their chips
 #: with, holding copies of ``gates``' and ``roles``' values rather than load
-#: either (``tests/unit/test_jev_chips.py::TestTheCopies``).
+#: either (``tests/unit/test_jev_chips.py::TestTheCopies``); and phase D3's
+#: ``jev_redact``, the one way any part of a job's error becomes state, which
+#: the planner, the handler and the harness all reduce an error with.
 PURE_PROGRAMME_MODULES = (
     "src.programme.claims",
     "src.programme.jev_calibration",
     "src.programme.jev_chips",
     "src.programme.jev_hash",
     "src.programme.jev_prereg",
+    "src.programme.jev_redact",
     "src.programme.jev_stats",
     "src.programme.job_errors",
 )
 
-#: The one pure module that loads others: ``jev_calibration`` reads the
-#: analysis plan its rules are written against, ``jev_prereg``, and computes
-#: the plan's gates with ``jev_stats`` — the held-out bound at a threshold,
-#: the exact test a baseline is beaten by — each itself pure and loading
-#: nothing. Named, so a further such load is a reviewer's edit here rather
-#: than a loosened rule.
+#: The pure modules that load others: ``jev_calibration`` reads the analysis
+#: plan its rules are written against, ``jev_prereg``, and computes the plan's
+#: gates with ``jev_stats`` — the held-out bound at a threshold, the exact test
+#: a baseline is beaten by — and ``jev_chips`` reads the triaged kinds and the
+#: input bound from ``jev_redact``, each itself pure and loading nothing.
+#: Named, so a further such load is a reviewer's edit here rather than a
+#: loosened rule.
 PURE_MODULES_MAY_LOAD: Mapping[str, tuple[str, ...]] = {
     "src.programme.jev_calibration": (
         "src.programme.jev_prereg",
         "src.programme.jev_stats",
     ),
+    # Phase D3: code's triage of a failed job reads the triaged kinds and the
+    # input bound from the redactor, pure as it is (docs/09, section 4.6).
+    "src.programme.jev_chips": ("src.programme.jev_redact",),
 }
 
 

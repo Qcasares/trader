@@ -163,7 +163,9 @@ PROVENANCES: tuple[str, ...] = ("web", "internal", "operator", "model", "system"
 #: (``jev_questions.STATE_SUBJECT``). A text subject — a web excerpt, a
 #: hypothesis title, from phase D2 a finding's title — is addressed by the
 #: sha256 of its text, so a replay can never answer for another subject, and a
-#: label joins its answer exactly. Vocabulary: migration 0012 holds
+#: label joins its answer exactly; from phase D3 a failed job's error, as a
+#: skeleton, is addressed by the hash of its whole state
+#: (``jev_questions.STATE_ADDRESSED``). Vocabulary: migration 0012 holds
 #: ``subject_type`` to no CHECK.
 SUBJECT_TYPES: tuple[str, ...] = (
     "probe",
@@ -171,6 +173,7 @@ SUBJECT_TYPES: tuple[str, ...] = (
     "web_excerpt",
     "hypothesis_title",
     "finding_title",
+    "job_error",
 )
 
 #: The percent of ``jev_daily_request_budget`` each recorded lane may spend in
@@ -227,6 +230,7 @@ def _listed(names: Sequence[str]) -> str:
     if len(names) == 1:
         return names[0]
     return ", ".join(names[:-1]) + " and " + names[-1]
+
 
 #: The operator's area switches, one ``jev_area_<area>`` flag each.
 AREAS: tuple[str, ...] = (

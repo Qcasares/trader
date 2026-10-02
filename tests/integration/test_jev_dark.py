@@ -37,9 +37,18 @@ the switches as the migrations seed them:
   programme and Jev** (phase D2): it joins the matrix, with a model-written
   finding and an operator's stored before the loop runs; the findings sets
   ask about the first exactly when the programme, Jev and the findings area
-  are all on, and never about the second. The ops area, the detail switch and
-  the arming switch have no consumer in D2 and plan nothing of their own
-  (:class:`TestTheSwitchesWithNoConsumerYet`).
+  are all on, and never about the second.
+* **The ops area asks about a failed job's error, and only with the detail
+  switch** (phase D3): a failed job whose error code leaves to Jev is stored
+  before every case of the matrix, where the ops area is off, and is asked
+  about in none; the programme, Jev, the ops area and the detail switch make
+  a matrix of their own (:class:`TestTheOpsMatrix`), in which the ops set
+  asks about the job's skeleton exactly when all four are on, so the ops area
+  on with the detail switch off plans and sends nothing (docs/09, owner item
+  9.1's default). A failed job stored while dark is asked nothing. The arming
+  switch has no consumer until D4 and plans nothing of its own
+  (:class:`TestTheArmingSwitchHasNoConsumerYet`); until D3 that class held
+  the ops area and the detail switch to the same.
 
 The client is a fake of ``jev_client.ask`` counting calls, and the fetcher a
 fake of ``web_fetch.fetch`` counting fetches and handing over a synthetic page.
@@ -54,7 +63,8 @@ import hashlib
 import itertools
 import json
 import os
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -70,9 +80,11 @@ from src.db.repos import jobs as job_repo  # noqa: E402
 from src.programme import (  # noqa: E402
     flags,
     jev_catalogue,
+    jev_chips,
     jev_client,
     jev_clock,
     jev_prereg,
+    jev_questions,
     jev_repo,
     repo,
     web_fetch,
@@ -106,12 +118,19 @@ RESEARCH = f"{flags.JEV_AREA_PREFIX}research"
 GUARDRAILS = f"{flags.JEV_AREA_PREFIX}guardrails"
 FINDINGS = f"{flags.JEV_AREA_PREFIX}findings"
 OPS = f"{flags.JEV_AREA_PREFIX}ops"
+DETAIL = flags.JEV_SEND_INTERNAL_DETAIL
 
 #: The two findings stored before a matrix case runs: one the programme's
 #: model raised, which the findings sets ask about, and an operator's, which
 #: they never do. Invented.
 MODEL_FINDING = "Invented Fills Assumed at Prices No Venue Gave"
 OPERATORS_FINDING = "An Operator's Invented Finding"
+
+#: The failed job stored before a case runs (phase D3): a backtest, a kind
+#: whose errors code triages, failing with an invented error code leaves to
+#: Jev, whose skeleton holds enough words to be asked about.
+FAILED_KIND = "backtest"
+FAILED_ERROR = 'duplicate key value violates unique constraint "invented_key"'
 
 
 def _derived(suffix: str) -> str:
@@ -281,6 +300,55 @@ async def _raise_findings(conn: asyncpg.Connection) -> None:
     )
 
 
+async def _fail_a_job(conn: asyncpg.Connection) -> uuid.UUID:
+    """
+    :data:`FAILED_ERROR`, a job that failed an hour ago by the database's
+    clock, stored through the shipped writer and ended as the queue ends one;
+    returns its id.
+    """
+    job_id = await job_repo.enqueue(
+        conn, FAILED_KIND, {}, dedupe_key=f"test:{uuid.uuid4()}"
+    )
+    assert job_id is not None
+    await conn.execute(
+        "UPDATE jobs SET status = 'failed', attempts = 1, error = $2, "
+        "started_at = now() - interval '1 hour', "
+        "finished_at = now() - interval '1 hour' WHERE id = $1",
+        job_id,
+        FAILED_ERROR,
+    )
+    return job_id
+
+
+async def _job_row(conn: asyncpg.Connection, job_id: uuid.UUID) -> dict[str, Any]:
+    """Every column of the job ``job_id``."""
+    return dict(await conn.fetchrow("SELECT * FROM jobs WHERE id = $1", job_id))
+
+
+def _failed_state() -> dict[str, Any]:
+    """What the ops set would send about :data:`FAILED_ERROR`: its skeleton."""
+    tokens = jev_chips.residue_skeleton(FAILED_KIND, FAILED_ERROR)
+    assert tokens is not None
+    return jev_questions.OPS_JOB_ERROR.dump_state(
+        jev_questions.JobErrorState(job_kind=FAILED_KIND, error=tokens)
+    )
+
+
+def _about_jobs(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The states of the calls about a failed job's error."""
+    return [call["state"] for call in calls if "error" in call["state"]]
+
+
+async def _planned(
+    conn: asyncpg.Connection, stored: Sequence[uuid.UUID] = ()
+) -> set[str]:
+    """The dedupe key of every job but those the test stored itself."""
+    rows = await conn.fetch(
+        "SELECT dedupe_key FROM jobs WHERE NOT (id = ANY($1::uuid[]))", list(stored)
+    )
+    return {row["dedupe_key"] for row in rows}
+
+
 def _finding_asks(on: tuple[str, ...], day: Any) -> set[str]:
     """The findings sets' asks a lit loop plans about the model's finding."""
     if FINDINGS not in on:
@@ -373,6 +441,26 @@ class TestSeededItIsDark:
         assert client.calls == [] and fetcher.fetched == []
         assert set((await _jev_rows(conn)).values()) == {0}
 
+    async def test_a_job_that_failed_while_dark_is_asked_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+    ) -> None:
+        """
+        Phase D3: the ops area and the detail switch are seeded off, so a
+        failed job's error waits, and the job is left as it failed.
+        """
+        dsn, conn = seeded
+        job_id = await _fail_a_job(conn)
+        before = await _job_row(conn, job_id)
+        await _run_the_loop(monkeypatch, dsn)
+        assert await _planned(conn, [job_id]) == set()
+        assert await _job_row(conn, job_id) == before
+        assert client.calls == [] and fetcher.fetched == []
+        assert set((await _jev_rows(conn)).values()) == {0}
+
 
 #: The switches the matrix turns on and off, each alone and in every company.
 SWITCHES = (PROGRAMME, JEV, DECISIONS, RESEARCH, GUARDRAILS, FINDINGS)
@@ -412,17 +500,20 @@ class TestTheSwitchMatrix:
         From phase D2 a model-written finding and an operator's are stored
         first: the findings sets ask about the first's title exactly when the
         findings area is on with the programme and Jev, and never the second's.
+        From phase D3 a failed job whose error code leaves to Jev is stored
+        too, and with the ops area off in every case here nothing asks about
+        it (:class:`TestTheOpsMatrix` turns it on).
         """
         dsn, conn = seeded
         await _raise_findings(conn)
+        failed = await _fail_a_job(conn)
         await _set(conn, {switch: switch in on for switch in SWITCHES})
         now = datetime.now(UTC)
 
         await _run_the_loop(monkeypatch, dsn)
 
-        keys = {
-            row["dedupe_key"] for row in await conn.fetch("SELECT dedupe_key FROM jobs")
-        }
+        keys = await _planned(conn, [failed])
+        assert _about_jobs(client.calls) == [], "a failed job's error was sent"
         lit = PROGRAMME in on and JEV in on
         if not lit:
             assert keys == set()
@@ -478,16 +569,97 @@ class TestTheSwitchMatrix:
         assert keys == probe | clock | ingest | asks
 
 
-class TestTheSwitchesWithNoConsumerYet:
+#: The switches the ops matrix turns on and off, each alone and in every
+#: company: the programme, Jev, the ops area and the detail switch.
+OPS_SWITCHES = (PROGRAMME, JEV, OPS, DETAIL)
+
+
+def _ops_combinations() -> list[tuple[str, ...]]:
+    return [
+        combo
+        for size in range(len(OPS_SWITCHES) + 1)
+        for combo in itertools.combinations(OPS_SWITCHES, size)
+    ]
+
+
+class TestTheOpsMatrix:
+    @pytest.mark.parametrize(
+        "on", _ops_combinations(), ids=lambda on: "+".join(on) or "none"
+    )
+    async def test_a_failed_job_is_asked_about_only_with_all_four(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+        on: tuple[str, ...],
+    ) -> None:
+        """
+        Phase D3 (docs/09, section 13): a failed job whose error code leaves
+        to Jev is stored, and the programme, Jev, the ops area and the detail
+        switch are set as the case says, every other area off. Nothing unless
+        the programme and Jev are both on; those two plan and send the daily
+        probe; the ops set's ask about the job's skeleton is planned, and the
+        skeleton alone sent, exactly when the ops area and the detail switch
+        are on as well, each read through its own fail-closed reader — the ops
+        area on with the detail switch off plans nothing (owner item 9.1's
+        default). The failed job itself is left as it failed.
+        """
+        dsn, conn = seeded
+        failed = await _fail_a_job(conn)
+        before = await _job_row(conn, failed)
+        await _set(conn, {switch: switch in on for switch in OPS_SWITCHES})
+        now = datetime.now(UTC)
+
+        await _run_the_loop(monkeypatch, dsn)
+
+        keys = await _planned(conn, [failed])
+        assert await _job_row(conn, failed) == before, "the failed job was changed"
+        if not (PROGRAMME in on and JEV in on):
+            assert keys == set()
+            assert client.calls == [] and fetcher.fetched == []
+            assert set((await _jev_rows(conn)).values()) == {0}
+            return
+        probe = {f"jev_probe:{now.date().isoformat()}"}
+        asks: set[str] = set()
+        if OPS in on and DETAIL in on:
+            state = _failed_state()
+            address = jev_questions.job_error_subject(
+                jev_questions.JobErrorState(
+                    job_kind=state["job_kind"], error=tuple(state["error"])
+                )
+            )
+            asks = {
+                jev_repo.ask_job_key(
+                    "ops.job_error", 1, "job_error", address, now.date()
+                )
+            }
+            assert _about_jobs(client.calls) == [state], "not the skeleton alone"
+            job = await conn.fetchrow(
+                "SELECT status, payload FROM jobs WHERE dedupe_key = $1", *asks
+            )
+            assert job["status"] == "succeeded"
+            assert json.loads(job["payload"])["source_id"] == str(failed)
+        else:
+            assert _about_jobs(client.calls) == [], "a failed job's error was sent"
+        assert keys == probe | asks
+        assert len(client.calls) == 1 + len(asks)
+        assert fetcher.fetched == []
+
+
+class TestTheArmingSwitchHasNoConsumerYet:
     """
-    Phase D2: the ops area, the detail switch and the arming switch exist
-    from phase D1 and have no consumer until D3 and D4, so every other switch
-    on, with or without the three, the loop plans and sends exactly the same
-    — the docs/09 section 13 matrix's "the arming switch alone plans
-    nothing", built up from here.
+    The arming switch exists from phase D1 and has no consumer until D4, so
+    with every other switch on — the ops area and the detail switch among
+    them, a model-written finding and a failed job stored for their sets to
+    ask about — the loop plans and sends exactly the same with it on as off;
+    and on alone it plans nothing: the docs/09 section 13 matrix's "the
+    arming switch alone plans nothing". Until phase D3 this class held the
+    ops area and the detail switch to the same, which D3 gave a consumer;
+    :class:`TestTheOpsMatrix` holds them now.
     """
 
-    async def test_ops_the_detail_switch_and_arming_plan_nothing_of_their_own(
+    async def test_with_every_other_switch_on_it_changes_nothing(
         self,
         monkeypatch: pytest.MonkeyPatch,
         seeded: tuple[str, asyncpg.Connection],
@@ -496,28 +668,36 @@ class TestTheSwitchesWithNoConsumerYet:
     ) -> None:
         dsn, conn = seeded
         await _raise_findings(conn)
-        await _set(conn, dict.fromkeys(SWITCHES, True))
+        failed = await _fail_a_job(conn)
+        await _set(conn, {**dict.fromkeys(SWITCHES, True), OPS: True, DETAIL: True})
         await _run_the_loop(monkeypatch, dsn)
-        planned = {
-            row["dedupe_key"] for row in await conn.fetch("SELECT dedupe_key FROM jobs")
-        }
+        planned = await _planned(conn, [failed])
         sent = len(client.calls)
         assert any(key.startswith("jev_ask:findings.") for key in planned)
+        assert any(key.startswith("jev_ask:ops.job_error@") for key in planned)
 
-        await _set(
-            conn,
-            {
-                OPS: True,
-                flags.JEV_SEND_INTERNAL_DETAIL: True,
-                flags.JEV_ARM_CARD_CHECK: True,
-            },
-        )
+        await _set(conn, {flags.JEV_ARM_CARD_CHECK: True})
         await _run_the_loop(monkeypatch, dsn)
-        again = {
-            row["dedupe_key"] for row in await conn.fetch("SELECT dedupe_key FROM jobs")
-        }
-        assert again == planned, "a switch with no consumer planned something"
-        assert len(client.calls) == sent, "a switch with no consumer sent something"
+        assert await _planned(conn, [failed]) == planned, (
+            "the arming switch planned something"
+        )
+        assert len(client.calls) == sent, "the arming switch sent something"
+
+    async def test_on_alone_it_plans_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seeded: tuple[str, asyncpg.Connection],
+        client: _Client,
+        fetcher: _Fetcher,
+    ) -> None:
+        dsn, conn = seeded
+        await _raise_findings(conn)
+        failed = await _fail_a_job(conn)
+        await _set(conn, {flags.JEV_ARM_CARD_CHECK: True})
+        await _run_the_loop(monkeypatch, dsn)
+        assert await _planned(conn, [failed]) == set()
+        assert client.calls == [] and fetcher.fetched == []
+        assert set((await _jev_rows(conn)).values()) == {0}
 
 
 #: Two invented excerpts stored before the areas are set: one the screen

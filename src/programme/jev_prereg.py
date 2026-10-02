@@ -582,6 +582,9 @@ SET_PLAN_VERSIONS: Mapping[tuple[str, int], int] = MappingProxyType(
         ("guardrail.card", 1): 1,
         ("findings.owner", 1): 1,
         ("findings.severity", 1): 1,
+        # Plan version 2 names the redactor's version 2 (D3's review); its
+        # rules, and so its verdicts, are version 1's.
+        ("ops.job_error", 1): 2,
     }
 )
 
@@ -606,6 +609,9 @@ GOLDEN_SET_PLAN_HASHES: Mapping[tuple[str, int], str] = MappingProxyType(
         ),
         ("findings.severity", 1): (
             "256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2"
+        ),
+        ("ops.job_error", 1): (
+            "0578dd14068847a7062f0f0a2f8f2f938a834efd1ac0c41092a9be7168ae5bba"
         ),
     }
 )
@@ -678,6 +684,16 @@ SET_TARGETS: Mapping[tuple[str, str], Mapping[str, Any]] = MappingProxyType(
             }
         ),
         ("findings.severity", "severity"): MappingProxyType(
+            {
+                "acting_class": None,
+                "statistic": "covered_accuracy",
+                "at_least": 0.80,
+                "bound": "wilson_lower_at_gate_ci",
+            }
+        ),
+        # Phase D3: a cause suggested beside code's, which acts on nothing,
+        # measured as the findings sets are (docs/09, section 3.4).
+        ("ops.job_error", "cause"): MappingProxyType(
             {
                 "acting_class": None,
                 "statistic": "covered_accuracy",
@@ -846,6 +862,120 @@ MECHANISM_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
+#: The ops set's keyword rules (phase D3, docs/09 section 3.4): the likely
+#: cause of a failed job, read by :func:`keyword_label` from the subject's
+#: text — the job's kind and its skeleton, ``jev_questions.job_error_text`` —
+#: ordered, first match wins, the code-defect words before ``data_missing``,
+#: so "missing 1 required positional argument" is a code defect; text no
+#: keyword is in is :data:`OPS_KEYWORD_FALLBACK`.
+#:
+#: The design's draft, cut to what can fire. Each keyword is held to a real
+#: message a triaged job can record as it stands — a builtin's, triggered in
+#: the test; an operating system's error, by its errno; PostgreSQL's, as
+#: asyncpg raises it; numpy's and pandas' own — that code leaves to Jev and
+#: whose skeleton is admissible, the keyword found in its subject text by this
+#: matcher (``tests/unit/test_jev_prereg.py::TestTheOpsKeywords``). A keyword no
+#: such message produces is dropped: every HTTP status, the rate-limit words,
+#: ``unauthorized`` and ``forbidden``, since the data sources wrap every
+#: vendor failure in a message code places (``jev_chips``); the words the
+#: redactor cannot emit (``throttled``, ``unauthorised``, ``credential``,
+#: ``exhausted``, ``dns``, ``outage``, ``inconsistent``); the builtins'
+#: messages too short to be asked about (``not callable``, ``not
+#: subscriptable``, ``is not defined``); and ``password``, ``cannot connect``,
+#: ``empty response``, ``no data``, ``delisted`` and ``not found``, which no
+#: such message holds in an admissible skeleton. So the rule never answers
+#: ``rate_limit``.
+OPS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "credentials",
+        (
+            "permission",  # "permission denied", PostgreSQL's or the system's
+            "authentication",  # "authentication failed", PostgreSQL refusing a login
+        ),
+    ),
+    (
+        "database",
+        ("deadlock", "constraint", "violates", "duplicate key", "could not serialize"),
+    ),
+    ("resource_limit", ("memory", "disk", "no space")),
+    (
+        "network",
+        (
+            "connection",
+            "refused",
+            "reset",
+            "timeout",
+            "timed out",
+            "unreachable",
+            "socket",
+        ),
+    ),
+    ("vendor_service", ("unavailable",)),
+    (
+        "code_defect",
+        (
+            "has no attribute",
+            "unsupported operand",
+            "out of range",
+            "division by zero",
+            "not iterable",
+            "unexpected keyword argument",
+            "required positional argument",
+        ),
+    ),
+    ("data_missing", ("missing", "no rows", "empty")),
+    ("data_invalid", ("malformed", "invalid", "nan")),
+    ("configuration", ("parameter", "setting", "configuration", "unknown")),
+)
+
+#: What the ops rule gives text no keyword is in: ``unclear``, the set's
+#: escape (docs/09, section 3.4).
+OPS_KEYWORD_FALLBACK = "unclear"
+
+#: Who the ops set is asked about, and so whose skeletons are labelled (phase
+#: D3, docs/09 sections 3.4 and 3.7): every job of a triaged kind that failed
+#: and finished after the UTC day the pinned model was first observed
+#: (``jev_catalogue.MODEL_FIRST_OBSERVED``), so that every item is dated
+#: strictly after it — a job failed by an expired lease has no finish time,
+#: and is never in it — whose error code's table leaves to Jev and whose
+#: skeleton holds at least the redactor's minimum of content words, each
+#: skeleton once, by its state's address; and dated over these same rows
+#: (``jev_repo.job_error_population``). The kinds, both versions and hashes
+#: and the minimum are copies, since this module loads the standard library
+#: alone, and ``tests/unit/test_jev_prereg.py::TestTheOpsPlan`` holds each to
+#: ``jev_redact``'s and ``jev_chips``' own, so the plan's hash moves with the
+#: redactor and the shapes table.
+OPS_POPULATION: Mapping[str, Any] = MappingProxyType(
+    {
+        "table": "jobs",
+        "status": "failed",
+        "kinds": ("backtest", "walkforward", "ingest_bars", "ingest_reference_bars"),
+        "finished": "after the UTC day the pin was first observed",
+        "left_to_jev_by": MappingProxyType(
+            {
+                "rule": "jev_chips.code_cause",
+                "version": 2,
+                "sha256": (
+                    "0ce6cdc62fbbbfe20ba80fa5f268157f6a21f838687fc8657bf8f4a84aa474d8"
+                ),
+            }
+        ),
+        "redactor": MappingProxyType(
+            {
+                "rule": "jev_redact.skeleton",
+                "version": 2,
+                "sha256": (
+                    "ed4585f4750734e4615fc193300fddbc858fcb234462d3667bb859e05c1a3814"
+                ),
+            }
+        ),
+        "min_content_tokens": 3,
+        "subject": "job_error",
+        "address": "jev_hash.state_hash of the state sent",
+        "dated_by": "the earliest finished_at of the population's rows holding it",
+    }
+)
+
 #: The words a keyword's plural never falls on: in "portfolio of" the noun is
 #: the one before.
 _NOT_PLURALISED = frozenset({"of"})
@@ -951,8 +1081,9 @@ def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
     its target (:data:`SET_TARGETS`) and its baseline, in the plan's
     ``keyword_baseline`` slot whatever its rule; and from phase D2, for the
     findings sets, the population they are asked about
-    (:data:`FINDINGS_POPULATION`). A phase C plan holds no population, so none
-    of their hashes moved.
+    (:data:`FINDINGS_POPULATION`), and from phase D3 the ops set's
+    (:data:`OPS_POPULATION`). A phase C plan holds no population, so none of
+    their hashes moved.
     """
 
     def question(name: str, key: str, baseline: Mapping[str, Any]) -> dict:
@@ -1003,10 +1134,20 @@ def _set_plans() -> dict[tuple[str, int], dict[str, Any]]:
                 {**FINDINGS_RECORDED_BASELINE, "reads": "severity"},
             ),
         },
+        ("ops.job_error", 1): {
+            "cause": question(
+                "ops.job_error",
+                "cause",
+                _keyword_baseline(
+                    OPS_KEYWORDS, "job_error_text", fallback=OPS_KEYWORD_FALLBACK
+                ),
+            ),
+        },
     }
     populations: dict[tuple[str, int], Mapping[str, Any]] = {
         ("findings.owner", 1): FINDINGS_POPULATION,
         ("findings.severity", 1): FINDINGS_POPULATION,
+        ("ops.job_error", 1): OPS_POPULATION,
     }
     return {
         key: {
@@ -1092,6 +1233,9 @@ __all__ = [
     "MIN_FLIP_PAIRS",
     "MIN_TEST_ITEMS",
     "NEAR_THRESHOLD",
+    "OPS_KEYWORDS",
+    "OPS_KEYWORD_FALLBACK",
+    "OPS_POPULATION",
     "PERFORMANCE_CLAIM_BASELINE",
     "PLAN_VERSION",
     "REASKS_PER_DAY",

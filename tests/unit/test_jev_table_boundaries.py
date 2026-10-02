@@ -40,6 +40,12 @@ an import scan cannot see: a query is a string, and a module that never imports
   ``origin``, ``repo.raise_finding`` takes it keyword-only with no default,
   its two callers pass ``'model'`` (the tick) and ``'operator'`` (the API) as
   literals, and the one update of the table sets the closure's columns alone.
+* **A failed job's error goes to the redactor and to code, and nowhere else.**
+  From phase D3, the handler, the planner, the harness and the reads beneath
+  them hand a job's error only to ``jev_redact.skeleton``,
+  ``jev_chips.code_cause`` or ``jev_chips.residue_skeleton``, so what becomes
+  state is the skeleton alone; one read is exempt by name, the forward
+  report's, of the forward clock's own job.
 
 The scan reads strings, because that is where SQL lives: literals, f-strings,
 and the one text a chain of ``+`` or a ``str.join`` of literals assembles,
@@ -2925,3 +2931,239 @@ def test_the_switch_reach_passes_a_reader() -> None:
     )
     graph = _synthetic({**_SWITCH_TREE, "src/programme/x.py": module})
     assert _switch_writes_reached(graph, ["src.programme.x"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Phase D3: a job's error goes to the redactor and to code, and nowhere else
+# ---------------------------------------------------------------------------
+
+#: What a failed job's error may be handed to on the Jev side: the redactor,
+#: code's triage — its cause, and the shape the harness names beside it, an
+#: entry of code's own table that carries no word of the error — and the
+#: function that is both, which the planner and the population read (docs/09,
+#: sections 4, 5.1 and 9.3, M8).
+ERROR_READERS = frozenset(
+    {
+        "jev_redact.skeleton",
+        "jev_chips.code_cause",
+        "jev_chips.job_error_shape",
+        "jev_chips.residue_skeleton",
+    }
+)
+
+#: The modules on the Jev side that read failed jobs: the handler, the
+#: planner, the harness and the reads beneath them.
+ERROR_MODULES = ("jev_jobs", "jev_plan", "jev_eval", "jev_repo")
+
+#: The one read of a job's error there that is not a triaged job's, by its
+#: function: the forward report's reason for an absent session, which reads the
+#: forward clock's own ``jev_regime`` job — a programme kind, whose errors the
+#: programme writes — and prints it on the operator's terminal. It is never
+#: sent; :func:`test_the_one_exemption_reads_the_forward_clocks_own_job` holds
+#: it to that job.
+ERROR_EXEMPT = frozenset({("jev_eval", "_absent_reason")})
+
+
+def _dotted(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
+
+
+def _reads_an_error(node: ast.AST) -> bool:
+    """``x["error"]``, ``x.get("error")`` or ``x.get("error", …)``."""
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+        key = node.slice
+        return isinstance(key, ast.Constant) and key.value == "error"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and node.args
+    ):
+        key = node.args[0]
+        return isinstance(key, ast.Constant) and key.value == "error"
+    return False
+
+
+def _handed_to_a_reader(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """Whether ``node`` is itself an argument of a call to an allowed reader."""
+    parent = parents.get(node)
+    if isinstance(parent, ast.keyword):
+        parent = parents.get(parent)
+    return isinstance(parent, ast.Call) and _dotted(parent.func) in ERROR_READERS
+
+
+def _error_uses(source: str) -> list[tuple[int, str | None, str]]:
+    """
+    Every use in ``source`` of a job's error that is not handed straight to
+    :data:`ERROR_READERS`, as ``(line, function, what)``: a read of the key
+    used any other way, and a name bound to such a read — ``error =
+    row["error"]`` — loaded anywhere in its function but as an argument of an
+    allowed reader. It reads spellings, and is not a sandbox: a row handed
+    whole to something that reads it is the canary's to find
+    (``tests/integration/test_jev_ops.py``).
+    """
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def function_of(node: ast.AST) -> ast.AST | None:
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node
+        return None
+
+    found: list[tuple[int, str | None, str]] = []
+    for node in ast.walk(tree):
+        if not _reads_an_error(node) or _handed_to_a_reader(node, parents):
+            continue
+        function = function_of(node)
+        name = getattr(function, "name", None)
+        parent = parents.get(node)
+        aliased = (
+            isinstance(parent, ast.Assign)
+            and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Name)
+            and function is not None
+        )
+        if not aliased:
+            found.append((node.lineno, name, ast.unparse(node)))
+            continue
+        alias = parent.targets[0].id
+        for use in ast.walk(function):
+            if (
+                isinstance(use, ast.Name)
+                and use.id == alias
+                and isinstance(use.ctx, ast.Load)
+                and not _handed_to_a_reader(use, parents)
+            ):
+                found.append((use.lineno, name, f"{alias} (= {ast.unparse(node)})"))
+    return found
+
+
+def test_a_job_error_is_used_only_by_the_redactor_and_code_cause() -> None:
+    """
+    docs/09, section 13 (D3), M8: on the Jev side a failed job's error is read
+    by ``jev_redact.skeleton`` and ``jev_chips.code_cause`` — or
+    ``jev_chips.residue_skeleton``, which is both — and by nothing else, so
+    what becomes state is the skeleton alone, and no error is logged, stored,
+    returned or put in a payload by the handler, the planner, the harness or
+    the reads beneath them. One read is exempt, by name
+    (:data:`ERROR_EXEMPT`).
+    """
+    offences = []
+    reads = 0
+    for module in ERROR_MODULES:
+        source = (PROGRAMME / f"{module}.py").read_text(encoding="utf-8")
+        reads += sum(_reads_an_error(node) for node in ast.walk(ast.parse(source)))
+        offences += [
+            f"src/programme/{module}.py:{line} in {function}: {what}"
+            for line, function, what in _error_uses(source)
+            if (module, function) not in ERROR_EXEMPT
+        ]
+    assert not offences, "a job's error goes elsewhere:\n" + "\n".join(offences)
+    assert reads >= 6, "the scan read none of the handler's and planner's reads"
+
+
+def test_the_one_exemption_reads_the_forward_clocks_own_job() -> None:
+    """
+    The exempt function is called once, with the job its session's regime
+    key names, and reads the error as it reads nothing else — so the one
+    error the harness prints is the forward clock's own.
+    """
+    source = (PROGRAMME / "jev_eval.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    callers = [
+        function
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(node, ast.Call) and _dotted(node.func) == "_absent_reason"
+            for node in ast.walk(function)
+        )
+    ]
+    (caller,) = callers
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _dotted(node.func) == "_absent_reason"
+    ]
+    (call,) = calls
+    assert ast.unparse(call) == "_absent_reason(jobs.get(key))"
+    # The key it reads the job by, in the one function that calls it, is the
+    # forward clock's own job's for the session.
+    keys = [
+        node
+        for node in ast.walk(caller)
+        if isinstance(node, ast.Assign)
+        and [ast.unparse(t) for t in node.targets] == ["key"]
+    ]
+    assert [ast.unparse(node.value) for node in keys] == [
+        "jev_clock.regime_job_key(question_set, session)"
+    ]
+    exempt = {name for _, name in ERROR_EXEMPT}
+    uses = [use for use in _error_uses(source) if use[1] in exempt]
+    assert uses, "the exemption names a function that reads no error"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'logger.info("job failed: %s", row["error"])',
+        "return f\"{job['error']}\"",
+        'return {"error": row["error"]}',
+        'return str(row.get("error"))',
+        'error = row["error"]\n    logger.warning(error)',
+        'error = row["error"]\n    jev_redact.skeleton(error)\n    print(error)',
+        'return row["error"]',
+        'await conn.execute("UPDATE x SET y = $1", row["error"])',
+        'return jev_redact.admissible(row["error"])',
+        'return skeleton(row["error"])',
+    ],
+    ids=[
+        "logged",
+        "formatted",
+        "stored",
+        "get-converted",
+        "aliased-and-logged",
+        "aliased-and-printed",
+        "returned",
+        "written",
+        "another-redactor-function",
+        "imported-by-name",
+    ],
+)
+def test_the_error_scan_finds_each_use(body: str) -> None:
+    source = f"async def handler(conn, row, job):\n    {body}\n"
+    assert _error_uses(source), body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'return jev_redact.skeleton(row["error"])',
+        'return jev_chips.code_cause(row["kind"], row["error"])',
+        'return jev_chips.residue_skeleton(row["kind"], error=row["error"])',
+        'return jev_redact.admissible(jev_redact.skeleton(row["error"]))',
+        'error = row["error"]\n    return jev_chips.residue_skeleton(kind, error)',
+        'return row["kind"], row["finished_at"], state.error',
+    ],
+    ids=[
+        "redacted",
+        "triaged",
+        "both-by-keyword",
+        "redacted-then-counted",
+        "aliased-then-redacted",
+        "no-error-read",
+    ],
+)
+def test_the_error_scan_passes_the_readers(body: str) -> None:
+    source = f"async def handler(conn, row, job, kind, state):\n    {body}\n"
+    assert _error_uses(source) == [], body

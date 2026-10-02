@@ -43,6 +43,7 @@ import json
 import math
 import random
 import re
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
@@ -59,10 +60,12 @@ from src.programme import (
     flags,
     jev_calibration,
     jev_catalogue,
+    jev_chips,
     jev_clock,
     jev_eval,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     jev_stats,
     web_sources,
@@ -1322,14 +1325,16 @@ class TestTheNewSubjects:
 
     def test_question_problem_admits_finding_title_and_job_error(self) -> None:
         """
-        Both findings sets' questions may be evaluated, and the subjects a
-        label may be of are exactly those of the registered sets with ground
-        truth: phase D3's job error joins them when ``ops.job_error`` is
-        registered, and this fails until it does.
+        Both findings sets' questions and, from phase D3, the ops set's may be
+        evaluated, and the subjects a label may be of are exactly those of the
+        registered sets with ground truth: the job error joined them when
+        ``ops.job_error`` was registered.
         """
         assert jev_eval.question_problem(OWNER, "owning_role") is None
         assert jev_eval.question_problem(SEVERITY, "severity") is None
+        assert jev_eval.question_problem(jev_questions.OPS_JOB_ERROR, "cause") is None
         assert "finding_title" in jev_eval.LABELLED_SUBJECTS
+        assert "job_error" in jev_eval.LABELLED_SUBJECTS
         measured = {
             jev_questions.STATE_SUBJECT[question_set.state_model]
             for name, question_set in jev_questions.REGISTRY.items()
@@ -1617,6 +1622,10 @@ class _FlagConn:
 CANARY = "CANARY-5e1d"
 FINDING_TITLE = f"Invented Fills Assumed at Prices No Venue Gave {CANARY}"
 TODAY = date(2026, 10, 1)
+#: The database's clock as the read surfaces' rigs give it, on :data:`TODAY`
+#: and within a week of the day the pin was first observed, so the ops rule's
+#: read starts where its population does (phase D3).
+NOW = datetime(2026, 10, 1, 15, tzinfo=UTC)
 
 
 class _Findings:
@@ -1972,6 +1981,10 @@ class _Outcomes:
         self.auth_held = False
         self.refused: set[str] = set()
         self.refusals_read: list[dict[str, Any]] = []
+        # Phase D3: the week's failed jobs, and the reads made of them.
+        self.failed: list[dict[str, Any]] = []
+        self.failed_reads: list[datetime] = []
+        self.outcome_reads: list[dict[str, Any]] = []
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def open_findings(conn: Any) -> list[dict[str, Any]]:
@@ -1981,7 +1994,23 @@ class _Outcomes:
             return self.jev
 
         async def ask_outcomes(conn: Any, **kwargs: Any) -> dict[str, Any]:
-            return self.outcomes.get(kwargs["question_set"].name, {})
+            # As the shipped read answers: a row for every subject asked about,
+            # nothing on record where the rig names none.
+            self.outcome_reads.append(kwargs)
+            given = self.outcomes.get(kwargs["question_set"].name, {})
+            return {
+                subject: given.get(subject, _outcome())
+                for subject in kwargs["subject_ids"]
+            }
+
+        async def recent_failed_jobs(
+            conn: Any, *, since: datetime, limit: int = 200
+        ) -> list[dict[str, Any]]:
+            self.failed_reads.append(since)
+            return [dict(row) for row in self.failed]
+
+        async def database_now(conn: Any) -> datetime:
+            return NOW
 
         async def auth_failed_today(conn: Any) -> bool:
             return self.auth_held
@@ -1999,6 +2028,7 @@ class _Outcomes:
             "ask_outcomes": ask_outcomes,
             "auth_failed_today": auth_failed_today,
             "set_refused": set_refused,
+            "recent_failed_jobs": recent_failed_jobs,
             "answers_for_subjects": answered,
             "answers_for": answered,
             "probe_pairs": answered,
@@ -2006,6 +2036,7 @@ class _Outcomes:
             "get_request": answered,
         }.items():
             monkeypatch.setattr(jev_repo, name, fake)
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
 
 
 def _outcome(**overrides: Any) -> dict[str, Any]:
@@ -2192,6 +2223,8 @@ class TestSuggestions:
         asked, each read as the road reads it — a 422 for the set, its
         version and the pin, and an authentication failure today — were held
         by no case, and suggestions forced to say "no" for every 422 passed.
+        From phase D3 the ops set's hold is read and named beside them, since
+        suggestions says how its asks came out too.
         """
         self._register(outcomes_rig)
         outcomes_rig.refused = {"findings.severity"}
@@ -2203,15 +2236,22 @@ class TestSuggestions:
             "authentication_failure_today": True,
             "findings.owner refused under the pin": False,
             "findings.severity refused under the pin": True,
+            "ops.job_error refused under the pin": False,
         }
         assert outcomes_rig.refusals_read == [
             {"question_set": name, "version": 1, "model": MODEL}
-            for name in ("findings.owner", "findings.severity")
+            for name in ("findings.owner", "findings.severity", "ops.job_error")
         ]
         text = jev_eval.format_suggestions(report)
         assert "findings.severity refused under the pin: yes" in text
         assert "findings.owner refused under the pin: no" in text
         assert "authentication failure today: yes" in text
+        # D3's review (D3RT-4): a hold is printed under its set's own name.
+        # ``ops.job_error`` is the first set whose name holds an underscore,
+        # and the line once printed it as "ops.job error", a set that does
+        # not exist.
+        assert "ops.job_error refused under the pin: no" in text
+        assert "ops.job error" not in text
 
     @pytest.mark.parametrize(
         "pin",
@@ -2256,6 +2296,847 @@ class TestSuggestions:
         text = jev_eval.format_suggestions(report)
         assert "pin: none usable, so how each ask came out is not read" in text
         assert "not asked: no usable pin" not in text
+
+
+# ---------------------------------------------------------------------------
+# The read surfaces' jobs half (phase D3)
+# ---------------------------------------------------------------------------
+
+#: Invented failed jobs, one for each way code reads an error, every error but
+#: the queue's own carrying :data:`CANARY`, which no output may show.
+FAILED_JOBS = {
+    # Code leaves it to Jev, and its skeleton holds enough words to ask about.
+    "left": (
+        "ingest_bars",
+        f"[Errno 111] Connection refused while reading an invented page {CANARY}",
+    ),
+    # Another skeleton code leaves to Jev.
+    "other": (
+        "backtest",
+        f'duplicate key value violates unique constraint "{CANARY}"',
+    ),
+    # A shape of code's own table places it.
+    "placed": ("backtest", f"unknown backtest run 4c1f {CANARY}"),
+    # Code leaves it to Jev, and its skeleton is too short to ask about.
+    "short": ("walkforward", f"Invented {CANARY}"),
+    # A kind whose errors code alone places.
+    "untriaged": ("live_decision", f"Invented failure {CANARY}"),
+    # What the queue writes, for any kind, when a lease expires.
+    "expired": ("ingest_bars", "lease expired; worker presumed dead"),
+}
+
+#: Exactly what the ``left`` job's error would be sent as: its kind and its
+#: skeleton, the marker an ``[id]`` and each word outside the vocabulary a
+#: ``[word]``.
+LEFT_STATE = {
+    "job_kind": "ingest_bars",
+    "error": [
+        "errno",
+        "[number]",
+        "connection",
+        "refused",
+        "while",
+        "[word]",
+        "an",
+        "[word]",
+        "[id]",
+    ],
+}
+
+#: When an invented job failed: within the population, and on the day the pin
+#: was first observed, before it starts (``jev_repo.job_error_since``).
+JOB_IN = datetime(2026, 9, 30, 9, tzinfo=UTC)
+JOB_EARLY = datetime(2026, 9, 26, 12, tzinfo=UTC)
+
+
+def _address_of(name: str) -> str:
+    """The subject a job of :data:`FAILED_JOBS` holds: its state's address."""
+    kind, error = FAILED_JOBS[name]
+    tokens = jev_chips.residue_skeleton(kind, error)
+    assert tokens is not None, name
+    return jev_questions.job_error_subject(
+        jev_questions.JobErrorState(job_kind=kind, error=tokens)
+    )
+
+
+def _job_row(name: str, finished_at: datetime | None, n: int) -> dict[str, Any]:
+    """A failed job of :data:`FAILED_JOBS`, as the reads beneath return it."""
+    kind, error = FAILED_JOBS[name]
+    return {
+        "id": uuid.UUID(f"0b9a6c1e-3f0d-4c55-8e21-{n:012d}"),
+        "kind": kind,
+        "error": error,
+        "finished_at": finished_at,
+    }
+
+
+def _ops_flags(**overrides: str | None) -> dict[str, str]:
+    """The switches, with the ops area and the detail switch on as well."""
+    rows: dict[str, str | None] = {
+        f"{flags.JEV_AREA_PREFIX}ops": "true",
+        flags.JEV_SEND_INTERNAL_DETAIL: "true",
+    }
+    rows.update(overrides)
+    return _flags(**rows)
+
+
+def _never_quoted(*shown: str) -> None:
+    """No output quotes a job's error: no marker, and no word of one."""
+    for text in shown:
+        assert CANARY not in text, text
+        assert "nvented" not in text, text
+        assert "backtest run" not in text and "presumed dead" not in text, text
+
+
+class _FailedJobs:
+    """
+    The ops rule's reads, faked: the planner's read of failed jobs, the
+    handler's read of one again by its id, the skeletons asked about today,
+    and the database's clock, each read recorded.
+    """
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.changed: dict[str, dict[str, Any] | None] = {}
+        self.asked: set[str] = set()
+        self.triage_reads: list[dict[str, Any]] = []
+        self.unasked_reads: list[dict[str, Any]] = []
+        self.clock_reads = 0
+
+    def add(self, name: str, finished_at: datetime | None) -> str:
+        row = _job_row(name, finished_at, len(self.rows))
+        self.rows.append(row)
+        return str(row["id"])
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def failed_jobs_for_triage(
+            conn: Any, *, kinds: Any, since: datetime, limit: int | None = 200
+        ) -> list[dict[str, Any]]:
+            self.triage_reads.append({"kinds": kinds, "since": since})
+            kept = [
+                dict(row)
+                for row in self.rows
+                if row["kind"] in kinds
+                and row["finished_at"] is not None
+                and row["finished_at"] > since
+            ]
+            kept.sort(key=lambda r: (r["finished_at"], str(r["id"])), reverse=True)
+            return kept[:limit]
+
+        async def get_failed_job(conn: Any, job_id: uuid.UUID) -> dict[str, Any] | None:
+            assert isinstance(job_id, uuid.UUID), job_id
+            for row in self.rows:
+                if row["id"] == job_id:
+                    change = self.changed.get(str(job_id), {})
+                    if change is None:
+                        return None
+                    return {**row, "status": "failed", **change}
+            return None
+
+        async def unasked_subjects(conn: Any, **kwargs: Any) -> list[str]:
+            self.unasked_reads.append(kwargs)
+            return [s for s in kwargs["subjects"] if s not in self.asked]
+
+        async def database_now(conn: Any) -> datetime:
+            self.clock_reads += 1
+            return NOW
+
+        for name, fake in {
+            "failed_jobs_for_triage": failed_jobs_for_triage,
+            "get_failed_job": get_failed_job,
+            "unasked_subjects": unasked_subjects,
+        }.items():
+            monkeypatch.setattr(jev_repo, name, fake)
+        monkeypatch.setattr(jev_clock, "database_now", database_now)
+
+
+@pytest.fixture
+def jobs_rig(monkeypatch: pytest.MonkeyPatch) -> _FailedJobs:
+    rig = _FailedJobs()
+    rig.install(monkeypatch)
+    return rig
+
+
+async def _ops_preview(
+    rows: dict[str, str] | None = None,
+    *,
+    limit: int = 10,
+    now: datetime | None = NOW,
+) -> dict[str, Any]:
+    return await jev_eval.preview_report(
+        _FlagConn(_ops_flags() if rows is None else rows),  # type: ignore[arg-type]
+        question_set=jev_questions.OPS_JOB_ERROR,
+        limit=limit,
+        day=TODAY,
+        now=now,
+    )
+
+
+class TestThePreviewOfAFailedJob:
+    """
+    docs/09, section 9.3 (D3): for ``ops.job_error``, the skeletons the
+    planner would ask about, each with the exact state the handler would send
+    or why it would send nothing; the switches the set needs, the detail
+    switch among them; and each failed job of a triaged kind the planner's
+    read reaches, by its id and kind, with code's chip and shape or that code
+    leaves it to Jev — never a job's error. The reads are the planner's and
+    the handler's, copied, and held equal to them on the same rows by
+    ``tests/integration/test_jev_ops.py::TestPreviewIsThePlanners``.
+    """
+
+    def test_the_window_is_the_planners(self) -> None:
+        from src.programme import jev_plan
+
+        assert jev_eval.OPS_WINDOW == jev_plan.OPS_WINDOW
+        assert "job_error" in jev_eval.PREVIEWED_SUBJECTS
+
+    async def test_it_prints_exactly_the_skeleton_that_would_leave(
+        self, findings_rig: _Findings, jobs_rig: _FailedJobs
+    ) -> None:
+        left = jobs_rig.add("left", NOW - timedelta(hours=1))
+        placed = jobs_rig.add("placed", NOW - timedelta(hours=2))
+        short = jobs_rig.add("short", NOW - timedelta(hours=3))
+        report = await _ops_preview()
+        address = _address_of("left")
+        assert (
+            jev_questions.job_error_subject(
+                jev_questions.JobErrorState(
+                    job_kind="ingest_bars", error=tuple(LEFT_STATE["error"])
+                )
+            )
+            == address
+        )
+        assert report["subjects"] == [
+            {
+                "subject_type": "job_error",
+                "subject_id": address,
+                "source_id": left,
+                "state": LEFT_STATE,
+                "not_sent_because": None,
+            }
+        ]
+        assert report["switches"] == {
+            flags.PROGRAMME_ENABLED: True,
+            flags.JEV_ENABLED: True,
+            f"{flags.JEV_AREA_PREFIX}ops": True,
+            flags.JEV_SEND_INTERNAL_DETAIL: True,
+        }
+        assert (report["lane"], report["provenance"]) == ("ops", "system")
+        assert report["would_plan"] is True and report["not_planned_because"] == []
+        assert report["calls_left_today"] == jev_catalogue.lane_budget(500, "ops")
+        assert report["failed_jobs"] == [
+            {
+                "job_id": left,
+                "kind": "ingest_bars",
+                "finished_at": (NOW - timedelta(hours=1)).isoformat(),
+                "code_cause": None,
+                "code_shape": None,
+                "triage": "left to Jev",
+                "subject_id": address,
+            },
+            {
+                "job_id": placed,
+                "kind": "backtest",
+                "finished_at": (NOW - timedelta(hours=2)).isoformat(),
+                "code_cause": "code_defect",
+                "code_shape": "unknown_backtest_run",
+                "triage": "placed by code: code_defect",
+                "subject_id": None,
+            },
+            {
+                "job_id": short,
+                "kind": "walkforward",
+                "finished_at": (NOW - timedelta(hours=3)).isoformat(),
+                "code_cause": None,
+                "code_shape": None,
+                "triage": (
+                    "left to Jev, and too few words of the vocabulary to ask about"
+                ),
+                "subject_id": None,
+            },
+        ]
+        assert jobs_rig.triage_reads == [
+            {
+                "kinds": jev_redact.TRIAGED_KINDS,
+                "since": jev_repo.job_error_since(MODEL),
+            }
+        ]
+        assert jobs_rig.unasked_reads == [
+            {
+                "question_set": jev_questions.OPS_JOB_ERROR,
+                "model": MODEL,
+                "subject_type": "job_error",
+                "subjects": [address],
+                "day": TODAY,
+            }
+        ]
+        text = jev_eval.format_preview(report)
+        assert f"job_error {address} from {left}" in text
+        assert f"would send: {json.dumps(LEFT_STATE, sort_keys=True)}" in text
+        assert "jev_area_ops on; jev_send_internal_detail on" in text
+        assert "failed jobs the ops rule reads, newest first: 3" in text
+        assert (
+            f"job {placed} (backtest, failed {(NOW - timedelta(hours=2)).isoformat()}"
+            "): placed by code: code_defect (unknown_backtest_run)"
+        ) in text
+        _never_quoted(text, json.dumps(report))
+
+    async def test_each_skeleton_once_by_its_newest_job(
+        self, findings_rig: _Findings, jobs_rig: _FailedJobs
+    ) -> None:
+        """
+        The planner's rule: a skeleton is one subject, naming the newest job
+        that failed with it, newest first, at most the limit; one already
+        asked about today is not planned again, and its jobs are still listed.
+        """
+        older = jobs_rig.add("left", NOW - timedelta(hours=5))
+        newer = jobs_rig.add("left", NOW - timedelta(hours=1))
+        other = jobs_rig.add("other", NOW - timedelta(hours=2))
+        report = await _ops_preview()
+        assert [(s["subject_id"], s["source_id"]) for s in report["subjects"]] == [
+            (_address_of("left"), newer),
+            (_address_of("other"), other),
+        ]
+        assert [job["job_id"] for job in report["failed_jobs"]] == [
+            newer,
+            other,
+            older,
+        ]
+        assert len((await _ops_preview(limit=1))["subjects"]) == 1
+        jobs_rig.asked = {_address_of("left")}
+        report = await _ops_preview()
+        assert [s["source_id"] for s in report["subjects"]] == [other]
+        assert len(report["failed_jobs"]) == 3
+
+    @pytest.mark.parametrize(
+        ("change", "why"),
+        [
+            (None, "the job is no longer stored"),
+            ({"status": "queued"}, "the job is 'queued', not failed"),
+            (
+                {"kind": "live_decision"},
+                "a 'live_decision' job, whose errors code alone places",
+            ),
+            ({"finished_at": None}, "the job has no finish time"),
+            ({"error": FAILED_JOBS["expired"][1]}, "code places its error (expired)"),
+            (
+                {"error": FAILED_JOBS["short"][1]},
+                "its error reduces to too few words of the vocabulary to ask about",
+            ),
+            (
+                {"error": FAILED_JOBS["other"][1]},
+                "the job no longer holds the skeleton planned",
+            ),
+        ],
+        ids=[
+            "gone",
+            "requeued",
+            "another-kind",
+            "no-finish",
+            "now-placed",
+            "now-too-short",
+            "another-skeleton",
+        ],
+    )
+    async def test_what_the_handler_would_not_send_is_said_and_not_quoted(
+        self,
+        findings_rig: _Findings,
+        jobs_rig: _FailedJobs,
+        change: dict[str, Any] | None,
+        why: str,
+    ) -> None:
+        """
+        The handler reads the job again by its id and admits it rule by rule
+        (``jev_jobs._admit_failed_job``), and holds the state it builds to
+        the address planned; a job that is no longer what was planned sends
+        nothing, and preview says which rule refuses it, in code's words,
+        quoting nothing of its error.
+        """
+        job = jobs_rig.add("left", NOW - timedelta(hours=1))
+        jobs_rig.changed[job] = change
+        report = await _ops_preview()
+        (subject,) = report["subjects"]
+        assert (subject["state"], subject["not_sent_because"]) == (None, why)
+        _never_quoted(json.dumps(report), jev_eval.format_preview(report))
+
+    @pytest.mark.parametrize(
+        ("rows", "reasons"),
+        [
+            (
+                _ops_flags(**{f"{flags.JEV_AREA_PREFIX}ops": "false"}),
+                ["jev_area_ops is off"],
+            ),
+            (
+                _ops_flags(**{flags.JEV_SEND_INTERNAL_DETAIL: None}),
+                ["jev_send_internal_detail is off"],
+            ),
+            (
+                _ops_flags(**{flags.JEV_SEND_INTERNAL_DETAIL: '"true"'}),
+                ["jev_send_internal_detail is off"],
+            ),
+            # An area needs the master switch as well as its own.
+            (
+                _ops_flags(**{flags.JEV_ENABLED: "false"}),
+                ["jev_enabled is off", "jev_area_ops is off"],
+            ),
+        ],
+        ids=["the-area", "detail-unset", "detail-not-json-true", "jev"],
+    )
+    async def test_each_switch_the_set_needs_is_read_and_named(
+        self,
+        findings_rig: _Findings,
+        jobs_rig: _FailedJobs,
+        rows: dict[str, str],
+        reasons: list[str],
+    ) -> None:
+        """
+        docs/09, owner item 9.1, its chosen default: the ops set is planned
+        and sent only while the ops area and the detail switch are both on,
+        each read through its own fail-closed reader, so the area on with the
+        detail switch off plans nothing; preview names the switch.
+        """
+        jobs_rig.add("left", NOW - timedelta(hours=1))
+        report = await _ops_preview(rows)
+        assert report["would_plan"] is False
+        assert report["not_planned_because"] == reasons
+        assert f"would plan: no — {'; '.join(reasons)}" in jev_eval.format_preview(
+            report
+        )
+
+    async def test_the_read_starts_where_the_planners_does(
+        self, findings_rig: _Findings, jobs_rig: _FailedJobs
+    ) -> None:
+        """
+        A week back from the clock, never before the midnight after the pin
+        was first observed (``jev_plan._job_error_subjects``); the clock is
+        the database's unless one is given.
+        """
+        first = jev_repo.job_error_since(MODEL)
+        assert first == datetime(2026, 9, 27, tzinfo=UTC)
+        assert NOW - jev_eval.OPS_WINDOW < first
+        await _ops_preview(now=None)
+        assert jobs_rig.clock_reads == 1
+        later = NOW + timedelta(days=30)
+        await _ops_preview(now=later)
+        assert jobs_rig.clock_reads == 1
+        assert [read["since"] for read in jobs_rig.triage_reads] == [
+            first,
+            later - timedelta(days=7),
+        ]
+
+    async def test_with_no_pin_no_subject_is_read_and_each_job_is_listed(
+        self, findings_rig: _Findings, jobs_rig: _FailedJobs
+    ) -> None:
+        jobs_rig.add("left", NOW - timedelta(hours=1))
+        report = await _ops_preview(_ops_flags(**{flags.JEV_MODEL: None}))
+        assert report["subjects"] == [] and jobs_rig.unasked_reads == []
+        assert [job["triage"] for job in report["failed_jobs"]] == ["left to Jev"]
+        assert "no usable pin is set" in report["not_planned_because"]
+
+    async def test_a_state_the_road_would_refuse_is_not_shown_as_sent(
+        self, findings_rig: _Findings, jobs_rig: _FailedJobs
+    ) -> None:
+        """
+        The road's two refusals before any call that the planner does not
+        foresee, as for a title (D2's review, D2RW-1): a state over the limit,
+        and a day whose budget is spent.
+        """
+        jobs_rig.add("left", NOW - timedelta(hours=1))
+        report = await _ops_preview(_ops_flags(**{flags.JEV_MAX_STATE_TOKENS: "1"}))
+        (subject,) = report["subjects"]
+        assert subject["state"] is None
+        assert subject["not_sent_because"].startswith(
+            "over the size limits, so the road would refuse it before any call: "
+        )
+        findings_rig.spent_everywhere = 500
+        (subject,) = (await _ops_preview())["subjects"]
+        assert (subject["state"], subject["not_sent_because"]) == (
+            None,
+            "the road would refuse it before any call: no call is left in the "
+            "day's request budget, 500 of 500 made today",
+        )
+
+
+class TestTheSuggestionsOfFailedJobs:
+    """
+    docs/09, section 9.3 (D3): each failed job of the last seven days, of any
+    kind, by its id and kind, with code's chip — code's, never Jev's — and
+    whether the ops set asked about it and how the ask came out; never its
+    error, its skeleton or an answer.
+    """
+
+    def _jobs(self, rig: _Outcomes) -> dict[str, str]:
+        """
+        One failed job of each way code reads an error, newest first; the
+        lease-expired one with no finish time, as the queue leaves it.
+        """
+        names = ("left", "placed", "short", "untriaged", "expired")
+        rig.failed = [
+            _job_row(name, NOW - timedelta(hours=n + 1), n)
+            for n, name in enumerate(names)
+        ]
+        rig.failed[-1]["finished_at"] = None
+        return {
+            name: str(row["id"]) for name, row in zip(names, rig.failed, strict=True)
+        }
+
+    async def test_ids_kinds_and_codes_chip_only(self, outcomes_rig: _Outcomes) -> None:
+        ids = self._jobs(outcomes_rig)
+        left = _address_of("left")
+        outcomes_rig.outcomes = {
+            "ops.job_error": {left: _outcome(answered=True, valid=True)}
+        }
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_ops_flags()),  # type: ignore[arg-type]
+            now=NOW,
+        )
+        assert outcomes_rig.failed_reads == [NOW - timedelta(days=7)]
+        assert report["failed_jobs_since"] == (NOW - timedelta(days=7)).isoformat()
+        placed = "not asked: code places its error"
+        assert report["failed_jobs"] == [
+            {
+                "job_id": ids["left"],
+                "kind": "ingest_bars",
+                "code": "left to Jev",
+                "shape": None,
+                "asks": {"ops.job_error": "answered"},
+            },
+            {
+                "job_id": ids["placed"],
+                "kind": "backtest",
+                "code": "code_defect",
+                "shape": "unknown_backtest_run",
+                "asks": {"ops.job_error": placed},
+            },
+            {
+                "job_id": ids["short"],
+                "kind": "walkforward",
+                "code": "left to Jev",
+                "shape": None,
+                "asks": {
+                    "ops.job_error": (
+                        "not asked: too few words of the vocabulary to ask about"
+                    )
+                },
+            },
+            {
+                "job_id": ids["untriaged"],
+                "kind": "live_decision",
+                "code": "unclassified",
+                "shape": None,
+                "asks": {
+                    "ops.job_error": "not asked: code alone places this kind's errors"
+                },
+            },
+            {
+                "job_id": ids["expired"],
+                "kind": "ingest_bars",
+                "code": "expired",
+                "shape": "lease_expired",
+                "asks": {"ops.job_error": placed},
+            },
+        ]
+        (read,) = [
+            read
+            for read in outcomes_rig.outcome_reads
+            if read["question_set"] is jev_questions.OPS_JOB_ERROR
+        ]
+        assert read == {
+            "question_set": jev_questions.OPS_JOB_ERROR,
+            "model": MODEL,
+            "subject_type": "job_error",
+            "subject_ids": [left],
+        }
+        text = jev_eval.format_suggestions(report)
+        assert "failed jobs since 2026-09-24T15:00:00+00:00, newest first: 5" in text
+        assert (
+            f"job {ids['left']} (ingest_bars): code left to Jev; ops.job_error answered"
+        ) in text
+        assert (
+            f"job {ids['placed']} (backtest): code code_defect "
+            f"(unknown_backtest_run); ops.job_error {placed}"
+        ) in text
+        for shown in (text, json.dumps(report)):
+            _never_quoted(shown)
+            for word in ("errno", "connection", "[word]", "[id]", "[number]"):
+                assert word not in shown, word
+
+    async def test_no_answer_no_probability_and_no_chip_of_jevs(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        """
+        The statuses are fixed phrases, none of them an option of the ops
+        set; the chip beside a job is code's — a cause of code's own table,
+        or that code leaves it to Jev — never Jev's; and nothing behind them
+        reads an option, a probability or a margin.
+        """
+        self._jobs(outcomes_rig)
+        outcomes_rig.outcomes = {
+            "ops.job_error": {_address_of("left"): _outcome(answered=True, valid=True)}
+        }
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_ops_flags()),  # type: ignore[arg-type]
+            now=NOW,
+        )
+        options = {
+            option
+            for _, question in jev_questions.OPS_JOB_ERROR.questions
+            for option in question["criteria"]
+        }
+        for job in report["failed_jobs"]:
+            for status in job["asks"].values():
+                assert not set(re.findall(r"[a-z_]+", status)) & options, status
+        assert {job["code"] for job in report["failed_jobs"]} <= {
+            *jev_chips.CAUSES,
+            *jev_chips.CODE_ONLY_CAUSES,
+            "left to Jev",
+        }
+        for function in (
+            jev_eval._failed_jobs_suggested,
+            jev_eval.job_ask_status,
+            jev_eval._on_record,
+        ):
+            body = inspect.getsource(function).split('"""')[2]
+            for word in ("argmax", "probabilit", "margin", "answers_for", "noul"):
+                assert word not in body, (function.__name__, word)
+
+    async def test_the_week_ends_at_the_databases_clock_unless_given(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_ops_flags())  # type: ignore[arg-type]
+        )
+        assert outcomes_rig.failed_reads == [NOW - jev_eval.OPS_WINDOW]
+        assert report["failed_jobs_since"] == (NOW - jev_eval.OPS_WINDOW).isoformat()
+
+    async def test_the_switches_named_include_the_ops_area_and_the_detail_switch(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        report = await jev_eval.suggestions_report(
+            _FlagConn(  # type: ignore[arg-type]
+                _ops_flags(**{flags.JEV_SEND_INTERNAL_DETAIL: None})
+            ),
+            now=NOW,
+        )
+        assert report["switches"] == {
+            flags.PROGRAMME_ENABLED: True,
+            flags.JEV_ENABLED: True,
+            f"{flags.JEV_AREA_PREFIX}findings": True,
+            f"{flags.JEV_AREA_PREFIX}ops": True,
+            flags.JEV_SEND_INTERNAL_DETAIL: False,
+        }
+        assert "jev_area_ops on; jev_send_internal_detail off" in (
+            jev_eval.format_suggestions(report)
+        )
+
+    async def test_a_job_the_planner_does_not_read_is_said_from_the_ledger_first(
+        self, outcomes_rig: _Outcomes
+    ) -> None:
+        """
+        A job that failed before the population starts, or whose lease
+        expired after an attempt that wrote its error, so that it has no
+        finish time, holds the very words another job may have had asked: its
+        status is read from the ledger first, and "not asked" is said only
+        where nothing is on record, never where the ledger may contradict it
+        (D2's review, D2RW-2's rule).
+        """
+        outcomes_rig.failed = [
+            _job_row("left", NOW - timedelta(hours=1), 0),
+            _job_row("left", JOB_EARLY, 1),
+            _job_row("left", None, 2),
+            _job_row("other", JOB_EARLY, 3),
+            _job_row("other", None, 4),
+        ]
+        outcomes_rig.outcomes = {
+            "ops.job_error": {_address_of("left"): _outcome(answered=True, valid=True)}
+        }
+        report = await jev_eval.suggestions_report(
+            _FlagConn(_ops_flags()),  # type: ignore[arg-type]
+            now=NOW,
+        )
+        assert [job["asks"]["ops.job_error"] for job in report["failed_jobs"]] == [
+            "answered",
+            "answered",
+            "answered",
+            "not asked: failed on or before the day the pin was first observed",
+            "not asked: no finish time, so the planner does not read it",
+        ]
+
+    async def test_with_no_pin_the_ledger_is_not_read_and_unknown_is_said(
+        self, outcomes_rig: _Outcomes, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        As for a finding (D2RW-2): with no pin how an ask came out is
+        unknown, and said to be; what the job's own row decides — its kind,
+        code's cause, a skeleton too short — is said whatever the pin.
+        """
+        ids = self._jobs(outcomes_rig)
+
+        async def no_outcomes(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("an outcome was read with no pin")
+
+        monkeypatch.setattr(jev_repo, "ask_outcomes", no_outcomes)
+        report = await jev_eval.suggestions_report(
+            _FlagConn(  # type: ignore[arg-type]
+                _ops_flags(**{flags.JEV_MODEL: None})
+            ),
+            now=NOW,
+        )
+        statuses = {
+            job["job_id"]: job["asks"]["ops.job_error"] for job in report["failed_jobs"]
+        }
+        assert statuses == {
+            ids["left"]: jev_eval.UNKNOWN_WITHOUT_A_PIN,
+            ids["placed"]: "not asked: code places its error",
+            ids["short"]: "not asked: too few words of the vocabulary to ask about",
+            ids["untriaged"]: "not asked: code alone places this kind's errors",
+            ids["expired"]: "not asked: code places its error",
+        }
+
+    @pytest.mark.parametrize(
+        ("kind", "cause", "address", "finished_at", "outcome", "status"),
+        [
+            (
+                "live_decision",
+                "unclassified",
+                None,
+                JOB_IN,
+                None,
+                "not asked: code alone places this kind's errors",
+            ),
+            (
+                "backtest",
+                "code_defect",
+                None,
+                JOB_IN,
+                None,
+                "not asked: code places its error",
+            ),
+            (
+                "ingest_bars",
+                None,
+                None,
+                JOB_IN,
+                None,
+                "not asked: too few words of the vocabulary to ask about",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_IN,
+                None,
+                "unknown: no usable pin, so how the ask came out is not read",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_EARLY,
+                None,
+                "unknown: no usable pin, so how the ask came out is not read",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_IN,
+                _outcome(answered=True, valid=True),
+                "answered",
+            ),
+            ("ingest_bars", None, "a" * 64, JOB_IN, _outcome(answered=True), "invalid"),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_IN,
+                _outcome(failed_calls=3, retired=True),
+                "retired: 3 failed calls",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_IN,
+                _outcome(waiting=True),
+                "waiting: a job is queued or running",
+            ),
+            ("ingest_bars", None, "a" * 64, JOB_IN, _outcome(), "not asked yet"),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_EARLY,
+                _outcome(),
+                "not asked: failed on or before the day the pin was first observed",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                datetime(2026, 9, 27, tzinfo=UTC),
+                _outcome(),
+                "not asked: failed on or before the day the pin was first observed",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                JOB_EARLY,
+                _outcome(answered=True, valid=True),
+                "answered",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                None,
+                _outcome(),
+                "not asked: no finish time, so the planner does not read it",
+            ),
+            (
+                "ingest_bars",
+                None,
+                "a" * 64,
+                None,
+                _outcome(failed_calls=1),
+                "not answered yet: 1 failed calls",
+            ),
+        ],
+        ids=[
+            "untriaged",
+            "placed",
+            "too-short",
+            "no-pin",
+            "no-pin-early",
+            "answered",
+            "invalid",
+            "retired",
+            "waiting",
+            "not-yet",
+            "early",
+            "at-the-population-start",
+            "early-but-asked",
+            "no-finish",
+            "no-finish-but-called",
+        ],
+    )
+    def test_each_status(
+        self,
+        kind: str,
+        cause: str | None,
+        address: str | None,
+        finished_at: datetime | None,
+        outcome: dict[str, Any] | None,
+        status: str,
+    ) -> None:
+        since = jev_repo.job_error_since(MODEL)
+        assert since == datetime(2026, 9, 27, tzinfo=UTC)
+        assert JOB_EARLY < since < JOB_IN
+        assert (
+            jev_eval.job_ask_status(kind, cause, address, finished_at, since, outcome)
+            == status
+        )
 
 
 class TestTheEvaluationIsTheTable:
@@ -2498,6 +3379,328 @@ class TestThePlansAnAnswerWasRecordedUnder:
         book.label(_title(0), "equities")
         evaluation = book.evaluate()
         assert (evaluation.n, evaluation.n_not_asked) == (1, 1)
+
+
+#: An invented failed job's error that code leaves to Jev and whose skeleton
+#: holds enough words to be asked about.
+OPS_ERROR = "[Errno 111] Connection refused while reading an invented page"
+
+
+def _failed_rows(*finished: datetime) -> list[dict[str, Any]]:
+    """Failed ingest jobs of :data:`OPS_ERROR`, one finished at each instant."""
+    return [
+        {
+            "id": f"6d0c5b1e-0d3a-4d37-9c43-{n:012d}",
+            "kind": "ingest_bars",
+            "error": OPS_ERROR,
+            "finished_at": at,
+        }
+        for n, at in enumerate(finished)
+    ]
+
+
+class TestTheOpsDates:
+    """
+    docs/09, section 3.7 (D3; revised: D-HMB-08): a job error's skeleton is
+    dated over exactly the rows its population reads — the failed jobs of a
+    triaged kind finished after the UTC day the pin was first observed — so
+    one occurrence of the same error before that day leaves the date where
+    the population puts it, and does not make every ops evaluation an upper
+    bound. ``jev_repo.item_dates`` over a fake of the one read beneath it;
+    ``tests/integration/test_jev_repo.py::TestTheJobErrorPopulation`` holds
+    the read itself.
+    """
+
+    async def test_an_item_is_dated_over_the_population_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+        before = datetime.combine(first - timedelta(days=30), time(9), UTC)
+        on_the_day = datetime.combine(first, time(18), UTC)
+        after = datetime.combine(first + timedelta(days=2), time(9), UTC)
+        later = after + timedelta(days=1)
+        rows = _failed_rows(later, after, on_the_day, before)
+        reads: list[datetime] = []
+
+        async def failed_jobs_for_triage(
+            conn: Any, *, kinds: Any, since: datetime, limit: int | None = 200
+        ) -> list[dict[str, Any]]:
+            reads.append(since)
+            kept = [r for r in rows if r["kind"] in kinds and r["finished_at"] > since]
+            return sorted(kept, key=lambda r: r["finished_at"], reverse=True)
+
+        monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
+        tokens = _skeleton_of(OPS_ERROR)
+        state = jev_questions.JobErrorState(job_kind="ingest_bars", error=tokens)
+        subject = ("job_error", jev_questions.job_error_subject(state))
+        other = ("job_error", "0" * 64)
+
+        dates = await jev_repo.item_dates(object(), [subject, other], model=MODEL)
+
+        assert dates == {subject: after, other: None}
+        assert reads == [jev_repo.job_error_since(MODEL)]
+        assert jev_repo.job_error_since(MODEL) == datetime.combine(
+            first + timedelta(days=1), time(0), UTC
+        )
+        assert jev_eval.possibly_in_training(MODEL, [dates[subject]]) is False
+        for occurrence in (before, on_the_day):
+            assert jev_eval.possibly_in_training(MODEL, [occurrence]) is True
+
+    async def test_only_occurrences_before_the_day_leave_it_undated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        A skeleton no job of the population holds is no item of it: undated,
+        which the harness reads as possibly in training, and never dated by an
+        occurrence the population does not read.
+        """
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[MODEL]
+        rows = _failed_rows(datetime.combine(first, time(23, 59), UTC))
+
+        async def failed_jobs_for_triage(
+            conn: Any, *, kinds: Any, since: datetime, limit: int | None = 200
+        ) -> list[dict[str, Any]]:
+            return [r for r in rows if r["finished_at"] > since]
+
+        monkeypatch.setattr(jev_repo, "failed_jobs_for_triage", failed_jobs_for_triage)
+        state = jev_questions.JobErrorState(
+            job_kind="ingest_bars", error=_skeleton_of(OPS_ERROR)
+        )
+        subject = ("job_error", jev_questions.job_error_subject(state))
+        assert await jev_repo.item_dates(object(), [subject], model=MODEL) == {
+            subject: None
+        }
+
+
+def _skeleton_of(error: str) -> tuple[str, ...]:
+    """The redactor's skeleton of ``error``, through the harness's own rule."""
+    tokens = jev_chips.residue_skeleton("ingest_bars", error)
+    assert tokens is not None, error
+    return tokens
+
+
+OPS = jev_questions.OPS_JOB_ERROR
+
+
+def _ops_state(*tokens: str, kind: str = "ingest_bars") -> jev_questions.JobErrorState:
+    return jev_questions.JobErrorState(job_kind=kind, error=tokens)
+
+
+class _OpsBook(_Book):
+    """
+    A synthetic ledger for ``ops.job_error``'s ``cause``: an item is named by
+    its text, ``jev_questions.job_error_text`` of a skeleton, and its subject
+    is the address of the state that text names, as the harness reads it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(OPS, "cause")
+
+    def subject(self, text: str) -> tuple[str, str]:
+        state = jev_questions.job_error_from_text(text)
+        assert state is not None, text
+        return (self.subject_type, jev_questions.job_error_subject(state))
+
+
+#: Invented skeletons of the ops population, as their texts, each with the
+#: cause the keyword rule gives it.
+OPS_TEXTS = {
+    "ingest_bars: errno [number] connection refused while [word] [id]": "network",
+    "backtest: duplicate key value violates unique constraint [quoted]": "database",
+    "walkforward: type object [quoted] has no attribute [quoted]": "code_defect",
+    "backtest: cannot convert float nan to integer": "data_invalid",
+}
+
+
+class TestTheOpsSubject:
+    """
+    docs/09, sections 3.4 and 3.7 (D3): a job error's skeleton is a subject a
+    label may be of, read as its text and addressed by its state; the keyword
+    baseline reads the text, ``"{kind}: {tokens}"``; and an ops evaluation
+    says beside its figures that its dates carry no information about
+    training (open item 81).
+    """
+
+    def test_the_ops_question_may_be_evaluated(self) -> None:
+        assert jev_eval.question_problem(OPS, "cause") is None
+        assert "job_error" in jev_eval.LABELLED_SUBJECTS
+        assert jev_eval.options_of(OPS, "cause") == list(jev_chips.CAUSES)
+
+    def test_the_baseline_reads_the_skeletons_text(self) -> None:
+        book = _OpsBook()
+        for text in OPS_TEXTS:
+            book.label(text, "network")
+            book.answer(text, "network")
+        guess, named = jev_eval.keyword_baseline(OPS, "cause")
+        assert "reading job_error_text" in named
+        for text, cause in OPS_TEXTS.items():
+            assert guess(book.subject(text), text) == cause, text
+        assert guess(book.subject("backtest: [word] [word] [word]"), "x") == "unclear"
+
+    def test_an_evaluation_is_built_over_skeletons(self) -> None:
+        book = _OpsBook()
+        for text, cause in OPS_TEXTS.items():
+            book.label(text, cause)
+            book.answer(text, cause)
+        evaluation = book.evaluate()
+        assert evaluation.n == len(OPS_TEXTS)
+        assert evaluation.possibly_in_training is False
+        lines = jev_eval.format_evaluation(evaluation.row())
+        assert jev_eval.OPS_DATING_NOTE in lines
+
+    def test_only_an_ops_evaluation_carries_the_dating_note(self) -> None:
+        book = _Book()
+        for n in range(4):
+            book.label(f"Invented Bond Timing {n}", "bonds")
+            book.answer(f"Invented Bond Timing {n}", "bonds")
+        lines = jev_eval.format_evaluation(book.evaluate().row())
+        assert jev_eval.OPS_DATING_NOTE not in lines
+
+
+def _ops_row(
+    state: jev_questions.JobErrorState, label: str = "network", **overrides: str
+) -> dict[str, str]:
+    """A labels file's row for ``state``, as an export of it is filled in."""
+    row = {
+        "question_set": OPS.name,
+        "question_set_version": str(OPS.version),
+        "question_key": "cause",
+        "subject_type": "job_error",
+        "subject_id": jev_questions.job_error_subject(state),
+        "label": label,
+        "text": jev_questions.job_error_text(state),
+    }
+    row.update(overrides)
+    return row
+
+
+class TestTheJobErrorLabels:
+    """
+    docs/09, section 3.5 (D3; revised: D-HMB-07): a job error's subject is
+    its state's hash, never its text's, so a label of one is checked through
+    the state its text names — the text required, naming exactly one state,
+    and that state's address the subject.
+    """
+
+    STATE = _ops_state("errno", "[number]", "connection", "refused")
+
+    def test_a_label_is_checked_through_the_state_its_text_names(self) -> None:
+        assert jev_eval.label_problems([_ops_row(self.STATE)]) == []
+        for cause in jev_chips.CAUSES:
+            assert jev_eval.label_problems([_ops_row(self.STATE, cause)]) == []
+        (problem,) = jev_eval.label_problems([_ops_row(self.STATE, "unclear")])
+        assert "escape" in problem
+
+    @pytest.mark.parametrize(
+        ("overrides", "says"),
+        [
+            ({"text": "ingest_bars: errno [number] connection reset"}, "another"),
+            ({"text": "backtest: errno [number] connection refused"}, "another"),
+            ({"text": ""}, "names no state"),
+            ({"text": "ingest_bars: errno [number] Connection refused"}, "no state"),
+            ({"text": "ingest_bars:  errno [number] connection refused"}, "no state"),
+            ({"text": "[Errno 111] Connection refused"}, "names no state"),
+            ({"text": "live_decision: errno [number] connection refused"}, "no state"),
+        ],
+        ids=[
+            "another-skeleton",
+            "another-kind",
+            "blanked",
+            "a-token-edited",
+            "a-space-too-many",
+            "the-raw-error",
+            "a-kind-never-triaged",
+        ],
+    )
+    def test_a_text_naming_another_state_or_none_is_refused(
+        self, overrides: dict[str, str], says: str
+    ) -> None:
+        (problem,) = jev_eval.label_problems([_ops_row(self.STATE, **overrides)])
+        assert problem.startswith("line 2: ") and says in problem, problem
+
+    def test_a_row_with_no_text_is_refused(self) -> None:
+        row = _ops_row(self.STATE)
+        del row["text"]
+        (problem,) = jev_eval.label_problems([row])
+        assert "names no state" in problem
+
+    def test_a_texts_own_sha256_is_not_its_address(self) -> None:
+        """A text subject's address is no job error's: the state is."""
+        row = _ops_row(self.STATE)
+        row["subject_id"] = text_sha256(row["text"])
+        (problem,) = jev_eval.label_problems([row])
+        assert "another state" in problem
+
+    async def test_an_exported_file_imports_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        The export's rows, each given a label, import as the items they were
+        exported as: through ``parse_labels``, ``label_problems`` and
+        ``import_labels`` with nothing refused.
+        """
+        states = [
+            self.STATE,
+            _ops_state("duplicate", "key", "value", "violates", kind="backtest"),
+        ]
+        population = [
+            {
+                "subject_type": "job_error",
+                "subject_id": jev_questions.job_error_subject(state),
+                "text": jev_questions.job_error_text(state),
+            }
+            for state in states
+        ]
+
+        async def subjects_to_label(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            assert kwargs == {"subject_type": "job_error"}
+            return population
+
+        async def subject_texts(conn: Any, subjects: Any) -> dict[Any, str]:
+            return {(r["subject_type"], r["subject_id"]): r["text"] for r in population}
+
+        async def labels_for(conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            return []
+
+        written: list[dict[str, Any]] = []
+
+        async def record_label(conn: Any, **kwargs: Any) -> int:
+            written.append(kwargs)
+            return len(written)
+
+        monkeypatch.setattr(jev_repo, "subjects_to_label", subjects_to_label)
+        monkeypatch.setattr(jev_repo, "subject_texts", subject_texts)
+        monkeypatch.setattr(jev_repo, "labels_for", labels_for)
+        monkeypatch.setattr(jev_repo, "record_label", record_label)
+        exported = await jev_eval.export_labels(
+            object(),  # type: ignore[arg-type]
+            question_set=OPS,
+            question_key="cause",
+            sample=None,
+            include_quarantined=False,
+        )
+        reader = csv.DictReader(io.StringIO(exported))
+        filled = [
+            {
+                "question_set": OPS.name,
+                "question_set_version": str(OPS.version),
+                "question_key": "cause",
+                "label": "network",
+                **row,
+            }
+            for row in reader
+        ]
+        rows = jev_eval.parse_labels(_labels_file(*filled, extra=("text",)))
+        assert jev_eval.label_problems(rows) == []
+        done = await jev_eval.import_labels(
+            object(),  # type: ignore[arg-type]
+            rows=rows,
+            labelled_by="operator:q",
+        )
+        assert done["recorded"] == 2
+        assert sorted(w["subject_id"] for w in written) == sorted(
+            r["subject_id"] for r in population
+        )
 
 
 class TestPossiblyInTraining:
@@ -4449,19 +5652,25 @@ class TestTheCommandsThatWrite:
                 [],
             ),
             "report": (["report"], []),
-            # Phase D2's two read surfaces, each read in the snapshot too.
+            # Phase D2's two read surfaces, each read in the snapshot too, and
+            # from phase D3 the ops set's preview, which reads failed jobs.
             "preview": (["preview", "--set", "findings.owner"], []),
+            "preview ops": (["preview", "--set", "ops.job_error"], []),
             "suggestions": (["suggestions"], []),
         }
         _Findings().install(monkeypatch)
         _Outcomes().install(monkeypatch)
+        _FailedJobs().install(monkeypatch)
         preview, suggestions = jev_eval.preview_report, jev_eval.suggestions_report
 
         async def previewed(conn: Any, **kwargs: Any) -> dict[str, Any]:
             return await preview(_FlagConn(_flags()), **kwargs)  # type: ignore[arg-type]
 
-        async def suggested(conn: Any) -> dict[str, Any]:
-            return await suggestions(_FlagConn(_flags()))  # type: ignore[arg-type]
+        async def suggested(conn: Any, **kwargs: Any) -> dict[str, Any]:
+            return await suggestions(
+                _FlagConn(_flags()),  # type: ignore[arg-type]
+                **kwargs,
+            )
 
         monkeypatch.setattr(jev_eval, "preview_report", previewed)
         monkeypatch.setattr(jev_eval, "suggestions_report", suggested)

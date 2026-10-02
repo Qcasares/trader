@@ -31,8 +31,9 @@ And one rule for every set (phase D, docs/09 section 5.2): a set declaring
 ``jev_send_internal_detail`` is on — is planned only while that switch is on,
 read through its own reader as the road reads it, neither derived from the
 other, so no job is queued only to end ``disabled``. A set declaring none
-reads no switch for it. No registered set declares it until phase D3's
-``ops.job_error``.
+reads no switch for it. Phase D3's ``ops.job_error`` is the one registered
+set that declares it, so ops triage is planned only while the ops area and
+the detail switch are both on.
 
 The rules
 ~~~~~~~~~
@@ -56,18 +57,24 @@ Each with the area it needs, what it enqueues, when, and under which key:
   date}`` (``jev_repo.ask_job_key``), at most :data:`ASKS_PER_PASS` of a set
   a pass: the injection screen (25) and the card check (10) behind
   guardrails, the catalogue (25) and the hypothesis categories (10) behind
-  research, and from phase D2 the two findings sets (10 each) behind the
-  findings area, from the findings lane's share. The payload names the set,
-  its version, the subject, the row its
-  text is read from and the analysis plans in force, which the handler asks
-  under and no others, never the text; a set with no plan is planned nothing.
+  research, from phase D2 the two findings sets (10 each) behind the
+  findings area, from the findings lane's share, and from phase D3 the ops
+  set (10) behind the ops area and the detail switch, from the ops lane's
+  share. The payload names the set, its version, the subject, the row its
+  text is read from — for the ops set, the failed job, by its id — and the
+  analysis plans in force, which the handler asks under and no others, never
+  the text; a set with no plan is planned nothing.
   The subjects are ``jev_repo``'s reads: stored content the screen has not
   answered, and first its repairs, content still in use that a vendor
   content block or the screen's own ``true`` is on record for; content the
   screen cleared, for the catalogue, and never any other; model-written
   hypothesis titles within their cap, newest first; and the titles of
   model-written findings within theirs, of any status, newest first
-  (``jev_repo.findings_to_ask``). Each read leaves out a
+  (``jev_repo.findings_to_ask``); and, for the ops set, each skeleton of a
+  failed job of a triaged kind that finished within :data:`OPS_WINDOW`, and
+  after the pin was first observed, whose error code leaves to Jev
+  (:func:`_job_error_subjects`), newest first, once each, naming its newest
+  job. Each read leaves out a
   subject whose job is waiting or was planned today, and retires one after
   three failed calls — but for the screen's repairs, returned until their
   content is quarantined whatever its answers and failed calls; the day in
@@ -114,7 +121,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
@@ -125,9 +132,11 @@ from src.db.repos import jobs as job_repo
 from src.programme import (
     flags,
     jev_catalogue,
+    jev_chips,
     jev_clock,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     web_sources,
 )
@@ -159,11 +168,12 @@ ASK_PRIORITY = 0
 ASK_ATTEMPTS = 3
 
 #: Every set a ``jev_ask`` job asks, with the most one pass may plan of it
-#: (design C7 and C8; docs/09 section 5.2 for phase D2's). Each is planned
-#: behind its own lane's area, within its lane's share: the injection screen
-#: and the card check the guardrails', the catalogue and the hypothesis
-#: categories the research area's, and the findings sets the findings area's,
-#: from the findings lane's share.
+#: (design C7 and C8; docs/09 section 5.2 for phase D2's and D3's). Each is
+#: planned behind its own lane's area, within its lane's share: the injection
+#: screen and the card check the guardrails', the catalogue and the hypothesis
+#: categories the research area's, the findings sets the findings area's, from
+#: the findings lane's share, and the ops set the ops area's, from the ops
+#: lane's share, and only while the detail switch is on as well.
 ASKS_PER_PASS: Mapping[str, int] = MappingProxyType(
     {
         "guardrail.injection": 25,
@@ -172,6 +182,7 @@ ASKS_PER_PASS: Mapping[str, int] = MappingProxyType(
         "research.hypothesis": 10,
         "findings.owner": 10,
         "findings.severity": 10,
+        "ops.job_error": 10,
     }
 )
 
@@ -183,6 +194,15 @@ TITLE_SET_NAMES = ("guardrail.card", "research.hypothesis")
 
 #: The two sets asked about a finding's title (phase D2).
 FINDING_SET_NAMES = ("findings.owner", "findings.severity")
+
+#: The set asked about a failed job's error, as its skeleton (phase D3).
+OPS_SET_NAME = "ops.job_error"
+
+#: How far back the ops rule reads failed jobs: a week, never from before the
+#: midnight after the pin was first observed (``jev_repo.job_error_since``),
+#: so that every job it plans for is one of its set's population (docs/09,
+#: section 5.3). A job that failed earlier is never asked about.
+OPS_WINDOW = timedelta(days=7)
 
 #: The forward clock's job: above the probe and every research ask, since a
 #: session missed is missed for good; and with the queue's backoff, 20
@@ -425,8 +445,9 @@ async def _plan_asks(
     ``jev_repo.ask_job_key``. What each set is asked about is ``jev_repo``'s
     to read: :func:`jev_repo.documents_to_screen`,
     :func:`jev_repo.documents_to_describe` — content the screen cleared, and
-    nothing else — :func:`jev_repo.hypotheses_to_ask` and, from phase D2,
-    :func:`jev_repo.findings_to_ask`.
+    nothing else — :func:`jev_repo.hypotheses_to_ask`, from phase D2
+    :func:`jev_repo.findings_to_ask`, and from phase D3
+    :func:`_job_error_subjects`.
 
     A set declaring ``internal_detail`` is planned only while
     ``jev_send_internal_detail`` is on (:func:`_detail_allows`).
@@ -442,7 +463,6 @@ async def _plan_asks(
     repairs as long.
     """
     held_today = await jev_repo.auth_failed_today(conn)
-    day = now.astimezone(UTC).date()
     planned: list[str] = []
     for name in ASKS_PER_PASS:
         question_set = jev_questions.REGISTRY.get(name)
@@ -461,7 +481,7 @@ async def _plan_asks(
         )
         if held and name != jev_questions.SCREEN_SET_NAME:
             continue
-        subjects = await _ask_subjects(conn, question_set, model, day)
+        subjects = await _ask_subjects(conn, question_set, model, now)
         if held:
             subjects = [subject for subject in subjects if not subject[2]]
         planned += await _enqueue_asks(conn, now, question_set, plans, subjects, room)
@@ -472,18 +492,20 @@ async def _ask_subjects(
     conn: asyncpg.Connection,
     question_set: jev_questions.QuestionSet,
     model: str,
-    day: date,
+    now: datetime,
 ) -> list[tuple[str, object, bool]]:
     """
-    What ``question_set`` is to be asked about: each subject's address, the
-    row its text is read from — a document by its id, a hypothesis or a
-    finding by its ref — and whether its ask can make a call. Only the
-    screen's repairs cannot: its ask about content a block is on record for,
-    which the road refuses for the block before any call and whose follow-up
-    quarantines the content, and about content the screen itself flagged,
-    which the handler quarantines on the answer on record before any ask.
+    What ``question_set`` is to be asked about at ``now``: each subject's
+    address, the row its text is read from — a document by its id, a
+    hypothesis or a finding by its ref, a failed job by its id — and whether
+    its ask can make a call. Only the screen's repairs cannot: its ask about
+    content a block is on record for, which the road refuses for the block
+    before any call and whose follow-up quarantines the content, and about
+    content the screen itself flagged, which the handler quarantines on the
+    answer on record before any ask.
     """
     limit = ASKS_PER_PASS[question_set.name]
+    day = now.astimezone(UTC).date()
     if question_set.name == jev_questions.SCREEN_SET_NAME:
         rows = await jev_repo.documents_to_screen(
             conn, screen=question_set, model=model, limit=limit, day=day
@@ -519,7 +541,67 @@ async def _ask_subjects(
             conn, question_set=question_set, model=model, limit=limit, day=day
         )
         return [(row["subject_id"], row["ref"], True) for row in rows]
+    if question_set.name == OPS_SET_NAME:
+        return await _job_error_subjects(conn, question_set, model, now, limit)
     return []
+
+
+async def _job_error_subjects(
+    conn: asyncpg.Connection,
+    question_set: jev_questions.QuestionSet,
+    model: str,
+    now: datetime,
+    limit: int,
+) -> list[tuple[str, object, bool]]:
+    """
+    The ops set's subjects (phase D3; docs/09, sections 5.2 and 5.3): the
+    failed jobs of a triaged kind that finished within :data:`OPS_WINDOW` of
+    ``now`` and after the midnight following the pin's first observation
+    (``jev_repo.failed_jobs_for_triage``), whose error code leaves to Jev and
+    whose skeleton holds enough words to be asked about — the handler's
+    admission, read by the same function (``jev_chips.residue_skeleton``) —
+    each skeleton once, by its state's address, naming the newest job that
+    failed with it, newest first; then those
+    :func:`jev_repo.unasked_subjects` keeps, at most ``limit`` of them. Each
+    names its job by id, and each ask can make a call.
+
+    An error is held in memory only between its read and the redactor, and
+    nothing here logs one: a row that cannot be read is logged by its class
+    and the job's id, and passed over.
+    """
+    since = max(now - OPS_WINDOW, jev_repo.job_error_since(model))
+    rows = await jev_repo.failed_jobs_for_triage(
+        conn, kinds=jev_redact.TRIAGED_KINDS, since=since
+    )
+    newest: dict[str, str] = {}
+    for row in rows:
+        try:
+            tokens = jev_chips.residue_skeleton(row["kind"], row["error"])
+            if tokens is None:
+                continue
+            state = jev_questions.JobErrorState(job_kind=row["kind"], error=tokens)
+            address = jev_questions.job_error_subject(state)
+        except Exception as exc:  # one row's defect holds no other row
+            logger.warning(
+                "Jev planner passed over job %s, which it could not read for "
+                "triage (%s)",
+                row.get("id"),
+                type(exc).__name__,
+            )
+            continue
+        # Newest first, so the first job met with an address is its newest.
+        newest.setdefault(address, str(row["id"]))
+    if not newest:
+        return []
+    unasked = await jev_repo.unasked_subjects(
+        conn,
+        question_set=question_set,
+        model=model,
+        subject_type=jev_questions.STATE_SUBJECT[question_set.state_model],
+        subjects=list(newest),
+        day=now.astimezone(UTC).date(),
+    )
+    return [(address, newest[address], True) for address in unasked[:limit]]
 
 
 async def _enqueue_asks(
@@ -671,6 +753,8 @@ __all__ = [
     "INGEST_ATTEMPTS",
     "INGEST_PRIORITY",
     "LANE_KINDS",
+    "OPS_SET_NAME",
+    "OPS_WINDOW",
     "PROBE_ATTEMPTS",
     "PROBE_PRIORITY",
     "REASK_ATTEMPTS",

@@ -66,11 +66,13 @@ import pytest
 
 from src.programme import (
     flags,
+    jev_chips,
     jev_client,
     jev_jobs,
     jev_lane,
     jev_prereg,
     jev_questions,
+    jev_redact,
     jev_repo,
     main,
     repo,
@@ -183,6 +185,10 @@ WEB_SETS = ("guardrail.injection", "research.catalogue")
 TITLE_SETS = ("research.hypothesis", "guardrail.card")
 FINDING_SETS = ("findings.owner", "findings.severity")
 ASKED_SETS = (*WEB_SETS, *TITLE_SETS, *FINDING_SETS)
+
+#: Phase D3: the set asked about a failed job's error, as its skeleton, whose
+#: subject is its state and not a text (``jev_questions.STATE_ADDRESSED``).
+OPS_SETS = ("ops.job_error",)
 
 
 def _subject_of(name: str) -> tuple[str, str, str, object, datetime, str]:
@@ -432,6 +438,27 @@ def _text_canonical(name: str, **overrides: Any) -> dict[str, Any]:
         subject_type=subject_type,
         subject_id=address,
         as_of=instant,
+    )
+    row.update(overrides)
+    return row
+
+
+def _ops_canonical(**overrides: Any) -> dict[str, Any]:
+    """
+    A canonical answer of the ops set (phase D3): the skeleton of
+    :data:`JOB_ERROR` as it was sent, about its own address.
+    """
+    state = _job_state()
+    ops = jev_questions.OPS_JOB_ERROR
+    row = _canonical(
+        lane=ops.lane,
+        question_set=ops.name,
+        question_set_version=ops.version,
+        pack_hash=ops.pack_hash,
+        state=ops.dump_state(state),
+        subject_type="job_error",
+        subject_id=jev_questions.job_error_subject(state),
+        as_of=FINISHED,
     )
     row.update(overrides)
     return row
@@ -816,6 +843,48 @@ class TestAReaskOfText:
         assert rig.quarantine.flags_read == []
         assert "quarantined (" not in failed.value.error
 
+    async def test_an_ops_answer_is_reasked_as_the_state_it_was_asked_about(
+        self, rig: Rig
+    ) -> None:
+        """
+        Phase D3: a re-ask of the ops set rebuilds the skeleton on record
+        through its state model — as JSON, so a tuple of tokens reads back
+        from the stored list — and asks it once as a probe about the row's own
+        subject, its address; nothing about the job is read again.
+        """
+        rig.canonical = _ops_canonical()
+        rig.result = AskResult(
+            "ok", request_row_id=88, answers=_answers("ops.job_error")
+        )
+        await rig.run()
+        (asked,) = rig.asks
+        assert asked["probe"] is True
+        assert asked["question_set"] is jev_questions.OPS_JOB_ERROR
+        assert asked["state"] == _job_state()
+        assert asked["subject_type"] == "job_error"
+        assert asked["subject_id"] == jev_questions.job_error_subject(_job_state())
+        assert asked["as_of"] == FINISHED
+
+    @pytest.mark.parametrize(
+        "met",
+        [
+            AskResult("error", request_row_id=12, error_kind="content_block"),
+            AskResult("content_blocked"),
+        ],
+        ids=["blocked-now", "block-on-record"],
+    )
+    async def test_a_block_on_a_reasked_skeleton_quarantines_nothing(
+        self, rig: Rig, met: AskResult
+    ) -> None:
+        """A skeleton is enumerated: the follow-up is web text's alone."""
+        rig.canonical = _ops_canonical()
+        rig.result = met
+        with pytest.raises(JobFailedError):
+            await rig.run()
+        assert rig.quarantine.written == []
+        assert rig.quarantine.blocks_read == []
+        assert rig.quarantine.looked_up == []
+
     @pytest.mark.parametrize("name", WEB_SETS)
     async def test_a_probes_answer_never_quarantines(self, rig: Rig, name: str) -> None:
         """Even a screen sure the text is addressed to it: a probe measures."""
@@ -878,6 +947,51 @@ def _finding(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+#: An invented failed job of a triaged kind, whose error code leaves to Jev
+#: and whose skeleton is admissible: a word of the canary rides in it, which
+#: the redactor reduces to a placeholder and nothing may quote.
+JOB_ID = "4f9a2c1e-6b0d-4e8a-9c3f-0a1b2c3d4e5f"
+JOB_ERROR = f"[Errno 111] Connection refused while reading {CANARY}"
+FINISHED = datetime(2026, 9, 28, 10, 30, tzinfo=UTC)
+
+
+def _failed_job(**overrides: Any) -> dict[str, Any]:
+    """
+    A job as ``jev_repo.get_failed_job`` returns one: its id, kind, status,
+    error and finish time, and nothing else (docs/09, section 5.1).
+    """
+    row = {
+        "id": JOB_ID,
+        "kind": "ingest_bars",
+        "status": "failed",
+        "error": JOB_ERROR,
+        "finished_at": FINISHED,
+    }
+    row.update(overrides)
+    return row
+
+
+def _job_state(row: Mapping[str, Any] | None = None) -> jev_questions.JobErrorState:
+    job = row or _failed_job()
+    return jev_questions.JobErrorState(
+        job_kind=job["kind"], error=jev_redact.skeleton(job["error"])
+    )
+
+
+def _ops_payload(**overrides: Any) -> dict[str, Any]:
+    """An ops ``jev_ask`` payload as the planner writes one."""
+    payload = {
+        "set": "ops.job_error",
+        "version": 1,
+        "subject_type": "job_error",
+        "subject_id": jev_questions.job_error_subject(_job_state()),
+        "source_id": JOB_ID,
+        **(jev_prereg.plans_in_force("ops.job_error", 1) or {}),
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _payload(name: str, **overrides: Any) -> dict[str, Any]:
     """A ``jev_ask`` payload as the planner writes one, the plans in force in it."""
     subject_type, _, address, source_id, _, _ = _subject_of(name)
@@ -898,6 +1012,7 @@ class AskRig:
     document: dict[str, Any] | None = field(default_factory=_document)
     hypothesis: dict[str, Any] | None = field(default_factory=_hypothesis)
     finding: dict[str, Any] | None = field(default_factory=_finding)
+    job: dict[str, Any] | None = field(default_factory=_failed_job)
     request: dict[str, Any] | None = field(
         default_factory=lambda: {"id": 88, "model_answered": PIN}
     )
@@ -932,6 +1047,10 @@ class AskRig:
                 "a findings set read a finding's detail through repo.list_findings"
             )
 
+        async def get_failed_job(conn: Any, job_id: Any) -> dict[str, Any] | None:
+            self.loaded.append(("job", str(job_id)))
+            return self.job
+
         async def get_request(conn: Any, request_id: int) -> dict[str, Any] | None:
             assert self.request is None or request_id == self.request["id"]
             return self.request
@@ -950,6 +1069,7 @@ class AskRig:
         monkeypatch.setattr(repo, "get_hypothesis", get_hypothesis)
         monkeypatch.setattr(jev_repo, "get_finding_title", get_finding_title)
         monkeypatch.setattr(repo, "list_findings", list_findings)
+        monkeypatch.setattr(jev_repo, "get_failed_job", get_failed_job)
         monkeypatch.setattr(jev_repo, "get_request", get_request)
         monkeypatch.setattr(jev_lane, "ask", ask)
         self.quarantine.install(monkeypatch)
@@ -974,7 +1094,8 @@ class TestWhatIsAskable:
     def test_it_asks_exactly_the_registered_sets_asked_about_text(self) -> None:
         """
         Every set whose state is a text — the web sets, the title sets and,
-        from phase D2, the findings sets — and nothing else: the probe and the
+        from phase D2, the findings sets — and, from phase D3, the one whose
+        subject is its state, the ops set; nothing else: the probe and the
         regime have jobs of their own.
         """
         text_sets = {
@@ -982,7 +1103,14 @@ class TestWhatIsAskable:
             for name, question_set in REGISTRY.items()
             if question_set.state_model in jev_questions.TEXT_SUBJECT_FIELD
         }
-        assert set(jev_jobs.ASKABLE) == text_sets == set(ASKED_SETS)
+        state_sets = {
+            name
+            for name, question_set in REGISTRY.items()
+            if question_set.state_model in jev_questions.STATE_ADDRESSED
+        }
+        assert text_sets == set(ASKED_SETS)
+        assert state_sets == set(OPS_SETS)
+        assert set(jev_jobs.ASKABLE) == text_sets | state_sets
 
     @pytest.mark.parametrize("name", ASKED_SETS)
     def test_each_is_asked_about_its_own_states_subject(self, name: str) -> None:
@@ -1020,22 +1148,258 @@ class TestASKABLE:
         docs/09, section 13 (D2/D3). Read from the registry the other way
         round from :class:`TestWhatIsAskable`: every registered set but the two
         with a job of their own is asked by a ``jev_ask`` job, and each such
-        set's state is a text the registry knows the writer of. A set
-        registered later whose state is neither — phase D3's job-error
-        skeleton, until its subject is named — fails here rather than being
-        registered and never asked, or asked by a road that does not know it.
+        set's state is a text the registry knows the writer of, or, from
+        phase D3, a state addressed by itself and recorded under the
+        provenance the registry names for it. A set registered later whose
+        state is neither fails here rather than being registered and never
+        asked, or asked by a road that does not know it.
         """
         assert OWN_JOB_SETS <= set(REGISTRY)
         asked = set(REGISTRY) - OWN_JOB_SETS
         assert set(jev_jobs.ASKABLE) == asked
         for name in asked:
             state_model = REGISTRY[name].state_model
+            if state_model in jev_questions.STATE_ADDRESSED:
+                assert state_model not in jev_questions.TEXT_SUBJECT_FIELD, name
+                assert REGISTRY[name].provenance == (
+                    jev_questions.STATE_ADDRESSED[state_model]
+                ), name
+                assert jev_jobs.ASKABLE[name].subject_type == (
+                    jev_questions.STATE_SUBJECT[state_model]
+                ), name
+                continue
             assert state_model in jev_questions.TEXT_SUBJECT_FIELD, name
             subject = jev_questions.STATE_SUBJECT[state_model]
             assert subject in jev_questions.TEXT_SUBJECT_PROVENANCE, name
             assert REGISTRY[name].provenance == (
                 jev_questions.TEXT_SUBJECT_PROVENANCE[subject]
             ), name
+
+
+class TestTheJobErrorAsk:
+    """
+    Phase D3: the ops set asked about a failed job's error, as its skeleton
+    (docs/09, section 5.1). The job is read by its id and column list; each
+    admission refuses alone, before any state is built; the subject is the
+    state's own address, held to the payload once the state is built; and no
+    error the job fails with quotes the error it was about.
+    """
+
+    async def test_it_asks_once_about_the_skeleton(self, ask_rig: AskRig) -> None:
+        result = await ask_rig.run(_ops_payload())
+        (asked,) = ask_rig.asks
+        state = _job_state()
+        assert asked["question_set"] is jev_questions.OPS_JOB_ERROR
+        assert asked["state"] == state
+        assert asked["subject_type"] == "job_error"
+        assert asked["subject_id"] == jev_questions.job_error_subject(state)
+        assert asked["as_of"] == FINISHED, "the instant the job finished failing"
+        assert asked["api_key"] == KEY
+        assert asked["probe"] is False
+        assert ask_rig.loaded == [("job", JOB_ID)]
+        assert state.error == (
+            "errno",
+            "[number]",
+            "connection",
+            "refused",
+            "while",
+            "[word]",
+            "[id]",
+        )
+        assert CANARY not in json.dumps(result)
+        assert CANARY not in repr(asked["state"])
+        assert "quarantined" not in result, "an ops answer changes nothing"
+        assert (
+            result["set_plan_hash"]
+            == (jev_prereg.GOLDEN_SET_PLAN_HASHES[("ops.job_error", 1)])
+        )
+
+    @pytest.mark.parametrize(
+        ("overrides", "says"),
+        [
+            ({"status": "succeeded"}, "is 'succeeded', not failed"),
+            ({"kind": "live_decision"}, "is of the kind 'live_decision'"),
+            ({"kind": "jev_ask"}, "is of the kind 'jev_ask'"),
+            ({"finished_at": None}, "has no finish time"),
+            (
+                {"kind": "backtest", "error": f"unknown data source '{CANARY}'"},
+                "is placed by code (configuration)",
+            ),
+            ({"error": f"division by zero {CANARY}"}, "reduces to fewer than 3"),
+            ({"error": None}, "is placed by code (unclassified)"),
+        ],
+        ids=[
+            "not-failed",
+            "a-venue-kind",
+            "a-programme-kind",
+            "no-finish-time",
+            "placed-by-code",
+            "too-few-words",
+            "no-error",
+        ],
+    )
+    async def test_each_admission_refuses_alone(
+        self, ask_rig: AskRig, overrides: dict[str, Any], says: str
+    ) -> None:
+        """
+        Every other part of the job admissible, one refused: no state is
+        built and nothing is asked, for good, and the refusal names the job
+        and its rule, quoting no error.
+        """
+        ask_rig.job = _failed_job(**overrides)
+        failed = await ask_rig.fails(_ops_payload())
+        assert failed.retry is False
+        assert says in failed.error, failed.error
+        assert failed.error.startswith(f"job {JOB_ID}")
+        assert CANARY not in failed.error
+        assert "Connection" not in failed.error and "refused" not in failed.error
+        assert ask_rig.asks == []
+        # And code places the refusal itself, by a shape of the ops ask's own.
+        shape = jev_chips.job_error_shape("jev_ask", failed.error)
+        assert shape is not None and shape.name.startswith("ops_ask_"), shape
+
+    async def test_the_admission_is_the_planners_rule(self, ask_rig: AskRig) -> None:
+        """
+        A failed, finished job of a triaged kind is admitted exactly when
+        ``jev_chips.residue_skeleton`` would plan it: the handler and the
+        planner read a job's error by one rule.
+        """
+        errors = (
+            JOB_ERROR,
+            "division by zero",
+            "unknown data source 'x'",
+            "no bars for ['SPY'] between 2026-01-02 and 2026-01-09",
+            "lease expired; worker presumed dead",
+            "type object 'int' has no attribute 'close'",
+            "",
+            "'Adj Close'",
+        )
+        for kind in jev_redact.TRIAGED_KINDS:
+            for error in errors:
+                ask_rig.job = _failed_job(kind=kind, error=error)
+                ask_rig.asks.clear()
+                planned = jev_chips.residue_skeleton(kind, error) is not None
+                state = jev_questions.JobErrorState(
+                    job_kind=kind, error=jev_redact.skeleton(error) or ("[word]",)
+                )
+                payload = _ops_payload(
+                    subject_id=jev_questions.job_error_subject(state)
+                )
+                if planned:
+                    await ask_rig.run(payload)
+                    assert len(ask_rig.asks) == 1, (kind, error)
+                else:
+                    await ask_rig.fails(payload)
+                    assert ask_rig.asks == [], (kind, error)
+
+    async def test_the_address_is_checked_after_build(self, ask_rig: AskRig) -> None:
+        """
+        The subject is the state's hash, so it is held to the payload once the
+        state is built, after admission: a payload naming another skeleton, or
+        the sha256 of the skeleton's text — a text's address, never a state's
+        — asks nothing; and a job admission refuses is refused for that, the
+        address unread.
+        """
+        other = jev_questions.JobErrorState(
+            job_kind="ingest_bars", error=("connection", "reset", "errno")
+        )
+        for subject_id in (
+            jev_questions.job_error_subject(other),
+            text_sha256(jev_questions.job_error_text(_job_state())),
+            text_sha256(JOB_ERROR),
+        ):
+            failed = await ask_rig.fails(_ops_payload(subject_id=subject_id))
+            assert "does not hold the text whose address this job names" in (
+                failed.error
+            )
+            assert failed.retry is False
+            assert ask_rig.asks == []
+        ask_rig.job = _failed_job(status="running")
+        failed = await ask_rig.fails(
+            _ops_payload(subject_id=jev_questions.job_error_subject(other))
+        )
+        assert "not failed" in failed.error
+
+    @pytest.mark.parametrize(
+        "source_id", [7, "", "not-a-job-id", None, ["4f9a2c1e"]], ids=repr
+    )
+    async def test_a_job_is_named_by_its_id(
+        self, ask_rig: AskRig, source_id: object
+    ) -> None:
+        failed = await ask_rig.fails(_ops_payload(source_id=source_id))
+        assert failed.retry is False
+        assert "named by its id" in failed.error
+        assert ask_rig.loaded == [] and ask_rig.asks == []
+
+    async def test_a_job_no_longer_stored_asks_nothing(self, ask_rig: AskRig) -> None:
+        ask_rig.job = None
+        failed = await ask_rig.fails(_ops_payload())
+        assert "is not stored" in failed.error
+        assert ask_rig.asks == []
+
+    @pytest.mark.parametrize(
+        "status", sorted(set(STATUSES) - {"ok"}), ids=lambda status: status
+    )
+    async def test_every_outcome_quotes_no_error_and_changes_nothing(
+        self, ask_rig: AskRig, status: str
+    ) -> None:
+        """
+        Whatever the road says, the job's error and its result hold the job's
+        id and labels, never its error's words, and no quarantine is written:
+        the ops set has no follow-up (docs/09, section 6.2).
+        """
+        ask_rig.result = AskResult(
+            status,  # type: ignore[arg-type]
+            request_row_id=None if status in jev_lane.UNRECORDED_STATUSES else 88,
+            error_kind="server" if status == "error" else None,
+        )
+        failed = await ask_rig.fails(_ops_payload())
+        assert CANARY not in failed.error
+        assert CANARY not in json.dumps(failed.result or {})
+        assert ask_rig.quarantine.written == []
+
+    async def test_errors_name_the_job_and_quote_nothing(
+        self, ask_rig: AskRig, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        docs/09, section 13 (D3): whatever the job fails with — a refusal, a
+        mismatched subject, a state that cannot be built, an exception from
+        the road — its error and its result name the job by its id and quote
+        no word of the error it was about.
+        """
+        failures = []
+        ask_rig.job = _failed_job(status="running")
+        failures.append(await ask_rig.fails(_ops_payload()))
+        ask_rig.job = _failed_job()
+        failures.append(
+            await ask_rig.fails(_ops_payload(subject_id=text_sha256(JOB_ERROR)))
+        )
+        failures.append(await ask_rig.fails(_ops_payload(source_id="nope")))
+
+        # A skeleton the state refuses: the validator's message would quote
+        # the token it refused, which here carries the canary.
+        real = jev_redact.skeleton
+        payload = _ops_payload()
+
+        def skeleton(text: object) -> tuple[str, ...]:
+            return (*real(text), f"marker-{CANARY}")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(jev_redact, "skeleton", skeleton)
+            failures.append(await ask_rig.fails(payload))
+        assert "does not make the state" in failures[-1].error
+
+        async def broken(conn: Any, **kwargs: Any) -> AskResult:
+            raise RuntimeError(f"the road broke on {JOB_ERROR}")
+
+        monkeypatch.setattr(jev_lane, "ask", broken)
+        failures.append(await ask_rig.fails(_ops_payload()))
+        for failed in failures:
+            assert CANARY not in failed.error, failed.error
+            assert "Connection refused" not in failed.error, failed.error
+            assert CANARY not in json.dumps(failed.result or {}, default=str)
+        for failed in (*failures[:2], *failures[3:]):
+            assert JOB_ID in failed.error, failed.error
 
 
 class TestTheAsk:
