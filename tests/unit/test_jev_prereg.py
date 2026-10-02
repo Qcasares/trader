@@ -1053,6 +1053,11 @@ RELEASED_SET_PLAN_HASHES: dict[tuple[str, int, int], str] = {
     ("ops.job_error", 1, 1): (
         "eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883"
     ),
+    # D3's review: the plan names the redactor's version 2, which replaced
+    # version 1 before D3 merged, while the ledger held no answer of the set.
+    ("ops.job_error", 1, 2): (
+        "0578dd14068847a7062f0f0a2f8f2f938a834efd1ac0c41092a9be7168ae5bba"
+    ),
 }
 
 #: The sets with no plan of their own: the probe measures the vendor, not a
@@ -2198,39 +2203,43 @@ OPS_KEYWORDS_DRAFTED = (
 #: What the ops rule says of invented subject texts, recorded under the set
 #: plan version that registered it: a change to what the rule decides fails
 #: here until the plan's version is bumped and a row appended.
-OPS_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, str], ...]] = {
-    1: (
-        ("ingest_bars: errno [number] connection refused", "network"),
-        ("backtest: errno [number] connection reset by peer", "network"),
-        (
-            "backtest: [address] missing [number] required positional argument "
-            "[quoted]",
-            "code_defect",
-        ),
-        (
-            "walkforward: [address] got an unexpected keyword argument missing",
-            "code_defect",
-        ),
-        (
-            "walkforward: duplicate key value violates unique constraint [quoted]",
-            "database",
-        ),
-        ("backtest: permission denied for table [word]", "credentials"),
-        ("backtest: permission denied connection refused", "credentials"),
-        (
-            "ingest_reference_bars: errno [number] no space left on device",
-            "resource_limit",
-        ),
-        ("backtest: errno [number] resource temporarily unavailable", "vendor_service"),
-        ("backtest: query returned no rows", "data_missing"),
-        ("backtest: cannot [word] from an empty sequence", "data_missing"),
-        ("backtest: invalid input syntax for type integer [quoted]", "data_invalid"),
-        ("backtest: cannot convert float nan to integer", "data_invalid"),
-        ("backtest: unrecognized configuration parameter [quoted]", "configuration"),
-        ("ingest_bars: connection [word] missing", "network"),
-        ("backtest: [word] [word] [word]", "unclear"),
-        ("ingest_reference_bars: ", "unclear"),
+_OPS_VERDICTS_OF_PLAN_1: tuple[tuple[str, str], ...] = (
+    ("ingest_bars: errno [number] connection refused", "network"),
+    ("backtest: errno [number] connection reset by peer", "network"),
+    (
+        "backtest: [address] missing [number] required positional argument [quoted]",
+        "code_defect",
     ),
+    (
+        "walkforward: [address] got an unexpected keyword argument missing",
+        "code_defect",
+    ),
+    (
+        "walkforward: duplicate key value violates unique constraint [quoted]",
+        "database",
+    ),
+    ("backtest: permission denied for table [word]", "credentials"),
+    ("backtest: permission denied connection refused", "credentials"),
+    (
+        "ingest_reference_bars: errno [number] no space left on device",
+        "resource_limit",
+    ),
+    ("backtest: errno [number] resource temporarily unavailable", "vendor_service"),
+    ("backtest: query returned no rows", "data_missing"),
+    ("backtest: cannot [word] from an empty sequence", "data_missing"),
+    ("backtest: invalid input syntax for type integer [quoted]", "data_invalid"),
+    ("backtest: cannot convert float nan to integer", "data_invalid"),
+    ("backtest: unrecognized configuration parameter [quoted]", "configuration"),
+    ("ingest_bars: connection [word] missing", "network"),
+    ("backtest: [word] [word] [word]", "unclear"),
+    ("ingest_reference_bars: ", "unclear"),
+)
+
+OPS_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, str], ...]] = {
+    1: _OPS_VERDICTS_OF_PLAN_1,
+    # Plan version 2 moved the redactor it names and not one keyword (D3's
+    # review), so its verdicts are version 1's.
+    2: _OPS_VERDICTS_OF_PLAN_1,
 }
 
 

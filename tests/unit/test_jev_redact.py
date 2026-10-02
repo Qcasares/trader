@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import itertools
 import json
 import os
@@ -71,12 +72,32 @@ ROOT = Path(__file__).resolve().parents[2]
 #: invites — still fails here: a released version is never rewritten.
 RELEASED_REDACTOR_SHA256: dict[int, str] = {
     1: "e7742dcfc1b4ebafb2ab87e595fb8a9fce67a8dc540bdca39a63fb05330984e9",
+    # Version 2: rules 5 to 7 read on chunks, the marked forms version 1
+    # missed, and the rules' data hashed (D3's review, D3RR-1 to D3RR-3).
+    # Version 1 was published on the branch, named by the ops set's plan
+    # version 1, and replaced before D3 merged, while no ops.job_error
+    # answer existed and every switch was off.
+    2: "ed4585f4750734e4615fc193300fddbc858fcb234462d3667bb859e05c1a3814",
 }
 
-#: Which redactor each ``ops.job_error`` version was released with: the same
-#: words over another skeleton are another question, so a new redactor is a
-#: new set version (docs/08 open item 77).
-REDACTOR_OF_OPS_VERSION: dict[int, int] = {1: 1}
+#: What each released redactor makes of the behaviour corpus
+#: (:func:`_behaviour_sha256`), append-only: a rule changed under a released
+#: version's definition hash fails here (D3's review, D3RR-3). Version 1's was
+#: computed after its release, from its module at 500efb4 over this corpus,
+#: when the pin was made; a change to the corpus recomputes every row, each
+#: from its version's module at the commit that released it.
+RELEASED_BEHAVIOUR_SHA256: dict[int, str] = {
+    1: "dcb4fbaa939b2dbc736101c73fa709928a84fcd765bd793a125ca669e5188a06",
+    2: "16685d02d4136b11b1ec822a52b3bd323c6250b9eac77c2b80cc4c9705b92a6d",
+}
+
+#: Which redactor each ``ops.job_error`` version is asked under: the same
+#: words over another skeleton are another question, so once an answer of
+#: a version is on record, a new redactor is a new set version (docs/08 open
+#: items 77 and 87). Version 1 of the set is asked under redactor version 2:
+#: redactor version 1 was replaced before D3 merged, while no ops.job_error
+#: answer existed, so no answer was ever recorded under it.
+REDACTOR_OF_OPS_VERSION: dict[int, int] = {1: 2}
 
 
 def _subject_text(kind: str, tokens: tuple[str, ...] | list[str]) -> str:
@@ -318,6 +339,19 @@ class TestBoundedAndDeterministic:
             "2026-09-30" * (MAX_INPUT_CHARS // 10),
             "1:" * (MAX_INPUT_CHARS // 2),
             "[number] " * (MAX_INPUT_CHARS // 9),
+            # Version 2's readings: runs re-read, leads chained, tuples,
+            # addresses, arrows and keys inside keys.
+            "'a,b' " * (MAX_INPUT_CHARS // 6),
+            "'a',b" * (MAX_INPUT_CHARS // 5),
+            "password -> " * (MAX_INPUT_CHARS // 12),
+            "Authorization: " * (MAX_INPUT_CHARS // 15),
+            "(a)=(b " * (MAX_INPUT_CHARS // 7),
+            "'a@b " * (MAX_INPUT_CHARS // 5),
+            "x;password;" * (MAX_INPUT_CHARS // 11),
+            "dsn : " * (MAX_INPUT_CHARS // 6),
+            '"{"password":' * (MAX_INPUT_CHARS // 13),
+            "key:key=" * (MAX_INPUT_CHARS // 8),
+            "a=Bearer " * (MAX_INPUT_CHARS // 9),
         ],
         ids=lambda text: repr(text[:6]),
     )
@@ -338,6 +372,14 @@ class TestIdempotent:
         for value in FUZZ:
             once = skeleton(value)
             assert skeleton(" ".join(once)) == once
+
+    def test_over_the_behaviour_corpus(self) -> None:
+        """Every marked secret, template, identifier and edge, read again: a
+        lead in a skeleton is always followed by a placeholder or nothing."""
+        for text in _behaviour_corpus():
+            once = skeleton(text)
+            assert skeleton(" ".join(once)) == once, text
+            jev_redact._tokens(text[:MAX_INPUT_CHARS])
 
     @pytest.mark.parametrize("position", range(44, 51))
     def test_a_literal_more_around_the_cut(self, position: int) -> None:
@@ -387,6 +429,35 @@ def _alnum(rng: random.Random, n: int, alphabet: str | None = None) -> str:
     return "".join(rng.choice(alphabet) for _ in range(n))
 
 
+#: A password generator's alphabet: letters, digits and the punctuation such
+#: generators draw from, rule 2's split characters among it (D3's review,
+#: D3RR-1). No quote, ``=``, ``:``, ``@``, ``/``, ``\\`` or space: the
+#: characters the rules read as structure, which a value holding them is read
+#: by, as a quote's run, a key, an address or a path, hidden all the same.
+GENERATED_ALPHABET = (
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    "!#$%^&*()-_+[]{};,.|~"
+)
+
+
+def _generated(rng: random.Random, n: int = 20) -> str:
+    """A password a generator over :data:`GENERATED_ALPHABET` could make."""
+    return "".join(rng.choice(GENERATED_ALPHABET) for _ in range(n))
+
+
+def _word_between_separators(rng: random.Random) -> str:
+    """A password holding a vocabulary word between two of rule 2's split
+    characters, as ``Xk2;connection;9z`` does: what version 1 sent verbatim."""
+    separators = jev_redact.SPLIT_CHARACTERS
+    return (
+        _alnum(rng, 3)
+        + rng.choice(separators)
+        + rng.choice(sorted(VOCABULARY - FUNCTION_WORDS))
+        + rng.choice(separators)
+        + _alnum(rng, 2)
+    )
+
+
 def _shapes(rng: random.Random) -> dict[str, str]:
     """One synthetic value of each credential shape the deployment holds or
     could echo. None of them is a real credential."""
@@ -412,6 +483,8 @@ def _shapes(rng: random.Random) -> dict[str, str]:
         "jwt": jwt,
         "word_password": rng.choice(["connection", "timeout", "database", "refused"]),
         "letters_password": _alnum(rng, 16, "abcdefghijklmnopqrstuvwxyz"),
+        "generated_password": _generated(rng),
+        "word_between_separators": _word_between_separators(rng),
     }
 
 
@@ -453,6 +526,35 @@ _MARKED = (
     "postgres://u:{secret}@10.0.0.9/db",
     "https://user:{secret}@api.example.invalid/v2",
     "Cookie: session={secret}; path=/",
+    # D3's review (D3RR-2): marked forms version 1 let a vocabulary word
+    # through. Every key of SECRET_WORDS written ``key:``; compound keys; an
+    # arrow between a lead and its value; a scheme written as a value, or
+    # one rule 7 does not know; a quoted key; a key and its value in one
+    # piece; and a colon written apart.
+    "credentials: {secret}",
+    "credential: {secret}",
+    "dsn: {secret}",
+    "cookie: {secret}",
+    "session: {secret}",
+    "key: {secret}",
+    "PGPASSWORD: {secret}",
+    "POSTGRES_PASSWORD: {secret}",
+    "db_password: {secret}",
+    "client_secret: {secret}",
+    "access_token: {secret}",
+    "X-Api-Key: {secret}",
+    "--db-password {secret}",
+    "password -> {secret}",
+    "password => {secret}",
+    "password - {secret}",
+    "Authorization=Bearer {secret}",
+    "Authorization: Key {secret}",
+    "Authorization:Bearer {secret}",
+    '{{"password": {secret}}}',
+    "{{'session': {secret}}}",
+    '{{"dsn" : {secret}}}',
+    "password:{secret}",
+    "dsn : {secret}",
 )
 
 #: Error templates, each a template of ``{marked}``: what asyncpg, aiohttp, a
@@ -489,6 +591,16 @@ _TEMPLATES = (
     "the request was {marked} and failed",
     "response body: {{'error': 'bad key', 'detail': '{marked}'}}",
     "<class 'Exception'> {marked}",
+    # D3's review (D3RR-1): PostgreSQL's DETAIL, as asyncpg's str() of an
+    # error carries it, a tuple's values after its key's tuple. Version 1 hid
+    # the first value alone.
+    'duplicate key value violates unique constraint "jobs_dedupe_key"\n'
+    "DETAIL:  Key (kind, status)=({marked}, failed) already exists.",
+    'duplicate key value violates unique constraint "jobs_dedupe_key"\n'
+    "DETAIL:  Key (kind, status)=(backtest, {marked}) already exists.",
+    'insert or update on table "fills" violates foreign key constraint "f"\n'
+    'DETAIL:  Key (order_id)=({marked}) is not present in table "orders".\n'
+    "HINT:  check the order",
 )
 
 
@@ -525,6 +637,69 @@ class TestSecretsNeverSurvive:
                 failures.append((template, marked, "survived", one))
         assert not failures, failures[:5]
 
+    def test_the_two_values_of_each_shape_differ(self) -> None:
+        """The comparison above means something only where the two values
+        differ: a word password must be two words, so a word that leaks shows."""
+        first, second = _shapes(random.Random(1)), _shapes(random.Random(2))
+        for shape in first:
+            assert first[shape] != second[shape], shape
+        split = re.compile("[" + re.escape(jev_redact.SPLIT_CHARACTERS) + "]")
+        words = [
+            split.split(shapes["word_between_separators"])[1]
+            for shapes in (first, second)
+        ]
+        assert words[0] != words[1] and set(words) <= VOCABULARY, words
+
+    def test_passwords_holding_split_characters_change_nothing(self) -> None:
+        """
+        D3's review (D3RR-1): rule 2 split a chunk on ``,;()[]{}|`` before
+        rules 5 to 7 read it, so whatever of a password followed one of them
+        was a new piece — verbatim when a vocabulary word, its class
+        otherwise — and two passwords of one shape gave two skeletons in
+        15,085 of 21,600 cases. Twenty pairs of generated passwords and twenty
+        of a vocabulary word between two split characters, in every marked
+        form and template, each pair one skeleton.
+        """
+        rng = random.Random(20261002)
+        pairs = [(_generated(rng), _generated(rng)) for _ in range(20)]
+        pairs += [
+            (_word_between_separators(rng), _word_between_separators(rng))
+            for _ in range(20)
+        ]
+        failures = []
+        for template in _TEMPLATES:
+            for marked in _MARKED:
+                for one, other in pairs:
+                    a = skeleton(_filled(template, marked, one))
+                    b = skeleton(_filled(template, marked, other))
+                    if a != b:
+                        failures.append((template, marked, one, a, other, b))
+        assert not failures, (len(failures), failures[:3])
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("password=Xk2;connection;9z", ("password", "[secret]")),
+            ("password: Xk2;connection;9z", ("password", "[secret]")),
+            (
+                "postgresql://trader:Ab3(timeout)Q@db.example.invalid:5432/trader",
+                ("[address]",),
+            ),
+            ("postgres://u:x|database|y@10.0.0.9/db", ("[address]",)),
+            (
+                "connection to server failed: password=Q1{connection}Z",
+                ("connection", "to", "server", "failed", "password", "[secret]"),
+            ),
+            (
+                "Key (kind, status)=(backtest, failed) already exists.",
+                ("key", "[word]", "status", "[value]"),
+            ),
+        ],
+    )
+    def test_the_reviews_cases(self, text: str, expected: tuple[str, ...]) -> None:
+        """The forms D3RR-1 measured, each read as its whole value."""
+        assert skeleton(text) == expected
+
     def test_a_password_that_is_a_vocabulary_word_is_hidden_when_marked(
         self,
     ) -> None:
@@ -535,6 +710,37 @@ class TestSecretsNeverSurvive:
         for marked in _MARKED:
             text = marked.format(secret="connection")
             assert "connection" not in skeleton(text), text
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("PGPASSWORD: connection", ("[name]", "[secret]")),
+            ("POSTGRES_PASSWORD: connection", ("[name]", "[secret]")),
+            ("client_secret: connection", ("[word]", "[secret]")),
+            ("access_token: connection", ("[word]", "[secret]")),
+            ("X-Api-Key: connection", ("[name]", "[secret]")),
+            ("credentials: connection", ("[word]", "[secret]")),
+            ("dsn: connection", ("[word]", "[secret]")),
+            ("cookie: connection", ("[word]", "[secret]")),
+            ("session: connection", ("session", "[secret]")),
+            ("key: connection", ("key", "[secret]")),
+            ("password -> connection", ("password", "[secret]")),
+            ("password => connection", ("password", "[secret]")),
+            ("password - connection", ("password", "[secret]")),
+            ("Authorization=Bearer connection", ("[word]", "[secret]")),
+            ("Authorization: Key connection", ("[word]", "[secret]")),
+            ('{"password": connection}', ("[quoted]", "[secret]")),
+            (
+                "connection to server failed: PGPASSWORD: database",
+                ("connection", "to", "server", "failed", "[name]", "[secret]"),
+            ),
+        ],
+    )
+    def test_the_forms_rule_7_missed(
+        self, text: str, expected: tuple[str, ...]
+    ) -> None:
+        """D3's review (D3RR-2): each kept ``connection`` in version 1."""
+        assert skeleton(text) == expected
 
     def test_the_stated_limit(self) -> None:
         """
@@ -1278,6 +1484,27 @@ class TestEachRule:
         for text in ("https://x.invalid", "www.example", "a@b", "s3://bucket"):
             assert skeleton(text) == ("[address]",)
 
+    def test_rule_5_reads_the_whole_chunk(self) -> None:
+        """
+        Version 2 (D3RR-1): the address is the chunk, read before rule 2
+        splits it, so a split character inside a DSN's password, a user's
+        name or a query starts no piece; and a quote the chunk leaves open
+        runs on, already emitted.
+        """
+        assert skeleton("u:x|database|y@10.0.0.9 refused") == ("[address]", "refused")
+        assert skeleton("('x',y@z;connection)") == ("[address]",)
+        assert skeleton("(www.x;connection)") == ("[address]",)
+        assert skeleton("url='https://x.invalid/a connection' refused") == (
+            "[address]",
+            "refused",
+        )
+
+    def test_rule_5_is_no_lead(self) -> None:
+        """An address is no key, and hides nothing after it, whatever it ends
+        with: a lead's word as its last piece included."""
+        assert skeleton("https://x.invalid/token refused") == ("[address]", "refused")
+        assert skeleton("x@y;password refused") == ("[address]", "refused")
+
     def test_rule_6_key_value(self) -> None:
         assert skeleton("timeout=30") == ("timeout", "[value]")
         assert skeleton("password=hunter2") == ("password", "[secret]")
@@ -1294,12 +1521,203 @@ class TestEachRule:
         assert skeleton("password = connection") == ("password", "[secret]")
         assert skeleton("dsn = connection refused") == ("[word]", "[secret]", "refused")
 
+    def test_rule_6_a_value_of_equals_signs_alone_is_written_apart(self) -> None:
+        """
+        ``=`` is no content: ``password== x`` is a key whose value is written
+        apart, so the next chunk is hidden as the credential it is, not as a
+        ``[value]`` the second ``=`` leaves behind it.
+        """
+        assert skeleton("password== connection") == ("password", "[secret]")
+        assert skeleton("password=( connection") == ("password", "[secret]")
+        assert skeleton("key=) connection refused") == ("key", "[secret]", "refused")
+
+    def test_rule_6_the_value_is_the_rest_of_the_chunk(self) -> None:
+        """Version 2 (D3RR-1): whatever rule 2 would split the value on."""
+        assert skeleton("timeout=(a,connection) refused") == (
+            "timeout",
+            "[value]",
+            "refused",
+        )
+        assert skeleton("x=1;password=y refused") == ("[word]", "[value]", "refused")
+
+    def test_rule_6_a_tuples_values_are_the_rest_of_the_line(self) -> None:
+        """
+        Version 2 (D3RR-1): PostgreSQL's ``Key (a, b)=(x, y)`` hides every
+        value, spaces and brackets in them included, to the end of the line
+        and no further.
+        """
+        text = "Key (kind, status)=(backtest, (a) b, failed) exists\nconnection refused"
+        assert skeleton(text) == (
+            "key",
+            "[word]",
+            "status",
+            "[value]",
+            "connection",
+            "refused",
+        )
+
+    def test_lines_change_no_chunk(self) -> None:
+        """The chunks read line by line are ``str.split``'s, so the tuple's
+        line ends where a line ends and the chunks are as version 1 read them."""
+        for value in FUZZ:
+            if isinstance(value, str):
+                text = value[:MAX_INPUT_CHARS]
+                assert [
+                    chunk for line in text.splitlines() for chunk in line.split()
+                ] == text.split()
+
     def test_rule_7_after_a_secret_lead(self) -> None:
         assert skeleton("password connection") == ("password", "[secret]")
         assert skeleton("--token connection") == ("[word]", "[secret]")
         assert skeleton("password: connection") == ("password", "[secret]")
         assert skeleton("password= connection") == ("password", "[secret]")
         assert skeleton("password : connection") == ("password", "[secret]")
+
+    def test_rule_7_hides_the_whole_next_chunk_or_the_rest_of_its_own(self) -> None:
+        """Version 2 (D3RR-1): never only the first piece of it."""
+        assert skeleton("password Xk2;connection;9z refused") == (
+            "password",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("password;Xk2;connection refused") == (
+            "password",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("password:Xk2;connection refused") == (
+            "password",
+            "[secret]",
+            "refused",
+        )
+
+    def test_rule_7_a_credentials_key_leads_written_as_a_key(self) -> None:
+        """
+        Version 2 (D3RR-2): a word of ``SECRET_WORDS`` that is no lead hides
+        its value written ``key:``, ``"key":`` or ``key :``, and nothing in
+        prose, so the most common database error keeps its words.
+        """
+        assert skeleton("dsn: connection refused") == ("[word]", "[secret]", "refused")
+        assert skeleton("dsn : connection refused") == (
+            "[word]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton('"dsn": connection refused') == (
+            "[quoted]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("duplicate key value violates unique constraint") == (
+            "duplicate",
+            "key",
+            "value",
+            "violates",
+            "unique",
+            "constraint",
+        )
+
+    def test_rule_7_a_compound_key_leads(self) -> None:
+        """Version 2 (D3RR-2): a lead as a part, two parts or a suffix run
+        into one; a credential's key as a part or a suffix, with its colon."""
+        for key in (
+            "access_token",
+            "db.password",
+            "password_hash",
+            "PGPASSWORD",
+            "X-Api-Key",
+        ):
+            assert skeleton(f"{key} connection refused")[-2:] == ("[secret]", "refused")
+        assert skeleton("privateKey: connection refused")[-2:] == (
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("session_id connection refused")[-2:] == (
+            "connection",
+            "refused",
+        )
+        assert skeleton("session_id: connection refused")[-2:] == (
+            "[secret]",
+            "refused",
+        )
+
+    def test_rule_7_only_a_word_shaped_as_a_key_is_one(self) -> None:
+        """A path or an address ending with a lead's word leads nothing."""
+        assert skeleton("/etc/token: permission denied") == (
+            "[path]",
+            "permission",
+            "denied",
+        )
+
+    def test_rule_7_what_stands_between_is_neither(self) -> None:
+        for arrow in ("->", "=>", "-", "--", "==>"):
+            assert skeleton(f"password {arrow} connection refused") == (
+                "password",
+                "[secret]",
+                "refused",
+            )
+
+    def test_rule_7_a_scheme_and_its_credential(self) -> None:
+        """Version 2 (D3RR-2): after ``Authorization`` the scheme and the
+        credential, whatever the scheme; and a lead written as a value."""
+        assert skeleton("Authorization: Key connection refused") == (
+            "[word]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("Authorization=Bearer connection refused") == (
+            "[word]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("Authorization:Bearer connection refused") == (
+            "[word]",
+            "[secret]",
+            "refused",
+        )
+        # A value hidden as a credential's stays one: ``[secret]`` wins over a
+        # ``[value]`` the hidden chunk leaves after it.
+        assert skeleton("Authorization: x= y z") == ("[word]", "[secret]", "[word]")
+
+    def test_rule_7_a_value_hidden_still_leads(self) -> None:
+        """
+        What a value or a quoted run hidden ends with still leads: a lead, a
+        key whose value is written apart, a credential's key and its value in
+        one piece, a quoted key closing a run.
+        """
+        assert skeleton("headers= password: connection") == (
+            "[word]",
+            "[value]",
+            "[secret]",
+        )
+        assert skeleton("headers={password= connection} refused") == (
+            "[word]",
+            "[value]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton("headers={Authorization:Bearer connection} refused") == (
+            "[word]",
+            "[value]",
+            "[secret]",
+            "refused",
+        )
+        assert skeleton('error "{"password": connection}" refused') == (
+            "error",
+            "[quoted]",
+            "[secret]",
+        )
+
+    def test_rule_2_a_run_closes_where_a_chunk_ends(self) -> None:
+        """
+        Version 2 (D3RR-1): a bracket inside a quoted value no longer stops
+        the quote, wherever it falls.
+        """
+        assert skeleton('"password="(x)y"" refused') == skeleton(
+            '"password="xyz"" refused'
+        )
+        assert skeleton("'a (b' connection") == ("[quoted]", "connection")
+        assert skeleton("'x', connection") == ("[quoted]", "connection")
 
     def test_rule_8_path(self) -> None:
         assert skeleton("/var/x") == ("[path]",)
@@ -1881,6 +2299,32 @@ class TestPinned:
             ("MIN_CONTENT_TOKENS", lambda value: value - 1),
             ("REDACTOR_VERSION", lambda value: value + 1),
             ("TRIAGED_KINDS", lambda value: value[:-1]),
+            # D3's review (D3RR-3): every datum the rules read, not only
+            # their names.
+            ("ADDRESS_MARKERS", lambda value: value[:-1]),
+            ("ADDRESS_PREFIXES", lambda value: ()),
+            ("PATH_CHARACTERS", lambda value: value[:-1]),
+            ("PRINTABLE_ASCII", lambda value: (value[0], "}")),
+            ("NAME_CAPITALS", lambda value: value + 1),
+            ("TUPLE_KEY_END", lambda value: "]"),
+            ("KEY_PART_SEPARATORS", lambda value: value[:-1]),
+            ("SECRET_SUFFIXES", lambda value: value[:-1]),
+            ("ARROW_CHARACTERS", lambda value: value[:-1]),
+            ("SCHEME_LEADS", lambda value: frozenset()),
+            *(
+                (
+                    "PATTERNS",
+                    lambda value, name=name: {**value, name: re.compile("x")},
+                )
+                for name in sorted(jev_redact.PATTERNS)
+            ),
+            (
+                "PATTERNS",
+                lambda value: {
+                    **value,
+                    "date": re.compile(value["date"].pattern, re.UNICODE),
+                },
+            ),
         ],
     )
     def test_everything_hashed_moves_the_hash(
@@ -1894,6 +2338,235 @@ class TestPinned:
             jev_redact, attribute, moved(getattr(jev_redact, attribute))
         )
         assert jev_redact.redactor_sha256() != before, attribute
+
+    def test_the_patterns_hashed_are_the_patterns_read(self) -> None:
+        """
+        The hash reads :data:`jev_redact.PATTERNS`, the rules read the
+        module's own names: each is the other, and no compiled pattern of the
+        module is left out of the mapping, so no pattern a rule reads escapes
+        the hash (D3RR-3).
+        """
+        patterns = {
+            name: value
+            for name, value in vars(jev_redact).items()
+            if isinstance(value, re.Pattern)
+        }
+        mapped = {id(pattern) for pattern in jev_redact.PATTERNS.values()}
+        unmapped = {name for name, value in patterns.items() if id(value) not in mapped}
+        assert unmapped == {"VOCABULARY_WORD"}, (
+            "a compiled pattern the hash does not read",
+            unmapped,
+        )
+        for name, pattern in jev_redact.PATTERNS.items():
+            spelled = "KEY_SHAPE" if name == "key_shape" else f"_{name.upper()}"
+            assert getattr(jev_redact, spelled) is pattern, name
+
+    def test_a_pattern_narrowed_under_one_hash_is_seen(self) -> None:
+        """
+        D3's review (D3RR-3): ``_DATE`` narrowed from ``\\d{1,2}`` to
+        ``\\d{2}`` kept version 1's hash and every test green. Narrowed in a
+        copy of the module now, both the definition's hash and what it makes
+        of the behaviour corpus move.
+        """
+        source = (ROOT / "src" / "programme" / "jev_redact.py").read_text()
+        line = 'r"\\d{4}-\\d{1,2}-\\d{1,2}"'
+        assert source.count(line) == 1
+        variant = _variant(source.replace(line, 'r"\\d{4}-\\d{2}-\\d{2}"'))
+        assert variant["redactor_sha256"]() != jev_redact.GOLDEN_REDACTOR_SHA256
+        assert (
+            _behaviour_sha256(variant["skeleton"])
+            != (RELEASED_BEHAVIOUR_SHA256[jev_redact.REDACTOR_VERSION])
+        )
+        assert variant["skeleton"]("no bars for 2026-9-30") != skeleton(
+            "no bars for 2026-9-30"
+        )
+
+    def test_the_behaviour_is_the_released_versions(self) -> None:
+        """
+        What no datum can say — how the code reads the data — is pinned by
+        what it does: the skeletons of a fixed corpus, hashed, per released
+        version. A rule changed under a released version's hash fails here
+        until a new version is released (D3RR-3).
+        """
+        assert (
+            _behaviour_sha256(skeleton)
+            == (RELEASED_BEHAVIOUR_SHA256[jev_redact.REDACTOR_VERSION])
+        )
+
+    def test_released_behaviours_are_distinct_and_keyed_by_released_versions(
+        self,
+    ) -> None:
+        assert set(RELEASED_BEHAVIOUR_SHA256) <= set(RELEASED_REDACTOR_SHA256)
+        assert len(set(RELEASED_BEHAVIOUR_SHA256.values())) == len(
+            RELEASED_BEHAVIOUR_SHA256
+        )
+
+
+def _variant(source: str) -> dict[str, Any]:
+    """The redactor's module run from ``source``, apart from the one loaded."""
+    namespace: dict[str, Any] = {"__name__": "jev_redact_variant"}
+    exec(compile(source, "jev_redact_variant", "exec"), namespace)  # noqa: S102
+    return namespace
+
+
+#: The edges each pattern and datum of the rules decides, beside the fuzz,
+#: which rarely lands on them: a rule narrowed or widened under one hash moves
+#: a skeleton here (D3's review, D3RR-3). Every value invented.
+BEHAVIOUR_EDGES: tuple[str, ...] = (
+    # Dates and times (rule 9).
+    "2026-9-30",
+    "2026-09-3",
+    "2026-09-30T9:05",
+    "2026-09-30T21:05:00.5Z",
+    "2026-09-30 21:05",
+    "2026-09-30t21:05:00+0100",
+    "2026-09-30T21:05:00+01",
+    "26-09-30",
+    "20260-09-30",
+    "9:05",
+    "21:05:07",
+    "21:05:07.123",
+    "21:05Z",
+    "21:05+01:00",
+    "21:5",
+    "211:05",
+    # Numbers (rules 10 to 12).
+    "1.5",
+    "-1.5",
+    "+.5",
+    "1.",
+    ".5e-3",
+    "1.5E+10",
+    "1.5e",
+    "1..5",
+    "-42",
+    "+42",
+    "4-2",
+    "0x7f",
+    # Statuses (rule 11).
+    "status 99",
+    "status 100",
+    "status 599",
+    "status 600",
+    "HTTP 418",
+    "code 429",
+    "Status 503",
+    "status: 404",
+    "status=503",
+    "http 401",
+    "code: 529",
+    # Capitals and printable ASCII (rules 4 and 14).
+    "Ab",
+    "AB",
+    "aB",
+    "ABc",
+    "Http",
+    "NaN",
+    "Nan",
+    "nAn",
+    "a\x7fb",
+    "~x",
+    "x~",
+    "!x?",
+    # Addresses and paths (rules 5 and 8).
+    "x://y",
+    "a@b",
+    "www.x",
+    "WWW.x",
+    "(www.x)",
+    "'www.x'",
+    "x.www.y",
+    "a/b",
+    "a\\b",
+    "a;b@c;d e",
+    # Keys, leads and values (rules 6 and 7).
+    "password",
+    "password x y",
+    "password: x y",
+    "password=x y",
+    "password = x y",
+    "x= y z",
+    "x=",
+    "dsn x y",
+    "dsn: x y",
+    "dsn : x y",
+    '"dsn": x y',
+    "key x y",
+    "key: x y",
+    "session_id x y",
+    "session_id: x y",
+    "PGPASSWORD x y",
+    "db.password x y",
+    "X-Api-Key x y",
+    "api-key x y",
+    "Bearer x y",
+    "basic x y",
+    "Authorization: x y z",
+    "Authorization=Bearer x y",
+    "Authorization=Key x y z",
+    "Authorization: x= connection refused",
+    "password -> x y",
+    "password ==> x y",
+    "/etc/token: x y",
+    "a=password x y",
+    "headers= password: x y",
+    "headers={password= x y",
+    "password:x:y z",
+    "a=b=c d",
+    # Tuples and lines (rule 6).
+    "Key (a, b)=(x, y) z\nw",
+    "a)=b c\nd",
+    "x (a)=(b\nc)",
+    # Quotes (rule 2).
+    "'a b' c",
+    "'a b",
+    "x='a b' c",
+    "it's x",
+    "`a` b",
+    '"a b" c',
+    "'a', b",
+    "'a',b c",
+    '"x="(y)z"" w',
+    '"x="(connection)y"" w',
+    "'a (b' c",
+    "'x'.",
+    ":'a b' c",
+    # Kept chunks (rule 1).
+    "[number] [more] http_429",
+    "password [more] x",
+    "password [secret] x",
+)
+
+
+def _behaviour_corpus() -> list[str]:
+    """
+    The texts whose skeletons a released version is pinned by: the fuzz's
+    strings, :data:`BEHAVIOUR_EDGES`, this system's own raise sites'
+    messages, every identifier in every template, and three credential
+    shapes — one letters and digits, one generated, one a vocabulary word
+    between split characters — in every marked form and template.
+    """
+    texts = [value for value in FUZZ if isinstance(value, str)]
+    texts += BEHAVIOUR_EDGES
+    texts += sorted(message for _, message in OWN_SKELETONS)
+    for (one, other), _ in _IDENTIFIERS.values():
+        texts += [template.format(marked=one) for template in _TEMPLATES]
+        texts += [template.format(marked=other) for template in _TEMPLATES]
+    shapes = _shapes(random.Random(1))
+    for shape in ("alpaca_secret", "generated_password", "word_between_separators"):
+        texts += [
+            _filled(template, marked, shapes[shape])
+            for template in _TEMPLATES
+            for marked in _MARKED
+        ]
+    return texts
+
+
+def _behaviour_sha256(redact: Callable[[object], tuple[str, ...]]) -> str:
+    """sha256 of every skeleton ``redact`` makes of the behaviour corpus."""
+    skeletons = [list(redact(text)) for text in _behaviour_corpus()]
+    encoded = json.dumps(skeletons, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
 
 
 class TestPure:

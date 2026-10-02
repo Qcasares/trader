@@ -582,7 +582,9 @@ SET_PLAN_VERSIONS: Mapping[tuple[str, int], int] = MappingProxyType(
         ("guardrail.card", 1): 1,
         ("findings.owner", 1): 1,
         ("findings.severity", 1): 1,
-        ("ops.job_error", 1): 1,
+        # Plan version 2 names the redactor's version 2 (D3's review); its
+        # rules, and so its verdicts, are version 1's.
+        ("ops.job_error", 1): 2,
     }
 )
 
@@ -609,7 +611,7 @@ GOLDEN_SET_PLAN_HASHES: Mapping[tuple[str, int], str] = MappingProxyType(
             "256b20e7cf141417af8bb71e4aeaca4b793d4ef1eedb947ec41db96bf30fcca2"
         ),
         ("ops.job_error", 1): (
-            "eaf2412b1c757bde0a0d42bd3d3f3c10fab1c4e9ae04bd30d750a5aef46fa883"
+            "0578dd14068847a7062f0f0a2f8f2f938a834efd1ac0c41092a9be7168ae5bba"
         ),
     }
 )
@@ -955,9 +957,9 @@ OPS_POPULATION: Mapping[str, Any] = MappingProxyType(
         "redactor": MappingProxyType(
             {
                 "rule": "jev_redact.skeleton",
-                "version": 1,
+                "version": 2,
                 "sha256": (
-                    "e7742dcfc1b4ebafb2ab87e595fb8a9fce67a8dc540bdca39a63fb05330984e9"
+                    "ed4585f4750734e4615fc193300fddbc858fcb234462d3667bb859e05c1a3814"
                 ),
             }
         ),
