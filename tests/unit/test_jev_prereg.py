@@ -2207,18 +2207,21 @@ OPS_VERDICTS_AS_REGISTERED: dict[int, tuple[tuple[str, str], ...]] = {
             "[quoted]",
             "code_defect",
         ),
-        ("walkforward: [address] got an unexpected keyword argument missing",
-         "code_defect"),
+        (
+            "walkforward: [address] got an unexpected keyword argument missing",
+            "code_defect",
+        ),
         (
             "walkforward: duplicate key value violates unique constraint [quoted]",
             "database",
         ),
         ("backtest: permission denied for table [word]", "credentials"),
         ("backtest: permission denied connection refused", "credentials"),
-        ("ingest_reference_bars: errno [number] no space left on device",
-         "resource_limit"),
-        ("backtest: errno [number] resource temporarily unavailable",
-         "vendor_service"),
+        (
+            "ingest_reference_bars: errno [number] no space left on device",
+            "resource_limit",
+        ),
+        ("backtest: errno [number] resource temporarily unavailable", "vendor_service"),
         ("backtest: query returned no rows", "data_missing"),
         ("backtest: cannot [word] from an empty sequence", "data_missing"),
         ("backtest: invalid input syntax for type integer [quoted]", "data_invalid"),
@@ -2287,9 +2290,10 @@ def _evidence() -> tuple[tuple[str, str], ...]:
         ("builtins: ValueError", _raised(lambda: int("abc"))),
         ("builtins: ValueError", _raised(lambda: int(float("nan")))),
         ("random: IndexError", _raised(lambda: random.choice([]))),
-        (f"numpy {numpy.__version__}", _raised(
-            lambda: numpy.array([1.0, [1, 2]], dtype=float)
-        )),
+        (
+            f"numpy {numpy.__version__}",
+            _raised(lambda: numpy.array([1.0, [1, 2]], dtype=float)),
+        ),
         (f"pandas {pandas.__version__}", _raised(lambda: pandas.Timestamp("xyzzy"))),
         ("os: ECONNREFUSED", _os_error("ECONNREFUSED")),
         ("os: ECONNRESET", _os_error("ECONNRESET")),
@@ -2302,43 +2306,69 @@ def _evidence() -> tuple[tuple[str, str], ...]:
         ("os: EDEADLK", _os_error("EDEADLK")),
         ("os: EACCES", _os_error("EACCES")),
         ("os: EAGAIN", _os_error("EAGAIN")),
-        (pg, _postgres(
-            "UniqueViolationError",
-            'duplicate key value violates unique constraint "jobs_dedupe_key"',
-        )),
-        (pg, _postgres(
-            "SerializationError", "could not serialize access due to concurrent update"
-        )),
-        (pg, _postgres(
-            "QueryCanceledError", "canceling statement due to statement timeout"
-        )),
+        (
+            pg,
+            _postgres(
+                "UniqueViolationError",
+                'duplicate key value violates unique constraint "jobs_dedupe_key"',
+            ),
+        ),
+        (
+            pg,
+            _postgres(
+                "SerializationError",
+                "could not serialize access due to concurrent update",
+            ),
+        ),
+        (
+            pg,
+            _postgres(
+                "QueryCanceledError", "canceling statement due to statement timeout"
+            ),
+        ),
         (
             pg,
             _postgres("InsufficientPrivilegeError", "permission denied for table jobs"),
         ),
-        (pg, _postgres(
-            "InvalidAuthorizationSpecificationError",
-            'Peer authentication failed for user "trader"',
-        )),
-        (pg, _postgres(
-            "InvalidTextRepresentationError",
-            'invalid input syntax for type integer: "abc"',
-        )),
+        (
+            pg,
+            _postgres(
+                "InvalidAuthorizationSpecificationError",
+                'Peer authentication failed for user "trader"',
+            ),
+        ),
+        (
+            pg,
+            _postgres(
+                "InvalidTextRepresentationError",
+                'invalid input syntax for type integer: "abc"',
+            ),
+        ),
         (
             pg,
             _postgres("InvalidTextRepresentationError", 'malformed array literal: "x"'),
         ),
         (pg, _postgres("NoDataFoundError", "query returned no rows")),
-        (pg, _postgres(
-            "UndefinedObjectError", 'unrecognized configuration parameter "x"'
-        )),
-        (pg, _postgres(
-            "DiskFullError", 'could not extend file "base/1/2": No space left on device'
-        )),
-        (pg, _postgres(
-            "ConnectionDoesNotExistError",
-            "connection was closed in the middle of operation",
-        )),
+        (
+            pg,
+            _postgres(
+                "UndefinedObjectError", 'unrecognized configuration parameter "x"'
+            ),
+        ),
+        (
+            pg,
+            _postgres(
+                "DiskFullError",
+                'could not extend file "base/1/2": No space left on device',
+            ),
+        ),
+        (
+            pg,
+            _postgres(
+                "ConnectionDoesNotExistError",
+                "connection was closed in the middle of operation",
+            ),
+        ),
     )
 
 
@@ -2368,9 +2398,12 @@ class TestTheOpsKeywords:
         assert jev_prereg.OPS_KEYWORD_FALLBACK == "unclear"
         version = jev_prereg.SET_PLAN_VERSIONS[("ops.job_error", 1)]
         for text, label in OPS_VERDICTS_AS_REGISTERED[version]:
-            assert jev_prereg.keyword_label(
-                jev_prereg.OPS_KEYWORDS, text, fallback="unclear"
-            ) == label, text
+            assert (
+                jev_prereg.keyword_label(
+                    jev_prereg.OPS_KEYWORDS, text, fallback="unclear"
+                )
+                == label
+            ), text
 
     def test_the_labels_are_code_causes_and_the_fallback_the_escape(self) -> None:
         from src.programme import jev_chips, jev_questions
@@ -2521,8 +2554,9 @@ class TestTheOpsPlan:
             "sha256": jev_chips.shapes_sha256(),
         }
         assert population["min_content_tokens"] == jev_redact.MIN_CONTENT_TOKENS
-        assert population["subject"] == (
-            jev_questions.STATE_SUBJECT[jev_questions.JobErrorState]
+        assert (
+            population["subject"]
+            == (jev_questions.STATE_SUBJECT[jev_questions.JobErrorState])
         )
         assert population["status"] == "failed"
         plan = jev_prereg.set_plan("ops.job_error", 1)
