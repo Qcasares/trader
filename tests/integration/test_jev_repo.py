@@ -4129,6 +4129,101 @@ class TestFailedJobsForTriage:
         )
 
 
+class TestRecentFailedJobs:
+    """
+    ``jev_repo.recent_failed_jobs``, what the harness's ``suggestions`` reads
+    (docs/09, section 9.3): every failed job of any kind after ``since``,
+    newest first, then by id, at most ``limit``, four columns and no more,
+    one an expired lease failed placed by when it was first claimed, or else
+    queued. Each filter is held by a case only it refuses.
+    """
+
+    async def test_failed_jobs_of_any_kind_newest_first(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        older = await _failed_job(conn, "live_decision", error="an older error")
+        newer = await _failed_job(
+            conn, finished_at=SINCE + timedelta(hours=10), error="a newer error"
+        )
+        assert await jev_repo.recent_failed_jobs(conn, since=SINCE) == [
+            {
+                "id": newer,
+                "kind": "ingest_bars",
+                "error": "a newer error",
+                "finished_at": SINCE + timedelta(hours=10),
+            },
+            {
+                "id": older,
+                "kind": "live_decision",
+                "error": "an older error",
+                "finished_at": SINCE + timedelta(hours=9),
+            },
+        ]
+
+    @pytest.mark.parametrize("status", ["queued", "running", "succeeded", "cancelled"])
+    async def test_only_a_failed_job(
+        self, conn: asyncpg.Connection, status: str
+    ) -> None:
+        await _failed_job(conn, status=status)
+        assert await jev_repo.recent_failed_jobs(conn, since=SINCE) == []
+
+    async def test_only_after_since(self, conn: asyncpg.Connection) -> None:
+        await _failed_job(conn, finished_at=SINCE)
+        after = await _failed_job(conn, finished_at=SINCE + timedelta(microseconds=1))
+        rows = await jev_repo.recent_failed_jobs(conn, since=SINCE)
+        assert [row["id"] for row in rows] == [after]
+
+    async def test_one_an_expired_lease_failed_is_placed_by_its_claim(
+        self, conn: asyncpg.Connection
+    ) -> None:
+        """
+        ``requeue_expired`` fails a job with no finish time: it is placed by
+        when it was first claimed, and one never claimed by when it was
+        queued, so each is read when that falls after ``since`` and not when
+        it falls at or before it.
+        """
+        claimed = await _failed_job(
+            conn, error="lease expired; worker presumed dead", finished_at=None
+        )
+        never_claimed = await _failed_job(conn, finished_at=None)
+        stale = await _failed_job(conn, finished_at=None)
+        await conn.execute(
+            "UPDATE jobs SET started_at = $2, created_at = $3 WHERE id = $1",
+            claimed,
+            SINCE + timedelta(hours=2),
+            SINCE - timedelta(days=1),
+        )
+        await conn.execute(
+            "UPDATE jobs SET started_at = NULL, created_at = $2 WHERE id = $1",
+            never_claimed,
+            SINCE + timedelta(hours=1),
+        )
+        await conn.execute(
+            "UPDATE jobs SET started_at = $2, created_at = $3 WHERE id = $1",
+            stale,
+            SINCE,
+            SINCE + timedelta(hours=3),
+        )
+        rows = await jev_repo.recent_failed_jobs(conn, since=SINCE)
+        assert [(row["id"], row["finished_at"]) for row in rows] == [
+            (claimed, None),
+            (never_claimed, None),
+        ]
+
+    async def test_at_most_the_limit(self, conn: asyncpg.Connection) -> None:
+        ids = [
+            await _failed_job(conn, finished_at=SINCE + timedelta(minutes=n))
+            for n in range(1, 4)
+        ]
+        rows = await jev_repo.recent_failed_jobs(conn, since=SINCE, limit=2)
+        assert [row["id"] for row in rows] == ids[::-1][:2]
+
+    async def test_a_tie_is_broken_by_the_id(self, conn: asyncpg.Connection) -> None:
+        ids = [await _failed_job(conn) for _ in range(3)]
+        rows = await jev_repo.recent_failed_jobs(conn, since=SINCE)
+        assert [row["id"] for row in rows] == sorted(ids, reverse=True)
+
+
 async def _ops_request(
     conn: asyncpg.Connection, subject_id: str, status: str = "ok", **overrides: Any
 ) -> int:

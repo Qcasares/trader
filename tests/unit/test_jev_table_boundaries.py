@@ -2938,10 +2938,17 @@ def test_the_switch_reach_passes_a_reader() -> None:
 # ---------------------------------------------------------------------------
 
 #: What a failed job's error may be handed to on the Jev side: the redactor,
-#: code's triage, and the function that is both, which the planner and the
-#: population read (docs/09, sections 4 and 5.1, M8).
+#: code's triage — its cause, and the shape the harness names beside it, an
+#: entry of code's own table that carries no word of the error — and the
+#: function that is both, which the planner and the population read (docs/09,
+#: sections 4, 5.1 and 9.3, M8).
 ERROR_READERS = frozenset(
-    {"jev_redact.skeleton", "jev_chips.code_cause", "jev_chips.residue_skeleton"}
+    {
+        "jev_redact.skeleton",
+        "jev_chips.code_cause",
+        "jev_chips.job_error_shape",
+        "jev_chips.residue_skeleton",
+    }
 )
 
 #: The modules on the Jev side that read failed jobs: the handler, the

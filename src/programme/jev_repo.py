@@ -1745,6 +1745,30 @@ async def failed_jobs_for_triage(
     return [dict(row) for row in rows]
 
 
+async def recent_failed_jobs(
+    conn: asyncpg.Connection, *, since: datetime, limit: int = 200
+) -> list[dict[str, Any]]:
+    """
+    ``id``, ``kind``, ``error`` and ``finished_at`` of every job, of any kind,
+    that failed after ``since``, newest first, then by id, at most ``limit``:
+    what the harness's ``suggestions`` shows code's chip for (docs/09, section
+    9.3). A job an expired lease failed has no finish time
+    (``jobs.requeue_expired``), and is placed by when it was first claimed, or
+    else queued, so it is shown too. Nothing here reads the error.
+    ``tests/integration/test_jev_repo.py::TestRecentFailedJobs``.
+    """
+    rows = await conn.fetch(
+        "SELECT id, kind, error, finished_at FROM jobs "
+        "WHERE status = 'failed' "
+        "AND COALESCE(finished_at, started_at, created_at) > $1 "
+        "ORDER BY COALESCE(finished_at, started_at, created_at) DESC, id DESC "
+        "LIMIT $2",
+        since,
+        _page(limit),
+    )
+    return [dict(row) for row in rows]
+
+
 async def unasked_subjects(
     conn: asyncpg.Connection,
     *,
