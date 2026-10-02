@@ -2091,7 +2091,13 @@ class TestTheKeywordRules:
 #: the module: the plan hashes the module's constant, and this copy holds the
 #: words a reviewer read (docs/09, section 3.4).
 OPS_RULES_AS_WRITTEN = (
-    ("credentials", ("permission", "authentication")),
+    (
+        "credentials",
+        (
+            "permission",  # "permission denied", PostgreSQL's or the system's
+            "authentication",  # "authentication failed", PostgreSQL refusing a login
+        ),
+    ),
     (
         "database",
         ("deadlock", "constraint", "violates", "duplicate key", "could not serialize"),

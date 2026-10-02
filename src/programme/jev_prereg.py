@@ -886,7 +886,13 @@ MECHANISM_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: such message holds in an admissible skeleton. So the rule never answers
 #: ``rate_limit``.
 OPS_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("credentials", ("permission", "authentication")),
+    (
+        "credentials",
+        (
+            "permission",  # "permission denied", PostgreSQL's or the system's
+            "authentication",  # "authentication failed", PostgreSQL refusing a login
+        ),
+    ),
     (
         "database",
         ("deadlock", "constraint", "violates", "duplicate key", "could not serialize"),

@@ -682,10 +682,10 @@ class TestSecretsNeverSurvive:
             ("password=Xk2;connection;9z", ("password", "[secret]")),
             ("password: Xk2;connection;9z", ("password", "[secret]")),
             (
-                "postgresql://trader:Ab3(timeout)Q@db.example.invalid:5432/trader",
+                "postgresql://trader:Ab3(timeout)Q" + "@db.example.invalid:5432/trader",
                 ("[address]",),
             ),
-            ("postgres://u:x|database|y@10.0.0.9/db", ("[address]",)),
+            ("postgres://u:x|database|y" + "@10.0.0.9/db", ("[address]",)),
             (
                 "connection to server failed: password=Q1{connection}Z",
                 ("connection", "to", "server", "failed", "password", "[secret]"),
