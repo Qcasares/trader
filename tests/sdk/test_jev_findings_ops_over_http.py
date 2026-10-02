@@ -304,8 +304,8 @@ class TestOneJobErrorSkeletonOverHTTP:
     async def test_the_skeleton_alone_leaves_and_a_second_ask_replays(
         self, conn: asyncpg.Connection, server: FakeTypeSafe, routed: Redirect
     ) -> None:
-        for key in (f"{flags.JEV_AREA_PREFIX}ops", flags.JEV_SEND_INTERNAL_DETAIL):
-            await flag_repo.set_flag(conn, key, True, "test")
+        await flag_repo.set_flag(conn, f"{flags.JEV_AREA_PREFIX}ops", True, "test")
+        await flag_repo.set_flag(conn, flags.JEV_SEND_INTERNAL_DETAIL, False, "test")
         tokens = jev_chips.residue_skeleton("ingest_bars", ERROR.format(FIRST_ID))
         assert tokens is not None
         assert tokens == jev_chips.residue_skeleton(
@@ -317,6 +317,16 @@ class TestOneJobErrorSkeletonOverHTTP:
         before = await _job_row(conn, first)
         server.script(_reply(OPS_JOB_ERROR, "req_ops"))
 
+        # The ops area on and the detail switch off: nothing is planned, and
+        # nothing leaves (docs/09, owner item 9.1's default).
+        await jev_plan.plan(conn, now=datetime.now(UTC), key_available=True)
+        assert not await conn.fetchval(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'jev_ask' AND payload->>'set' = $1",
+            OPS_JOB_ERROR.name,
+        ), "planned with the detail switch off"
+        assert routed.sent == [] and server.received == []
+
+        await flag_repo.set_flag(conn, flags.JEV_SEND_INTERNAL_DETAIL, True, "test")
         await jev_plan.plan(conn, now=datetime.now(UTC), key_available=True)
         payload = await _ask_job(conn, OPS_JOB_ERROR.name)
         assert payload["source_id"] == str(first)
