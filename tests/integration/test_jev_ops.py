@@ -57,7 +57,7 @@ import os
 import random
 import uuid
 from collections.abc import AsyncIterator, Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -652,6 +652,62 @@ async def _snapshot(
     return taken
 
 
+async def _register(conn: asyncpg.Connection, at: datetime) -> dict[str, Any]:
+    """
+    A register an answer could reach if it acted, as D2's
+    ``test_jev_findings.py::TestAFindingIsUnchangedByEveryOutcome`` seeds it:
+    a hypothesis the programme's model wrote, a candidate on it, an open
+    finding that blocks — high, from a role holding a veto — and one that
+    blocks nothing, and an assessment of the candidate. Every word invented,
+    and none of it asked about: the findings, research and guardrails areas
+    are off here. Without it the comparison could catch only an insert, and
+    a follow-up that moved the candidate passed every outcome (D3's review,
+    D3RS-1).
+    """
+    hypothesis = uuid.uuid4()
+    await conn.execute(
+        "INSERT INTO hypotheses (id, ref, title, owner, origin, created_at) "
+        "VALUES ($1, $2, 'Invented Idea of the Programme''s Model', 'programme', "
+        "'model', $3)",
+        hypothesis,
+        f"H-{uuid.uuid4().hex[:8]}",
+        at,
+    )
+    candidate = uuid.uuid4()
+    await conn.execute(
+        "INSERT INTO candidates (id, hypothesis_id, strategy_name, start_session, "
+        "end_session, data_source) VALUES ($1, $2, 'buy_and_hold', $3, $4, "
+        "'yfinance')",
+        candidate,
+        hypothesis,
+        date(2015, 1, 2),
+        date(2019, 12, 31),
+    )
+    findings = []
+    for raised_by, severity in (("independent_risk", "high"), ("execution", "low")):
+        ref = f"F-{uuid.uuid4().hex[:8]}"
+        await conn.execute(
+            "INSERT INTO findings (id, ref, candidate_id, raised_by, severity, "
+            "title, detail_md, remediation, opened_at, origin) "
+            "VALUES ($1, $2, $3, $4, $5, $6, 'Invented detail', "
+            "'Invented remedy', $7, 'model')",
+            uuid.uuid4(),
+            ref,
+            candidate,
+            raised_by,
+            severity,
+            f"Invented {severity} finding",
+            at,
+        )
+        findings.append(ref)
+    await conn.execute(
+        "INSERT INTO role_assessments (candidate_id, role, verdict, summary, stage) "
+        "VALUES ($1, 'independent_risk', 'object', 'Invented summary', 1)",
+        candidate,
+    )
+    return {"hypothesis": hypothesis, "candidate": candidate, "findings": findings}
+
+
 class TestAJobIsUnchangedByEveryOutcome:
     @pytest.mark.parametrize("outcome", OUTCOMES)
     async def test_the_job_and_the_register_are_what_they_were(
@@ -665,10 +721,13 @@ class TestAJobIsUnchangedByEveryOutcome:
         docs/09, section 6.1: an ops answer has no follow-up, so no Jev path
         changes a failed job — its status, error, attempts, result or times —
         nor a finding, a hypothesis, a candidate, an assessment or a switch,
-        whatever the vendor answers or refuses.
+        whatever the vendor answers or refuses. The register holds a row of
+        each (:func:`_register`), so a change to one is seen, not only an
+        insert.
         """
         dsn, conn = db
         at = await _db_now(conn) - timedelta(hours=1)
+        register = await _register(conn, at - timedelta(hours=1))
         job = await _failed(
             conn, "left", at, payload={"invented": 1}, result={"invented": 2}
         )
@@ -677,6 +736,10 @@ class TestAJobIsUnchangedByEveryOutcome:
         if outcome != "answered":
             vendor.failing[_text_of(state) or ""] = outcome
         before = await _snapshot(conn, [job, placed])
+        for table in ("findings", "hypotheses", "candidates", "role_assessments"):
+            assert before[table], f"no {table} row, so no change to one is seen"
+        assert [row["status"] for row in before["candidates"]] == ["active"]
+        assert {row["ref"] for row in before["findings"]} == set(register["findings"])
         await _loop(monkeypatch, dsn)
         assert state in _sent(vendor), "the job's error was never asked about"
         assert await _snapshot(conn, [job, placed]) == before
