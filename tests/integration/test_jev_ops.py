@@ -13,12 +13,16 @@ test can script a failure for it. What must hold:
 
 * **The canary** (docs/09, section 13; design M8): markers planted in failed
   jobs' errors — one code leaves to Jev, another, one code places, one too
-  short to ask about, one of a kind code alone places — and in a failed job's
-  payload and result are found in that job's own column alone after the loop
-  has asked about every skeleton it may, read from ``information_schema``:
-  never in ``jev_requests.state`` or any other text or JSON column of any
-  table, any log record at DEBUG, any call the vendor saw, or any other job's
-  payload, result or error. What left is each skeleton, and nothing else.
+  short to ask about, one of a kind code alone places; one in every class of
+  what the redactor replaces, ``jev_redact.PLACEHOLDERS`` each; and synthetic
+  secrets of every shape this deployment holds or could echo, marked as
+  credentials and bare — and in a failed job's payload and result are found
+  in that job's own column alone after the loop has asked about every
+  skeleton it may, read from ``information_schema``: never in
+  ``jev_requests.state``, which holds the redactor's tokens and nothing
+  else, or in any other text or JSON column of any table, any log record at
+  DEBUG, any call the vendor saw, or any other job's payload, result or
+  error. What left is each skeleton, and nothing else.
 * **Only what code leaves to Jev is asked about**: each skeleton once, by its
   newest job, and planned again on no later day; never an error code places,
   one too short to ask about, one of a kind code alone places, one that
@@ -45,12 +49,14 @@ the ledger refuses DELETE. Every error is invented. Skipped unless
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import logging
 import os
+import random
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -72,6 +78,7 @@ from src.programme import (  # noqa: E402
     jev_lane,
     jev_plan,
     jev_questions,
+    jev_redact,
     jev_repo,
 )
 from src.programme.job_errors import JobFailedError  # noqa: E402
@@ -270,6 +277,14 @@ async def _db_now(conn: asyncpg.Connection) -> datetime:
     return await conn.fetchval("SELECT now()")
 
 
+def _in_order(states: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    States in one order whatever order their keys were read in: a state read
+    back from ``jsonb`` has its keys in ``jsonb``'s order, not the one sent.
+    """
+    return sorted(states, key=lambda state: json.dumps(state, sort_keys=True))
+
+
 def _sent(vendor: _Vendor) -> list[dict[str, Any]]:
     """The states of the calls the vendor saw about a job's error."""
     return [call["state"] for call in vendor.calls if "error" in call["state"]]
@@ -334,13 +349,13 @@ class TestTheCanary:
         assert [job["status"] for job in asks] == ["succeeded"] * 2, [
             job["error"] for job in asks
         ]
-        assert sorted(_sent(vendor), key=json.dumps) == sorted(states, key=json.dumps)
+        assert _in_order(_sent(vendor)) == _in_order(states)
         recorded = await conn.fetch(
             "SELECT state FROM jev_requests WHERE question_set = $1", OPS.name
         )
-        assert sorted(
-            (json.loads(row["state"]) for row in recorded), key=json.dumps
-        ) == (sorted(states, key=json.dumps))
+        assert _in_order(json.loads(row["state"]) for row in recorded) == (
+            _in_order(states)
+        )
         seen = json.dumps(vendor.calls, default=str)
         for marker in markers.values():
             assert marker not in seen
@@ -348,6 +363,171 @@ class TestTheCanary:
         assert any(
             record.name == "src.programme.jev_plan" for record in caplog.records
         ), "the planner's own log line was not captured, so the scan read nothing"
+
+    async def test_no_placeholder_class_or_secret_shape_leaves_its_job(
+        self,
+        db: tuple[str, asyncpg.Connection],
+        monkeypatch: pytest.MonkeyPatch,
+        vendor: _Vendor,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """
+        docs/09, section 13: a marker in every class the redactor replaces,
+        and synthetic secrets of every shape, marked as credentials and bare,
+        each in an error code leaves to Jev and long enough to ask about, so
+        every one is asked about as its skeleton, under each triaged kind in
+        turn. Each marker is found in its own job's error alone; what was
+        recorded as sent holds the redactor's tokens and nothing else, and is
+        exactly what the vendor saw; and no marker is in a log record.
+        """
+        dsn, conn = db
+        planted = _canary_errors()
+        at = await _db_now(conn) - timedelta(hours=1)
+        jobs: dict[str, uuid.UUID] = {}
+        expected: list[dict[str, Any]] = []
+        for n, (marker, (kind, error)) in enumerate(planted.items()):
+            jobs[marker] = await _failed_with(
+                conn, kind, error, at - timedelta(seconds=n)
+            )
+            state = await _state(conn, jobs[marker])
+            if state not in expected:
+                expected.append(state)
+        tokens = {token for state in expected for token in state["error"]}
+        assert set(jev_redact.PLACEHOLDERS) <= tokens, "a class went unplanted"
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+        await _loop(monkeypatch, dsn)
+
+        for marker, job_id in jobs.items():
+            assert await _columns_holding(conn, marker) == {"jobs.error": 1}, marker
+            (row,) = await conn.fetch(
+                "SELECT id FROM jobs WHERE strpos(error, $1) > 0", marker
+            )
+            assert row["id"] == job_id, marker
+        recorded = [
+            json.loads(row["state"])
+            for row in await conn.fetch(
+                "SELECT state FROM jev_requests WHERE question_set = $1", OPS.name
+            )
+        ]
+        for state in recorded:
+            assert state["job_kind"] in jev_redact.TRIAGED_KINDS
+            assert set(state["error"]) <= set(jev_redact.TOKENS), state
+        assert _in_order(recorded) == _in_order(expected)
+        assert _in_order(_sent(vendor)) == _in_order(expected)
+        seen = json.dumps(vendor.calls, default=str)
+        for marker in jobs:
+            assert marker not in seen, marker
+            assert _logged(caplog.records, marker) == [], marker
+
+
+#: How each class of what the redactor replaces is planted in an invented
+#: error code leaves to Jev, ``{}`` standing where the marker goes.
+PLACEHOLDER_ERRORS: dict[str, str] = {
+    "[number]": "[Errno 111] Connection refused after {} bytes",
+    "[id]": "[Errno 111] Connection refused while reading q7{}9x",
+    "[name]": "[Errno 111] Connection refused by {}",
+    "[word]": "[Errno 111] Connection refused while reading {}",
+    "[date]": "[Errno 111] Connection refused on {}",
+    "[time]": "[Errno 111] Connection refused at {}",
+    "[address]": "[Errno 111] Connection refused by https://{}.example.invalid/v2",
+    "[path]": "[Errno 111] Connection refused while reading /srv/{}/bars.csv",
+    "[quoted]": "[Errno 111] Connection refused while reading '{}'",
+    "[value]": "[Errno 111] Connection refused with timeout={}",
+    "[secret]": "[Errno 111] Connection refused with password={}",
+    "[more]": "[Errno 111] Connection refused " + "while reading " * 40 + "{}",
+}
+
+#: Where a planted date's year in the 1900s, month and day in the tens fall:
+#: none a date this test's own rows could carry.
+DATE_SPANS = ((50, 90), (1, 10), (0, 10))
+
+#: How a synthetic secret is planted: marked as a credential, and bare.
+SECRET_ERRORS = (
+    "[Errno 111] Connection refused with token={}",
+    "[Errno 111] Connection refused while reading {}",
+)
+
+
+def _secret_shapes(rng: random.Random) -> list[str]:
+    """
+    One synthetic value of each credential shape this deployment holds or
+    could echo, as ``tests/unit/test_jev_redact.py`` draws them. None of them
+    is a real credential.
+    """
+
+    def alnum(n: int, alphabet: str = "") -> str:
+        alphabet = alphabet or (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        )
+        return "".join(rng.choice(alphabet) for _ in range(n))
+
+    def b64(n: int) -> str:
+        return base64.urlsafe_b64encode(bytes(rng.randrange(256) for _ in range(n)))
+
+    upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return [
+        "ts_" + alnum(40),
+        "sk-ant-api03-" + alnum(80),
+        "PK" + alnum(18, upper),
+        "AK" + alnum(18, upper),
+        alnum(40),
+        b64(32).decode(),
+        alnum(64, "0123456789abcdef"),
+        base64.b64encode(bytes(rng.randrange(256) for _ in range(48))).decode(),
+        ".".join(b64(n).decode().rstrip("=") for n in (18, 40, 32)),
+    ]
+
+
+def _canary_errors() -> dict[str, tuple[str, str]]:
+    """
+    Each marker, by itself, and the failed job's kind and error it is planted
+    in: one per placeholder class and two per secret shape, the kinds taken
+    in turn, every error one code leaves to Jev and long enough to ask about.
+    """
+    rng = random.Random()
+    planted: dict[str, str] = {}
+    for placeholder, error in PLACEHOLDER_ERRORS.items():
+        marker = _token().lower()
+        if placeholder == "[number]":
+            marker = str(rng.randrange(10**11, 10**12))
+        elif placeholder == "[name]":
+            marker = _token().upper()
+        elif placeholder == "[date]":
+            year, month, day = (rng.randrange(*span) for span in DATE_SPANS)
+            marker = f"19{year}-0{month}-1{day}"
+        elif placeholder == "[time]":
+            marker = (
+                f"0{rng.randrange(10)}:{rng.randrange(10, 60)}:"
+                f"{rng.randrange(10, 60)}.{rng.randrange(100000, 1000000)}"
+            )
+        planted[marker] = error.format(marker)
+    for error in SECRET_ERRORS:
+        for secret in _secret_shapes(rng):
+            planted[secret] = error.format(secret)
+    errors: dict[str, tuple[str, str]] = {}
+    kinds = jev_redact.TRIAGED_KINDS
+    for n, (marker, error) in enumerate(planted.items()):
+        kind = kinds[n % len(kinds)]
+        assert jev_chips.residue_skeleton(kind, error) is not None, (kind, error)
+        errors[marker] = (kind, error)
+    return errors
+
+
+async def _failed_with(
+    conn: asyncpg.Connection, kind: str, error: str, finished_at: datetime
+) -> uuid.UUID:
+    """A job of ``kind`` failed with ``error`` at ``finished_at``."""
+    job_id = await job_repo.enqueue(conn, kind, {}, dedupe_key=f"test:{uuid.uuid4()}")
+    assert job_id is not None
+    await conn.execute(
+        "UPDATE jobs SET status = 'failed', attempts = 1, error = $2, "
+        "finished_at = $3, started_at = $3 WHERE id = $1",
+        job_id,
+        error,
+        finished_at,
+    )
+    return job_id
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +553,16 @@ class TestOnlyWhatCodeLeavesToJevIsAsked:
         other = await _failed(conn, "other", NOW - timedelta(hours=2))
         for name in ("placed", "short", "untriaged"):
             await _failed(conn, name, NOW - timedelta(hours=3))
+        # A venue kind, the shadow replay and a programme kind failing with an
+        # error a triaged kind's would be asked about: code alone places them
+        # (docs/09, owner item 9.9; design M9 and M18).
+        for kind in ("submit_orders", "shadow_decision", "jev_ask"):
+            await _failed_with(
+                conn,
+                kind,
+                ERRORS["left"][1].format(_identifier()),
+                NOW - timedelta(hours=3),
+            )
         # The population starts at the midnight after the pin's first day.
         await _failed(conn, "third", datetime(2026, 9, 26, 23, 59, tzinfo=UTC))
         # An expired lease leaves no finish time.

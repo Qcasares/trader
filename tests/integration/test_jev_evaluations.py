@@ -40,6 +40,14 @@ Four parts:
   earliest finding holding a title and at what severity, and the flip rates
   count the population's pairs, six of them of titles nobody labelled, so a
   flip count exceeds ``n`` (plan version 2, M2).
+* **End to end, the ops set** (phase D3; docs/09, section 13). A ledger of
+  its own: failed jobs of five skeletons code leaves to Jev, one of them two
+  jobs, beside jobs no population holds; the loop asks the ops set about
+  each skeleton once; the population is exported blind and labelled by its
+  text, imported, and the cause's evaluation recorded through
+  ``jev_eval.main``; the row equals its recomputation, the keyword rule reads
+  each skeleton's text, and every item is dated after the day the pin was
+  first observed, which the evaluation says reads nothing about training.
 
 Runs on databases of its own, derived from ``TEST_DATABASE_URL`` as
 ``test_jev_schema.py``'s are: the ledger refuses DELETE and TRUNCATE, so rows
@@ -55,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import csv
 import dataclasses
 import io
@@ -62,6 +71,7 @@ import json
 import math
 import os
 import random
+import uuid
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
@@ -75,10 +85,12 @@ import asyncpg  # noqa: E402
 
 from src.db import migrate as migrations  # noqa: E402
 from src.db.repos import flags as flag_repo  # noqa: E402
+from src.db.repos import jobs as job_repo  # noqa: E402
 from src.programme import (  # noqa: E402
     flags,
     jev_calibration,
     jev_catalogue,
+    jev_chips,
     jev_client,
     jev_eval,
     jev_jobs,
@@ -2787,3 +2799,359 @@ class TestTheFindingsSetsEndToEnd:
             if question_set is SEVERITY:
                 assert unlabelled == len(UNLABELLED_FINDINGS), "a pair was left out"
                 assert row["flip_rate_n"] + row["flip_rate_low_margin_n"] > row["n"]
+
+
+# ---------------------------------------------------------------------------
+# End to end: the ops set (phase D3)
+# ---------------------------------------------------------------------------
+
+OPS = jev_questions.OPS_JOB_ERROR
+
+#: The switches the ops ledger is written under: the programme, Jev, the ops
+#: area and the detail switch the set declares, and no other area, so nothing
+#: but the ops set and the daily probe is planned.
+OPS_ON: dict[str, Any] = {
+    flags.PROGRAMME_ENABLED: True,
+    flags.JEV_ENABLED: True,
+    f"{flags.JEV_AREA_PREFIX}ops": True,
+    flags.JEV_SEND_INTERNAL_DETAIL: True,
+}
+
+#: Invented errors of failed jobs, by name: (kind, error), each with a slot
+#: an invented identifier is formatted into, so two jobs failing with one at
+#: other values hold one skeleton. Code leaves each to Jev, and each skeleton
+#: holds enough words to be asked about.
+OPS_ERRORS: dict[str, tuple[str, str]] = {
+    "OE1": ("ingest_bars", "[Errno 111] Connection refused while reading {}"),
+    "OE2": ("backtest", 'duplicate key value violates unique constraint "{}"'),
+    "OE3": (
+        "ingest_reference_bars",
+        "[Errno 104] Connection reset by peer while sending {}",
+    ),
+    "OE4": ("walkforward", "cannot convert float NaN to integer near {}"),
+    "OE5": ("backtest", "permission denied for table {}"),
+}
+
+#: Failed jobs no item of the population holds: an error code places, one of
+#: a kind whose errors code alone places, and a skeleton of its own from a
+#: job that failed on the day the pin was first observed.
+OPS_NEVER: dict[str, tuple[str, str]] = {
+    "placed": ("backtest", "unknown backtest run {}"),
+    "untriaged": ("live_decision", "Invented failure {}"),
+    "early": ("walkforward", "[Errno 110] Connection timed out while reading {}"),
+}
+
+#: What the vendor answers about each skeleton's cause, and by how much:
+#: OE3's cause wrong, narrowly, and OE5's the escape.
+OPS_ANSWERS: dict[str, tuple[str, str]] = {
+    "OE1": ("network", CLEAR),
+    "OE2": ("database", CLEAR),
+    "OE3": ("vendor_service", CLOSE),
+    "OE4": ("data_invalid", CLEAR),
+    "OE5": ("unclear", CLEAR),
+}
+
+#: The person's labels, by skeleton.
+OPS_LABELS: dict[str, str] = {
+    "OE1": "network",
+    "OE2": "database",
+    "OE3": "network",
+    "OE4": "data_invalid",
+    "OE5": "credentials",
+}
+
+
+def _identifier() -> str:
+    """An invented identifier the redactor reduces to ``[id]``."""
+    return f"m{uuid.uuid4().hex[:8]}9"
+
+
+def _ops_state(error: tuple[str, str]) -> jev_questions.JobErrorState:
+    """The state a job failing with ``error`` is asked about as."""
+    kind, message = error
+    tokens = jev_chips.residue_skeleton(kind, message.format(_identifier()))
+    assert tokens is not None, message
+    return jev_questions.JobErrorState(job_kind=kind, error=tokens)
+
+
+def _ops_text(name: str) -> str:
+    """The text the skeleton of :data:`OPS_ERRORS`' ``name`` is labelled by."""
+    return jev_questions.job_error_text(_ops_state(OPS_ERRORS[name]))
+
+
+def _ops_address(name: str) -> str:
+    return jev_questions.job_error_subject(_ops_state(OPS_ERRORS[name]))
+
+
+class _ScriptedOps:
+    """
+    ``jev_client.ask``, answering each skeleton's cause as :data:`OPS_ANSWERS`
+    scripts it, and the connectivity probe 0.99. A skeleton it has no script
+    for fails the job that asked, which the tests below would see.
+    """
+
+    def __init__(self) -> None:
+        self.by_text = {_ops_text(name): name for name in OPS_ERRORS}
+
+    async def ask(self, **kwargs: Any) -> jev_client.JevCall:
+        answers: dict[str, Any] = {}
+        for key, question in kwargs["questions"].items():
+            if question["type"] == "noul":
+                assert key == "about_the_sun", key
+                answers[key] = {"type": "noul", "noul": 0.99}
+                continue
+            state = kwargs["state"]
+            text = jev_questions.job_error_text(
+                jev_questions.JobErrorState(
+                    job_kind=state["job_kind"], error=tuple(state["error"])
+                )
+            )
+            top, lead = OPS_ANSWERS[self.by_text[text]]
+            answers[key] = _choice(list(question["criteria"]), top, lead)
+        body = json.dumps({"model": kwargs["model"], "answers": answers, "usage": {}})
+        return jev_client.JevCall(
+            http_status=200,
+            raw_body=body,
+            request_id="req_ops_evaluation",
+            latency_ms=50,
+            error_class=None,
+            error_kind=None,
+            input_tokens=None,
+            output_tokens=None,
+            wire_body=body.encode("utf-8"),
+        )
+
+
+async def _failed_job(
+    conn: asyncpg.Connection, error: tuple[str, str], finished_at: datetime
+) -> uuid.UUID:
+    """
+    A job failing with ``error``, an identifier in its slot, through the
+    shipped writer and ended as the queue ends one.
+    """
+    kind, message = error
+    job_id = await job_repo.enqueue(conn, kind, {}, dedupe_key=f"test:{uuid.uuid4()}")
+    assert job_id is not None
+    await conn.execute(
+        "UPDATE jobs SET status = 'failed', attempts = 1, error = $2, "
+        "started_at = $3, finished_at = $3 WHERE id = $1",
+        job_id,
+        message.format(_identifier()),
+        finished_at,
+    )
+    return job_id
+
+
+async def _write_the_ops_ledger(mp: pytest.MonkeyPatch, dsn: str) -> None:
+    """
+    A database of its own, migrated: a failed job of each skeleton of
+    :data:`OPS_ERRORS` — OE1's twice, at another identifier — and each of
+    :data:`OPS_NEVER`, all but the early one within the hours before the
+    database's clock; then the programme's loop as shipped against the
+    scripted vendor.
+    """
+    await research._drop(dsn)
+    admin = await asyncpg.connect(TEST_DSN)
+    try:
+        await admin.execute(f'CREATE DATABASE "{research._name(dsn)}"')
+    finally:
+        await admin.close()
+    await migrations.migrate(dsn)
+    mp.setattr(jev_client, "ask", _ScriptedOps().ask)
+    conn = await asyncpg.connect(dsn)
+    try:
+        for key, value in OPS_ON.items():
+            await flag_repo.set_flag(conn, key, value, "test")
+        now = await conn.fetchval("SELECT now()")
+        for hours, name in enumerate(OPS_ERRORS, start=1):
+            await _failed_job(conn, OPS_ERRORS[name], now - timedelta(hours=hours))
+        await _failed_job(conn, OPS_ERRORS["OE1"], now - timedelta(hours=9))
+        for name in ("placed", "untriaged"):
+            await _failed_job(conn, OPS_NEVER[name], now - timedelta(hours=2))
+        first = jev_catalogue.MODEL_FIRST_OBSERVED[PIN]
+        await _failed_job(
+            conn, OPS_NEVER["early"], datetime.combine(first, time(12), UTC)
+        )
+        await research._loop(mp, dsn)
+    finally:
+        await conn.close()
+
+
+@pytest.fixture(scope="module")
+def ops_ledger(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SimpleNamespace]:
+    """
+    The ops ledger the shipped jobs wrote, labelled and evaluated through
+    ``jev_eval.main`` as an operator would: the population exported blind,
+    each exported row given the person's label by its text, the file
+    imported, and the cause's evaluation recorded under :data:`COMMIT`.
+    Written once for the module and dropped after it.
+    """
+    dsn = research._derived("jev_evaluations_ops")
+    files = tmp_path_factory.mktemp("ops_labels")
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            asyncio.run(_write_the_ops_ledger(mp, dsn))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("DATABASE_URL", dsn)
+            mp.delenv("GIT_COMMIT", raising=False)
+            printed = io.StringIO()
+            argv = ["labels", "export", "--set", OPS.name, "--key", "cause"]
+            with contextlib.redirect_stdout(printed):
+                assert jev_eval.main([*argv, "--blind"]) == jev_eval.EXIT_OK
+            exported = list(csv.DictReader(io.StringIO(printed.getvalue())))
+            by_text = {_ops_text(name): name for name in OPS_ERRORS}
+            filled = io.StringIO()
+            writer = csv.writer(filled, lineterminator="\n")
+            writer.writerow([*jev_eval.IMPORT_COLUMNS, "text"])
+            for row in exported:
+                writer.writerow(
+                    [
+                        OPS.name,
+                        OPS.version,
+                        "cause",
+                        row["subject_type"],
+                        row["subject_id"],
+                        OPS_LABELS[by_text[row["text"]]],
+                        row["text"],
+                    ]
+                )
+            path = files / "tester.csv"
+            path.write_text(filled.getvalue(), encoding="utf-8")
+            argv = ["labels", "import", "--file", str(path), "--as", TESTER]
+            assert jev_eval.main(argv) == jev_eval.EXIT_OK
+            argv = ["evaluate", "--set", OPS.name, "--key", "cause"]
+            argv += ["--labelled-by", TESTER, "--split", "all"]
+            argv += ["--record", "--commit", COMMIT]
+            assert jev_eval.main(argv) == jev_eval.EXIT_OK
+        yield SimpleNamespace(dsn=dsn, exported=exported)
+    finally:
+        asyncio.run(research._drop(dsn))
+
+
+@pytest.fixture
+async def ops_written(ops_ledger: SimpleNamespace) -> AsyncIterator[asyncpg.Connection]:
+    connection = await asyncpg.connect(ops_ledger.dsn)
+    try:
+        yield connection
+    finally:
+        await connection.close()
+
+
+class TestTheOpsSetEndToEnd:
+    async def test_each_skeleton_is_asked_once_and_exported_and_nothing_else(
+        self, ops_ledger: SimpleNamespace, ops_written: asyncpg.Connection
+    ) -> None:
+        """
+        Five skeletons code leaves to Jev — OE1's two jobs one skeleton — each
+        asked once, every job succeeding with the request it recorded and the
+        plans in force; the error code places, the kind code alone places and
+        the job that failed on the day the pin was first observed asked about
+        by nothing; and the blind export lists exactly the five, each by its
+        state's address and its text, no other column but those it names.
+        The early job's skeleton is one code leaves to Jev, long enough to ask
+        about, so its date alone keeps it out.
+        """
+        early = _ops_state(OPS_NEVER["early"])
+        assert early not in {_ops_state(error) for error in OPS_ERRORS.values()}
+        jobs = await ops_written.fetch(
+            "SELECT status, error, payload, result FROM jobs WHERE kind = 'jev_ask'"
+        )
+        assert len(jobs) == len(OPS_ERRORS)
+        for job in jobs:
+            assert job["status"] == "succeeded", job["error"]
+            payload, result = json.loads(job["payload"]), json.loads(job["result"])
+            assert isinstance(result["request_id"], int)
+            assert result["replayed"] is False
+            assert {key: result[key] for key in jev_eval.PLAN_KEYS} == (
+                jev_prereg.plans_in_force(payload["set"], payload["version"])
+            )
+        asked = await ops_written.fetch(
+            "SELECT question_set, subject_type, subject_id, provenance "
+            "FROM jev_requests WHERE lane = 'ops'"
+        )
+        assert sorted(tuple(row) for row in asked) == sorted(
+            (OPS.name, "job_error", _ops_address(name), "system") for name in OPS_ERRORS
+        )
+        assert sorted(
+            (row["subject_type"], row["subject_id"], row["text"])
+            for row in ops_ledger.exported
+        ) == sorted(
+            ("job_error", _ops_address(name), _ops_text(name)) for name in OPS_ERRORS
+        )
+        assert set(ops_ledger.exported[0]) == set(jev_eval.EXPORT_COLUMNS)
+
+    async def test_the_row_recorded_is_its_recomputation(
+        self, ops_written: asyncpg.Connection
+    ) -> None:
+        """
+        ``evaluate --record`` wrote a row; ``evaluate`` reads the same ledger
+        again and computes it again, every column equal; nothing was set apart
+        as answered under other plans or plans unknown; and no threshold is
+        chosen from five items.
+        """
+        stored = await _stored(ops_written, OPS, "cause", TESTER, "all")
+        recomputed = await jev_eval.evaluate(
+            ops_written,
+            question_set=OPS,
+            question_key="cause",
+            labelled_by=TESTER,
+            model=PIN,
+            split="all",
+        )
+        assert stored["code_commit"] == COMMIT
+        assert {
+            column: stored[column] for column in jev_repo.EVALUATION_COLUMNS
+        } == dataclasses.replace(recomputed, code_commit=COMMIT).row()
+        assert (stored["n_other_plans"], stored["n_plan_unknown"]) == (0, 0)
+        assert stored["analysis_plan_hash"] == jev_calibration.analysis_plan_hash(
+            OPS.name, OPS.version
+        )
+        assert stored["threshold"] is None
+
+    async def test_the_cause_against_a_person(
+        self, ops_written: asyncpg.Connection
+    ) -> None:
+        """
+        Five skeletons labelled; OE3's answer is wrong, narrowly, and OE5's
+        the escape, which is a valid answer and never a right one: three of
+        five agree with the person. The keyword rule reads each skeleton's
+        text, ``jev_questions.job_error_text``, and is right on all five, so
+        Jev is right on no item the rule missed, and the rule on two Jev did.
+        """
+        row = await _stored(ops_written, OPS, "cause", TESTER, "all")
+        assert (
+            row["n"],
+            row["n_valid"],
+            row["n_escape"],
+            row["n_invalid"],
+            row["n_not_asked"],
+            row["n_distinct_states"],
+        ) == (5, 5, 1, 0, 0, 5)
+        assert (row["accuracy"], row["accuracy_all_items"]) == (3 / 5, 3 / 5)
+        assert row["n_per_class"] == {
+            "network": 2,
+            "database": 1,
+            "data_invalid": 1,
+            "credentials": 1,
+        }
+        assert row["majority_baseline_accuracy"] == 2 / 5
+        assert "job_error_text" in row["keyword_baseline_ref"]
+        assert row["keyword_baseline_accuracy"] == 5 / 5
+        assert (
+            row["vs_keyword_jev_right_only"],
+            row["vs_keyword_baseline_right_only"],
+        ) == (0, 2)
+
+    async def test_every_item_is_dated_after_the_pin_was_first_observed(
+        self, ops_written: asyncpg.Connection
+    ) -> None:
+        """
+        A skeleton is dated over the population's own rows (D-HMB-08), every
+        one finished after the day the pin was first observed — the early
+        job's skeleton is no item — so the evaluation is not an upper bound,
+        and says beside its figures why that reads nothing about training
+        (open item 81).
+        """
+        row = await _stored(ops_written, OPS, "cause", TESTER, "all")
+        assert row["possibly_in_training"] is False
+        assert jev_eval.OPS_DATING_NOTE in jev_eval.format_evaluation(row)
